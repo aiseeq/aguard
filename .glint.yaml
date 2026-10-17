@@ -1,0 +1,21 @@
+# Glint: https://github.com/aiseeq/glint
+version: 1
+
+settings:
+  exclude:
+    - vendor/*
+    - bin/*
+    - testdata/*
+    - "*.md"
+  min_severity: low
+  output: console
+
+categories:
+  architecture: {enabled: true}
+  duplication: {enabled: true}
+  patterns: {enabled: true}
+  typesafety: {enabled: true}
+  security: {enabled: true}
+  deadcode: {enabled: true}
+  naming: {enabled: true}
+  documentation: {enabled: true}
