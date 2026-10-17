@@ -9,13 +9,13 @@ import (
 
 func TestNameFor(t *testing.T) {
 	home := "/home/u"
-	table := map[string]string{home: "lead", "/home/u/git": "admin-sc2", "/home/u/sc2/demu/farm/hard": "master-bench"}
+	table := map[string]string{home: "lead", "/home/u/git": "admin-sc2", "/home/u/sc2/demu/farm/hard": "bench-master"}
 	cases := map[string]string{
 		"/home/u":                    "lead",
 		"/home/u/git":                "admin-sc2",
-		"/home/u/git/sc2demu":        "master-sc2demu",
-		"/home/u/work/Shop/":         "master-shop",
-		"/home/u/sc2/demu/farm/hard": "master-bench",
+		"/home/u/git/sc2demu":        "sc2demu-master",
+		"/home/u/work/Shop/":         "shop-master",
+		"/home/u/sc2/demu/farm/hard": "bench-master",
 		"/home/u/git/sc2demu/cmd":    "",
 		"/tmp":                       "",
 	}
@@ -27,8 +27,8 @@ func TestNameFor(t *testing.T) {
 }
 
 func TestFree(t *testing.T) {
-	taken := map[string]bool{"master-sc2demu": true, "master-sc2demu-2": true}
-	if got := free("master-sc2demu", taken); got != "master-sc2demu-3" {
+	taken := map[string]bool{"sc2demu-master": true, "sc2demu-master-2": true}
+	if got := free("sc2demu-master", taken); got != "sc2demu-master-3" {
 		t.Errorf("free = %q", got)
 	}
 	if got := free("lead", taken); got != "lead" {
@@ -61,12 +61,12 @@ func TestReadTableAndLive(t *testing.T) {
 	if empty, err := readTable(filepath.Join(dir, "none"), "/home/u"); err != nil || len(empty) != 0 {
 		t.Fatalf("нет файла: %v %v", empty, err)
 	}
-	live := `{"pid":` + strconv.Itoa(os.Getpid()) + `,"name":"master-sc2demu"}`
+	live := `{"pid":` + strconv.Itoa(os.Getpid()) + `,"name":"sc2demu-master"}`
 	dead := `{"pid":999999999,"name":"lead"}`
 	_ = os.WriteFile(filepath.Join(dir, "1.json"), []byte(live), 0o600)
 	_ = os.WriteFile(filepath.Join(dir, "2.json"), []byte(dead), 0o600)
 	names, err := liveNames(dir)
-	if err != nil || !names["master-sc2demu"] || names["lead"] {
+	if err != nil || !names["sc2demu-master"] || names["lead"] {
 		t.Errorf("liveNames = %v", names)
 	}
 }

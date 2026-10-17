@@ -82,7 +82,7 @@ func expand(dir, home string) string {
 	return filepath.Clean(dir)
 }
 
-// nameFor — имя из таблицы, иначе master-<проект> для ~/git/<проект> и ~/work/<проект>.
+// nameFor — имя из таблицы, иначе <проект>-master для ~/git/<проект> и ~/work/<проект>.
 func nameFor(cwd, home string, table map[string]string) string {
 	cwd = filepath.Clean(cwd)
 	if name, ok := table[cwd]; ok {
@@ -90,7 +90,7 @@ func nameFor(cwd, home string, table map[string]string) string {
 	}
 	parent := filepath.Dir(cwd)
 	if parent == filepath.Join(home, "git") || parent == filepath.Join(home, "work") {
-		return "master-" + strings.ToLower(filepath.Base(cwd))
+		return strings.ToLower(filepath.Base(cwd)) + "-master"
 	}
 	return ""
 }
