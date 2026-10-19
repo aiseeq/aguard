@@ -3,12 +3,14 @@
 // Имя берётся из таблицы ~/.config/cl/names.tsv (строка «папка<TAB>имя», ~ раскрывается); папки нет в таблице, а
 // она прямо в ~/git или ~/work — имя <папка>-master; иначе имя не задаётся (Claude Code выведет своё). Имя уже
 // занято живой сессией — к нему добавляется -2, -3… Своё -n/--name, режим -p и подкоманды (mcp, auth, …) cl не
-// трогает.
+// трогает. Сессия запускается в своём scope слайса agents.slice (scope.go): вес процессора и диска ниже, чем у
+// приложений пользователя.
 package main
 
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 )
@@ -20,6 +22,13 @@ func main() {
 	}
 	claude, err := lookClaude()
 	if err != nil {
+		fail(err)
+	}
+	systemdRun, err := exec.LookPath("systemd-run")
+	if err != nil {
+		fail(fmt.Errorf("без systemd-run сессия не попадёт в %s: %w", agentsSlice, err))
+	}
+	if err := sliceInstalled(filepath.Join(home, ".config", "systemd", "user", agentsSlice)); err != nil {
 		fail(err)
 	}
 	args := os.Args[1:]
@@ -42,8 +51,8 @@ func main() {
 		}
 		args = append(pre, args...)
 	}
-	argv := append([]string{"claude"}, args...)
-	if err := syscall.Exec(claude, argv, os.Environ()); err != nil {
+	argv := scopeArgv(systemdRun, claude, nameArg(args), os.Getpid(), args)
+	if err := syscall.Exec(systemdRun, argv, os.Environ()); err != nil {
 		fail(err)
 	}
 }
