@@ -9,9 +9,9 @@ tasks:
     run:
       - go test -p {threads} -json {args} ./...
 
+# Гейт: go vet (graft сам, первым шагом), gofmt, тесты и glint без находок.
 gate:
   - sh: 'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }'
-  - [go, vet, ./...]
   - task: test
   # glint выходит с кодом 0 и при находках — гейт по строке итога; tee — чтобы находки были видны.
   - sh: GOWORK=off ~/bin/glint check . | tee /dev/stderr | grep -q 'No issues found!'
