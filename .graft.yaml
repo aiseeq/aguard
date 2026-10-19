@@ -1,0 +1,32 @@
+# Коммитить проект: graft commit -m "…" — гейт, git add -A, проверки и коммит.
+schema: 1
+graft: '>=2.5.0'
+
+tasks:
+  test:
+    desc: все тесты
+    tests: go
+    run:
+      - go test -p {threads} -json {args} ./...
+
+gate:
+  - sh: 'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }'
+  - [go, vet, ./...]
+  - task: test
+  # glint выходит с кодом 0 и при находках — гейт по строке итога; tee — чтобы находки были видны.
+  - sh: GOWORK=off ~/bin/glint check . | tee /dev/stderr | grep -q 'No issues found!'
+
+version:
+  mode: none
+
+push:
+  force_with_lease: ['w/*']
+
+checks:
+  large_files:
+    max_binary_bytes: 1048576
+    max_text_bytes: 1048576
+    binary_extensions: [png, jpg, jpeg, gif, webp, pdf, gz, zst, sc2replay]
+
+lock:
+  scope: worktree
