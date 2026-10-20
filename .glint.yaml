@@ -11,7 +11,10 @@ settings:
   output: console
 
 categories:
-  architecture: {enabled: true}
+  architecture:
+    enabled: true
+    rules:
+      python-file: {enabled: true}
   duplication: {enabled: true}
   patterns: {enabled: true}
   typesafety: {enabled: true}
