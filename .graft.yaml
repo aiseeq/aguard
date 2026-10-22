@@ -1,6 +1,9 @@
 # Коммитить проект: graft commit -m "…" — гейт, git add -A, проверки и коммит.
 schema: 1
-graft: '>=2.5.0'
+graft: '>=2.37.0'
+# go fix -diff ./... идёт после go vet с его окружением: модернизаторы тулчейна не оставляют правок.
+go_fix:
+  enabled: true
 
 tasks:
   test:
