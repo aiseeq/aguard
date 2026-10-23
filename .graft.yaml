@@ -16,8 +16,8 @@ tasks:
 gate:
   - sh: 'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }'
   - task: test
-  # glint выходит с кодом 0 и при находках — гейт по строке итога; tee — чтобы находки были видны.
-  - sh: GOWORK=off ~/bin/glint check . | tee /dev/stderr | grep -q 'No issues found!'
+  # glint падает кодом выхода на любой находке: fail_on: low в .glint.yaml.
+  - sh: GOWORK=off ~/bin/glint check .
 
 version:
   mode: none

@@ -8,6 +8,7 @@ settings:
     - testdata/*
     - "*.md"
   min_severity: low
+  fail_on: low  # гейт — по коду выхода glint, падает на любой находке
   output: console
 
 categories:
