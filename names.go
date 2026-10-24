@@ -37,15 +37,6 @@ func interactive(args []string) bool {
 	return true
 }
 
-func hasName(args []string) bool {
-	for _, a := range args {
-		if a == "-n" || a == "--name" || strings.HasPrefix(a, "--name=") {
-			return true
-		}
-	}
-	return false
-}
-
 // readTable читает «папка<TAB>имя»; пустые строки и # — пропуск. Нет файла — пустая таблица.
 func readTable(path, home string) (map[string]string, error) {
 	f, err := os.Open(path)

@@ -7,13 +7,13 @@ import (
 )
 
 func TestScopeArgv(t *testing.T) {
-	got := scopeArgv("/usr/bin/systemd-run", "/home/u/.local/bin/claude", "llmark-master", 4242, []string{"-n", "llmark-master", "--resume"})
+	got := scopeArgv("/usr/bin/systemd-run", "/home/u/.local/bin/claude", "llmark-master", "4242", []string{"-n", "llmark-master", "--resume"})
 	want := []string{"/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect", "--slice=agents.slice",
 		"--unit=agent-llmark-master-4242", "--", "/home/u/.local/bin/claude", "-n", "llmark-master", "--resume"}
 	if !slices.Equal(got, want) {
 		t.Errorf("scopeArgv = %q\nwant %q", got, want)
 	}
-	if got := scopeArgv("sr", "c", "", 7, []string{"mcp", "list"}); got[6] != "--unit=agent-claude-7" {
+	if got := scopeArgv("sr", "c", "", "7", []string{"mcp", "list"}); got[6] != "--unit=agent-claude-7" {
 		t.Errorf("без имени: %q", got[6])
 	}
 }

@@ -1,0 +1,35 @@
+{
+  "restart": {
+    "mode": "log",
+    "idle_minutes": 10,
+    "check_seconds": 60,
+    "journal": "~/.local/state/cl/restart.log",
+    "resume_dir": "~/.claude/restart",
+    "resume_max_age_hours": 24
+  },
+  "roles": [
+    {
+      "names": ["lead"],
+      "text": "Ты лид ({why}): старт роли по скиллу coordinator.",
+      "on_start": "always",
+      "restorable_crons": ["Сон (скилл sleep)", "Дайджест (скилл digest)"]
+    },
+    {
+      "names": ["work-admin"],
+      "text": "Ты work-admin, админ пространства ~/work ({why}): старт роли по скиллу work-supervisor.",
+      "on_start": "always"
+    },
+    {
+      "names": ["git-admin"],
+      "text": "Ты git-admin, админ пространства ~/git ({why}): правила админа — скилл work-supervisor, продолжай по своей роли.",
+      "on_start": "always"
+    },
+    {
+      "names": ["*-master", "*-master-[0-9]*"],
+      "text": "Ты мастер проекта ({why}): продолжай по своей роли.",
+      "on_start": "resume_file"
+    }
+  ],
+  "resume_text": "Файл возобновления: {path}.",
+  "restart_note": "Это служебная строка cl, не ответ пользователя: беседа сохранена целиком, уже сделанное не повторяй; ждал ответа пользователя — жди дальше."
+}

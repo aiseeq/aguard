@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -13,12 +12,12 @@ const agentsSlice = "agents.slice"
 
 // scopeArgv — запуск claude в своём scope слайса агентов: systemd-run --scope регистрирует scope и делает exec
 // команды в том же процессе, так что терминал, сигналы и код выхода — как у голого claude. Имя scope —
-// agent-<имя сессии>-<pid>, оно видно в /proc/<pid>/cgroup.
-func scopeArgv(systemdRun, claude, name string, pid int, args []string) []string {
+// agent-<имя сессии>-<id> (id — pid cl, у перезапусков с -r<n>), оно видно в /proc/<pid>/cgroup.
+func scopeArgv(systemdRun, claude, name, id string, args []string) []string {
 	if name == "" {
 		name = "claude"
 	}
-	unit := "agent-" + unitSafe(name) + "-" + strconv.Itoa(pid)
+	unit := "agent-" + unitSafe(name) + "-" + unitSafe(id)
 	argv := []string{systemdRun, "--user", "--scope", "--quiet", "--collect", "--slice=" + agentsSlice, "--unit=" + unit, "--", claude}
 	return append(argv, args...)
 }

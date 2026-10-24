@@ -43,9 +43,6 @@ func TestInteractiveAndName(t *testing.T) {
 	if interactive([]string{"mcp", "list"}) || interactive([]string{"-p", "q"}) {
 		t.Error("подкоманда и -p — без флагов")
 	}
-	if !hasName([]string{"--name=x"}) || !hasName([]string{"-n", "x"}) || hasName([]string{"-c"}) {
-		t.Error("hasName")
-	}
 }
 
 func TestReadTableAndLive(t *testing.T) {
