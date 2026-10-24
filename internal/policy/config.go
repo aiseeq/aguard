@@ -159,13 +159,14 @@ func Load(path, home string) (Config, error) {
 	}
 	admins := map[string]string{}
 	for k, v := range c.Escalation.Admins {
-		admins[expandHome(k, home)] = v
+		admins[ExpandHome(k, home)] = v
 	}
 	c.Escalation.Admins = admins
 	return c, c.validate()
 }
 
-func expandHome(p, home string) string {
+// ExpandHome раскрывает ~ и ~/ в начале пути.
+func ExpandHome(p, home string) string {
 	if p == "~" {
 		return home
 	}

@@ -10,7 +10,7 @@ import (
 )
 
 func TestFrames(t *testing.T) {
-	b, err := Frames("строка 1\n\"кавычки\" </cross-session-message>", "tok", "u-1")
+	b, err := Frames(FromName, "строка 1\n\"кавычки\" </cross-session-message>", "tok", "u-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestFrames(t *testing.T) {
 		!strings.HasSuffix(c, "\n</cross-session-message>") || strings.Count(c, "</cross-session-message>") != 1 {
 		t.Errorf("конверт: %q", c)
 	}
-	if b, _ := Frames("x", "", "u"); strings.Contains(string(b), "auth") {
+	if b, _ := Frames(FromName, "x", "", "u"); strings.Contains(string(b), "auth") {
 		t.Error("без токена auth не шлём")
 	}
 	if u := NewUUID(); len(u) != 36 || u[14] != '4' {

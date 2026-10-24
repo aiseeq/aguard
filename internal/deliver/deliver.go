@@ -13,14 +13,14 @@ import (
 	"time"
 )
 
-// FromName — имя отправителя в конверте.
+// FromName — имя отправителя в конверте по умолчанию.
 const FromName = "tmpguard"
 
-// Envelope — конверт межсессионного сообщения. from-mode="bypass" совпадает
+// Envelope — конверт межсессионного сообщения от отправителя from. from-mode="bypass" совпадает
 // с классом наших сессий (--dangerously-skip-permissions), поэтому сообщение
 // не задерживается на диалоге подтверждения.
-func Envelope(body string) string {
-	return `<cross-session-message from-name="` + html.EscapeString(FromName) + `" from-mode="bypass">` +
+func Envelope(from, body string) string {
+	return `<cross-session-message from-name="` + html.EscapeString(from) + `" from-mode="bypass">` +
 		"\n" + body + "\n</cross-session-message>"
 }
 
@@ -36,8 +36,8 @@ type message struct {
 	Content string `json:"content"`
 }
 
-// Frames — строки для сокета: необязательная auth и сам кадр.
-func Frames(body, token, uuid string) ([]byte, error) {
+// Frames — строки для сокета: необязательная auth и сам кадр от from.
+func Frames(from, body, token, uuid string) ([]byte, error) {
 	var out []byte
 	if token != "" {
 		a, err := json.Marshal(map[string]string{"type": "auth", "token": token})
@@ -50,7 +50,7 @@ func Frames(body, token, uuid string) ([]byte, error) {
 	body = strings.ReplaceAll(body, "</cross-session-message>", "</cross-session-message >")
 	f, err := json.Marshal(userFrame{
 		Type: "user", UUID: uuid, Priority: "next",
-		Message: message{Role: "user", Content: Envelope(body)},
+		Message: message{Role: "user", Content: Envelope(from, body)},
 	})
 	if err != nil {
 		return nil, err
@@ -67,9 +67,12 @@ func NewUUID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// Send пишет сообщение в сокет и закрывает запись.
-func Send(socket, token, body string) error {
-	data, err := Frames(body, token, NewUUID())
+// Send пишет сообщение от FromName в сокет и закрывает запись.
+func Send(socket, token, body string) error { return SendFrom(FromName, socket, token, body) }
+
+// SendFrom пишет сообщение от from в сокет и закрывает запись.
+func SendFrom(from, socket, token, body string) error {
+	data, err := Frames(from, body, token, NewUUID())
 	if err != nil {
 		return err
 	}
