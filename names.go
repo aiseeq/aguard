@@ -24,6 +24,24 @@ func lookClaude() (string, error) {
 	return exec.LookPath("claude")
 }
 
+// searchToolsFlag возвращает в Bash настоящие grep и find вместо встроенных ugrep и bfs, а сессии — инструменты Grep и
+// Glob, не урезая остальной набор (tools-reference, «Glob tool behavior»; отдельного выключателя подмены нет: #69736).
+// Форма с «=»: без неё вариадический флаг съел бы позиционный промпт (строку роли).
+const searchToolsFlag = "--allowedTools=Grep,Glob"
+
+// sessionFlags — флаги каждого запуска сессии, первого и после перезапуска на новую версию.
+func sessionFlags() []string {
+	return []string{"--dangerously-skip-permissions", searchToolsFlag}
+}
+
+// printArgs — аргументы разового запуска: -p получает те же grep и find, что и сессия, подкоманды — как есть.
+func printArgs(args []string) []string {
+	if len(args) > 0 && subcommands[args[0]] {
+		return args
+	}
+	return append([]string{searchToolsFlag}, args...)
+}
+
 // interactive — запуск сессии, а не подкоманда и не разовый -p.
 func interactive(args []string) bool {
 	if len(args) > 0 && subcommands[args[0]] {

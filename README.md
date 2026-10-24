@@ -1,6 +1,10 @@
 # cl
 
-Короткий запуск Claude Code: `cl [аргументы claude]` = `claude --dangerously-skip-permissions -n <имя> [аргументы]`.
+Короткий запуск Claude Code: `cl [аргументы claude]` = `claude --dangerously-skip-permissions --allowedTools=Grep,Glob -n <имя> [аргументы]`.
+
+`--allowedTools=Grep,Glob` возвращает в Bash настоящие `grep` и `find` вместо встроенных ugrep и bfs (и инструменты Grep и Glob),
+остальной набор инструментов не меняется (tools-reference, «Glob tool behavior»; выключателя подмены нет, #69736). Его же
+получает `cl -p`, подкоманды — нет. Флаг — обход: ночью его проверяет обход Сна `harness`.
 
 Имя сессии — по папке запуска: строка таблицы `~/.config/cl/names.tsv` («папка<TAB>имя», `~` раскрывается),
 иначе `<папка>-master` для `~/git/<папка>` и `~/work/<папка>`, иначе без имени. Имя занято живой сессией

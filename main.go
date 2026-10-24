@@ -45,7 +45,7 @@ func main() {
 		fail(err)
 	}
 	if !interactive(args) {
-		argv := scopeArgv(l.systemdRun, claude, nameArg(args), fmt.Sprint(os.Getpid()), args)
+		argv := scopeArgv(l.systemdRun, claude, nameArg(args), fmt.Sprint(os.Getpid()), printArgs(args))
 		if err := syscall.Exec(l.systemdRun, argv, os.Environ()); err != nil {
 			fail(err)
 		}
@@ -58,7 +58,7 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	pre := []string{"--dangerously-skip-permissions"}
+	pre := sessionFlags()
 	l.name = nameArg(args)
 	if name := nameFor(cwd, home, table); name != "" && l.name == "" {
 		taken, err := liveNames(filepath.Join(home, ".claude", "sessions"))

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 )
@@ -65,5 +66,17 @@ func TestReadTableAndLive(t *testing.T) {
 	names, err := liveNames(dir)
 	if err != nil || !names["sc2demu-master"] || names["lead"] {
 		t.Errorf("liveNames = %v", names)
+	}
+}
+
+func TestSearchToolsFlag(t *testing.T) {
+	if !slices.Contains(sessionFlags(), searchToolsFlag) {
+		t.Errorf("sessionFlags без %s: %q", searchToolsFlag, sessionFlags())
+	}
+	if got := printArgs([]string{"-p", "привет"}); !slices.Equal(got, []string{searchToolsFlag, "-p", "привет"}) {
+		t.Errorf("-p: %q", got)
+	}
+	if got := printArgs([]string{"mcp", "list"}); !slices.Equal(got, []string{"mcp", "list"}) {
+		t.Errorf("подкоманда: %q", got)
 	}
 }
