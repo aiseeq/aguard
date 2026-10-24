@@ -48,6 +48,7 @@ type Tree struct {
 	Session   SessionKey
 	DeadBy    time.Time // сессия была мертва уже к этому моменту (оценка сверху)
 	Container string    // id контейнера podman, если корень — его conmon
+	Storage   []string  // --root/--runroot хранилища контейнера (из exit-command conmon)
 	Verdict   Verdict
 	Reason    string
 }
@@ -134,6 +135,7 @@ func judge(s *Snapshot, cfg *Config, t *Tree) {
 	if t.Root.Comm == "conmon" {
 		// процессы контейнера под conmon — забота podman stop, сами по себе не судятся
 		t.Members = t.Members[:1]
+		t.Storage = containerStorage(t.Root.Args)
 		if t.Container = containerID(t.Root.Args); t.Container == "" {
 			t.Verdict, t.Reason = Skip, "conmon без id контейнера в командной строке"
 			return
@@ -250,6 +252,28 @@ func containerID(args string) string {
 		}
 	}
 	return ""
+}
+
+// containerStorage — флаги --root и --runroot, с которыми podman запускал
+// контейнер: conmon передаёт их в своей exit-command (--exit-command-arg X).
+// Без них podman stop ищет контейнер в хранилище по умолчанию текущего окружения.
+func containerStorage(args string) []string {
+	var exit []string
+	f := strings.Fields(args)
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == "--exit-command-arg" {
+			exit = append(exit, f[i+1])
+			i++
+		}
+	}
+	var out []string
+	for i := 0; i+1 < len(exit); i++ {
+		if exit[i] == "--root" || exit[i] == "--runroot" {
+			out = append(out, exit[i], exit[i+1])
+			i++
+		}
+	}
+	return out
 }
 
 // ShortID — первые 12 знаков id контейнера, как у podman ps.

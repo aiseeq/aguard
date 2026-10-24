@@ -138,7 +138,9 @@ func TestServiceInsideTreeSkipped(t *testing.T) {
 
 func TestContainerStoppedByPodman(t *testing.T) {
 	conmon := proc(300, 1807, "conmon", 2, 100)
-	conmon.Args = "/usr/bin/conmon --api-version 1 -c " + cid + " -n ledger-sandbox"
+	conmon.Args = "/usr/bin/conmon --api-version 1 -c " + cid + " -n ledger-sandbox --exit-command /usr/bin/podman" +
+		" --exit-command-arg --root --exit-command-arg /home/u/.local/share/containers/storage" +
+		" --exit-command-arg --runroot --exit-command-arg /run/user/1000/containers --exit-command-arg container"
 	inner := proc(301, 300, "systemd-journal", 2, 0)
 	inner.Cgroup = "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-" + cid +
 		".scope/container/system.slice/systemd-journald.service"
@@ -148,6 +150,9 @@ func TestContainerStoppedByPodman(t *testing.T) {
 		t.Fatalf("деревьев %d, ожидалось 2 (pasta и conmon)", len(trees))
 	}
 	p, c := trees[0], trees[1]
+	if want := "--root /home/u/.local/share/containers/storage --runroot /run/user/1000/containers"; strings.Join(c.Storage, " ") != want {
+		t.Fatalf("хранилище %q, ожидалось %q", c.Storage, want)
+	}
 	if c.Verdict != Reap || c.Container != cid || len(c.Members) != 1 {
 		t.Fatalf("conmon: verdict %v (%s), контейнер %q, процессов %d; ожидалось podman stop одного conmon",
 			c.Verdict, c.Reason, c.Container, len(c.Members))

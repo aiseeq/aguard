@@ -81,7 +81,7 @@ func Stop(ctx context.Context, trees []*Tree, wait time.Duration, procRoot strin
 	}
 	for i, t := range trees { // podman stop ждёт сам; процессы тем временем выходят
 		if t.Container != "" {
-			outs[i].Podman = podmanStop(ctx, t.Container, wait)
+			outs[i].Podman = podmanStop(ctx, t.Container, t.Storage, wait)
 		}
 	}
 	left := waitExit(victims, start.Add(wait))
@@ -190,12 +190,13 @@ func waitExit(vs []victim, deadline time.Time) map[int]bool {
 }
 
 // podmanStop останавливает контейнер штатно: podman сам шлёт SIGTERM и через -t — SIGKILL.
-func podmanStop(ctx context.Context, id string, wait time.Duration) string {
+func podmanStop(ctx context.Context, id string, storage []string, wait time.Duration) string {
 	const slack = time.Minute
 	ctx, cancel := context.WithTimeout(ctx, wait+slack)
 	defer cancel()
 	secs := strconv.Itoa(int(wait.Seconds()))
-	out, err := exec.CommandContext(ctx, "podman", "stop", "-t", secs, id).CombinedOutput()
+	args := append(append([]string{}, storage...), "stop", "-t", secs, id)
+	out, err := exec.CommandContext(ctx, "podman", args...).CombinedOutput()
 	res := strings.TrimSpace(string(out))
 	if err != nil {
 		return fmt.Sprintf("podman stop %s: ошибка %v: %s", ShortID(id), err, res)

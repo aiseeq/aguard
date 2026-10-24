@@ -264,6 +264,9 @@ func (a *app) recipient(cfg *orphans.Config, cwd string, alive map[string]sessio
 	if alive[cfg.Lead].SocketPath != "" {
 		return cfg.Lead, to + " не в сети"
 	}
+	if to == cfg.Lead {
+		return "", to + " нет в живых"
+	}
 	return "", fmt.Sprintf("ни %s, ни %s нет в живых", to, cfg.Lead)
 }
 
