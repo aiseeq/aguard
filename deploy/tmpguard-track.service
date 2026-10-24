@@ -1,0 +1,27 @@
+[Unit]
+Description=tmpguard-track: кто создаёт записи в /tmp (fanotify + proc connector)
+After=tmp.mount local-fs.target
+RequiresMountsFor=/tmp /var/lib
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/tmpguard-track -roots /tmp -containers /tmp/claude-tmp
+Restart=always
+RestartSec=5
+StateDirectory=tmpguard
+StateDirectoryMode=0755
+RuntimeDirectory=tmpguard
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=256M
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=yes
+# fanotify (SYS_ADMIN), proc connector (NET_ADMIN), open_by_handle_at и du чужих папок
+# (DAC_READ_SEARCH), cwd чужих процессов (SYS_PTRACE), проверка pidfd (KILL)
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_SYS_PTRACE CAP_KILL
+
+[Install]
+WantedBy=multi-user.target

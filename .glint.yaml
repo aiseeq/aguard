@@ -1,0 +1,9 @@
+# Glint configuration
+version: 1
+
+settings:
+  exclude:
+    - vendor/**
+    - "**/*_test.go"
+  min_severity: low
+  output: console

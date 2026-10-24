@@ -1,0 +1,215 @@
+// Package record описывает общие для обеих частей tmpguard форматы:
+// журнал владельцев owners.jsonl (пишет tmpguard-track, читает tmpguard)
+// и снимок живых записей state.json.
+package record
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// Пути по умолчанию: общая папка состояния, её создаёт system-сервис.
+const (
+	DefaultDir   = "/var/lib/tmpguard"
+	OwnersFile   = "owners.jsonl"
+	StateFile    = "state.json"
+	RotatedOwner = "owners.jsonl.1"
+)
+
+// Состояния процесса-создателя на момент разбора события.
+const (
+	ProcOK      = "ok"      // процесс жив, данные из /proc
+	ProcReaped  = "reaped"  // процесс уже умер, данные из proc connector или pidfd
+	ProcUnknown = "unknown" // процесс умер и следов не осталось
+)
+
+// Виды строк owners.jsonl.
+const (
+	EvCreate      = "create"      // запись появилась (создана или переименована внутрь)
+	EvDelete      = "delete"      // запись удалена или вынесена из отслеживаемой папки
+	EvRename      = "rename"      // запись переименована внутри отслеживаемых папок
+	EvPreexisting = "preexisting" // запись найдена сверкой, создателя сторож не видел
+	EvGone        = "gone"        // запись пропала без события (пропуск или сторож лежал)
+)
+
+// Proc — процесс, создавший запись.
+type Proc struct {
+	Pid    int    `json:"pid"`
+	Comm   string `json:"comm,omitempty"`
+	Args   string `json:"args,omitempty"`
+	Cwd    string `json:"cwd,omitempty"`
+	UID    int    `json:"uid"` // -1, если не удалось узнать
+	Cgroup string `json:"cgroup,omitempty"`
+	State  string `json:"state"`
+}
+
+// Link — звено цепочки предков создателя.
+type Link struct {
+	Pid  int    `json:"pid"`
+	Comm string `json:"comm"`
+}
+
+// Session — сессия Claude Code, к которой ведёт цепочка предков.
+type Session struct {
+	Pid       int    `json:"pid"`
+	Name      string `json:"name,omitempty"`
+	Cwd       string `json:"cwd,omitempty"`
+	ID        string `json:"id,omitempty"`
+	ProcStart string `json:"proc_start,omitempty"` // поле 22 /proc/<pid>/stat: отличает переиспользованный pid
+	Via       string `json:"via"`                  // ppid | cgroup
+}
+
+// Owner — всё, что известно о создателе записи в момент создания.
+type Owner struct {
+	Proc    Proc     `json:"proc"`
+	Chain   []Link   `json:"chain,omitempty"` // от родителя создателя вверх до сессии включительно
+	Session *Session `json:"session,omitempty"`
+}
+
+// Event — одна строка owners.jsonl.
+type Event struct {
+	T     time.Time `json:"t"`
+	Ev    string    `json:"ev"`
+	Path  string    `json:"path"`
+	Old   string    `json:"old,omitempty"` // rename: прежний путь
+	To    string    `json:"to,omitempty"`  // delete при выносе: куда унесли
+	Dir   bool      `json:"dir,omitempty"`
+	UID   int       `json:"uid"` // владелец записи по файловой системе, -1 если неизвестен
+	Owner *Owner    `json:"owner,omitempty"`
+	// Поля закрытия записи (delete, gone): итог её жизни.
+	Born     time.Time `json:"born,omitzero"`
+	LifeS    float64   `json:"life_s,omitempty"`
+	MaxBytes int64     `json:"max_bytes,omitempty"`
+	MaxFiles int64     `json:"max_files,omitempty"`
+	ByteSec  float64   `json:"byte_sec,omitempty"`
+	Measured bool      `json:"measured,omitempty"` // размер замерен хотя бы раз
+}
+
+// Closed сообщает, закрывает ли строка жизнь записи.
+func (e Event) Closed() bool { return e.Ev == EvDelete || e.Ev == EvGone }
+
+// Entry — живая запись верхнего уровня в снимке state.json.
+type Entry struct {
+	Path       string    `json:"path"`
+	Dir        bool      `json:"dir,omitempty"`
+	Ino        uint64    `json:"ino"`
+	UID        int       `json:"uid"`
+	Born       time.Time `json:"born"`            // время создания (наше событие или btime)
+	Owner      *Owner    `json:"owner,omitempty"` // nil — создатель неизвестен
+	Bytes      int64     `json:"bytes"`           // занято сейчас (блоки tmpfs), по последнему замеру
+	Files      int64     `json:"files"`
+	MaxBytes   int64     `json:"max_bytes"`
+	MaxFiles   int64     `json:"max_files"`
+	ByteSec    float64   `json:"byte_sec"` // интеграл размера по времени, байт·с
+	MeasuredAt time.Time `json:"measured_at,omitzero"`
+}
+
+// Age — возраст записи на момент now.
+func (e *Entry) Age(now time.Time) time.Duration { return now.Sub(e.Born) }
+
+// Event — строка журнала о записи. Для закрывающих строк (delete, gone)
+// заполняются итоги жизни; остальные поля вызывающий дописывает сам (Old, To).
+func (e *Entry) Event(t time.Time, ev string) Event {
+	out := Event{T: t, Ev: ev, Path: e.Path, Dir: e.Dir, UID: e.UID, Owner: e.Owner, Born: e.Born}
+	if out.Closed() {
+		out.LifeS = t.Sub(e.Born).Seconds()
+		out.MaxBytes, out.MaxFiles, out.ByteSec = e.MaxBytes, e.MaxFiles, e.ByteSec
+		out.Measured = !e.MeasuredAt.IsZero()
+	}
+	return out
+}
+
+// State — снимок живых записей, пишется атомарно после каждого замера.
+type State struct {
+	Updated    time.Time `json:"updated"`
+	Started    time.Time `json:"started"` // запуск сторожа
+	Roots      []string  `json:"roots"`
+	Containers []string  `json:"containers"`
+	Entries    []Entry   `json:"entries"`
+}
+
+// ReadState читает снимок; отсутствующий файл — пустой снимок без ошибки.
+func ReadState(path string) (*State, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return &State{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var s State
+	if err := json.Unmarshal(b, &s); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return &s, nil
+}
+
+// WriteFileAtomic пишет файл через временный и rename, чтобы читатель
+// никогда не видел половину снимка.
+func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	if err := os.Chmod(name, perm); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+// ParseEvents разбирает owners.jsonl. Битые строки (например, оборванная
+// последняя при падении) пропускаются и считаются в bad.
+func ParseEvents(r io.Reader, fn func(Event)) (bad int, err error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var e Event
+		if json.Unmarshal(line, &e) != nil || e.Ev == "" {
+			bad++
+			continue
+		}
+		fn(e)
+	}
+	return bad, sc.Err()
+}
+
+// ReadEventFiles читает журнал вместе с ротированной частью (сначала старую).
+func ReadEventFiles(dir string, fn func(Event)) (bad int, err error) {
+	for _, name := range []string{RotatedOwner, OwnersFile} {
+		f, err := os.Open(filepath.Join(dir, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return bad, err
+		}
+		b, perr := ParseEvents(f, fn)
+		_ = f.Close()
+		bad += b
+		if perr != nil {
+			return bad, fmt.Errorf("%s: %w", name, perr)
+		}
+	}
+	return bad, nil
+}
