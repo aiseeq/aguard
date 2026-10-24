@@ -40,6 +40,8 @@ type facts struct {
 	Quiet time.Duration
 	// TTYQuiet — сколько времени в терминал сессии не приходил ввод (atime pts: клавиатура, фокус окна).
 	TTYQuiet time.Duration
+	// TurnQuiet — сколько времени не менялся транскрипт: последняя запись хода.
+	TurnQuiet time.Duration
 	// Children — потомки процесса claude: фоновые команды Bash и их дети, хуки, MCP-серверы.
 	Children   []string
 	Transcript transcriptFacts
@@ -129,6 +131,7 @@ func probe(p paths, cache *scanCache, pid int, now time.Time) facts {
 		return f
 	}
 	latest = later(latest, info.ModTime())
+	f.TurnQuiet = now.Sub(info.ModTime())
 	if f.Transcript, err = cache.read(transcript, info, time.UnixMilli(s.StartedAt), now); err != nil {
 		fail(err)
 	}

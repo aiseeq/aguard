@@ -15,7 +15,8 @@ func idleFacts() facts {
 		Installed: "2.1.310",
 		HookState: "done",
 		Quiet:     15 * time.Minute,
-		TTYQuiet:  15 * time.Minute,
+		TTYQuiet:  20 * time.Minute, // ввод — отправка последней реплики, до конца хода
+		TurnQuiet: 15 * time.Minute,
 	}
 }
 
@@ -63,6 +64,7 @@ func TestDecideAgainst(t *testing.T) {
 		"hook":     func(f *facts) { f.HookState = "working" },
 		"quiet":    func(f *facts) { f.Quiet = 9 * time.Minute },
 		"tty":      func(f *facts) { f.TTYQuiet = 2 * time.Minute },
+		"draft":    func(f *facts) { f.TTYQuiet = 12 * time.Minute },
 		"children": func(f *facts) { f.Children = []string{"42 bash"} },
 		"pending":  func(f *facts) { f.Transcript.Pending = []string{"AskUserQuestion t1"} },
 		"tasks":    func(f *facts) { f.Transcript.Tasks = []string{"Agent «ревью» a1"} },
@@ -126,5 +128,17 @@ func TestJournalLine(t *testing.T) {
 	got := journalLine(modeAct, "x", 7, f, decide(f, policy{idle: 10 * time.Minute}))
 	if !strings.Contains(got, "act: не перезапускаю: Claude Code: busy") {
 		t.Errorf("journalLine = %q", got)
+	}
+}
+
+func TestDecideDraftWithinTTYGranularity(t *testing.T) {
+	f := idleFacts()
+	f.TTYQuiet = f.TurnQuiet + 5*time.Second // atime pts отстаёт до 8 с: ввод мог быть уже после конца хода
+	if v := decide(f, policy{idle: 10 * time.Minute}); v.Restart || !slices.Contains(codes(v), "draft") {
+		t.Errorf("ввод в пределах 8 с до конца хода — тоже возможный черновик: %+v", v)
+	}
+	f.TTYQuiet = f.TurnQuiet + 30*time.Second
+	if v := decide(f, policy{idle: 10 * time.Minute}); !v.Restart {
+		t.Errorf("ввод за 30 с до конца хода — отправка реплики, не черновик: %+v", v)
 	}
 }
