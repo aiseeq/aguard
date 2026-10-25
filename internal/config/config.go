@@ -1,6 +1,6 @@
 // Package config — единый конфиг aguard (~/.config/aguard/config.toml):
 // общие поля (лид, админы пространств) и разделы наблюдателей [orphans], [tmp],
-// [memory], [restart]. Перечитывается каждый проход.
+// [memory], [restart], [waits]. Перечитывается каждый проход.
 package config
 
 import (
@@ -18,6 +18,7 @@ import (
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/aguard/internal/waits"
 )
 
 // Config — весь конфиг.
@@ -30,6 +31,7 @@ type Config struct {
 	Tmp     policy.Config   `toml:"tmp"`     // записи в /tmp (бывший tmpguard)
 	Memory  memwatch.Config `toml:"memory"`  // пики памяти сессий
 	Restart restart.Config  `toml:"restart"` // можно ли cl перезапустить сессию
+	Waits   waits.Config    `toml:"waits"`   // отказы и ожидания агентов по транскриптам
 }
 
 // Path — путь конфига в домашней папке.
@@ -47,6 +49,7 @@ func Default(home string) Config {
 		Tmp:     policy.Default(home),
 		Memory:  memwatch.Default(),
 		Restart: restart.Default(home, runtimeDir()),
+		Waits:   waits.Default(),
 	}
 }
 
@@ -99,6 +102,9 @@ func (c *Config) finish(home string, uid int) error {
 	}
 	if err := c.Restart.Validate(home); err != nil {
 		return err
+	}
+	if err := c.Waits.Validate(); err != nil {
+		return fmt.Errorf("waits: %w", err)
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/daily"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/policy"
 )
@@ -44,7 +45,7 @@ func (a *app) memoryCmd(args []string) error {
 	return nil
 }
 
-func (a *app) memoryStore() memwatch.Store { return memwatch.Store{Dir: a.dir("memory")} }
+func (a *app) memoryStore() daily.Store[memwatch.Sample] { return memwatch.NewStore(a.dir("memory")) }
 
 // memoryRound — один проход: записи по всем сессиям, сжатие прошлых дней.
 func (a *app) memoryRound(mw *memwatch.Watcher, cfg *memwatch.Config, dry bool) error {

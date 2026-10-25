@@ -93,7 +93,7 @@ func TestPass(t *testing.T) {
 }
 
 func TestStoreRotateRead(t *testing.T) {
-	st := Store{Dir: t.TempDir()}
+	st := NewStore(t.TempDir())
 	day1 := time.Date(2026, 10, 24, 23, 0, 0, 0, time.Local)
 	day2 := day1.Add(2 * time.Hour)
 	if err := st.Append([]Sample{{At: day1, Name: "lead", Scope: "a", Peak: 5 << 30}}); err != nil {

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/daily"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
@@ -291,4 +292,9 @@ func (w *Watcher) session(pids []int, s *Sample) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// NewStore — дневные файлы записей памяти в dir.
+func NewStore(dir string) daily.Store[Sample] {
+	return daily.Store[Sample]{Dir: dir, What: "записи памяти", At: func(s *Sample) time.Time { return s.At }}
 }
