@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/activity"
 	"github.com/aiseeq/aguard/internal/restart"
 )
 
@@ -50,16 +51,29 @@ func (a *app) restartServe(ctx context.Context) {
 	cfg, err := a.config()
 	if err != nil {
 		a.log.Error("aguard restart: конфиг, сокет не открыт", "err", err)
+		a.note("restart", activity.KindConfigSkipped, "сокет не открыт", "", 0, "")
 		return
 	}
 	ln, err := restart.Listen(cfg.Restart.Socket)
 	if err != nil {
 		a.log.Error("aguard restart: сокет не открыт", "err", err)
+		a.note("restart", "socket_failed", "", "", 0, "")
 		return
 	}
 	j := restart.NewJudge(a.home)
-	answer := func(req restart.Request) restart.Answer { return a.restartAnswer(j, req, "") }
+	answer := func(req restart.Request) restart.Answer {
+		ans := a.restartAnswer(j, req, "")
+		a.note("restart", activity.KindPass, "", "", 0, "")
+		switch {
+		case ans.Error != "":
+			a.note("restart", activity.KindPassFailed, "", "", 0, "")
+		case ans.Restart:
+			a.note("restart", "can_restart", ans.Name, "", 0, "") // в mode log cl только пишет «перезапустил бы»
+		}
+		return ans
+	}
 	if err := restart.Serve(ctx, ln, answer, a.log); err != nil {
 		a.log.Error("aguard restart: сокет", "err", err)
+		a.note("restart", "socket_failed", "", "", 0, "")
 	}
 }

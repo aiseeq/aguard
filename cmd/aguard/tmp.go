@@ -121,7 +121,7 @@ func (a *app) live() (*liveSessions, error) {
 func (a *app) tmpFactor(cfg *policy.Config) float64 {
 	p, err := pressure.ReadMemory(procRoot)
 	if err != nil {
-		a.log.Warn("aguard tmp: давление памяти не прочиталось, порог без поправки", "err", err)
+		a.warn("tmp", "давление памяти не прочиталось, порог без поправки", "err", err)
 		return 1
 	}
 	return cfg.Factor(p)
@@ -139,7 +139,7 @@ func (a *app) loadUserState() *policy.UserState {
 		err = json.Unmarshal(b, st)
 	}
 	if err != nil {
-		a.log.Warn("aguard tmp: состояние сброшено", "err", err)
+		a.warn("tmp", "состояние сброшено", "err", err)
 		return &policy.UserState{}
 	}
 	return st
@@ -170,7 +170,7 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 		return err
 	}
 	if age := now.Sub(snap.Updated); age > 3*cfg.Interval.D() {
-		a.log.Warn("aguard tmp: снимок трекера старый: tmpguard-track жив?", "age", policy.HumanAge(age))
+		a.warn("tmp", "снимок трекера старый: tmpguard-track жив?", "age", policy.HumanAge(age))
 	}
 	live, err := a.live()
 	if err != nil {
@@ -201,10 +201,12 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 		texts = fmt.Appendf(texts, "=== %s %s, записей %d\n%s\n\n", now.Format(time.RFC3339), s.Target.Key(), len(s.Lines), msg)
 		if cfg.Mode != policy.ModeAlert {
 			a.log.Info("aguard tmp observe: отправил бы", "to", s.Target.Key(), "entries", len(s.Lines), "bytes", policy.HumanBytes(total))
+			a.note("tmp", "would_send", "", s.Target.Key(), int64(len(s.Lines)), "entries")
 			continue
 		}
 		if err := a.tmpSend(cfg, s.Target, msg); err != nil {
 			a.log.Warn("aguard tmp: сводка не доставлена", "to", s.Target.Key(), "err", err)
+			a.note("tmp", "send_failed", "", s.Target.Key(), int64(len(s.Lines)), "entries")
 			for j := range s.Lines { // не доставлено — не считается
 				k := policy.EntryKey(&s.Lines[j].Item)
 				if p, ok := prev[k]; ok {
@@ -216,10 +218,11 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 			continue
 		}
 		a.log.Info("aguard tmp: сводка", "to", s.Target.Key(), "entries", len(s.Lines), "bytes", policy.HumanBytes(total))
+		a.note("tmp", "sent", "", s.Target.Key(), int64(len(s.Lines)), "entries")
 	}
 	if len(texts) > 0 {
 		if err := os.WriteFile(filepath.Join(a.dir("tmp"), "last-summaries.txt"), texts, 0o600); err != nil {
-			a.log.Warn("aguard tmp: последние сводки", "err", err)
+			a.warn("tmp", "последние сводки", "err", err)
 		}
 	}
 	a.caches(cfg, items, false)
@@ -237,12 +240,16 @@ func (a *app) caches(cfg *policy.Config, items []policy.Item, dry bool) {
 		if dry || cfg.Mode != policy.ModeAlert || !cfg.Cache.Clean {
 			a.log.Info(fmt.Sprintf("aguard tmp: кеш %s %s > %s — почистил бы файлы старше %s", it.Entry.Path,
 				policy.HumanBytes(it.Entry.Bytes), policy.HumanBytes(int64(cfg.Cache.Max)), cfg.Cache.CleanOlder.D()))
+			if !dry {
+				a.note("tmp", "would_clean", it.Entry.Path, "", it.Entry.Bytes, "bytes")
+			}
 			continue
 		}
 		c := cleanOld(it.Entry.Path, time.Now().Add(-cfg.Cache.CleanOlder.D()), a.uid)
 		a.log.Info("aguard tmp: кеш почищен", "path", it.Entry.Path, "files", c.files, "bytes", policy.HumanBytes(c.freed))
+		a.note("tmp", "cleaned", it.Entry.Path, "", c.freed, "bytes")
 		if c.failed > 0 {
-			a.log.Warn("aguard tmp: часть кеша не почищена", "path", it.Entry.Path, "failed", c.failed, "first", c.first)
+			a.warn("tmp", "часть кеша не почищена", "path", it.Entry.Path, "failed", c.failed, "first", c.first)
 		}
 	}
 }

@@ -53,7 +53,7 @@ func (a *app) waitsRound(cfg *waits.Config, dry bool) error {
 	}
 	evs, err := cfg.Tail(a.projects).Pass(st, now)
 	if err != nil { // битые строки и ошибки отдельных файлов: остальные события всё равно пишем
-		a.log.Warn("aguard waits: часть транскриптов не прочиталась", "err", err)
+		a.warn("waits", "часть транскриптов не прочиталась", "err", err)
 	}
 	if dry {
 		enc := json.NewEncoder(a.out)

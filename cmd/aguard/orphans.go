@@ -67,11 +67,11 @@ func (a *app) orphansRound(ctx context.Context, cfg *orphans.Config, dry bool) e
 		return err
 	}
 	if err != nil {
-		a.log.Warn("aguard orphans: часть процессов не прочиталась", "err", err)
+		a.warn("orphans", "часть процессов не прочиталась", "err", err)
 	}
 	st, err := orphans.LoadState(a.orphansState())
-	if err != nil { //nolint:fallback-return // битое состояние — начать заново: сроки смерти отсчитаются с этого прохода, то есть позже, не раньше
-		a.log.Warn("aguard orphans: состояние сброшено", "err", err)
+	if err != nil { // битое состояние — начать заново: сроки смерти отсчитаются с этого прохода, то есть позже, не раньше
+		a.warn("orphans", "состояние сброшено", "err", err)
 	}
 	trees := orphans.Plan(snap, cfg, st.Seen)
 	info := a.describe(trees)
@@ -86,8 +86,8 @@ func (a *app) orphansRound(ctx context.Context, cfg *orphans.Config, dry bool) e
 		return nil
 	}
 	alive, err := a.reg.Alive()
-	if err != nil { //nolint:fallback-return // Alive отдаёт прочитанную часть реестра; неизвестного адресата заменит лид
-		a.log.Warn("aguard orphans: реестр сессий", "err", err)
+	if err != nil { // Alive отдаёт прочитанную часть реестра; неизвестного адресата заменит лид
+		a.warn("orphans", "реестр сессий", "err", err)
 	}
 	if cfg.Mode == orphans.ModeAct {
 		a.orphansAct(ctx, cfg, trees, info, alive, now)
@@ -111,6 +111,7 @@ func (a *app) orphansObserve(cfg *orphans.Config, trees []orphans.Tree, info map
 		to, note := a.recipient(cfg, sessionCwd(t, in), alive, now)
 		lines = append(lines, a.journalLine(now, "снял бы", t, in, "сводка: "+recipientText(to, note), planText(t)))
 		st.Logged[t.RootKey()] = now
+		a.note("orphans", "would_reap", t.Root.Comm, to, int64(len(t.Members)), "procs")
 	}
 	a.appendJournal(lines)
 }
@@ -135,6 +136,7 @@ func (a *app) orphansAct(ctx context.Context, cfg *orphans.Config, trees []orpha
 		in := info[o.Tree.Session.ID]
 		to, note := a.recipient(cfg, sessionCwd(o.Tree, in), alive, now)
 		lines = append(lines, a.journalLine(time.Now(), "снял", o.Tree, in, "сводка: "+recipientText(to, note), o.Text()))
+		a.note("orphans", "reaped", o.Tree.Root.Comm, to, int64(len(o.Tree.Members)), "procs")
 		if to != "" {
 			byTo[to] = append(byTo[to], a.summaryLine(o, in, now))
 		}
@@ -148,9 +150,11 @@ func (a *app) orphansAct(ctx context.Context, cfg *orphans.Config, trees []orpha
 	for _, to := range names {
 		if err := a.orphansSend(cfg, alive[to], a.orphansMessage(cfg, byTo[to])); err != nil {
 			a.log.Warn("aguard orphans: сводка не доставлена", "to", to, "err", err)
+			a.note("orphans", "send_failed", "", to, int64(len(byTo[to])), "trees")
 			continue
 		}
 		a.log.Info("aguard orphans: сводка", "to", to, "trees", len(byTo[to]))
+		a.note("orphans", "sent", "", to, int64(len(byTo[to])), "trees")
 	}
 }
 
@@ -270,7 +274,7 @@ func (a *app) describe(trees []orphans.Tree) map[string]orphans.SessionInfo {
 		}
 		in, err := orphans.Describe(a.projects, id)
 		if err != nil {
-			a.log.Warn("aguard orphans: транскрипт не прочитан, в журнале будет cwd процесса", "session", id, "err", err)
+			a.warn("orphans", "транскрипт не прочитан, в журнале будет cwd процесса", "session", id, "err", err)
 			out[id] = orphans.SessionInfo{}
 			continue
 		}

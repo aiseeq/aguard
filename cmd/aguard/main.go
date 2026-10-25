@@ -18,6 +18,7 @@
 //     aguard memory tick [-dry-run] | report [-since 168h]
 //     aguard restart ask -pid N [-name имя]              вопрос, как его задаёт cl
 //     aguard waits tick [-dry-run] | report [-since 24h]
+//     aguard report [-json] [-at время]                 срабатывания и сбои за сутки, неделю, месяц
 package main
 
 import (
@@ -34,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/activity"
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/journal"
 	"github.com/aiseeq/aguard/internal/memwatch"
@@ -50,7 +52,8 @@ type app struct {
 	reg      session.Registry
 	uid      int
 	log      *slog.Logger
-	out      io.Writer // вывод команд для человека и агента (dry-run, report)
+	out      io.Writer          // вывод команд для человека и агента (dry-run, report)
+	act      *activity.Recorder // учёт срабатываний; только у демона, у команд nil
 }
 
 func main() {
@@ -89,6 +92,8 @@ func main() {
 		err = a.restartCmd(os.Args[2:])
 	case "waits":
 		err = a.waitsCmd(os.Args[2:])
+	case "report":
+		err = a.reportCmd(os.Args[2:])
 	default:
 		usage()
 	}
@@ -106,7 +111,8 @@ func usage() {
   aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
   aguard memory tick [-dry-run] | report [-since 168h]
   aguard restart ask -pid N [-name имя]
-  aguard waits tick [-dry-run] | report [-since 24h]`)
+  aguard waits tick [-dry-run] | report [-since 24h]
+  aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }
 
@@ -150,7 +156,7 @@ type watcher struct {
 // проход; не прочитался — проход пропускается (по неизвестным правилам ничего
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
-	for _, n := range []string{"orphans", "tmp", "memory", "waits"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -167,12 +173,16 @@ func (a *app) run(ctx context.Context) error {
 		{"waits", func(_ context.Context, c *config.Config) error { return a.waitsRound(&c.Waits, false) },
 			func(c *config.Config) time.Duration { return c.Waits.Interval.D() }},
 	}
+	a.act = activity.New(a.dir("activity"), time.Now())
+	a.note("aguard", activity.KindStart, "", "", 0, "")
 	var wg sync.WaitGroup
 	wg.Go(func() { a.restartServe(ctx) })
 	for _, w := range ws {
 		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей четыре, список задан в коде выше
 	}
+	wg.Go(func() { a.flushLoop(ctx) })
 	wg.Wait()
+	a.flush() // остановка: несохранённое — в файл
 	return nil
 }
 
@@ -195,15 +205,19 @@ func (a *app) safePass(ctx context.Context, w watcher) (pause time.Duration) {
 	defer func() {
 		if r := recover(); r != nil {
 			a.log.Error("aguard "+w.name+": паника в проходе", "panic", r, "stack", string(debug.Stack()))
+			a.note(w.name, activity.KindPanic, fmt.Sprint(r), "", 0, "")
 		}
 	}()
+	a.note(w.name, activity.KindPass, "", "", 0, "")
 	cfg, err := a.config()
 	if err != nil {
 		a.log.Error("aguard "+w.name+": конфиг, проход пропущен", "err", err)
+		a.note(w.name, activity.KindConfigSkipped, "", "", 0, "")
 		return pause
 	}
 	if err := w.pass(ctx, &cfg); err != nil {
 		a.log.Error("aguard "+w.name+": проход", "err", err)
+		a.note(w.name, activity.KindPassFailed, "", "", 0, "")
 	}
 	return w.every(&cfg)
 }

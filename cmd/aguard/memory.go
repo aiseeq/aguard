@@ -52,7 +52,7 @@ func (a *app) memoryRound(mw *memwatch.Watcher, cfg *memwatch.Config, dry bool) 
 	now := time.Now()
 	samples, err := mw.Pass(cfg, now)
 	if err != nil { // ошибка одного scope: остальные записи всё равно пишем
-		a.log.Warn("aguard memory: часть сессий не прочиталась", "err", err)
+		a.warn("memory", "часть сессий не прочиталась", "err", err)
 	}
 	if dry {
 		enc := json.NewEncoder(a.out)
