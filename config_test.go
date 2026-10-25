@@ -131,10 +131,3 @@ func TestFreshResume(t *testing.T) {
 		t.Errorf("без файла: %q", got)
 	}
 }
-
-func TestParseStat(t *testing.T) {
-	name, ppid, err := parseStat("4242 (tmux: server (x)) S 17 4242 4242 0")
-	if err != nil || name != "tmux: server (x)" || ppid != 17 {
-		t.Errorf("parseStat = %q %d %v", name, ppid, err)
-	}
-}

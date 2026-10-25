@@ -37,7 +37,7 @@ func TestFree(t *testing.T) {
 	}
 }
 
-func TestInteractiveAndName(t *testing.T) {
+func TestInteractive(t *testing.T) {
 	if !interactive(nil) || !interactive([]string{"--resume", "x"}) || !interactive([]string{"привет"}) {
 		t.Error("сессия должна получать флаги")
 	}
@@ -61,8 +61,8 @@ func TestReadTableAndLive(t *testing.T) {
 	}
 	live := `{"pid":` + strconv.Itoa(os.Getpid()) + `,"name":"sc2demu-master"}`
 	dead := `{"pid":999999999,"name":"lead"}`
-	_ = os.WriteFile(filepath.Join(dir, "1.json"), []byte(live), 0o600)
-	_ = os.WriteFile(filepath.Join(dir, "2.json"), []byte(dead), 0o600)
+	write(t, filepath.Join(dir, "1.json"), live)
+	write(t, filepath.Join(dir, "2.json"), dead)
 	names, err := liveNames(dir)
 	if err != nil || !names["sc2demu-master"] || names["lead"] {
 		t.Errorf("liveNames = %v", names)
