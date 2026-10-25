@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/restart"
 )
 
 const home = "/home/u"
@@ -93,5 +94,16 @@ func TestLoadMissing(t *testing.T) {
 	}
 	if c.Tmp.Escalation.Admins["/home/u/git"] != "git-admin" {
 		t.Errorf("админы по умолчанию: %v", c.Tmp.Escalation.Admins)
+	}
+}
+
+// TestExample — пример из deploy читается без ошибок: он же ставится первым конфигом.
+func TestExample(t *testing.T) {
+	c, err := Load(filepath.Join("..", "..", "deploy", "config.example.toml"), home, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Restart.Mode != restart.ModeLog || len(c.Restart.Roles) == 0 {
+		t.Errorf("раздел restart примера: %+v", c.Restart)
 	}
 }

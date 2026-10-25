@@ -1,6 +1,6 @@
 // Package config — единый конфиг aguard (~/.config/aguard/config.toml):
 // общие поля (лид, админы пространств) и разделы наблюдателей [orphans], [tmp],
-// [memory]. Перечитывается каждый проход.
+// [memory], [restart]. Перечитывается каждый проход.
 package config
 
 import (
@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -16,6 +17,7 @@ import (
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/restart"
 )
 
 // Config — весь конфиг.
@@ -27,6 +29,7 @@ type Config struct {
 	Orphans orphans.Config  `toml:"orphans"` // процессы умерших сессий (бывший procguard)
 	Tmp     policy.Config   `toml:"tmp"`     // записи в /tmp (бывший tmpguard)
 	Memory  memwatch.Config `toml:"memory"`  // пики памяти сессий
+	Restart restart.Config  `toml:"restart"` // можно ли cl перезапустить сессию
 }
 
 // Path — путь конфига в домашней папке.
@@ -43,6 +46,7 @@ func Default(home string) Config {
 		Orphans: orphans.Default(home),
 		Tmp:     policy.Default(home),
 		Memory:  memwatch.Default(),
+		Restart: restart.Default(home, runtimeDir()),
 	}
 }
 
@@ -93,5 +97,16 @@ func (c *Config) finish(home string, uid int) error {
 	if err := c.Memory.Validate(uid); err != nil {
 		return fmt.Errorf("memory: %w", err)
 	}
+	if err := c.Restart.Validate(home); err != nil {
+		return err
+	}
 	return nil
+}
+
+// runtimeDir — $XDG_RUNTIME_DIR; без него (запуск не из сеанса) — /run/user/<uid>, как его ставит systemd.
+func runtimeDir() string {
+	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join("/run/user", strconv.Itoa(os.Getuid()))
 }

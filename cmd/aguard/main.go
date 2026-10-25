@@ -8,10 +8,13 @@
 //
 //   - memory — пики памяти сессий для выбора мягкого потолка.
 //
+//   - restart — ответ cl в сокет, можно ли перезапустить сессию на новую версию Claude Code.
+//
 //     aguard run                                         демон (user-сервис)
 //     aguard orphans tick [-dry-run] [-min-dead 0s]      один проход сирот
 //     aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
 //     aguard memory tick [-dry-run] | report [-since 168h]
+//     aguard restart ask -pid N [-name имя]              вопрос, как его задаёт cl
 package main
 
 import (
@@ -79,6 +82,8 @@ func main() {
 		err = a.tmpCmd(os.Args[2:])
 	case "memory":
 		err = a.memoryCmd(os.Args[2:])
+	case "restart":
+		err = a.restartCmd(os.Args[2:])
 	default:
 		usage()
 	}
@@ -94,7 +99,8 @@ func usage() {
   aguard run
   aguard orphans tick [-dry-run] [-min-dead 0s]
   aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
-  aguard memory tick [-dry-run] | report [-since 168h]`)
+  aguard memory tick [-dry-run] | report [-since 168h]
+  aguard restart ask -pid N [-name имя]`)
 	os.Exit(2)
 }
 
@@ -154,6 +160,7 @@ func (a *app) run(ctx context.Context) error {
 			func(c *config.Config) time.Duration { return c.Memory.Interval.D() }},
 	}
 	var wg sync.WaitGroup
+	wg.Go(func() { a.restartServe(ctx) })
 	for _, w := range ws {
 		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей три, список задан в коде выше
 	}

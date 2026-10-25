@@ -124,9 +124,9 @@ func TestThresholdWait(t *testing.T) {
 
 func TestServiceSkipped(t *testing.T) {
 	p := mkProc(200, 1807, "billing", 2, 100)
-	p.Cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/payapp.service"
+	p.Cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/billing.service"
 	tr := only(t, Plan(snap(p), testCfg(t), longDead()))
-	if tr.Verdict != Skip || !strings.Contains(tr.Reason, "payapp.service") {
+	if tr.Verdict != Skip || !strings.Contains(tr.Reason, "billing.service") {
 		t.Fatalf("verdict %v (%s), ожидалось не трогать сервис", tr.Verdict, tr.Reason)
 	}
 }

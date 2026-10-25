@@ -1,0 +1,176 @@
+package restart
+
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+	"time"
+)
+
+func write(t *testing.T, file, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadHookState(t *testing.T) {
+	dir := t.TempDir()
+	p := paths{hookStates: dir}
+	if rec, err := readHookState(p, "s1"); err != nil || rec.state != "" {
+		t.Errorf("нет записи — пустое состояние: %+v %v", rec, err)
+	}
+	write(t, filepath.Join(dir, "s1"), "paused\n")
+	write(t, filepath.Join(dir, "s1.tasks"), "{}")
+	rec, err := readHookState(p, "s1")
+	if err != nil || rec.state != "paused" || !rec.tasks || rec.written.IsZero() {
+		t.Errorf("readHookState = %+v %v", rec, err)
+	}
+}
+
+func TestDescendantsAndVersion(t *testing.T) {
+	proc := t.TempDir()
+	write(t, filepath.Join(proc, "10", "stat"), "10 (claude) S 1 10 10 0")
+	write(t, filepath.Join(proc, "11", "stat"), "11 (bash) S 10 11 11 0")
+	write(t, filepath.Join(proc, "12", "stat"), "12 (sleep) S 11 12 12 0")
+	write(t, filepath.Join(proc, "13", "stat"), "13 (konsole) S 1 13 13 0")
+	write(t, filepath.Join(proc, "self", "stat"), "x")
+	got, err := descendants(proc, 10)
+	if err != nil || !slices.Equal(got, []string{"11 bash", "12 sleep"}) {
+		t.Errorf("descendants = %q %v", got, err)
+	}
+	if err := os.Symlink("/home/u/.local/share/claude/versions/2.1.309 (deleted)", filepath.Join(proc, "10", "exe")); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := runningVersion(proc, 10); err != nil || v != "2.1.309" {
+		t.Errorf("runningVersion = %q %v", v, err)
+	}
+}
+
+func TestParseStat(t *testing.T) {
+	name, ppid, err := parseStat("4242 (tmux: server (x)) S 17 4242 4242 0")
+	if err != nil || name != "tmux: server (x)" || ppid != 17 {
+		t.Errorf("parseStat = %q %d %v", name, ppid, err)
+	}
+}
+
+func TestTranscriptFile(t *testing.T) {
+	dir := t.TempDir()
+	p := paths{projects: dir}
+	if _, err := transcriptFile(p, "s1"); err == nil {
+		t.Error("нет транскрипта — ошибка")
+	}
+	write(t, filepath.Join(dir, "-home-u", "s1.jsonl"), "")
+	if f, err := transcriptFile(p, "s1"); err != nil || f != filepath.Join(dir, "-home-u", "s1.jsonl") {
+		t.Errorf("transcriptFile = %q %v", f, err)
+	}
+}
+
+// probe на подменённой сессии: сведения собраны из реестра, /proc, claude-hooks, транскрипта и терминала, и решение
+// по ним то же, что по готовым facts в decide_test.go.
+func TestProbe(t *testing.T) {
+	now := time.Now()
+	idle := allowance{idle: time.Minute}
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 20 * time.Minute})
+	w.link(t, 4242)
+	f := probe(w.p, &scanCache{}, 4242, now)
+	if len(f.Errors) > 0 || f.Name != "x-master" || f.SessionID != "s1" || f.Running != "2.1.309" || f.Installed != "2.1.310" ||
+		f.HookState != "done" || f.HookTasks || len(f.Children) != 0 {
+		t.Fatalf("probe = %+v", f)
+	}
+	if f.Quiet != 10*time.Minute || f.TurnQuiet != 10*time.Minute || f.TTYQuiet != 20*time.Minute {
+		t.Errorf("Quiet %s TurnQuiet %s TTYQuiet %s, want 10m 10m 20m", f.Quiet, f.TurnQuiet, f.TTYQuiet)
+	}
+	if v := decide(f, idle); !v.Restart {
+		t.Errorf("простаивающая сессия: %+v", v)
+	}
+}
+
+// Ввод в терминал после конца хода (d3516ca): TurnQuiet — от mtime транскрипта, иначе черновик в поле не виден.
+func TestProbeDraftAfterTurn(t *testing.T) {
+	now := time.Now()
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 5 * time.Minute})
+	w.link(t, 4242)
+	f := probe(w.p, &scanCache{}, 4242, now)
+	if v := decide(f, allowance{idle: time.Minute}); v.Restart || !slices.Equal(codes(v), []string{"draft"}) {
+		t.Errorf("ввод 5 мин назад после хода 10 мин назад — черновик: %+v (facts %+v)", v, f)
+	}
+}
+
+// Идущий инструмент и потомок процесса держат перезапуск: probe передаёт их из транскрипта и /proc.
+func TestProbeBusy(t *testing.T) {
+	now := time.Now()
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 20 * time.Minute},
+		use(now.Add(-30*time.Minute).UTC().Format(time.RFC3339Nano), "t1", "AskUserQuestion", `{}`))
+	w.link(t, 4242)
+	write(t, filepath.Join(w.p.proc, "4243", "stat"), "4243 (bash) S 4242 4243 4243 0")
+	f := probe(w.p, &scanCache{}, 4242, now)
+	if !slices.Equal(f.Children, []string{"4243 bash"}) || !slices.Equal(f.Transcript.Pending, []string{"AskUserQuestion t1"}) {
+		t.Fatalf("Children %q Pending %q", f.Children, f.Transcript.Pending)
+	}
+	if v := decide(f, allowance{idle: time.Minute}); v.Restart || !slices.Equal(codes(v), []string{"children", "pending"}) {
+		t.Errorf("занятая сессия: %+v", v)
+	}
+}
+
+// Свежая версия — дальше probe не смотрит: без транскрипта и claude-hooks ошибки нет. Нет записи реестра — ошибка.
+func TestProbeFreshAndMissing(t *testing.T) {
+	now := time.Now()
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: time.Minute, ttyAgo: time.Minute})
+	w.link(t, 4242)
+	w.setRunning(t, "2.1.310")
+	if err := os.RemoveAll(w.p.projects); err != nil {
+		t.Fatal(err)
+	}
+	if f := probe(w.p, &scanCache{}, 4242, now); len(f.Errors) > 0 || !decide(f, allowance{}).Fresh {
+		t.Errorf("свежая версия: %+v", f)
+	}
+	if f := probe(w.p, &scanCache{}, 7, now); len(f.Errors) != 1 || decide(f, allowance{}).Restart {
+		t.Errorf("нет записи реестра: %+v", f)
+	}
+}
+
+// scanCache: тот же файл того же размера и времени не перечитывается, дописанный — перечитывается.
+func TestScanCache(t *testing.T) {
+	since, _ := time.Parse(time.RFC3339, "2026-10-24T09:00:00Z")
+	file := filepath.Join(t.TempDir(), "s1.jsonl")
+	write(t, file, use(tsNew, "t1", "AskUserQuestion", `{}`)+"\n")
+	stat := func() os.FileInfo {
+		info, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	cache := &scanCache{}
+	if f, err := cache.read(file, stat(), since, since); err != nil || len(f.Pending) != 1 {
+		t.Fatalf("первый разбор: %+v %v", f, err)
+	}
+	info := stat()
+	if err := os.Rename(file, file+".gone"); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := cache.read(file, info, since, since); err != nil || len(f.Pending) != 1 {
+		t.Errorf("файл не менялся — прошлый разбор без чтения: %+v %v", f, err)
+	}
+	if err := os.Rename(file+".gone", file); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(result(tsNew, "t1", "ok", `null`) + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cache.read(file, stat(), since, since); err != nil || len(got.Pending) != 0 {
+		t.Errorf("дописанный файл — новый разбор: %+v %v", got, err)
+	}
+}
