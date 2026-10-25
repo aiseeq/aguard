@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/akit/proc"
 )
 
 const (
@@ -20,10 +21,13 @@ var (
 	now  = boot.Add(100 * time.Hour)
 )
 
-// proc — процесс, стартовавший через startH часов после загрузки.
-func proc(pid, ppid int, comm string, startH float64, session int) *Proc {
+// clockTicks — USER_HZ: поле starttime в /proc/<pid>/stat идёт в этих тиках.
+const clockTicks = 100
+
+// mkProc — процесс, стартовавший через startH часов после загрузки.
+func mkProc(pid, ppid int, comm string, startH float64, session int) *proc.Proc {
 	start := uint64(startH * 3600 * clockTicks)
-	return &Proc{
+	return &proc.Proc{
 		Pid: pid, Ppid: ppid, Comm: comm, UID: 1000, Args: comm, Cgroup: tabCg, Cwd: "/home/u/work/x",
 		Start: start, StartRaw: strconv.FormatUint(start, 10),
 		StartAt: boot.Add(time.Duration(startH * float64(time.Hour))),
@@ -31,8 +35,8 @@ func proc(pid, ppid int, comm string, startH float64, session int) *Proc {
 	}
 }
 
-func snap(ps ...*Proc) *Snapshot {
-	s := &Snapshot{Now: now, Procs: map[int]*Proc{}}
+func snap(ps ...*proc.Proc) *proc.Snapshot {
+	s := &proc.Snapshot{Now: now, Procs: map[int]*proc.Proc{}}
 	for _, p := range ps {
 		s.Procs[p.Pid] = p
 	}
@@ -64,9 +68,9 @@ func only(t *testing.T, trees []Tree) *Tree {
 
 func TestLiveSessionNotOrphan(t *testing.T) {
 	s := snap(
-		proc(100, 10, "claude", 1, 0),
-		proc(200, 1807, "ledger", 2, 100), // отвязан (nohup), но сессия жива
-		proc(201, 100, "bash", 3, 100),
+		mkProc(100, 10, "claude", 1, 0),
+		mkProc(200, 1807, "ledger", 2, 100), // отвязан (nohup), но сессия жива
+		mkProc(201, 100, "bash", 3, 100),
 	)
 	if trees := Plan(s, testCfg(t), longDead()); len(trees) != 0 {
 		t.Fatalf("при живой сессии сирот быть не должно: %+v", trees)
@@ -76,8 +80,8 @@ func TestLiveSessionNotOrphan(t *testing.T) {
 func TestReusedPidMeansDead(t *testing.T) {
 	seen := map[string]time.Time{}
 	s := snap(
-		proc(100, 5, "claude", 90, 0), // pid сессии занят новой claude, она моложе сироты
-		proc(200, 1807, "ledger", 2, 100),
+		mkProc(100, 5, "claude", 90, 0), // pid сессии занят новой claude, она моложе сироты
+		mkProc(200, 1807, "ledger", 2, 100),
 	)
 	tr := only(t, Plan(s, testCfg(t), seen))
 	if tr.Verdict != Reap {
@@ -92,9 +96,9 @@ func TestReusedPidMeansDead(t *testing.T) {
 // переиспользовавшего pid: сравнивать надо с самым ранним процессом сессии.
 func TestReusedPidLateSpawn(t *testing.T) {
 	s := snap(
-		proc(100, 5, "bash", 50, 0),
-		proc(200, 1807, "sh", 2, 100),
-		proc(300, 200, "tail", 80, 100),
+		mkProc(100, 5, "bash", 50, 0),
+		mkProc(200, 1807, "sh", 2, 100),
+		mkProc(300, 200, "tail", 80, 100),
 	)
 	tr := only(t, Plan(s, testCfg(t), longDead()))
 	if tr.Verdict != Reap || len(tr.Members) != 2 {
@@ -104,7 +108,7 @@ func TestReusedPidLateSpawn(t *testing.T) {
 
 func TestThresholdWait(t *testing.T) {
 	seen := map[string]time.Time{}
-	s := snap(proc(200, 1807, "ledger", 2, 100)) // pid 100 нет вовсе: когда умерла — неизвестно
+	s := snap(mkProc(200, 1807, "ledger", 2, 100)) // pid 100 нет вовсе: когда умерла — неизвестно
 	tr := only(t, Plan(s, testCfg(t), seen))
 	if tr.Verdict != Wait {
 		t.Fatalf("verdict %v, ожидалось ждать: смерть замечена только сейчас", tr.Verdict)
@@ -119,7 +123,7 @@ func TestThresholdWait(t *testing.T) {
 }
 
 func TestServiceSkipped(t *testing.T) {
-	p := proc(200, 1807, "payapp", 2, 100)
+	p := mkProc(200, 1807, "billing", 2, 100)
 	p.Cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/payapp.service"
 	tr := only(t, Plan(snap(p), testCfg(t), longDead()))
 	if tr.Verdict != Skip || !strings.Contains(tr.Reason, "payapp.service") {
@@ -128,23 +132,23 @@ func TestServiceSkipped(t *testing.T) {
 }
 
 func TestServiceInsideTreeSkipped(t *testing.T) {
-	child := proc(201, 200, "worker", 3, 0)
+	child := mkProc(201, 200, "worker", 3, 0)
 	child.Cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/run-u12.service"
-	tr := only(t, Plan(snap(proc(200, 1807, "sh", 2, 100), child), testCfg(t), longDead()))
+	tr := only(t, Plan(snap(mkProc(200, 1807, "sh", 2, 100), child), testCfg(t), longDead()))
 	if tr.Verdict != Skip {
 		t.Fatalf("verdict %v, ожидалось не трогать дерево с сервисом внутри", tr.Verdict)
 	}
 }
 
 func TestContainerStoppedByPodman(t *testing.T) {
-	conmon := proc(300, 1807, "conmon", 2, 100)
+	conmon := mkProc(300, 1807, "conmon", 2, 100)
 	conmon.Args = "/usr/bin/conmon --api-version 1 -c " + cid + " -n ledger-sandbox --exit-command /usr/bin/podman" +
 		" --exit-command-arg --root --exit-command-arg /home/u/.local/share/containers/storage" +
 		" --exit-command-arg --runroot --exit-command-arg /run/user/1000/containers --exit-command-arg container"
-	inner := proc(301, 300, "systemd-journal", 2, 0)
+	inner := mkProc(301, 300, "systemd-journal", 2, 0)
 	inner.Cgroup = "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-" + cid +
 		".scope/container/system.slice/systemd-journald.service"
-	pasta := proc(299, 1807, "pasta.avx2", 2, 100)
+	pasta := mkProc(299, 1807, "pasta.avx2", 2, 100)
 	trees := Plan(snap(conmon, inner, pasta), testCfg(t), longDead())
 	if len(trees) != 2 {
 		t.Fatalf("деревьев %d, ожидалось 2 (pasta и conmon)", len(trees))
@@ -163,10 +167,10 @@ func TestContainerStoppedByPodman(t *testing.T) {
 }
 
 func TestExcludedContainerKeepsNetwork(t *testing.T) {
-	conmon := proc(300, 1807, "conmon", 2, 100)
+	conmon := mkProc(300, 1807, "conmon", 2, 100)
 	conmon.Args = "conmon -c " + cid
 	cfg := testCfg(t, Exclude{Comm: "conmon", Reason: "песочница"})
-	trees := Plan(snap(conmon, proc(299, 1807, "pasta", 2, 100)), cfg, longDead())
+	trees := Plan(snap(conmon, mkProc(299, 1807, "pasta", 2, 100)), cfg, longDead())
 	for _, tr := range trees {
 		if tr.Verdict != Skip {
 			t.Fatalf("%s: verdict %v (%s), ожидалось не трогать", tr.Root.Comm, tr.Verdict, tr.Reason)
@@ -176,12 +180,12 @@ func TestExcludedContainerKeepsNetwork(t *testing.T) {
 
 func TestClaudeInsideOrAbove(t *testing.T) {
 	// мёртвая сессия запустила konsole, в ней живёт новая claude
-	inside := snap(proc(200, 1807, "konsole", 2, 100), proc(201, 200, "bash", 3, 100), proc(202, 201, "claude", 4, 100))
+	inside := snap(mkProc(200, 1807, "konsole", 2, 100), mkProc(201, 200, "bash", 3, 100), mkProc(202, 201, "claude", 4, 100))
 	if tr := only(t, Plan(inside, testCfg(t), longDead())); tr.Verdict != Skip {
 		t.Fatalf("verdict %v, ожидалось не трогать дерево с claude внутри", tr.Verdict)
 	}
 	// процесс с чужим CLAUDE_PID под живой claude
-	above := snap(proc(150, 10, "claude", 3, 0), proc(200, 150, "make", 4, 100))
+	above := snap(mkProc(150, 10, "claude", 3, 0), mkProc(200, 150, "make", 4, 100))
 	if tr := only(t, Plan(above, testCfg(t), longDead())); tr.Verdict != Skip {
 		t.Fatalf("verdict %v, ожидалось не трогать потомка живой claude", tr.Verdict)
 	}
@@ -189,10 +193,10 @@ func TestClaudeInsideOrAbove(t *testing.T) {
 
 func TestTreeGroupsDescendants(t *testing.T) {
 	s := snap(
-		proc(200, 1807, "sh", 2, 100),
-		proc(201, 200, "tail", 2, 100),
-		proc(202, 200, "grep", 2, 0), // окружение очищено — всё равно часть дерева
-		proc(203, 202, "cat", 2, 0),
+		mkProc(200, 1807, "sh", 2, 100),
+		mkProc(201, 200, "tail", 2, 100),
+		mkProc(202, 200, "grep", 2, 0), // окружение очищено — всё равно часть дерева
+		mkProc(203, 202, "cat", 2, 0),
 	)
 	tr := only(t, Plan(s, testCfg(t), longDead()))
 	if tr.Root.Pid != 200 || len(tr.Members) != 4 || tr.Verdict != Reap {
@@ -201,15 +205,15 @@ func TestTreeGroupsDescendants(t *testing.T) {
 }
 
 func TestPartialMemberSkipped(t *testing.T) {
-	child := proc(201, 200, "ssh-agent", 3, 0)
+	child := mkProc(201, 200, "ssh-agent", 3, 0)
 	child.Partial = "environ: permission denied"
-	if tr := only(t, Plan(snap(proc(200, 1807, "sh", 2, 100), child), testCfg(t), longDead())); tr.Verdict != Skip {
+	if tr := only(t, Plan(snap(mkProc(200, 1807, "sh", 2, 100), child), testCfg(t), longDead())); tr.Verdict != Skip {
 		t.Fatalf("verdict %v, ожидалось не трогать дерево с непрочитанным процессом", tr.Verdict)
 	}
 }
 
 func TestExcludeUntil(t *testing.T) {
-	s := snap(proc(200, 1807, "ledger", 2, 100))
+	s := snap(mkProc(200, 1807, "ledger", 2, 100))
 	active := testCfg(t, Exclude{Session: sid, Until: now.Add(time.Hour).Format(time.RFC3339), Reason: "до понедельника"})
 	if tr := only(t, Plan(s, active, longDead())); tr.Verdict != Skip || !strings.Contains(tr.Reason, "до понедельника") {
 		t.Fatalf("verdict %v (%s), ожидалось исключение", tr.Verdict, tr.Reason)
@@ -219,7 +223,7 @@ func TestExcludeUntil(t *testing.T) {
 		t.Fatalf("verdict %v, истёкшее исключение не должно действовать", tr.Verdict)
 	}
 	byArgs := testCfg(t, Exclude{Args: `serve$`, Cwd: "~/work"})
-	p := proc(200, 1807, "ledger", 2, 100)
+	p := mkProc(200, 1807, "ledger", 2, 100)
 	p.Args, p.Cwd = "bin/ledger serve", "/home/u/work/ledger"
 	if tr := only(t, Plan(snap(p), byArgs, longDead())); tr.Verdict != Skip {
 		t.Fatalf("verdict %v, ожидалось исключение по args и cwd", tr.Verdict)
@@ -227,23 +231,10 @@ func TestExcludeUntil(t *testing.T) {
 }
 
 func TestOtherUIDIgnored(t *testing.T) {
-	p := proc(200, 1807, "sshd", 2, 0) // чужой: окружение не читали
+	p := mkProc(200, 1807, "sshd", 2, 0) // чужой: окружение не читали
 	p.UID = 0
 	if trees := Plan(snap(p), testCfg(t), longDead()); len(trees) != 0 {
 		t.Fatalf("чужие процессы не судятся: %+v", trees)
-	}
-}
-
-func TestServiceUnit(t *testing.T) {
-	for cg, want := range map[string]string{
-		tabCg: "",
-		"/user.slice/user-1000.slice/user@1000.service/app.slice/tmpguard.service": "tmpguard.service",
-		"/system.slice/sshd.service":                               "sshd.service",
-		"/user.slice/user-1000.slice/user@1000.service/init.scope": "",
-	} {
-		if got := serviceUnit(cg); got != want {
-			t.Errorf("serviceUnit(%q) = %q, want %q", cg, got, want)
-		}
 	}
 }
 
@@ -265,7 +256,7 @@ func TestPruneState(t *testing.T) {
 		Seen:   map[string]time.Time{"1/a": now.Add(-8 * 24 * time.Hour), "2/b": now.Add(-8 * 24 * time.Hour)},
 		Logged: map[string]time.Time{"200@1": now, "999@1": now},
 	}
-	root := &Proc{Pid: 200, StartRaw: "1"}
+	root := &proc.Proc{Pid: 200, StartRaw: "1"}
 	st.Prune([]Tree{{Root: root, Session: SessionKey{2, "b"}}}, now)
 	if _, ok := st.Seen["1/a"]; ok {
 		t.Error("пустая давняя сессия должна забыться")

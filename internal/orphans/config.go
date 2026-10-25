@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/akit/proc"
 )
 
 // Режимы работы.
@@ -131,7 +132,7 @@ func ParseUntil(s string) (time.Time, error) {
 }
 
 // matches — исключение действует сейчас и все его поля совпали с p.
-func (e *Exclude) matches(p *Proc, now time.Time) bool {
+func (e *Exclude) matches(p *proc.Proc, now time.Time) bool {
 	if !e.until.IsZero() && !now.Before(e.until) {
 		return false
 	}
@@ -148,7 +149,7 @@ func (e *Exclude) matches(p *Proc, now time.Time) bool {
 }
 
 // excluded — первое действующее исключение, под которое попал p.
-func (c *Config) excluded(p *Proc, now time.Time) *Exclude {
+func (c *Config) excluded(p *proc.Proc, now time.Time) *Exclude {
 	for i := range c.Exclude {
 		if c.Exclude[i].matches(p, now) {
 			return &c.Exclude[i]

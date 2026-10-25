@@ -10,13 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"golang.org/x/sys/unix"
 )
 
 // startChild запускает команду и возвращает её процесс из настоящего /proc,
 // когда он готов: comm стал want (exec прошёл), а если команда пишет строку
 // в stdout, — после этой строки (sh успел поставить trap).
-func startChild(t *testing.T, want string, ready bool, name string, args ...string) (*exec.Cmd, *Proc) {
+func startChild(t *testing.T, want string, ready bool, name string, args ...string) (*exec.Cmd, *proc.Proc) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
 	out, err := cmd.StdoutPipe()
@@ -46,7 +47,7 @@ func startChild(t *testing.T, want string, ready bool, name string, args ...stri
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	s, err := ReadSnapshot("/proc", os.Getuid(), time.Now())
+	s, err := proc.ReadSnapshot("/proc", os.Getuid(), time.Now())
 	if s == nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func startChild(t *testing.T, want string, ready bool, name string, args ...stri
 func TestStopTermAndKill(t *testing.T) {
 	_, soft := startChild(t, "sleep", false, "sleep", "100")
 	_, hard := startChild(t, "sh", true, "sh", "-c", "trap '' TERM; echo ready; while :; do sleep 1; done")
-	trees := []*Tree{{Root: soft, Members: []*Proc{soft}}, {Root: hard, Members: []*Proc{hard}}}
+	trees := []*Tree{{Root: soft, Members: []*proc.Proc{soft}}, {Root: hard, Members: []*proc.Proc{hard}}}
 	outs := Stop(context.Background(), trees, time.Second, "/proc")
 	if o := outs[0]; o.Termed != 1 || o.Exited != 1 || o.Killed != 0 || len(o.Errs) != 0 {
 		t.Errorf("sleep: %s; ожидалось выйти по SIGTERM", o.Text())
@@ -74,7 +75,7 @@ func TestStopReusedPidUntouched(t *testing.T) {
 	_, p := startChild(t, "sleep", false, "sleep", "100")
 	fake := *p
 	fake.StartRaw = "1" // как будто в снимке был другой процесс с этим pid
-	outs := Stop(context.Background(), []*Tree{{Root: &fake, Members: []*Proc{&fake}}}, time.Second, "/proc")
+	outs := Stop(context.Background(), []*Tree{{Root: &fake, Members: []*proc.Proc{&fake}}}, time.Second, "/proc")
 	if outs[0].Gone != 1 || outs[0].Termed != 0 {
 		t.Fatalf("%s; процесс с другим временем старта трогать нельзя", outs[0].Text())
 	}

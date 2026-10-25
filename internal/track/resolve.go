@@ -18,7 +18,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/aiseeq/aguard/internal/record"
-	"github.com/aiseeq/aguard/internal/sessions"
+	"github.com/aiseeq/akit/proc"
+	"github.com/aiseeq/akit/session"
 )
 
 const (
@@ -121,16 +122,16 @@ func (r *Resolver) Owner(pid, pidfd int) *record.Owner {
 
 // live заполняет процесс из /proc, если он ещё жив. /proc верим, только если
 // pidfd указывает на живой процесс: без pidfd pid мог достаться другому.
-func (r *Resolver) live(o *record.Owner, pid, pidfd int) (sessions.Stat, error) {
+func (r *Resolver) live(o *record.Owner, pid, pidfd int) (proc.Stat, error) {
 	if pidfd < 0 {
-		return sessions.Stat{}, errors.New("нет pidfd: процесс ушёл до чтения события")
+		return proc.Stat{}, errors.New("нет pidfd: процесс ушёл до чтения события")
 	}
 	if err := unix.PidfdSendSignal(pidfd, 0, nil, 0); err != nil {
-		return sessions.Stat{}, fmt.Errorf("pidfd процесса %d: %w", pid, err)
+		return proc.Stat{}, fmt.Errorf("pidfd процесса %d: %w", pid, err)
 	}
-	st, err := sessions.ProcStat("/proc", pid)
+	st, err := proc.ReadStat("/proc", pid)
 	if err != nil {
-		return st, err
+		return st, fmt.Errorf("процесс %d: %w", pid, err)
 	}
 	d, err := readProc(pid)
 	if err != nil { // умер между проверкой и чтением
@@ -186,7 +187,7 @@ func (r *Resolver) fromTomb(o *record.Owner, pid int) int {
 func (r *Resolver) chain(ppid int) ([]record.Link, *record.Session) {
 	var links []record.Link
 	for depth := 0; ppid > 1 && depth < chainDepth; depth++ {
-		st, err := sessions.ProcStat("/proc", ppid)
+		st, err := proc.ReadStat("/proc", ppid)
 		if err != nil { //nolint:silent-error-handling // предок тоже умер: берём его из proc connector
 			t, ok := r.tombs.lookup(ppid)
 			if !ok {
@@ -238,7 +239,7 @@ func (r *Resolver) sessionAt(pid int, start string, uid int) *record.Session {
 	if h == "" {
 		return nil
 	}
-	in, err := sessions.ForHome(h).Get(pid)
+	in, err := session.ForHome(h).Get(pid)
 	if err != nil {
 		r.log.Warn("tmpguard-track: сессия не проверена", "pid", pid, "err", err)
 		return nil //nolint:log-and-return-zero // нечитаемая запись реестра для цепочки — то же, что «не сессия»: идём к следующему предку и к cgroup
@@ -261,7 +262,7 @@ func (r *Resolver) byCgroup(cg string, uid int) *record.Session {
 	var found *record.Session
 	n := 0
 	if home := r.home(uid); home != "" {
-		reg := sessions.ForHome(home)
+		reg := session.ForHome(home)
 		all, err := reg.List()
 		if err != nil { //nolint:fallback-return // List отдаёт прочитанную часть реестра вместе с ошибкой о нечитаемых записях
 			r.log.Warn("tmpguard-track: реестр сессий, проверяю прочитанную часть", "err", err)

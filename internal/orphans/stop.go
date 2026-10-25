@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/aiseeq/aguard/internal/sessions"
+	"github.com/aiseeq/akit/proc"
 )
 
 // Outcome — чем кончилось снятие дерева.
@@ -47,7 +47,7 @@ func (o *Outcome) Text() string {
 
 type victim struct {
 	fd  int
-	p   *Proc
+	p   *proc.Proc
 	out *Outcome
 }
 
@@ -123,7 +123,7 @@ func Stop(ctx context.Context, trees []*Tree, wait time.Duration, procRoot strin
 var errGone = errors.New("процесса уже нет")
 
 // term открывает pidfd, сверяет старт и шлёт SIGTERM; возвращает открытый pidfd.
-func term(m *Proc, procRoot string) (int, error) {
+func term(m *proc.Proc, procRoot string) (int, error) {
 	fd, err := unix.PidfdOpen(m.Pid, 0)
 	if errors.Is(err, unix.ESRCH) {
 		return -1, errGone
@@ -132,7 +132,7 @@ func term(m *Proc, procRoot string) (int, error) {
 		return -1, fmt.Errorf("pidfd pid %d: %w", m.Pid, err)
 	}
 	// pidfd держит именно этот процесс; сверка после открытия исключает гонку с переиспользованием
-	st, err := sessions.ProcStat(procRoot, m.Pid)
+	st, err := proc.ReadStat(procRoot, m.Pid)
 	switch {
 	case err != nil && (errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH)):
 		err = errGone

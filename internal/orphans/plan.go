@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/akit/proc"
 )
 
 // Verdict — что делать с деревом сироты.
@@ -43,8 +44,8 @@ func (k SessionKey) String() string { return strconv.Itoa(k.Pid) + "/" + k.ID }
 
 // Tree — сирота-корень и всё, что под ним.
 type Tree struct {
-	Root      *Proc
-	Members   []*Proc // корень первым, затем потомки
+	Root      *proc.Proc
+	Members   []*proc.Proc // корень первым, затем потомки
 	Session   SessionKey
 	DeadBy    time.Time // сессия была мертва уже к этому моменту (оценка сверху)
 	Container string    // id контейнера podman, если корень — его conmon
@@ -63,7 +64,7 @@ type deadSession struct {
 
 // Plan находит деревья сирот и решает, что с ними делать. seen — когда каждая
 // мёртвая сессия впервые замечена мёртвой; Plan дописывает туда новые.
-func Plan(s *Snapshot, cfg *Config, seen map[string]time.Time) []Tree {
+func Plan(s *proc.Snapshot, cfg *Config, seen map[string]time.Time) []Tree {
 	dead := deadSessions(s)
 	orphan := map[int]SessionKey{}
 	for pid, p := range s.Procs {
@@ -92,7 +93,7 @@ func Plan(s *Snapshot, cfg *Config, seen map[string]time.Time) []Tree {
 // deadSessions — сессии, которых нет: процесса с pid CLAUDE_PID нет или он
 // стартовал позже самого раннего процесса этой сессии (pid переиспользован —
 // сессия старше любого своего потомка).
-func deadSessions(s *Snapshot) map[SessionKey]deadSession {
+func deadSessions(s *proc.Snapshot) map[SessionKey]deadSession {
 	first := map[SessionKey]uint64{}
 	for _, p := range s.Procs {
 		if p.Session == 0 {
@@ -131,7 +132,7 @@ func deadBy(seen map[string]time.Time, k SessionKey, d deadSession, now time.Tim
 }
 
 // judge выносит решение по дереву; первая сработавшая причина не трогать — в Reason.
-func judge(s *Snapshot, cfg *Config, t *Tree) {
+func judge(s *proc.Snapshot, cfg *Config, t *Tree) {
 	if t.Root.Comm == "conmon" {
 		// процессы контейнера под conmon — забота podman stop, сами по себе не судятся
 		t.Members = t.Members[:1]
@@ -159,14 +160,14 @@ func judge(s *Snapshot, cfg *Config, t *Tree) {
 }
 
 // memberBlock — почему этот процесс дерева запрещает его снимать, или "".
-func memberBlock(cfg *Config, m *Proc, now time.Time) string {
+func memberBlock(cfg *Config, m *proc.Proc, now time.Time) string {
 	switch {
 	case m.Comm == "claude":
 		return fmt.Sprintf("внутри claude pid %d", m.Pid)
 	case m.Partial != "":
 		return fmt.Sprintf("pid %d (%s) не прочитался: %s", m.Pid, m.Comm, m.Partial)
 	}
-	if svc := serviceUnit(m.Cgroup); svc != "" {
+	if svc := proc.ServiceUnit(m.Cgroup); svc != "" {
 		return fmt.Sprintf("pid %d под сервисом %s", m.Pid, svc)
 	}
 	if e := cfg.excluded(m, now); e != nil {
@@ -202,7 +203,7 @@ func linkPasta(trees []Tree) {
 }
 
 // claudeAncestor — ближайший предок-claude (живая сессия выше по дереву), или nil.
-func claudeAncestor(s *Snapshot, p *Proc) *Proc {
+func claudeAncestor(s *proc.Snapshot, p *proc.Proc) *proc.Proc {
 	const maxDepth = 64
 	for q, depth := p.Ppid, 0; q > 1 && depth < maxDepth; depth++ {
 		a, ok := s.Procs[q]
@@ -217,7 +218,7 @@ func claudeAncestor(s *Snapshot, p *Proc) *Proc {
 	return nil
 }
 
-func childIndex(s *Snapshot) map[int][]int {
+func childIndex(s *proc.Snapshot) map[int][]int {
 	out := map[int][]int{}
 	for pid, p := range s.Procs {
 		out[p.Ppid] = append(out[p.Ppid], pid)
@@ -229,8 +230,8 @@ func childIndex(s *Snapshot) map[int][]int {
 }
 
 // collect — корень и все потомки по ppid, в ширину.
-func collect(s *Snapshot, children map[int][]int, root int) []*Proc {
-	var out []*Proc
+func collect(s *proc.Snapshot, children map[int][]int, root int) []*proc.Proc {
+	var out []*proc.Proc
 	queue := []int{root}
 	for len(queue) > 0 {
 		pid := queue[0]

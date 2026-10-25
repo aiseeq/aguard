@@ -15,10 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aiseeq/aguard/internal/deliver"
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
-	"github.com/aiseeq/aguard/internal/sessions"
+	"github.com/aiseeq/akit/deliver"
+	"github.com/aiseeq/akit/proc"
+	"github.com/aiseeq/akit/session"
 )
 
 const (
@@ -61,7 +62,7 @@ func (a *app) orphansJournal() string { return filepath.Join(a.dir("orphans"), "
 // round — один проход: снимок, план, журнал, снятие и сводки (в act).
 func (a *app) orphansRound(ctx context.Context, cfg *orphans.Config, dry bool) error {
 	now := time.Now()
-	snap, err := orphans.ReadSnapshot(procRoot, a.uid, now)
+	snap, err := proc.ReadSnapshot(procRoot, a.uid, now)
 	if snap == nil {
 		return err
 	}
@@ -99,7 +100,7 @@ func (a *app) orphansRound(ctx context.Context, cfg *orphans.Config, dry bool) e
 
 // observe пишет в журнал «снял бы» — по разу на дерево.
 func (a *app) orphansObserve(cfg *orphans.Config, trees []orphans.Tree, info map[string]orphans.SessionInfo,
-	alive map[string]sessions.Info, st *orphans.State, now time.Time) {
+	alive map[string]session.Info, st *orphans.State, now time.Time) {
 	var lines []string
 	for i := range trees {
 		t := &trees[i]
@@ -116,7 +117,7 @@ func (a *app) orphansObserve(cfg *orphans.Config, trees []orphans.Tree, info map
 
 // act снимает деревья, пишет журнал и шлёт сводки.
 func (a *app) orphansAct(ctx context.Context, cfg *orphans.Config, trees []orphans.Tree, info map[string]orphans.SessionInfo,
-	alive map[string]sessions.Info, now time.Time) {
+	alive map[string]session.Info, now time.Time) {
 	var reap []*orphans.Tree
 	for i := range trees {
 		if trees[i].Verdict == orphans.Reap {
@@ -155,7 +156,7 @@ func (a *app) orphansAct(ctx context.Context, cfg *orphans.Config, trees []orpha
 
 // recipient — кому сводка по сессии с этим cwd: админ пространства, иначе лид;
 // "" с пояснением, если пространство молчит или адресатов нет в живых.
-func (a *app) recipient(cfg *orphans.Config, cwd string, alive map[string]sessions.Info, now time.Time) (string, string) {
+func (a *app) recipient(cfg *orphans.Config, cwd string, alive map[string]session.Info, now time.Time) (string, string) {
 	if key, until := orphans.LongestPrefix(cfg.MuteUntil, cwd); key != "" {
 		if t, err := orphans.ParseUntil(until); err == nil && now.Before(t) {
 			return "", fmt.Sprintf("%s молчит до %s", a.tilde(key), until)
@@ -188,7 +189,7 @@ func recipientText(to, note string) string {
 	}
 }
 
-func (a *app) orphansSend(cfg *orphans.Config, in sessions.Info, msg string) error {
+func (a *app) orphansSend(cfg *orphans.Config, in session.Info, msg string) error {
 	token := ""
 	if cfg.SendAuth {
 		var err error
@@ -196,7 +197,7 @@ func (a *app) orphansSend(cfg *orphans.Config, in sessions.Info, msg string) err
 			return fmt.Errorf("токен %s: %w", in.Name, err)
 		}
 	}
-	if err := deliver.SendFrom(orphansFrom, in.SocketPath, token, msg); err != nil {
+	if err := deliver.Send(orphansFrom, in.SocketPath, token, msg); err != nil {
 		return fmt.Errorf("сокет %s: %w", in.Name, err)
 	}
 	return nil

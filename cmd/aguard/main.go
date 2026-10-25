@@ -31,7 +31,7 @@ import (
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/journal"
 	"github.com/aiseeq/aguard/internal/memwatch"
-	"github.com/aiseeq/aguard/internal/sessions"
+	"github.com/aiseeq/akit/session"
 )
 
 const procRoot = "/proc"
@@ -41,7 +41,7 @@ type app struct {
 	cfgPath  string
 	stateDir string // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
 	projects string
-	reg      sessions.Registry
+	reg      session.Registry
 	uid      int
 	log      *slog.Logger
 	out      io.Writer // вывод команд для человека и агента (dry-run, report)
@@ -59,7 +59,7 @@ func main() {
 		cfgPath:  config.Path(home),
 		stateDir: filepath.Join(home, ".local", "state", "aguard"),
 		projects: filepath.Join(home, ".claude", "projects"),
-		reg:      sessions.ForHome(home),
+		reg:      session.ForHome(home),
 		uid:      os.Getuid(),
 		log:      lg,
 		out:      os.Stdout,

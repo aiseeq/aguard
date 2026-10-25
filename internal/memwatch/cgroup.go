@@ -15,37 +15,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/aiseeq/akit/proc"
 )
-
-// scopePrefix — начало имени scope сессии, который создаёт cl.
-const scopePrefix = "agent-"
-
-// ScopeName — имя сессии и pid cl из имени scope "agent-<имя>-<pid>.scope".
-func ScopeName(scope string) (name string, pid int, ok bool) {
-	s, found := strings.CutPrefix(scope, scopePrefix)
-	if !found {
-		return "", 0, false
-	}
-	s, found = strings.CutSuffix(s, ".scope")
-	if !found {
-		return "", 0, false
-	}
-	i := strings.LastIndexByte(s, '-')
-	if i <= 0 {
-		return "", 0, false
-	}
-	digits := s[i+1:]
-	if digits == "" || len(digits) > 9 {
-		return "", 0, false
-	}
-	for j := range len(digits) {
-		if digits[j] < '0' || digits[j] > '9' {
-			return "", 0, false
-		}
-		pid = pid*10 + int(digits[j]-'0')
-	}
-	return s[:i], pid, true
-}
 
 // listScopes — scope сессий в папке слайса.
 func listScopes(slice string) ([]string, error) {
@@ -55,7 +27,7 @@ func listScopes(slice string) ([]string, error) {
 	}
 	var out []string
 	for _, e := range ents {
-		if _, _, ok := ScopeName(e.Name()); ok && e.IsDir() {
+		if _, _, ok := proc.ScopeName(e.Name()); ok && e.IsDir() {
 			out = append(out, e.Name())
 		}
 	}

@@ -8,29 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aiseeq/aguard/internal/sessions"
+	"github.com/aiseeq/akit/session"
 )
-
-func TestScopeName(t *testing.T) {
-	cases := map[string]struct {
-		name string
-		pid  int
-		ok   bool
-	}{
-		"agent-lead-3548014.scope":       {"lead", 3548014, true},
-		"agent-aguard-master-12.scope":   {"aguard-master", 12, true},
-		"agent-x.scope":                  {"", 0, false},
-		"app-org.kde.konsole-5028.scope": {"", 0, false},
-		"agent-lead-12.service":          {"", 0, false},
-		"agent--12.scope":                {"", 0, false},
-	}
-	for in, want := range cases {
-		name, pid, ok := ScopeName(in)
-		if name != want.name || pid != want.pid || ok != want.ok {
-			t.Errorf("ScopeName(%q) = %q %d %v, хотим %+v", in, name, pid, ok, want)
-		}
-	}
-}
 
 func TestParseKeyed(t *testing.T) {
 	m, err := parseKeyed(strings.NewReader("anon 100\nfile 200\n"))
@@ -78,7 +57,7 @@ func fakeSlice(t *testing.T) (slice, proc, reg string) {
 
 func TestPass(t *testing.T) {
 	slice, proc, reg := fakeSlice(t)
-	w := NewWatcher(sessions.Registry{Dir: reg, ProcRoot: proc})
+	w := NewWatcher(session.Registry{Dir: reg, ProcRoot: proc})
 	w.ProcRoot = proc
 	defer w.Close()
 	cfg := Default()

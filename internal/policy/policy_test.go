@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/akit/pressure"
 )
 
 const (
@@ -139,25 +140,14 @@ func TestOverThresholds(t *testing.T) {
 
 func TestPressureFactor(t *testing.T) {
 	c := cfg()
-	if f := c.Factor(Pressure{PSISomeAvg60: 0.1, SwapUsedPct: 10}); f != 1 {
+	if f := c.Factor(pressure.Memory{PSISomeAvg60: 0.1, SwapUsedPct: 10}); f != 1 {
 		t.Errorf("без давления factor=%v", f)
 	}
-	if f := c.Factor(Pressure{SwapUsedPct: 60}); f != c.Pressure.Factor {
+	if f := c.Factor(pressure.Memory{SwapUsedPct: 60}); f != c.Pressure.Factor {
 		t.Errorf("своп 60%%: factor=%v", f)
 	}
-	if f := c.Factor(Pressure{PSISomeAvg60: 7}); f != c.Pressure.Factor {
+	if f := c.Factor(pressure.Memory{PSISomeAvg60: 7}); f != c.Pressure.Factor {
 		t.Errorf("PSI 7: factor=%v", f)
-	}
-	psi := "some avg10=1.00 avg60=6.50 avg300=0.01 total=1\nfull avg10=0.00 avg60=9.00 avg300=0.00 total=1\n"
-	if v, err := ParsePSI(psi); err != nil || v != 6.5 {
-		t.Errorf("ParsePSI = %v, %v", v, err)
-	}
-	mi := "MemTotal: 100 kB\nSwapTotal:       1000 kB\nSwapFree:         250 kB\n"
-	if v, err := ParseSwapUsedPct(mi); err != nil || v != 75 {
-		t.Errorf("ParseSwapUsedPct = %v, %v", v, err)
-	}
-	if _, err := ParsePSI("full avg60=1\n"); err == nil {
-		t.Error("PSI без some: ждали ошибку")
 	}
 }
 

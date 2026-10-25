@@ -16,11 +16,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aiseeq/aguard/internal/deliver"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/report"
-	"github.com/aiseeq/aguard/internal/sessions"
+	"github.com/aiseeq/akit/deliver"
+	"github.com/aiseeq/akit/pressure"
+	"github.com/aiseeq/akit/session"
 )
 
 func (a *app) tmpCmd(args []string) error {
@@ -78,9 +79,9 @@ func (a *app) snapshot(cfg *policy.Config) (*record.State, error) {
 
 // liveSessions — policy.Live поверх реестра сессий.
 type liveSessions struct {
-	reg    sessions.Registry
+	reg    session.Registry
 	log    *slog.Logger
-	byName map[string]sessions.Info
+	byName map[string]session.Info
 }
 
 func (l *liveSessions) ByPid(pid int, procStart string) (policy.Target, bool) {
@@ -109,7 +110,7 @@ func (l *liveSessions) ByName(name string) (policy.Target, bool) {
 func (a *app) live() (*liveSessions, error) {
 	m, err := a.reg.Alive()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("живые сессии: %w", err)
 	}
 	return &liveSessions{reg: a.reg, log: a.log, byName: m}, nil
 }
@@ -118,7 +119,7 @@ func (a *app) live() (*liveSessions, error) {
 // порог без поправки (множитель 1), с записью в журнал: недочитанный /proc
 // не повод ни пропускать проход, ни ужесточать порог.
 func (a *app) tmpFactor(cfg *policy.Config) float64 {
-	p, err := policy.ReadPressure(procRoot)
+	p, err := pressure.ReadMemory(procRoot)
 	if err != nil {
 		a.log.Warn("aguard tmp: давление памяти не прочиталось, порог без поправки", "err", err)
 		return 1
@@ -431,7 +432,7 @@ func (a *app) tmpSend(cfg *policy.Config, t policy.Target, msg string) error {
 			return fmt.Errorf("токен %s: %w", t.Key(), err)
 		}
 	}
-	return deliver.Send(t.Socket, token, msg)
+	return deliver.Send("aguard", t.Socket, token, msg)
 }
 
 // printDry печатает то, что ушло бы в этот проход, и отложенное: строки,

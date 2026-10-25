@@ -11,11 +11,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/policy"
-	"github.com/aiseeq/aguard/internal/sessions"
+	"github.com/aiseeq/akit/proc"
+	"github.com/aiseeq/akit/session"
 )
 
 // Config — раздел [memory] конфига aguard.
@@ -85,13 +85,13 @@ type Sample struct {
 // Watcher держит открытые memory.peak между проходами.
 type Watcher struct {
 	ProcRoot string
-	Reg      sessions.Registry
+	Reg      session.Registry
 	peaks    map[string]*peakReader
 	pageSize int64
 }
 
 // NewWatcher — наблюдатель над реестром reg.
-func NewWatcher(reg sessions.Registry) *Watcher {
+func NewWatcher(reg session.Registry) *Watcher {
 	return &Watcher{ProcRoot: "/proc", Reg: reg, peaks: map[string]*peakReader{}, pageSize: int64(os.Getpagesize())}
 }
 
@@ -142,7 +142,7 @@ func (w *Watcher) Pass(cfg *Config, now time.Time) ([]Sample, error) {
 // sample — память группы. Ошибка — записи нет.
 func (w *Watcher) sample(cfg *Config, scope string, now time.Time) (Sample, error) {
 	dir := filepath.Join(cfg.Slice, scope)
-	name, _, _ := ScopeName(scope)
+	name, _, _ := proc.ScopeName(scope)
 	s := Sample{At: now, Scope: scope, Name: name}
 	pr, ok := w.peaks[scope]
 	if !ok {
@@ -217,7 +217,7 @@ func (w *Watcher) top(pids []int, n int) ([]Proc, error) {
 	var errs []error
 	for _, pid := range pids {
 		p, err := w.readProc(pid)
-		if gone(err) {
+		if proc.Gone(err) {
 			continue
 		}
 		if err != nil {
@@ -232,7 +232,7 @@ func (w *Watcher) top(pids []int, n int) ([]Proc, error) {
 	}
 	for i := range procs {
 		args, err := w.args(procs[i].Pid)
-		if err != nil && !gone(err) {
+		if err != nil && !proc.Gone(err) {
 			errs = append(errs, err)
 		}
 		procs[i].Args = args
@@ -241,7 +241,6 @@ func (w *Watcher) top(pids []int, n int) ([]Proc, error) {
 }
 
 // gone — процесс завершился между списком группы и чтением.
-func gone(err error) bool { return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) }
 
 func (w *Watcher) readProc(pid int) (Proc, error) {
 	b, err := os.ReadFile(filepath.Join(w.ProcRoot, strconv.Itoa(pid), "statm"))
@@ -256,9 +255,9 @@ func (w *Watcher) readProc(pid int) (Proc, error) {
 	if err != nil {
 		return Proc{}, fmt.Errorf("statm %d: %w", pid, err)
 	}
-	st, err := sessions.ProcStat(w.ProcRoot, pid)
+	st, err := proc.ReadStat(w.ProcRoot, pid)
 	if err != nil {
-		return Proc{}, err
+		return Proc{}, fmt.Errorf("процесс %d: %w", pid, err)
 	}
 	return Proc{Pid: pid, Comm: st.Comm, RSS: pages * w.pageSize}, nil
 }
