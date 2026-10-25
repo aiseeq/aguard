@@ -42,7 +42,7 @@ func (a *app) restartAnswer(j *restart.Judge, req restart.Request, claude string
 	if claude != "" {
 		cfg.Restart.Claude = claude
 	}
-	return j.Answer(&cfg.Restart, req, time.Now())
+	return j.Answer(&cfg.Restart, &cfg.Compact, req, time.Now())
 }
 
 // restartServe — сокет для cl до отмены ctx. Сокет берётся из конфига на старте демона: смена пути — после

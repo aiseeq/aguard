@@ -37,7 +37,13 @@ type Answer struct {
 	Name      string `json:"name"`
 	Running   string `json:"running"`
 	Installed string `json:"installed"`
-	Error     string `json:"error,omitempty"`
+	// Compact — сжать беседу сейчас: cl останавливает claude, `claude -p --resume <сессия> /compact`, поднимает
+	// снова. CompactAgainst — почему нет, CompactKey — решение без чисел, Tokens — контекст последнего ответа.
+	Compact        bool     `json:"compact"`
+	CompactAgainst []Reason `json:"compact_against"`
+	CompactKey     string   `json:"compact_key"`
+	Tokens         int64    `json:"tokens"`
+	Error          string   `json:"error,omitempty"`
 }
 
 // cacheTTL — сколько держать разбор транскрипта сессии, о которой не спрашивают: cl спрашивает раз в минуту.
@@ -77,8 +83,8 @@ func (j *Judge) cache(pid int, now time.Time) *cached {
 	return c
 }
 
-// Answer — вердикт по вопросу cl при разделе конфига cfg.
-func (j *Judge) Answer(cfg *Config, req Request, now time.Time) Answer {
+// Answer — вердикты перезапуска и сжатия по вопросу cl при разделах конфига cfg и cc.
+func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Time) Answer {
 	if req.V != Version {
 		return Answer{V: Version, Error: fmt.Sprintf("версия протокола %d, aguard знает %d", req.V, Version)}
 	}
@@ -91,9 +97,11 @@ func (j *Judge) Answer(cfg *Config, req Request, now time.Time) Answer {
 	c.mu.Unlock()
 	name := firstNonEmpty(f.Name, req.Name)
 	v := decide(f, allowance{idle: cfg.Idle.D(), role: cfg.roleFor(name), argsProblem: req.ArgsProblem})
+	cv := j.Compact(cfg, cc, req.Pid, name, req.ArgsProblem, now)
 	return Answer{
 		V: Version, Verdict: v, Key: v.Key(), Mode: cfg.Mode,
 		SessionID: f.SessionID, Name: name, Running: f.Running, Installed: f.Installed,
+		Compact: cv.Compact, CompactAgainst: cv.Against, CompactKey: cv.Key(), Tokens: cv.Tokens,
 	}
 }
 

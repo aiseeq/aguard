@@ -59,9 +59,18 @@ func TestServe(t *testing.T) {
 }
 
 func TestAnswerVersion(t *testing.T) {
-	cfg := Default(t.TempDir(), t.TempDir())
-	a := NewJudge(t.TempDir()).Answer(&cfg, Request{V: Version + 1, Pid: 1}, time.Now())
+	cfg, cc := Default(t.TempDir(), t.TempDir()), DefaultCompact()
+	a := NewJudge(t.TempDir()).Answer(&cfg, &cc, Request{V: Version + 1, Pid: 1}, time.Now())
 	if a.Error == "" || a.Restart || a.V != Version {
 		t.Errorf("чужая версия: %+v", a)
+	}
+}
+
+func TestAnswerCompactOff(t *testing.T) {
+	cfg, cc := Default(t.TempDir(), t.TempDir()), DefaultCompact()
+	cc.Mode = CompactOff
+	a := NewJudge(t.TempDir()).Answer(&cfg, &cc, Request{V: Version, Pid: 1 << 22}, time.Now())
+	if a.Compact || len(a.CompactAgainst) == 0 || a.CompactAgainst[0].Code != "off" {
+		t.Errorf("сжатие выключено: %+v", a)
 	}
 }

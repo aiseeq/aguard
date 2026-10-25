@@ -73,6 +73,13 @@ func decide(f facts, p allowance) Verdict {
 	}
 	inputChecks(f, against)
 	workChecks(f, against)
+	lossChecks(f, p, against)
+	v.Restart = len(v.Against) == 0
+	return v
+}
+
+// lossChecks — новый процесс поднимется со всем, что было: таймеры, будильники, аргументы запуска.
+func lossChecks(f facts, p allowance, against againstFunc) {
 	if lost := lostCrons(f.Transcript.Crons, p.role); len(lost) > 0 {
 		against("crons", "таймеры пропали бы: %s", strings.Join(lost, ", "))
 	}
@@ -82,8 +89,6 @@ func decide(f facts, p allowance) Verdict {
 	if p.argsProblem != "" {
 		against("args", "%s", p.argsProblem)
 	}
-	v.Restart = len(v.Against) == 0
-	return v
 }
 
 // againstFunc — записать довод против.

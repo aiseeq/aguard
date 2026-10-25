@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/policy"
@@ -13,14 +14,15 @@ import (
 // Сжатие в простое. Кэш подсказки живёт час от начала запроса. Беседа, брошенная с большим контекстом, после часа
 // пишет весь контекст в кэш заново. Сжатие до конца часа читает контекст из живого кэша, и следующий запрос идёт уже
 // от короткой сводки. Claude Code делает это сам около 54-й минуты (настройка idleCompaction), но не всегда вовремя;
-// aguard смотрит сам. Сессия должна быть свободна, как для перезапуска.
+// aguard смотрит сам. Сжимает cl через перезапуск (решение пользователя 25.10 18:01 CET): останавливает claude,
+// `claude -p --resume <сессия> /compact`, поднимает беседу снова. Поэтому сессия должна быть свободна, как для
+// перезапуска, и ничего не терять: таймеры, будильники, аргументы запуска. В терминал никто не печатает.
 
-// Режимы сжатия: CompactLog — aguard пишет «сжал бы» и потом сверяет с тем, что случилось; CompactAct — шлёт /compact
-// в терминал сессии (пока не сделан).
+// Режимы сжатия в aguard: CompactLog — вердикт cl и журнал «сжал бы» со сверкой исхода; CompactOff — вердикт всегда
+// «нет». Сжимать или только писать — решает режим cl.
 const (
 	CompactOff = "off"
 	CompactLog = "log"
-	CompactAct = "act"
 )
 
 // CompactConfig — раздел [compact] конфига aguard.
@@ -55,12 +57,10 @@ func DefaultCompact() CompactConfig {
 	}
 }
 
-// Validate проверяет раздел [compact]. act пока не сделан: сначала журнал и сверка.
+// Validate проверяет раздел [compact].
 func (c *CompactConfig) Validate() error {
 	switch c.Mode {
 	case CompactOff, CompactLog:
-	case CompactAct:
-		return errors.New("compact.mode = act: отправка /compact ещё не сделана, только off или log")
 	default:
 		return fmt.Errorf("compact.mode = %q: ожидается %s или %s", c.Mode, CompactOff, CompactLog)
 	}
@@ -88,8 +88,9 @@ type CompactVerdict struct {
 }
 
 // decideCompact — сжимать ли сессию сейчас: большой контекст, последний запрос в окне, после него не сжимали,
-// сессия свободна (как для перезапуска, без версии и порога простоя), человек не печатает.
-func decideCompact(f facts, c *CompactConfig, now time.Time) CompactVerdict {
+// сессия свободна и перезапуск ничего не потеряет (как для перезапуска, без версии и порога простоя), человек не
+// печатает.
+func decideCompact(f facts, c *CompactConfig, p allowance, now time.Time) CompactVerdict {
 	var v CompactVerdict
 	against := func(code, format string, args ...any) {
 		v.Against = append(v.Against, Reason{Code: code, Text: fmt.Sprintf(format, args...)})
@@ -123,6 +124,7 @@ func decideCompact(f facts, c *CompactConfig, now time.Time) CompactVerdict {
 	}
 	inputChecks(f, against)
 	workChecks(f, against)
+	lossChecks(f, p, against)
 	v.Compact = len(v.Against) == 0
 	return v
 }
@@ -141,8 +143,9 @@ type CompactCheck struct {
 	Trigger     string    `json:"trigger"`
 }
 
-// Compact — решение о сжатии сессии процесса pid; cfg — раздел [restart] (пути claude-hooks и claude).
-func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, now time.Time) CompactCheck {
+// Compact — решение о сжатии сессии процесса pid; cfg — раздел [restart] (пути claude-hooks и claude, роли), name —
+// имя сессии у cl, argsProblem — почему перезапуск потерял бы аргументы (знает только cl; пусто — восстановимы).
+func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProblem string, now time.Time) CompactCheck {
 	ch := j.cache(pid, now)
 	ch.mu.Lock()
 	var f facts
@@ -156,8 +159,21 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, now time.Time) C
 	}
 	ch.mu.Unlock()
 	ctx := f.Transcript.Context
+	v := CompactVerdict{Against: []Reason{{Code: "off", Text: "сжатие выключено в конфиге aguard"}}}
+	if c.Mode != CompactOff {
+		v = decideCompact(f, c, allowance{role: cfg.roleFor(firstNonEmpty(f.Name, name)), argsProblem: argsProblem}, now)
+	}
 	return CompactCheck{
-		CompactVerdict: decideCompact(f, c, now), SessionID: f.SessionID, Name: f.Name, SessionKind: f.Kind,
+		CompactVerdict: v, SessionID: f.SessionID, Name: f.Name, SessionKind: f.Kind,
 		Request: ctx.Request, Tokens: ctx.Tokens, CacheRead: ctx.CacheRead, Compacted: ctx.Compacted, Trigger: ctx.Trigger,
 	}
+}
+
+// Key — решение без чисел: cl пишет строку журнала, только когда оно меняется.
+func (v CompactVerdict) Key() string {
+	codes := []string{fmt.Sprint(v.Compact)}
+	for _, r := range v.Against {
+		codes = append(codes, r.Code)
+	}
+	return strings.Join(codes, ",")
 }
