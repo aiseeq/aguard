@@ -21,6 +21,8 @@ type launcher struct {
 	home       string
 	configFile string
 	paths      paths
+	// aguard — сокет aguard: на время перехода cl сверяет с ним своё решение (ask.go); пусто — не спрашивать.
+	aguard string
 	// name — имя, которое дал cl (или пользователь через -n); после перезапуска — имя из реестра Claude Code.
 	name string
 }
@@ -150,6 +152,7 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, cache *scanCache, 
 			now := time.Now()
 			f := probe(l.paths, cache, pid, now)
 			v := l.verdict(cfg, f, argsProblem)
+			l.compare(cfg, now, pid, f, v, argsProblem)
 			if v.key() != lastKey {
 				journal(cfg.Restart.Journal, now, journalLine(cfg.Restart.Mode, l.name, pid, f, v))
 				lastKey = v.key()
@@ -233,4 +236,17 @@ func exitCode(err error) int {
 		return 1
 	}
 	return 0
+}
+
+// compare — на время перехода: вердикт aguard по той же сессии рядом со своим, строкой в журнал сверки (restart.log
+// и aguard-compare.log в одной папке). Решает пока сам cl; ответ aguard ни на что не влияет.
+func (l launcher) compare(cfg config, now time.Time, pid int, f facts, v verdict, argsProblem string) string {
+	if l.aguard == "" {
+		return ""
+	}
+	name := firstNonEmpty(f.Name, l.name)
+	a, err := askAguard(l.aguard, aguardRequest{PID: pid, Name: name, ArgsProblem: argsProblem})
+	line := compareLine(name, pid, v, a, err)
+	journal(filepath.Join(filepath.Dir(cfg.Restart.Journal), "aguard-compare.log"), now, line)
+	return line
 }

@@ -33,7 +33,7 @@ func main() {
 	if configFile == "" {
 		configFile = filepath.Join(home, ".config", "cl", "config.json")
 	}
-	l := launcher{claude: claude, home: home, configFile: configFile, paths: defaultPaths(home, claude)}
+	l := launcher{claude: claude, home: home, configFile: configFile, paths: defaultPaths(home, claude), aguard: aguardSocket()}
 	args := os.Args[1:]
 	if len(args) == 1 && args[0] == checkFlag {
 		os.Exit(runCheck(l))

@@ -45,6 +45,9 @@ func runCheck(l launcher) int {
 		line := "check " + journalLine(cfg.Restart.Mode, s.Name, s.PID, f, v)
 		fmt.Fprintln(os.Stdout, line)
 		journal(cfg.Restart.Journal, now, line)
+		if cmp := l.compare(cfg, now, s.PID, f, v, problem); cmp != "" {
+			fmt.Fprintln(os.Stdout, "check aguard "+cmp)
+		}
 	}
 	return 0
 }
