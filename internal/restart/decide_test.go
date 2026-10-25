@@ -4,6 +4,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/screen"
 )
 
 // idleFacts — сессия, которую можно перезапускать: старая версия, ход закончен, давно тихо, ничего не идёт.
@@ -16,6 +18,7 @@ func idleFacts() facts {
 		Quiet:     15 * time.Minute,
 		TTYQuiet:  20 * time.Minute, // ввод — отправка последней реплики, до конца хода
 		TurnQuiet: 15 * time.Minute,
+		Prompt:    screen.Empty,
 	}
 }
 
@@ -126,5 +129,20 @@ func TestDecideDraftWithinTTYGranularity(t *testing.T) {
 	f.TTYQuiet = f.TurnQuiet + 30*time.Second
 	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart {
 		t.Errorf("ввод за 30 с до конца хода — отправка реплики, не черновик: %+v", v)
+	}
+}
+
+// Черновик набран во время хода: ввод в терминал старше конца хода, проверка draft его не видит — видит экран.
+func TestDecideScreen(t *testing.T) {
+	for name, spoil := range map[string]func(*facts){
+		"черновик во время хода": func(f *facts) { f.Prompt = screen.Draft },
+		"рамки не видно":         func(f *facts) { f.Prompt = screen.Unknown },
+		"экран не прочитался":    func(f *facts) { f.Prompt, f.PromptErr = screen.Unknown, "терминал не Konsole и не tmux" },
+	} {
+		f := idleFacts()
+		spoil(&f)
+		if v := decide(f, allowance{idle: 10 * time.Minute}); v.Restart || !slices.Equal(codes(v), []string{"screen"}) {
+			t.Errorf("%s: %+v", name, v)
+		}
 	}
 }

@@ -25,6 +25,22 @@ type transcriptFacts struct {
 	Crons []cronJob
 	// Wakeups — ScheduleWakeup, срок которых не наступил.
 	Wakeups []string
+	// Context — последний запрос основной ветки, с любого процесса беседы: кэш подсказки переживает перезапуск.
+	Context contextFacts
+}
+
+// contextFacts — последний запрос основной ветки беседы. Кэш подсказки живёт час от начала запроса, который его
+// прочитал или записал.
+type contextFacts struct {
+	// Request — начало последнего запроса: запись, после которой он ушёл (реплика или результат инструмента).
+	Request time.Time
+	// Tokens — контекст после ответа: вход, кэш и выход; столько уйдёт в следующий запрос.
+	Tokens int64
+	// CacheRead — сколько ответ прочитал из кэша: при большом контексте 0 — кэш к запросу умер.
+	CacheRead int64
+	// Compacted — последнее сжатие (compact_boundary), Trigger — чьё: auto, manual.
+	Compacted time.Time
+	Trigger   string
 }
 
 // cronJob — таймер сессии; поля — как в результате CronList.
@@ -49,6 +65,14 @@ func (o object) str(key string) string {
 func (o object) flag(key string) bool {
 	var b bool
 	return json.Unmarshal(o[key], &b) == nil && b
+}
+
+func (o object) num(key string) int64 {
+	var n int64
+	if json.Unmarshal(o[key], &n) == nil {
+		return n
+	}
+	return 0
 }
 
 func (o object) seconds(key string) time.Duration {
@@ -92,8 +116,10 @@ var (
 	notifyStatus   = regexp.MustCompile(`<status>([a-z_]+)</status>`)
 )
 
-// markers — строки без них транскрипт-скан не разбирает: в них нет ни вызовов, ни уведомлений, ни таймеров.
-var markers = [][]byte{[]byte(`"tool_use"`), []byte(`"tool_result"`), []byte(`task-notification`), []byte(`scheduled_task_fire`)}
+// markers — строки без них транскрипт-скан не разбирает: в них нет ни вызовов, ни уведомлений, ни таймеров, ни
+// запросов и сжатий.
+var markers = [][]byte{[]byte(`"tool_use"`), []byte(`"tool_result"`), []byte(`task-notification`), []byte(`scheduled_task_fire`),
+	[]byte(`"type":"user"`), []byte(`"usage"`), []byte(`compact_boundary`)}
 
 // transcriptScan — состояние разбора одного транскрипта.
 type transcriptScan struct {
@@ -105,25 +131,41 @@ type transcriptScan struct {
 	crons   map[string]cronJob
 	fired   map[string]bool
 	wakeup  time.Time
+	userAt  time.Time // последняя реплика или результат инструмента основной ветки: после неё уходит запрос
+	context contextFacts
 }
 
 // scanTranscript разбирает транскрипт процесса, начавшегося в since; незакрытое на момент now — s.facts(now).
 // Последняя строка без перевода строки — недописанная запись живого файла: её разберёт следующая проверка.
 func scanTranscript(r io.Reader, since time.Time) (*transcriptScan, error) {
-	s := &transcriptScan{since: since, uses: map[string]toolUse{}, pending: map[string]string{}, tasks: map[string]string{},
+	s := newScan(since)
+	if _, err := s.feed(r); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func newScan(since time.Time) *transcriptScan {
+	return &transcriptScan{since: since, uses: map[string]toolUse{}, pending: map[string]string{}, tasks: map[string]string{},
 		closed: map[string]bool{}, crons: map[string]cronJob{}, fired: map[string]bool{}}
+}
+
+// feed разбирает строки до конца r; n — сколько байт целых строк разобрано: с этого места продолжит следующий feed.
+// После ошибки разбор неполон, его не продолжать.
+func (s *transcriptScan) feed(r io.Reader) (n int64, err error) {
 	br := bufio.NewReaderSize(r, 1<<20)
 	for {
 		line, err := br.ReadBytes('\n')
 		if errors.Is(err, io.EOF) {
-			return s, nil
+			return n, nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("транскрипт: %w", err)
+			return n, fmt.Errorf("транскрипт: %w", err)
 		}
 		if err := s.line(line); err != nil {
-			return nil, err
+			return n, err
 		}
+		n += int64(len(line))
 	}
 }
 
@@ -144,6 +186,11 @@ func (s *transcriptScan) line(line []byte) error {
 	if err != nil {
 		return err
 	}
+	if !rec.flag("isSidechain") {
+		if err := s.request(rec, at); err != nil {
+			return err
+		}
+	}
 	if at.Before(s.since) {
 		return nil
 	}
@@ -155,6 +202,11 @@ func (s *transcriptScan) line(line []byte) error {
 	if typ != "assistant" && typ != "user" {
 		return nil
 	}
+	return s.calls(typ, rec, at)
+}
+
+// calls — вызовы инструментов и их результаты в записи typ (assistant или user).
+func (s *transcriptScan) calls(typ string, rec object, at time.Time) error {
 	msg, err := parseObject(rec["message"])
 	if err != nil {
 		return err
@@ -177,6 +229,39 @@ func (s *transcriptScan) line(line []byte) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// request — запросы и сжатия основной ветки. Записей ответа у запроса несколько (по блоку), расход — в каждой.
+func (s *transcriptScan) request(rec object, at time.Time) error {
+	switch rec.str("type") {
+	case "user":
+		s.userAt = at
+	case "system":
+		if rec.str("subtype") != "compact_boundary" {
+			return nil
+		}
+		meta, err := parseObject(rec["compactMetadata"])
+		if err != nil {
+			return err
+		}
+		s.context.Compacted, s.context.Trigger = at, meta.str("trigger")
+	case "assistant":
+		msg, err := parseObject(rec["message"])
+		if err != nil {
+			return err
+		}
+		u, err := parseObject(msg["usage"])
+		if err != nil || len(u) == 0 {
+			return err
+		}
+		s.context.Request = s.userAt
+		if s.userAt.IsZero() || s.userAt.After(at) {
+			s.context.Request = at
+		}
+		s.context.CacheRead = u.num("cache_read_input_tokens")
+		s.context.Tokens = u.num("input_tokens") + s.context.CacheRead + u.num("cache_creation_input_tokens") + u.num("output_tokens")
 	}
 	return nil
 }
@@ -221,6 +306,7 @@ func (s *transcriptScan) notifications(text string) {
 func (s *transcriptScan) result(b block, raw json.RawMessage) error {
 	delete(s.pending, b.ToolUseID)
 	use, known := s.uses[b.ToolUseID]
+	delete(s.uses, b.ToolUseID) // ввод вызова нужен только для его результата: транскрипт лида — тысячи вызовов
 	if !known {
 		return nil
 	}
@@ -295,6 +381,7 @@ func (s *transcriptScan) facts(now time.Time) transcriptFacts {
 		}
 		f.Crons = append(f.Crons, job)
 	}
+	f.Context = s.context
 	if s.wakeup.After(now) {
 		f.Wakeups = append(f.Wakeups, "ScheduleWakeup до "+s.wakeup.Local().Format("15:04"))
 	}
@@ -333,18 +420,22 @@ func short(s string) string {
 	return s
 }
 
-// scanCache — разбор транскрипта, пока файл не менялся: транскрипт лида — десятки мегабайт, а проверка раз в минуту.
+// scanCache — разбор транскрипта между проверками: транскрипт лида — десятки мегабайт, а проверка раз в минуту.
+// Файл не менялся — прошлый разбор; дописан — разбор продолжается с конца разобранного.
 type scanCache struct {
-	file  string
-	size  int64
-	mtime time.Time
-	since time.Time
-	scan  *transcriptScan
+	file   string
+	size   int64
+	mtime  time.Time
+	since  time.Time
+	offset int64 // конец разобранных целых строк
+	scan   *transcriptScan
 }
 
-// read — незакрытая работа по файлу транскрипта; файл тот же, размер и время те же — прошлый разбор.
+// read — незакрытая работа по файлу транскрипта. Транскрипт только дописывается; файл стал короче разобранного
+// или другой — разбор заново.
 func (c *scanCache) read(file string, info os.FileInfo, since, now time.Time) (transcriptFacts, error) {
-	if c.scan != nil && c.file == file && c.size == info.Size() && c.mtime.Equal(info.ModTime()) && c.since.Equal(since) {
+	same := c.scan != nil && c.file == file && c.since.Equal(since)
+	if same && c.size == info.Size() && c.mtime.Equal(info.ModTime()) {
 		return c.scan.facts(now), nil
 	}
 	f, err := os.Open(file)
@@ -352,10 +443,18 @@ func (c *scanCache) read(file string, info os.FileInfo, since, now time.Time) (t
 		return transcriptFacts{}, fmt.Errorf("транскрипт: %w", err)
 	}
 	defer f.Close()
-	scan, err := scanTranscript(f, since)
+	if !same || info.Size() < c.offset {
+		*c = scanCache{file: file, since: since, scan: newScan(since)}
+	} else if _, err := f.Seek(c.offset, io.SeekStart); err != nil {
+		c.scan = nil
+		return transcriptFacts{}, fmt.Errorf("транскрипт: %w", err)
+	}
+	n, err := c.scan.feed(f)
 	if err != nil {
+		c.scan = nil // разбор неполон: в следующий раз — заново
 		return transcriptFacts{}, err
 	}
-	*c = scanCache{file: file, size: info.Size(), mtime: info.ModTime(), since: since, scan: scan}
-	return scan.facts(now), nil
+	c.offset += n
+	c.size, c.mtime = info.Size(), info.ModTime()
+	return c.scan.facts(now), nil
 }

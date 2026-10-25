@@ -1,6 +1,6 @@
 // Package config — единый конфиг aguard (~/.config/aguard/config.toml):
 // общие поля (лид, админы пространств) и разделы наблюдателей [orphans], [tmp],
-// [memory], [restart], [waits]. Перечитывается каждый проход.
+// [memory], [restart], [waits], [compact]. Перечитывается каждый проход.
 package config
 
 import (
@@ -32,6 +32,8 @@ type Config struct {
 	Memory  memwatch.Config `toml:"memory"`  // пики памяти сессий
 	Restart restart.Config  `toml:"restart"` // можно ли cl перезапустить сессию
 	Waits   waits.Config    `toml:"waits"`   // отказы и ожидания агентов по транскриптам
+	// Compact — своё сжатие сессий в простое, пока кэш подсказки жив.
+	Compact restart.CompactConfig `toml:"compact"`
 }
 
 // Path — путь конфига в домашней папке.
@@ -50,6 +52,7 @@ func Default(home string) Config {
 		Memory:  memwatch.Default(),
 		Restart: restart.Default(home, runtimeDir()),
 		Waits:   waits.Default(),
+		Compact: restart.DefaultCompact(),
 	}
 }
 
@@ -106,7 +109,7 @@ func (c *Config) finish(home string, uid int) error {
 	if err := c.Waits.Validate(); err != nil {
 		return fmt.Errorf("waits: %w", err)
 	}
-	return nil
+	return c.Compact.Validate()
 }
 
 // runtimeDir — $XDG_RUNTIME_DIR; без него (запуск не из сеанса) — /run/user/<uid>, как его ставит systemd.

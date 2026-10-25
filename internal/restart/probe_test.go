@@ -173,4 +173,34 @@ func TestScanCache(t *testing.T) {
 	if got, err := cache.read(file, stat(), since, since); err != nil || len(got.Pending) != 0 {
 		t.Errorf("дописанный файл — новый разбор: %+v %v", got, err)
 	}
+
+	// недописанная строка ждёт перевода строки; после него разбор продолжается с её начала
+	half := use(tsNew, "t2", "AskUserQuestion", `{}`)
+	appendTo(t, file, half[:len(half)/2])
+	if got, err := cache.read(file, stat(), since, since); err != nil || len(got.Pending) != 0 {
+		t.Errorf("недописанная строка: %+v %v", got, err)
+	}
+	appendTo(t, file, half[len(half)/2:]+"\n")
+	if got, err := cache.read(file, stat(), since, since); err != nil || !slices.Equal(got.Pending, []string{"AskUserQuestion t2"}) {
+		t.Errorf("дописанная строка: %+v %v", got, err)
+	}
+	// файл стал короче разобранного — разбор заново
+	write(t, file, use(tsNew, "t3", "AskUserQuestion", `{}`)+"\n")
+	if got, err := cache.read(file, stat(), since, since); err != nil || !slices.Equal(got.Pending, []string{"AskUserQuestion t3"}) {
+		t.Errorf("короткий файл: %+v %v", got, err)
+	}
+}
+
+func appendTo(t *testing.T, file, s string) {
+	t.Helper()
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

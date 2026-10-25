@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/screen"
 )
 
 // Reason — довод против перезапуска: Code — для сравнения проверок между собой (без чисел), Text — для журнала.
@@ -62,40 +64,20 @@ func decide(f facts, p allowance) Verdict {
 		}
 		return v
 	}
-	if f.Kind != "interactive" {
-		against("kind", "сессия не интерактивная: %q", f.Kind)
-	}
-	if f.Status != "idle" {
-		against("status", "Claude Code: %s", orDash(f.Status))
-	}
-	hookChecks(f, p, against)
+	sessionChecks(f, against)
 	if f.Quiet < p.idle {
 		against("quiet", "тихо %s из %s", minutes(f.Quiet), minutes(p.idle))
 	}
 	if f.TTYQuiet < p.idle {
 		against("tty", "ввод в терминал %s назад", minutes(f.TTYQuiet))
 	}
-	// Ввод после последней записи хода — в поле может лежать набранный, но не отправленный текст: перезапуск его
-	// потеряет, и порог простоя тут ни при чём. Ядро обновляет atime pts раз в 8 с, поэтому ввод в пределах 8 с до
-	// конца хода тоже считается: лишний раз не перезапустить дешевле, чем потерять черновик.
-	if f.TTYQuiet <= f.TurnQuiet+ttyGranularity {
-		against("draft", "ввод в терминал после конца хода (%s назад): может быть набранный текст", minutes(f.TTYQuiet))
-	}
-	if len(f.Children) > 0 {
-		against("children", "дети процесса: %s", strings.Join(f.Children, ", "))
-	}
-	t := f.Transcript
-	if len(t.Pending) > 0 {
-		against("pending", "инструмент без результата: %s", strings.Join(t.Pending, ", "))
-	}
-	if len(t.Tasks) > 0 {
-		against("tasks", "фоновые задачи и суб-агенты: %s", strings.Join(t.Tasks, ", "))
-	}
-	if lost := lostCrons(t.Crons, p.role); len(lost) > 0 {
+	inputChecks(f, against)
+	workChecks(f, against)
+	if lost := lostCrons(f.Transcript.Crons, p.role); len(lost) > 0 {
 		against("crons", "таймеры пропали бы: %s", strings.Join(lost, ", "))
 	}
-	if len(t.Wakeups) > 0 {
-		against("wakeup", "%s", strings.Join(t.Wakeups, ", "))
+	if len(f.Transcript.Wakeups) > 0 {
+		against("wakeup", "%s", strings.Join(f.Transcript.Wakeups, ", "))
 	}
 	if p.argsProblem != "" {
 		against("args", "%s", p.argsProblem)
@@ -104,11 +86,57 @@ func decide(f facts, p allowance) Verdict {
 	return v
 }
 
+// againstFunc — записать довод против.
+type againstFunc func(code, format string, args ...any)
+
+// sessionChecks — интерактивная сессия закончила ход.
+func sessionChecks(f facts, against againstFunc) {
+	if f.Kind != "interactive" {
+		against("kind", "сессия не интерактивная: %q", f.Kind)
+	}
+	if f.Status != "idle" {
+		against("status", "Claude Code: %s", orDash(f.Status))
+	}
+	hookChecks(f, against)
+}
+
+// inputChecks — в поле ввода нет набранного текста: то, что aguard или cl пошлют в сессию, его затёрло бы.
+func inputChecks(f facts, against againstFunc) {
+	// Ввод после последней записи хода — в поле может лежать набранный, но не отправленный текст: перезапуск его
+	// потеряет, и порог простоя тут ни при чём. Ядро обновляет atime pts раз в 8 с, поэтому ввод в пределах 8 с до
+	// конца хода тоже считается: лишний раз не перезапустить дешевле, чем потерять черновик.
+	if f.TTYQuiet <= f.TurnQuiet+ttyGranularity {
+		against("draft", "ввод в терминал после конца хода (%s назад): может быть набранный текст", minutes(f.TTYQuiet))
+	}
+	// Текст, набранный во время хода, старше конца хода, и проверка выше его не видит: поле ввода — по экрану.
+	switch {
+	case f.PromptErr != "":
+		against("screen", "экран терминала: %s", f.PromptErr)
+	case f.Prompt == screen.Draft:
+		against("screen", "в поле ввода набранный текст")
+	case f.Prompt != screen.Empty:
+		against("screen", "поля ввода на экране не видно")
+	}
+}
+
+// workChecks — ничего не идёт: дети процесса, инструменты, фоновые задачи и суб-агенты.
+func workChecks(f facts, against againstFunc) {
+	if len(f.Children) > 0 {
+		against("children", "дети процесса: %s", strings.Join(f.Children, ", "))
+	}
+	if len(f.Transcript.Pending) > 0 {
+		against("pending", "инструмент без результата: %s", strings.Join(f.Transcript.Pending, ", "))
+	}
+	if len(f.Transcript.Tasks) > 0 {
+		against("tasks", "фоновые задачи и суб-агенты: %s", strings.Join(f.Transcript.Tasks, ", "))
+	}
+}
+
 // hookChecks — состояние от claude-hooks. done — ход закончен без фоновых задач и таймеров (по списку Claude Code на
 // Stop). waiting — минутное напоминание после done или вопрос человеку; вопрос виден идущим инструментом (Pending).
 // paused — Stop при фоновых задачах или таймерах: годится, только если задач нет (файла .tasks нет), а таймеры по
 // транскрипту есть и все восстановимы ролью.
-func hookChecks(f facts, p allowance, against func(code, format string, args ...any)) {
+func hookChecks(f facts, against againstFunc) {
 	switch f.HookState {
 	case "done", "waiting":
 	case "paused":

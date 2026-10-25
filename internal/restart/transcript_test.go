@@ -2,6 +2,7 @@ package restart
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -131,4 +132,47 @@ func TestScanTranscriptBrokenLine(t *testing.T) {
 	if _, err := scanTranscript(strings.NewReader(`{"type":"user","tool_result":x}`+"\n"), time.Time{}); err == nil {
 		t.Error("битая строка должна быть ошибкой")
 	}
+}
+
+func answer(ts, sidechain string, input, cacheRead, cacheWrite, output int) string {
+	return `{"type":"assistant","isSidechain":` + sidechain + `,"timestamp":"` + ts + `","message":{"content":[{"type":"text","text":"ok"}],` +
+		`"usage":{"input_tokens":` + itoa(input) + `,"cache_read_input_tokens":` + itoa(cacheRead) +
+		`,"cache_creation_input_tokens":` + itoa(cacheWrite) + `,"output_tokens":` + itoa(output) + `}}}`
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+// Последний запрос основной ветки: начало — реплика перед ответом, контекст — расход ответа; суб-агенты не считаются;
+// запросы прошлого процесса той же беседы считаются: кэш у беседы общий.
+func TestScanTranscriptContext(t *testing.T) {
+	since, _ := time.Parse(time.RFC3339, "2026-10-24T09:00:00Z")
+	f := scanLines(t, since, since.Add(5*time.Hour),
+		`{"type":"user","timestamp":"`+tsOld+`","message":{"content":"привет"}}`,
+		answer("2026-10-24T08:00:30.000Z", "false", 3, 0, 5000, 100),
+		`{"type":"user","timestamp":"2026-10-24T08:10:00.000Z","message":{"content":"дальше"}}`,
+		answer("2026-10-24T08:12:00.000Z", "false", 2, 120000, 3000, 900),
+		answer("2026-10-24T08:12:01.000Z", "false", 2, 120000, 3000, 1000), // тот же ответ, следующий блок
+		`{"type":"user","isSidechain":true,"timestamp":"2026-10-24T08:20:00.000Z","message":{"content":"суб-агент"}}`,
+		answer("2026-10-24T08:21:00.000Z", "true", 5, 0, 900000, 10),
+	)
+	want := contextFacts{Request: mustTime(t, "2026-10-24T08:10:00Z"), Tokens: 2 + 120000 + 3000 + 1000, CacheRead: 120000}
+	if f.Context != want {
+		t.Errorf("запрос: %+v, ждали %+v", f.Context, want)
+	}
+	f = scanLines(t, since, since,
+		answer(tsNew, "false", 1, 0, 200000, 10),
+		`{"type":"system","subtype":"compact_boundary","timestamp":"2026-10-24T10:54:00.000Z","compactMetadata":{"trigger":"auto","preTokens":200011}}`,
+	)
+	if !f.Context.Compacted.Equal(mustTime(t, "2026-10-24T10:54:00Z")) || f.Context.Trigger != "auto" || !f.Context.Request.Equal(mustTime(t, tsNew)) {
+		t.Errorf("сжатие: %+v", f.Context)
+	}
+}
+
+func mustTime(t *testing.T, s string) time.Time {
+	t.Helper()
+	at, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return at
 }

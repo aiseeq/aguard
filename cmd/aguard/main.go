@@ -10,7 +10,9 @@
 //
 //   - restart — ответ cl в сокет, можно ли перезапустить сессию на новую версию Claude Code;
 //
-//   - waits — отказы и ожидания агентов по транскриптам: таймауты хуков, ошибки API, сжатия.
+//   - waits — отказы и ожидания агентов по транскриптам: таймауты хуков, ошибки API, сжатия;
+//
+//   - compact — своё сжатие сессий в простое, пока кэш подсказки жив: пока только журнал «сжал бы» и сверка.
 //
 //     aguard run                                         демон (user-сервис)
 //     aguard orphans tick [-dry-run] [-min-dead 0s]      один проход сирот
@@ -18,6 +20,7 @@
 //     aguard memory tick [-dry-run] | report [-since 168h]
 //     aguard restart ask -pid N [-name имя]              вопрос, как его задаёт cl
 //     aguard waits tick [-dry-run] | report [-since 24h]
+//     aguard compact tick [-dry-run] | report [-since 168h]
 //     aguard report [-json] [-at время]                 срабатывания и сбои за сутки, неделю, месяц
 package main
 
@@ -39,6 +42,7 @@ import (
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/journal"
 	"github.com/aiseeq/aguard/internal/memwatch"
+	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -92,6 +96,8 @@ func main() {
 		err = a.restartCmd(os.Args[2:])
 	case "waits":
 		err = a.waitsCmd(os.Args[2:])
+	case "compact":
+		err = a.compactCmd(os.Args[2:])
 	case "report":
 		err = a.reportCmd(os.Args[2:])
 	default:
@@ -112,6 +118,7 @@ func usage() {
   aguard memory tick [-dry-run] | report [-since 168h]
   aguard restart ask -pid N [-name имя]
   aguard waits tick [-dry-run] | report [-since 24h]
+  aguard compact tick [-dry-run] | report [-since 168h]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }
@@ -156,13 +163,14 @@ type watcher struct {
 // проход; не прочитался — проход пропускается (по неизвестным правилам ничего
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "compact", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
 	}
 	mw := memwatch.NewWatcher(a.reg)
 	defer a.closeWatcher(mw)
+	judge := restart.NewJudge(a.home) // общий разбор транскриптов для ответов cl и сжатия
 	ws := []watcher{
 		{"orphans", func(ctx context.Context, c *config.Config) error { return a.orphansRound(ctx, &c.Orphans, false) },
 			func(c *config.Config) time.Duration { return c.Orphans.Interval.D() }},
@@ -172,13 +180,15 @@ func (a *app) run(ctx context.Context) error {
 			func(c *config.Config) time.Duration { return c.Memory.Interval.D() }},
 		{"waits", func(_ context.Context, c *config.Config) error { return a.waitsRound(&c.Waits, false) },
 			func(c *config.Config) time.Duration { return c.Waits.Interval.D() }},
+		{"compact", func(_ context.Context, c *config.Config) error { return a.compactRound(judge, c, false) },
+			func(c *config.Config) time.Duration { return c.Compact.Interval.D() }},
 	}
 	a.act = activity.New(a.dir("activity"), time.Now())
 	a.note("aguard", activity.KindStart, "", "", 0, "")
 	var wg sync.WaitGroup
-	wg.Go(func() { a.restartServe(ctx) })
+	wg.Go(func() { a.restartServe(ctx, judge) })
 	for _, w := range ws {
-		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей четыре, список задан в коде выше
+		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей пять, список задан в коде выше
 	}
 	wg.Go(func() { a.flushLoop(ctx) })
 	wg.Wait()

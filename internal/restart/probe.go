@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/screen"
 )
 
 // session — запись реестра живых сессий Claude Code (~/.claude/sessions/<pid>.json).
@@ -45,6 +47,9 @@ type facts struct {
 	// Children — потомки процесса claude: фоновые команды Bash и их дети, хуки, MCP-серверы.
 	Children   []string
 	Transcript transcriptFacts
+	// Prompt — поле ввода по экрану терминала; PromptErr — почему экран не прочитался.
+	Prompt    screen.Prompt
+	PromptErr string
 	// Errors — что не прочиталось; любое — сомнение, не перезапускать.
 	Errors []string
 }
@@ -56,6 +61,8 @@ type paths struct {
 	hookStates string // состояния claude-hooks (internal/core/state.go: $XDG_RUNTIME_DIR/claude-hooks/sessions)
 	proc       string
 	claude     string // claude из PATH
+	// prompt — поле ввода процесса по экрану его терминала (screen.Reader.Prompt).
+	prompt func(pid int) (screen.Prompt, error)
 }
 
 // pathsFor — пути живой машины: реестр и транскрипты в home, остальное — из раздела [restart].
@@ -66,6 +73,7 @@ func pathsFor(home string, cfg *Config) paths {
 		hookStates: cfg.HookStates,
 		proc:       "/proc",
 		claude:     cfg.Claude,
+		prompt:     screen.NewReader().Prompt,
 	}
 }
 
@@ -111,6 +119,16 @@ func probe(p paths, cache *scanCache, pid int, now time.Time) facts {
 	if !old {
 		return f
 	}
+	state(p, cache, pid, now, &f)
+	return f
+}
+
+// state — всё о сессии, кроме версий: ход, ввод, дети, транскрипт, экран. f.session уже прочитан.
+func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
+	fail := func(err error) {
+		f.Errors = append(f.Errors, err.Error())
+	}
+	s := f.session
 	latest := time.UnixMilli(s.StatusUpdatedAt)
 	hook, err := readHookState(p, s.SessionID)
 	if err != nil {
@@ -120,12 +138,12 @@ func probe(p paths, cache *scanCache, pid int, now time.Time) facts {
 	transcript, err := transcriptFile(p, s.SessionID)
 	if err != nil {
 		fail(err)
-		return f
+		return
 	}
 	info, err := os.Stat(transcript)
 	if err != nil {
 		fail(fmt.Errorf("транскрипт: %w", err))
-		return f
+		return
 	}
 	latest = later(latest, info.ModTime())
 	f.TurnQuiet = now.Sub(info.ModTime())
@@ -139,7 +157,9 @@ func probe(p paths, cache *scanCache, pid int, now time.Time) facts {
 	if f.Children, err = descendants(p.proc, pid); err != nil {
 		fail(err)
 	}
-	return f
+	if f.Prompt, err = p.prompt(pid); err != nil {
+		f.PromptErr = err.Error()
+	}
 }
 
 // hookRecord — запись claude-hooks о сессии.

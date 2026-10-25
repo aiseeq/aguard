@@ -227,6 +227,8 @@ func valueText(v int64, unit string) string {
 		return fmt.Sprintf("%d процессов", v)
 	case "trees":
 		return fmt.Sprintf("%d деревьев", v)
+	case "tokens":
+		return fmt.Sprintf("%d тыс. токенов", v/1000)
 	}
 	return strconv.FormatInt(v, 10)
 }

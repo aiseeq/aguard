@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/screen"
 )
 
 // sessionWorld — подменённые реестр Claude Code, транскрипты, состояния claude-hooks, /proc, терминал и claude из
@@ -34,6 +36,7 @@ func newSessionWorld(t *testing.T, at worldTimes, transcript ...string) sessionW
 		hookStates: filepath.Join(dir, "hooks"),
 		proc:       filepath.Join(dir, "proc"),
 		claude:     filepath.Join(dir, "bin", "claude"),
+		prompt:     func(int) (screen.Prompt, error) { return screen.Empty, nil },
 	}}
 	turn := at.now.Add(-at.turnAgo)
 	write(t, filepath.Join(dir, "versions", "2.1.310"), "#!/bin/sh\n")

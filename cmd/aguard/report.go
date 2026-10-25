@@ -13,6 +13,7 @@ import (
 	"github.com/aiseeq/aguard/internal/activity"
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/memwatch"
+	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/aguard/internal/waits"
 )
 
@@ -96,6 +97,7 @@ func (a *app) buildReport(cfg *config.Config, at time.Time) (*activity.Report, e
 		{Name: "memory", Looped: true, Extra: a.memoryLines},
 		{Name: "waits", Looped: true, Extra: a.waitsLines},
 		{Name: "restart", Mode: cfg.Restart.Mode},
+		{Name: "compact", Mode: cfg.Compact.Mode, Looped: cfg.Compact.Mode != restart.CompactOff},
 	}
 	r, err := activity.Build(at, recs, specs)
 	if r != nil {

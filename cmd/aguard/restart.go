@@ -47,7 +47,7 @@ func (a *app) restartAnswer(j *restart.Judge, req restart.Request, claude string
 
 // restartServe — сокет для cl до отмены ctx. Сокет берётся из конфига на старте демона: смена пути — после
 // перезапуска aguard. Сокет не открылся — остальные наблюдатели работают, cl не получит ответа и не перезапустит.
-func (a *app) restartServe(ctx context.Context) {
+func (a *app) restartServe(ctx context.Context, j *restart.Judge) {
 	cfg, err := a.config()
 	if err != nil {
 		a.log.Error("aguard restart: конфиг, сокет не открыт", "err", err)
@@ -60,7 +60,6 @@ func (a *app) restartServe(ctx context.Context) {
 		a.note("restart", "socket_failed", "", "", 0, "")
 		return
 	}
-	j := restart.NewJudge(a.home)
 	answer := func(req restart.Request) restart.Answer {
 		ans := a.restartAnswer(j, req, "")
 		a.note("restart", activity.KindPass, "", "", 0, "")
