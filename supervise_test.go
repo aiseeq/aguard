@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -31,7 +32,9 @@ printf '%s\n' "$@" > "$D/run1"
 ln -s "$D/proc-tmpl" "$D/proc/$$" && ln -s "$D/session.json" "$D/sessions/$$.json"
 exec sleep 25`)
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
-	l := launcher{systemdRun: run, claude: w.p.claude, home: d, configFile: filepath.Join(d, "config.json"), paths: w.p, name: "x-master"}
+	socket := fakeAguard(t, `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master"}`)
+	l := launcher{systemdRun: run, claude: w.p.claude, home: d, configFile: filepath.Join(d, "config.json"), paths: w.p, name: "x-master",
+		aguard: socket}
 
 	code := l.supervise(append(sessionFlags(d), "-n", "x-master"), []string{"--model", "opus", "--effort=high"})
 	if code != 3 {
@@ -55,7 +58,7 @@ exec sleep 25`)
 		t.Errorf("перезапуск:\n%q\nwant\n%q", got, second)
 	}
 	if journalText := strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n"); !strings.Contains(journalText, "x-master pid=") ||
-		!strings.Contains(journalText, "act: перезапускаю") || !strings.Contains(journalText, "SIGTERM, поднимаю --resume s1 на 2.1.310") {
+		!strings.Contains(journalText, "act: cl за перезапуск") || !strings.Contains(journalText, "SIGTERM, поднимаю --resume s1 на 2.1.310") {
 		t.Errorf("журнал:\n%s", journalText)
 	}
 }
@@ -152,5 +155,46 @@ func TestWantCompact(t *testing.T) {
 	cfg.Restart.CompactMode = modeOff
 	if out, line, _ := l.wantCompact(cfg, 7, f, a, ""); out.restart || line != "" {
 		t.Errorf("off: %+v %q", out, line)
+	}
+}
+
+// Перезапуск в act — только если aguard тоже за и о той же беседе; иначе строка в журнал один раз на решение.
+func TestNextNeedsAguard(t *testing.T) {
+	cfg := defaultConfig(t.TempDir())
+	cfg.Restart.Mode = modeAct
+	l := launcher{name: "x-master"}
+	f := facts{session: session{SessionID: "s1", Name: "x-master"}, Installed: "2.1.311"}
+	v := verdict{Restart: true}
+	now := time.Now()
+	cases := []struct {
+		name string
+		a    aguardAnswer
+		err  error
+		want string
+	}{
+		{"нет ответа", aguardAnswer{}, errors.New("dial: нет сокета"), "aguard не ответил"},
+		{"против", aguardAnswer{SessionID: "s1", Key: "false,false,screen"}, nil, "aguard против: false,false,screen"},
+		{"другая беседа", aguardAnswer{SessionID: "s2", Restart: true}, nil, `aguard о беседе "s2"`},
+	}
+	for _, c := range cases {
+		out, last := l.next(cfg, now, 7, f, v, c.a, c.err, nextLines{})
+		if out.restart || !strings.Contains(last.veto, c.want) {
+			t.Errorf("%s: %+v %q", c.name, out, last.veto)
+		}
+		if _, again := l.next(cfg, now, 7, f, v, c.a, c.err, last); again != last {
+			t.Errorf("%s: ключ сменился на повторе: %q", c.name, again.veto)
+		}
+	}
+	journalText := strings.Join(readLines(t, cfg.Restart.Journal), "\n")
+	if n := strings.Count(journalText, "перезапустил бы, но"); n != len(cases) {
+		t.Errorf("строк вето %d, ждали %d:\n%s", n, len(cases), journalText)
+	}
+	out, _ := l.next(cfg, now, 7, f, v, aguardAnswer{SessionID: "s1", Restart: true}, nil, nextLines{})
+	if !out.restart || out.sessionID != "s1" || out.version != "2.1.311" {
+		t.Errorf("оба за — перезапуск: %+v", out)
+	}
+	cfg.Restart.Mode = modeLog
+	if out, last := l.next(cfg, now, 7, f, v, aguardAnswer{SessionID: "s1", Restart: true}, nil, nextLines{}); out.restart || last.veto != "" {
+		t.Errorf("log — без перезапуска: %+v %+v", out, last)
 	}
 }

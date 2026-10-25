@@ -211,7 +211,8 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, cache *scanCache, 
 	ticker := time.NewTicker(cfg.Restart.interval())
 	defer ticker.Stop()
 	var out outcome
-	stopping, lastKey, lastCompact := false, "", ""
+	stopping, lastKey := false, ""
+	var last nextLines
 	for {
 		select {
 		case err := <-done:
@@ -243,7 +244,7 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, cache *scanCache, 
 				journal(cfg.Restart.Journal, now, journalLine(cfg.Restart.Mode, l.name, pid, f, v))
 				lastKey = v.key()
 			}
-			if out, lastCompact = l.next(cfg, now, pid, f, v, a, askErr, lastCompact); !out.restart {
+			if out, last = l.next(cfg, now, pid, f, v, a, askErr, last); !out.restart {
 				continue
 			}
 			if err := signalChild(cmd, syscall.SIGTERM); err != nil {
@@ -254,20 +255,49 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, cache *scanCache, 
 	}
 }
 
-// next — что делать с сессией по своему вердикту и ответу aguard: перезапуск (act) важнее сжатия.
-func (l launcher) next(cfg config, now time.Time, pid int, f facts, v verdict, a aguardAnswer, askErr error, lastCompact string) (outcome, string) {
-	switch {
-	case v.Restart && cfg.Restart.Mode == modeAct:
-		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: SIGTERM, поднимаю --resume %s на %s", f.Name, pid, f.SessionID, f.Installed))
-		return outcome{restart: true, sessionID: f.SessionID, name: firstNonEmpty(f.Name, l.name), version: f.Installed}, lastCompact
-	case askErr == nil && a.Compact:
-		out, line, key := l.wantCompact(cfg, pid, f, a, lastCompact)
+// nextLines — ключи последних строк next: каждая пишется один раз на решение.
+type nextLines struct {
+	veto, compact string
+}
+
+// next — что делать с сессией по своему вердикту и ответу aguard: перезапуск (act) важнее сжатия. Перезапуск — только
+// если и aguard ответил restart о той же беседе: у cl нет проверки поля ввода по экрану (черновик, набранный во время
+// хода, перезапуск бы потерял).
+func (l launcher) next(cfg config, now time.Time, pid int, f facts, v verdict, a aguardAnswer, askErr error, last nextLines) (outcome, nextLines) {
+	if v.Restart && cfg.Restart.Mode == modeAct {
+		why := aguardVeto(f, a, askErr)
+		if why == "" {
+			journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: SIGTERM, поднимаю --resume %s на %s", f.Name, pid, f.SessionID, f.Installed))
+			return outcome{restart: true, sessionID: f.SessionID, name: firstNonEmpty(f.Name, l.name), version: f.Installed}, last
+		}
+		key := v.key() + "/" + why
+		if key != last.veto {
+			journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d act: перезапустил бы, но %s — не перезапускаю", firstNonEmpty(f.Name, l.name), pid, why))
+		}
+		last.veto = key
+	}
+	if askErr == nil && a.Compact {
+		out, line, key := l.wantCompact(cfg, pid, f, a, last.compact)
 		if line != "" {
 			journal(cfg.Restart.Journal, now, line)
 		}
-		return out, key
+		last.compact = key
+		return out, last
 	}
-	return outcome{}, lastCompact
+	return outcome{}, last
+}
+
+// aguardVeto — почему ответ aguard не разрешает перезапуск; пусто — разрешает.
+func aguardVeto(f facts, a aguardAnswer, askErr error) string {
+	switch {
+	case askErr != nil:
+		return "aguard не ответил (" + askErr.Error() + ")"
+	case f.SessionID == "" || a.SessionID != f.SessionID:
+		return fmt.Sprintf("aguard о беседе %q, у cl %q", a.SessionID, f.SessionID)
+	case !a.Restart:
+		return "aguard против: " + a.Key
+	}
+	return ""
 }
 
 // wantCompact — что делать с вердиктом aguard «сжать»: в act (и в пилоте) — остановить сессию для сжатия, иначе
@@ -321,7 +351,7 @@ func journalLine(mode, name string, pid int, f facts, v verdict) string {
 	case v.Fresh:
 		return head + "версия свежая"
 	case v.Restart && mode == modeAct:
-		return head + "перезапускаю: простаивает, ничего не идёт"
+		return head + "cl за перезапуск: простаивает, ничего не идёт"
 	case v.Restart:
 		return head + "перезапустил бы: простаивает, ничего не идёт"
 	}
@@ -369,9 +399,9 @@ func exitCode(err error) int {
 	return 0
 }
 
-// compare — вердикт aguard по той же сессии. На время перехода перезапуск решает сам cl, а вердикт aguard о
-// перезапуске идёт рядом со своим строкой в журнал сверки (restart.log и aguard-compare.log в одной папке). Сжатие
-// решает только aguard. Сокета нет в настройках — ответа нет.
+// compare — вердикт aguard по той же сессии; сверка со своим — строкой в журнал сверки (restart.log и
+// aguard-compare.log в одной папке). Перезапуск в act — только если оба за (next), сжатие решает только aguard.
+// Сокета нет в настройках — ответа нет.
 func (l launcher) compare(cfg config, now time.Time, pid int, f facts, v verdict, argsProblem string) (aguardAnswer, error) {
 	if l.aguard == "" {
 		return aguardAnswer{}, errors.New("aguard не задан")
