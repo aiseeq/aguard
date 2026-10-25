@@ -20,7 +20,7 @@
 //     aguard memory tick [-dry-run] | report [-since 168h]
 //     aguard restart ask -pid N [-name имя]              вопрос, как его задаёт cl
 //     aguard waits tick [-dry-run] | report [-since 24h]
-//     aguard compact tick [-dry-run] | report [-since 168h]
+//     aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время]
 //     aguard report [-json] [-at время]                 срабатывания и сбои за сутки, неделю, месяц
 package main
 
@@ -118,7 +118,7 @@ func usage() {
   aguard memory tick [-dry-run] | report [-since 168h]
   aguard restart ask -pid N [-name имя]
   aguard waits tick [-dry-run] | report [-since 24h]
-  aguard compact tick [-dry-run] | report [-since 168h]
+  aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время RFC3339]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }

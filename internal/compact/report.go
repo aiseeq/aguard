@@ -6,7 +6,18 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 )
+
+// Version — версия формата Summary для sleepstats.
+const Version = 1
+
+// Summary — сводки за окна до At (aguard compact report -json): day, week, month.
+type Summary struct {
+	V       int                `json:"v"`
+	At      time.Time          `json:"at"`
+	Windows map[string]*Report `json:"windows"`
+}
 
 // Report — сводка журнала: решения, доводы против и исходы.
 type Report struct {
