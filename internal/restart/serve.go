@@ -27,6 +27,11 @@ type Request struct {
 	ArgsProblem string `json:"args_problem"`
 }
 
+// NewRequest — вопрос текущей версии протокола о процессе pid.
+func NewRequest(pid int, name, argsProblem string) Request {
+	return Request{V: Version, Pid: pid, Name: name, ArgsProblem: argsProblem}
+}
+
 // Answer — вердикт и то, что нужно cl для журнала и перезапуска. Error — вопрос не разобран: вердикта нет.
 type Answer struct {
 	V int `json:"v"`
@@ -37,6 +42,8 @@ type Answer struct {
 	Name      string `json:"name"`
 	Running   string `json:"running"`
 	Installed string `json:"installed"`
+	// Crons — у сессии живые таймеры CronCreate: подъём после сжатия — со строкой роли, чтобы роль поставила их заново.
+	Crons bool `json:"crons"`
 	// Compact — сжать беседу сейчас: cl останавливает claude, `claude -p --resume <сессия> /compact`, поднимает
 	// снова. CompactAgainst — почему нет, CompactKey — решение без чисел, Tokens — контекст последнего ответа.
 	Compact        bool     `json:"compact"`
@@ -100,7 +107,7 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	cv := j.Compact(cfg, cc, req.Pid, name, req.ArgsProblem, now)
 	return Answer{
 		V: Version, Verdict: v, Key: v.Key(), Mode: cfg.Mode,
-		SessionID: f.SessionID, Name: name, Running: f.Running, Installed: f.Installed,
+		SessionID: f.SessionID, Name: name, Running: f.Running, Installed: f.Installed, Crons: len(f.Transcript.Crons) > 0,
 		Compact: cv.Compact, CompactAgainst: cv.Against, CompactKey: cv.Key(), Tokens: cv.Tokens,
 	}
 }

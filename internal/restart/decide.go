@@ -100,7 +100,7 @@ func sessionChecks(f facts, against againstFunc) {
 		against("kind", "сессия не интерактивная: %q", f.Kind)
 	}
 	if f.Status != "idle" {
-		against("status", "Claude Code: %s", orDash(f.Status))
+		against("status", "Claude Code: %s", OrDash(f.Status))
 	}
 	hookChecks(f, against)
 }
@@ -152,7 +152,7 @@ func hookChecks(f facts, against againstFunc) {
 			against("hook-paused", "claude-hooks: paused, а таймеров в транскрипте нет — непонятно, чего ждёт")
 		}
 	default:
-		against("hook", "claude-hooks: %s", orDash(f.HookState))
+		against("hook", "claude-hooks: %s", OrDash(f.HookState))
 	}
 }
 
@@ -171,7 +171,8 @@ func minutes(d time.Duration) string {
 	return fmt.Sprintf("%d мин", int(d.Minutes()))
 }
 
-func orDash(s string) string {
+// OrDash — пустое значение в строке журнала: «-».
+func OrDash(s string) string {
 	if s == "" {
 		return "нет записи"
 	}

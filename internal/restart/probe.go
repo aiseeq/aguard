@@ -126,7 +126,7 @@ func probe(p paths, cache *scanCache, pid int, now time.Time) facts {
 	if f.Running, err = runningVersion(p.proc, pid); err != nil {
 		fail(err)
 	}
-	if f.Installed, err = installedVersion(p.claude); err != nil {
+	if f.Installed, err = InstalledVersion(p.claude); err != nil {
 		fail(err)
 	}
 	if len(f.Errors) > 0 {

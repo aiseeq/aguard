@@ -23,7 +23,7 @@ func (a *app) restartCmd(args []string) error {
 	name := fl.String("name", "", "имя сессии, если реестр его не знает")
 	claude := fl.String("claude", "", "другая ссылка на установленный claude: проверить решение, как при выходе новой версии")
 	parse(fl, rest)
-	ans := a.restartAnswer(restart.NewJudge(a.home), restart.Request{V: restart.Version, Pid: *pid, Name: *name}, *claude)
+	ans := a.restartAnswer(restart.NewJudge(a.home), restart.NewRequest(*pid, *name, ""), *claude)
 	enc := json.NewEncoder(a.out)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(&ans); err != nil {

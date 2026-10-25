@@ -48,9 +48,9 @@ func at(v []int, i int) int {
 	return 0
 }
 
-// installedVersion — версия, которую запустит claude из PATH: ~/.local/bin/claude — ссылка на
+// InstalledVersion — версия, которую запустит claude из PATH: ~/.local/bin/claude — ссылка на
 // ~/.local/share/claude/versions/<версия>, автообновление переставляет её на новую.
-func installedVersion(claude string) (string, error) {
+func InstalledVersion(claude string) (string, error) {
 	target, err := filepath.EvalSymlinks(claude)
 	if err != nil {
 		return "", fmt.Errorf("установленная версия: %w", err)

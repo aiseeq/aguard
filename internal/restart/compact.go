@@ -143,7 +143,7 @@ func idleChecks(f facts, c *CompactConfig, p allowance, w idleWindow, now time.T
 		in = true
 	}
 	if !ctx.Compacted.IsZero() && !ctx.Compacted.Before(ctx.Request) {
-		against("compacted", "уже сжата (%s) после последнего запроса", orDash(ctx.Trigger))
+		against("compacted", "уже сжата (%s) после последнего запроса", OrDash(ctx.Trigger))
 	}
 	sessionChecks(f, against)
 	if f.TTYQuiet < c.TTYQuiet.D() {
