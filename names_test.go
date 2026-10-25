@@ -69,14 +69,45 @@ func TestReadTableAndLive(t *testing.T) {
 	}
 }
 
-func TestSearchToolsFlag(t *testing.T) {
-	if !slices.Contains(sessionFlags(), searchToolsFlag) {
-		t.Errorf("sessionFlags без %s: %q", searchToolsFlag, sessionFlags())
+func TestSessionArgv(t *testing.T) {
+	home := t.TempDir()
+	worktrees := filepath.Join(home, ".cache", "worktrees")
+	tmp := filepath.Join(home, ".cache", "claude-tmp")
+
+	// Общих папок нет — --add-dir не передаётся, остальной argv прежний.
+	if got := sessionFlags(home); !slices.Equal(got, []string{"--dangerously-skip-permissions", searchToolsFlag}) {
+		t.Errorf("без папок sessionFlags = %q", got)
 	}
-	if got := printArgs([]string{"-p", "привет"}); !slices.Equal(got, []string{searchToolsFlag, "-p", "привет"}) {
-		t.Errorf("-p: %q", got)
+	if got := printArgs(home, []string{"-p", "привет"}); !slices.Equal(got, []string{searchToolsFlag, "-p", "привет"}) {
+		t.Errorf("без папок -p: %q", got)
 	}
-	if got := printArgs([]string{"mcp", "list"}); !slices.Equal(got, []string{"mcp", "list"}) {
+
+	for _, dir := range []string{worktrees, tmp} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dirs := []string{"--add-dir=" + worktrees, "--add-dir=" + tmp}
+	want := append([]string{"--dangerously-skip-permissions", searchToolsFlag}, dirs...)
+	if got := sessionFlags(home); !slices.Equal(got, want) {
+		t.Errorf("sessionFlags = %q, want %q", got, want)
+	}
+	want = append(append([]string{searchToolsFlag}, dirs...), "-p", "привет")
+	if got := printArgs(home, []string{"-p", "привет"}); !slices.Equal(got, want) {
+		t.Errorf("-p: %q, want %q", got, want)
+	}
+	if got := printArgs(home, []string{"mcp", "list"}); !slices.Equal(got, []string{"mcp", "list"}) {
 		t.Errorf("подкоманда: %q", got)
+	}
+
+	// Папка-файл вместо каталога — не передаётся.
+	if err := os.RemoveAll(tmp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmp, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := addDirFlags(home); !slices.Equal(got, dirs[:1]) {
+		t.Errorf("claude-tmp файлом: %q", got)
 	}
 }

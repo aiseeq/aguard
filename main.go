@@ -45,7 +45,7 @@ func main() {
 		fail(err)
 	}
 	if !interactive(args) {
-		argv := scopeArgv(l.systemdRun, claude, nameArg(args), fmt.Sprint(os.Getpid()), printArgs(args))
+		argv := scopeArgv(l.systemdRun, claude, nameArg(args), fmt.Sprint(os.Getpid()), printArgs(home, args))
 		if err := syscall.Exec(l.systemdRun, argv, os.Environ()); err != nil {
 			fail(err)
 		}
@@ -58,7 +58,7 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	pre := sessionFlags()
+	pre := sessionFlags(home)
 	l.name = nameArg(args)
 	if name := nameFor(cwd, home, table); name != "" && l.name == "" {
 		taken, err := liveNames(filepath.Join(home, ".claude", "sessions"))

@@ -1,10 +1,17 @@
 # cl
 
-Короткий запуск Claude Code: `cl [аргументы claude]` = `claude --dangerously-skip-permissions --allowedTools=Grep,Glob -n <имя> [аргументы]`.
+Короткий запуск Claude Code: `cl [аргументы claude]` = `claude --dangerously-skip-permissions --allowedTools=Grep,Glob
+--add-dir=~/.cache/worktrees --add-dir=~/.cache/claude-tmp -n <имя> [аргументы]`.
 
 `--allowedTools=Grep,Glob` возвращает в Bash настоящие `grep` и `find` вместо встроенных ugrep и bfs (и инструменты Grep и Glob),
 остальной набор инструментов не меняется (tools-reference, «Glob tool behavior»; выключателя подмены нет, #69736). Его же
 получает `cl -p`, подкоманды — нет. Флаг — обход: ночью его проверяет обход Сна `harness`.
+
+`--add-dir` на `~/.cache/worktrees` (worktree от `graft worktree add`) и `~/.cache/claude-tmp` (`CLAUDE_CODE_TMPDIR`,
+scratchpad): без него Claude Code 2.1.310 возвращает cwd Bash в корень сессии после каждого `cd` туда. Несуществующая
+папка не передаётся. Его получают первый запуск, перезапуск и `cl -p`. После `cd` в такую папку Primary working
+directory сессии меняется так же, как при `cd` в подкаталог корня; каталог проекта (транскрипт, автопамять, скрипты
+Workflow) остаётся по папке запуска, `--resume` из неё находит беседу (пробы Сна 25.10).
 
 Имя сессии — по папке запуска: строка таблицы `~/.config/cl/names.tsv` («папка<TAB>имя», `~` раскрывается),
 иначе `<папка>-master` для `~/git/<папка>` и `~/work/<папка>`, иначе без имени. Имя занято живой сессией

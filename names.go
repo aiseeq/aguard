@@ -29,17 +29,41 @@ func lookClaude() (string, error) {
 // Форма с «=»: без неё вариадический флаг съел бы позиционный промпт (строку роли).
 const searchToolsFlag = "--allowedTools=Grep,Glob"
 
-// sessionFlags — флаги каждого запуска сессии, первого и после перезапуска на новую версию.
-func sessionFlags() []string {
-	return []string{"--dangerously-skip-permissions", searchToolsFlag}
+// sharedDirs — общие папки вне корня сессии: worktree (graft worktree add) и временные файлы Claude Code
+// (CLAUDE_CODE_TMPDIR, scratchpad). Без --add-dir Claude Code возвращает cwd Bash в корень после каждого cd в них.
+var sharedDirs = []string{filepath.Join(".cache", "worktrees"), filepath.Join(".cache", "claude-tmp")}
+
+// addDirFlags — --add-dir на каждую общую папку, которая есть. Форма с «=», как у searchToolsFlag: вариадический
+// флаг съел бы позиционный промпт. Несуществующую папку не передаём, чтобы её отсутствие не мешало запуску; другой
+// сбой stat — в stderr и тоже без флага: сессия важнее.
+func addDirFlags(home string) []string {
+	var flags []string
+	for _, rel := range sharedDirs {
+		dir := filepath.Join(home, rel)
+		info, err := os.Stat(dir)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			fmt.Fprintln(os.Stderr, "cl: --add-dir:", err)
+		case info.IsDir():
+			flags = append(flags, "--add-dir="+dir)
+		}
+	}
+	return flags
 }
 
-// printArgs — аргументы разового запуска: -p получает те же grep и find, что и сессия, подкоманды — как есть.
-func printArgs(args []string) []string {
+// sessionFlags — флаги каждого запуска сессии, первого и после перезапуска на новую версию.
+func sessionFlags(home string) []string {
+	return append([]string{"--dangerously-skip-permissions", searchToolsFlag}, addDirFlags(home)...)
+}
+
+// printArgs — аргументы разового запуска: -p получает те же grep и find и общие папки, что и сессия, подкоманды —
+// как есть.
+func printArgs(home string, args []string) []string {
 	if len(args) > 0 && subcommands[args[0]] {
 		return args
 	}
-	return append([]string{searchToolsFlag}, args...)
+	return append(append([]string{searchToolsFlag}, addDirFlags(home)...), args...)
 }
 
 // interactive — запуск сессии, а не подкоманда и не разовый -p.

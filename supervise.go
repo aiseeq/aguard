@@ -61,7 +61,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 			return exitCode(out.err)
 		}
 		l.name = out.name
-		args = append(append(sessionFlags(), "-n", out.name), keep...)
+		args = append(append(sessionFlags(l.home), "-n", out.name), keep...)
 		args = append(args, "--resume", out.sessionID)
 		args = l.withRoleLine(args, out.name, true)
 	}
