@@ -2,6 +2,7 @@ package restart
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,5 +88,44 @@ func TestCompactConfigValidate(t *testing.T) {
 		if err := c.Validate(); err == nil {
 			t.Errorf("%s: прошло", name)
 		}
+	}
+}
+
+// Сброс: большой контекст после часа простоя, подсказка Claude Code на экране, чистое дерево; любой довод держит.
+func TestDecideReset(t *testing.T) {
+	now := time.Date(2026, 10, 25, 19, 0, 0, 0, time.UTC)
+	c := DefaultCompact()
+	resetFacts := func() facts {
+		f := idleFacts()
+		f.Transcript.Context = contextFacts{Request: now.Add(-3 * time.Hour), Tokens: 235_000}
+		f.ClearHint = true
+		return f
+	}
+	if v := decideReset(resetFacts(), &c, now); !v.Reset || !v.Candidate {
+		t.Fatalf("закрытую большую беседу сбросил бы: %+v", v)
+	}
+	cases := map[string]func(*facts){
+		"tokens": func(f *facts) { f.Transcript.Context.Tokens = 149_000 },
+		"early":  func(f *facts) { f.Transcript.Context.Request = now.Add(-59 * time.Minute) },
+		"hint":   func(f *facts) { f.ClearHint = false },
+		"screen": func(f *facts) { f.Prompt = screen.Draft },
+		"crons":  func(f *facts) { f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
+		"tasks":  func(f *facts) { f.Transcript.Tasks = []string{"Agent «ревью» a1"} },
+	}
+	for code, spoil := range cases {
+		f := resetFacts()
+		spoil(&f)
+		if v := decideReset(f, &c, now); v.Reset || !slices.Contains(codes(Verdict{Against: v.Against}), code) {
+			t.Errorf("%s: %+v", code, v)
+		}
+	}
+	v := decideReset(resetFacts(), &c, now)
+	treeCheck(&v, func(string) ([]string, error) { return []string{"M docs/design.md", "?? new.go"}, nil }, "/w")
+	if v.Reset || len(v.Against) != 1 || v.Against[0].Code != "tree" || !strings.Contains(v.Against[0].Text, "незакоммиченное (2)") {
+		t.Errorf("грязное дерево: %+v", v)
+	}
+	v = decideReset(resetFacts(), &c, now)
+	if treeCheck(&v, func(string) ([]string, error) { return nil, nil }, "/w"); !v.Reset {
+		t.Errorf("чистое дерево: %+v", v)
 	}
 }

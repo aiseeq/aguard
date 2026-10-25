@@ -120,7 +120,7 @@ func (a *app) compactRound(j *restart.Judge, cfg *config.Config, dry bool) error
 		}
 		seen := tr.Observe(c, now)
 		for i := range seen {
-			a.compactNote(&seen[i], c.Against)
+			a.compactNote(&seen[i], &c)
 		}
 		recs = append(recs, seen...)
 	}
@@ -142,22 +142,34 @@ func (a *app) compactRound(j *restart.Judge, cfg *config.Config, dry bool) error
 	return store.Rotate(now, cfg.Compact.Keep.D())
 }
 
-// compactNote — запись журнала в журнал демона и в учёт.
-func (a *app) compactNote(r *compact.Record, against []restart.Reason) {
+// compactNote — запись журнала в журнал демона и в учёт; c — проверка, из которой запись (доводы против), у исходов
+// пропавших сессий — nil.
+func (a *app) compactNote(r *compact.Record, c *restart.CompactCheck) {
 	switch r.Kind {
-	case compact.KindWould:
-		a.log.Info("aguard compact: сжал бы", "session", r.Name, "tokens", r.Tokens, "request", r.Request)
+	case compact.KindWould, compact.KindWouldReset:
+		a.log.Info("aguard compact: "+kindText[r.Kind], "session", r.Name, "tokens", r.Tokens, "request", r.Request,
+			"rewrite_micro_usd", r.RewriteMicroUSD, "reply", r.Reply)
 		a.note("compact", r.Kind, r.Name, "", r.Tokens, "tokens")
-	case compact.KindWouldNot:
+	case compact.KindWouldNot, compact.KindWouldNotReset:
+		against := c.Against
+		if r.Kind == compact.KindWouldNotReset {
+			against = c.Reset.Against
+		}
 		texts := make([]string, 0, len(against))
 		for _, x := range against {
 			texts = append(texts, x.Code+": "+x.Text)
 		}
-		a.log.Info("aguard compact: не стал бы", "session", r.Name, "tokens", r.Tokens, "against", strings.Join(texts, "; "))
+		a.log.Info("aguard compact: "+kindText[r.Kind], "session", r.Name, "tokens", r.Tokens, "against", strings.Join(texts, "; "))
 		a.note("compact", r.Kind, strings.Join(r.Against, ","), "", r.Tokens, "tokens")
 	case compact.KindOutcome:
 		a.log.Info("aguard compact: исход", "session", r.Name, "decision", r.Decision, "outcome", r.Outcome,
-			"after", time.Duration(r.AfterS)*time.Second, "cache_read", r.CacheRead, "trigger", r.Trigger)
+			"after", time.Duration(r.AfterS)*time.Second, "cache_read", r.CacheRead, "trigger", r.Trigger, "prompt", r.Prompt)
 		a.note("compact", r.Decision+"_"+r.Outcome, r.Name, "", r.Tokens, "tokens")
 	}
+}
+
+// kindText — решения журнала сжатия словами.
+var kindText = map[string]string{
+	compact.KindWould: "сжал бы", compact.KindWouldNot: "не стал бы",
+	compact.KindWouldReset: "сбросил бы", compact.KindWouldNotReset: "не стал бы сбрасывать",
 }

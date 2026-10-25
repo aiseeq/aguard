@@ -102,11 +102,49 @@ func TestObserve(t *testing.T) {
 	}
 }
 
+// Сброс: решение по большому контексту после часа простоя — с ценой и итогом хода; исход — человек сбросил сам
+// (у процесса новая беседа) или вернулся с репликой.
+func TestObserveReset(t *testing.T) {
+	tr, err := Load(filepath.Join(t.TempDir(), "нет.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := func(m int) time.Time { return t0.Add(time.Duration(m) * time.Minute) }
+	c := check(t0, false, false, "late")
+	c.Pid, c.Model, c.Tokens, c.Reply = 7, "claude-opus-5-5", 250_000, "Всё закрыто, следующее — 1.11."
+	c.Reset = restart.ResetVerdict{Reset: true, Candidate: true}
+	recs := tr.Observe(c, at(61))
+	if len(recs) != 1 || recs[0].Kind != KindWouldReset || recs[0].Reply != c.Reply || recs[0].RewriteMicroUSD != 2_000_000 || recs[0].ReadMicroUSD != 50_000 {
+		t.Fatalf("сбросил бы: %+v", recs)
+	}
+	if recs := tr.Observe(c, at(62)); len(recs) != 0 {
+		t.Errorf("по тому же запросу — одно решение: %+v", recs)
+	}
+	fresh := restart.CompactCheck{SessionID: "s2", Pid: 7, Request: at(70)}
+	recs = tr.Observe(fresh, at(70))
+	if !slices.Equal(kinds(recs), []string{"outcome/" + OutcomeCleared}) || recs[0].Decision != KindWouldReset || recs[0].SessionID != "s1" {
+		t.Fatalf("сбросил сам: %+v", recs)
+	}
+
+	c.Reset = restart.ResetVerdict{Candidate: true, Against: []restart.Reason{{Code: "tree"}}}
+	c.Request = at(100)
+	if recs := tr.Observe(c, at(161)); len(recs) != 1 || recs[0].Kind != KindWouldNotReset || recs[0].Against[0] != "tree" {
+		t.Fatalf("не стал бы сбрасывать: %+v", recs)
+	}
+	back := check(at(300), false, false, "early")
+	back.Pid, back.Prompt, back.PromptAt = 7, "продолжим с того места", at(300)
+	recs = tr.Observe(back, at(301))
+	if !slices.Equal(kinds(recs), []string{"outcome/" + OutcomeCacheExpired}) || recs[0].Prompt != back.Prompt || recs[0].RewriteMicroUSD != 2_000_000 {
+		t.Fatalf("вернулся: %+v", recs)
+	}
+}
+
 func TestReport(t *testing.T) {
 	recs := []Record{
 		{Kind: KindWould}, {Kind: KindWouldNot, Against: []string{"screen", "draft"}}, {Kind: KindWouldNot, Against: []string{"draft"}},
 		{Kind: KindOutcome, Decision: KindWould, Outcome: OutcomeCacheExpired, Tokens: 150_000},
 		{Kind: KindOutcome, Decision: KindWould, Outcome: OutcomeCacheExpired, Tokens: 250_000},
+		{Kind: KindWouldReset, Tokens: 235_000, RewriteMicroUSD: 1_880_000}, {Kind: KindWouldNotReset, Against: []string{"tree"}},
 	}
 	r, err := Collect(func(fn func(*Record)) (int, error) {
 		for i := range recs {
@@ -117,7 +155,8 @@ func TestReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Decisions[KindWouldNot] != 2 || r.Against["draft"] != 2 || r.Outcomes["would/cache_expired"] != (Tally{2, 400_000}) || r.Bad != 1 {
+	if r.Decisions[KindWouldNot] != 2 || r.Against["draft"] != 2 || r.Outcomes["would/cache_expired"] != (Tally{2, 400_000, 0}) || r.Bad != 1 ||
+		r.Held[KindWouldReset] != (Tally{1, 235_000, 1_880_000}) || r.ResetAgainst["tree"] != 1 || r.Against["tree"] != 0 {
 		t.Errorf("сводка: %+v", r)
 	}
 	var b bytes.Buffer

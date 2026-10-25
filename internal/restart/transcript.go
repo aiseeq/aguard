@@ -41,7 +41,16 @@ type contextFacts struct {
 	// Compacted — последнее сжатие (compact_boundary), Trigger — чьё: auto, manual.
 	Compacted time.Time
 	Trigger   string
+	// Model — модель последнего ответа: по ней цена кэша.
+	Model string
+	// Reply — конец последнего текста ответа (итог хода), Prompt — начало последней реплики человека и её время.
+	Reply    string
+	Prompt   string
+	PromptAt time.Time
 }
+
+// textLimit — сколько знаков текста ответа и реплики держать для журнала.
+const textLimit = 300
 
 // cronJob — таймер сессии; поля — как в результате CronList.
 type cronJob struct {
@@ -102,6 +111,7 @@ type block struct {
 	Input     json.RawMessage `json:"input"`
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"`
+	Text      string          `json:"text"`
 }
 
 type toolUse struct {
@@ -238,6 +248,7 @@ func (s *transcriptScan) request(rec object, at time.Time) error {
 	switch rec.str("type") {
 	case "user":
 		s.userAt = at
+		return s.prompt(rec, at)
 	case "system":
 		if rec.str("subtype") != "compact_boundary" {
 			return nil
@@ -262,8 +273,64 @@ func (s *transcriptScan) request(rec object, at time.Time) error {
 		}
 		s.context.CacheRead = u.num("cache_read_input_tokens")
 		s.context.Tokens = u.num("input_tokens") + s.context.CacheRead + u.num("cache_creation_input_tokens") + u.num("output_tokens")
+		s.context.Model = msg.str("model")
+		bs, err := blocks(msg["content"])
+		if err != nil {
+			return err
+		}
+		for _, b := range bs {
+			if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+				s.context.Reply = tail(b.Text, textLimit)
+			}
+		}
 	}
 	return nil
+}
+
+// prompt — реплика человека (не результат инструмента и не служебная запись): начало текста и время.
+func (s *transcriptScan) prompt(rec object, at time.Time) error {
+	if rec.flag("isMeta") {
+		return nil
+	}
+	msg, err := parseObject(rec["message"])
+	if err != nil {
+		return err
+	}
+	var text strings.Builder
+	text.WriteString(msg.str("content"))
+	bs, err := blocks(msg["content"])
+	if err != nil {
+		return err
+	}
+	for _, b := range bs {
+		if b.Type == "tool_result" {
+			return nil
+		}
+		if b.Type == "text" {
+			text.WriteString(b.Text)
+		}
+	}
+	if strings.TrimSpace(text.String()) != "" {
+		s.context.Prompt, s.context.PromptAt = head(text.String(), textLimit), at
+	}
+	return nil
+}
+
+// head и tail — первые и последние n знаков текста одной строкой.
+func head(s string, n int) string {
+	r := []rune(strings.Join(strings.Fields(s), " "))
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return string(r)
+}
+
+func tail(s string, n int) string {
+	r := []rune(strings.Join(strings.Fields(s), " "))
+	if len(r) > n {
+		return "…" + string(r[len(r)-n:])
+	}
+	return string(r)
 }
 
 // recordTime — метка записи; без метки — нулевое время (запись старше любого процесса).

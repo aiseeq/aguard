@@ -36,13 +36,13 @@ var ErrNoTerminal = errors.New("терминал не Konsole и не tmux")
 // ancestors — сколько родителей проходим в поисках konsole: claude ← cl ← оболочка ← konsole, с запасом.
 const ancestors = 16
 
-// Prompt — поле ввода Claude Code процесса pid по экрану его терминала.
-func (r *Reader) Prompt(pid int) (Prompt, error) {
+// View — поле ввода Claude Code процесса pid и подсказка /clear по экрану его терминала.
+func (r *Reader) View(pid int) (View, error) {
 	lines, err := r.Lines(pid)
 	if err != nil {
-		return Unknown, err
+		return View{Prompt: Unknown}, err
 	}
-	return Parse(lines), nil
+	return Read(lines), nil
 }
 
 // Lines — строки экрана терминала процесса pid. Внутри tmux — его панель (tmux мог быть открыт и в Konsole),

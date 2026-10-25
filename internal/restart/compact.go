@@ -39,7 +39,13 @@ type CompactConfig struct {
 	Interval policy.Duration `toml:"interval"`
 	// Keep — сколько хранить записи «сжал бы» и их сверку.
 	Keep policy.Duration `toml:"keep"`
+	// ResetMinTokens и ResetIdle — с какого контекста и простоя от начала запроса писать «сбросил бы» (reset.go).
+	ResetMinTokens int64           `toml:"reset_min_tokens"`
+	ResetIdle      policy.Duration `toml:"reset_idle"`
 }
+
+// defaultResetTokens — с какого контекста писать «сбросил бы» (задача лида 25.10).
+const defaultResetTokens = 150_000
 
 // cacheTTL1h — сколько живёт кэш подсказки у Claude Code (TTL 1 ч).
 const cacheTTL1h = time.Hour
@@ -54,6 +60,9 @@ func DefaultCompact() CompactConfig {
 		TTYQuiet:  policy.Duration(2 * time.Minute),
 		Interval:  policy.Duration(time.Minute),
 		Keep:      policy.Duration(60 * 24 * time.Hour),
+
+		ResetMinTokens: defaultResetTokens,
+		ResetIdle:      policy.Duration(time.Hour),
 	}
 }
 
@@ -76,6 +85,9 @@ func (c *CompactConfig) Validate() error {
 	if c.TTYQuiet.D() < 0 || c.Keep.D() < 24*time.Hour {
 		return errors.New("compact: tty_quiet не меньше нуля, keep не меньше суток")
 	}
+	if c.ResetMinTokens <= 0 || c.ResetIdle.D() < c.Before.D() {
+		return fmt.Errorf("compact: reset_min_tokens = %d больше нуля, reset_idle = %v не меньше before", c.ResetMinTokens, c.ResetIdle.D())
+	}
 	return nil
 }
 
@@ -91,29 +103,44 @@ type CompactVerdict struct {
 // сессия свободна и перезапуск ничего не потеряет (как для перезапуска, без версии и порога простоя), человек не
 // печатает.
 func decideCompact(f facts, c *CompactConfig, p allowance, now time.Time) CompactVerdict {
-	var v CompactVerdict
+	against, in := idleChecks(f, c, p, idleWindow{c.MinTokens, c.After.D(), c.Before.D(), "окно"}, now)
+	return CompactVerdict{Compact: len(against) == 0, Against: against, InWindow: in}
+}
+
+// idleWindow — когда решать о беседе в простое: контекст от minTokens, последний запрос from…to назад (to 0 — без
+// верхней границы); what — слово для доводов.
+type idleWindow struct {
+	minTokens int64
+	from, to  time.Duration
+	what      string
+}
+
+// idleChecks — доводы против действия над беседой в простое (сжатия или сброса) и в окне ли она: контекст и окно,
+// после запроса не сжимали, сессия свободна, человек не печатает, ничего не идёт и ничего не потеряется.
+func idleChecks(f facts, c *CompactConfig, p allowance, w idleWindow, now time.Time) ([]Reason, bool) {
+	var list []Reason
 	against := func(code, format string, args ...any) {
-		v.Against = append(v.Against, Reason{Code: code, Text: fmt.Sprintf(format, args...)})
+		list = append(list, Reason{Code: code, Text: fmt.Sprintf(format, args...)})
 	}
 	for _, e := range f.Errors {
 		against("error", "не прочитал: %s", e)
 	}
 	if len(f.Errors) > 0 {
-		return v
+		return list, false
 	}
 	ctx := f.Transcript.Context
-	age := now.Sub(ctx.Request)
+	age, in := now.Sub(ctx.Request), false
 	switch {
 	case ctx.Request.IsZero():
 		against("context", "в транскрипте нет запросов")
-	case ctx.Tokens < c.MinTokens:
-		against("tokens", "контекст %d тыс. из %d тыс.", ctx.Tokens/1000, c.MinTokens/1000)
-	case age < c.After.D():
-		against("early", "запрос %s назад, окно с %s", minutes(age), minutes(c.After.D()))
-	case age >= c.Before.D():
-		against("late", "запрос %s назад, окно до %s", minutes(age), minutes(c.Before.D()))
+	case ctx.Tokens < w.minTokens:
+		against("tokens", "контекст %d тыс. из %d тыс.", ctx.Tokens/1000, w.minTokens/1000)
+	case age < w.from:
+		against("early", "запрос %s назад, %s с %s", minutes(age), w.what, minutes(w.from))
+	case w.to > 0 && age >= w.to:
+		against("late", "запрос %s назад, %s до %s", minutes(age), w.what, minutes(w.to))
 	default:
-		v.InWindow = true
+		in = true
 	}
 	if !ctx.Compacted.IsZero() && !ctx.Compacted.Before(ctx.Request) {
 		against("compacted", "уже сжата (%s) после последнего запроса", orDash(ctx.Trigger))
@@ -125,8 +152,7 @@ func decideCompact(f facts, c *CompactConfig, p allowance, now time.Time) Compac
 	inputChecks(f, against)
 	workChecks(f, against)
 	lossChecks(f, p, against)
-	v.Compact = len(v.Against) == 0
-	return v
+	return list, in
 }
 
 // CompactCheck — решение о сжатии и то, что о сессии пишет журнал.
@@ -141,6 +167,15 @@ type CompactCheck struct {
 	CacheRead   int64     `json:"cache_read"` // сколько последний ответ прочитал из кэша
 	Compacted   time.Time `json:"compacted"`  // последнее сжатие
 	Trigger     string    `json:"trigger"`
+	// Pid — процесс сессии: /clear меняет беседу у того же процесса.
+	Pid int `json:"pid"`
+	// Model, Reply, Prompt, PromptAt — модель, итог последнего хода, последняя реплика человека (contextFacts).
+	Model    string    `json:"model"`
+	Reply    string    `json:"reply"`
+	Prompt   string    `json:"prompt"`
+	PromptAt time.Time `json:"prompt_at"`
+	// Reset — сбросил бы беседу (только журнал).
+	Reset ResetVerdict `json:"reset"`
 }
 
 // Compact — решение о сжатии сессии процесса pid; cfg — раздел [restart] (пути claude-hooks и claude, роли), name —
@@ -159,13 +194,18 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProble
 	}
 	ch.mu.Unlock()
 	ctx := f.Transcript.Context
-	v := CompactVerdict{Against: []Reason{{Code: "off", Text: "сжатие выключено в конфиге aguard"}}}
+	off := []Reason{{Code: "off", Text: "сжатие выключено в конфиге aguard"}}
+	v, r := CompactVerdict{Against: off}, ResetVerdict{Against: off}
 	if c.Mode != CompactOff {
 		v = decideCompact(f, c, allowance{role: cfg.roleFor(firstNonEmpty(f.Name, name)), argsProblem: argsProblem}, now)
+		if r = decideReset(f, c, now); r.Reset {
+			treeCheck(&r, p.tree, f.CWD)
+		}
 	}
 	return CompactCheck{
 		CompactVerdict: v, SessionID: f.SessionID, Name: f.Name, SessionKind: f.Kind,
 		Request: ctx.Request, Tokens: ctx.Tokens, CacheRead: ctx.CacheRead, Compacted: ctx.Compacted, Trigger: ctx.Trigger,
+		Pid: pid, Model: ctx.Model, Reply: ctx.Reply, Prompt: ctx.Prompt, PromptAt: ctx.PromptAt, Reset: r,
 	}
 }
 

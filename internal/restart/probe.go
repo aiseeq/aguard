@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -50,6 +51,8 @@ type facts struct {
 	// Prompt — поле ввода по экрану терминала; PromptErr — почему экран не прочитался.
 	Prompt    screen.Prompt
 	PromptErr string
+	// ClearHint — под полем ввода подсказка Claude Code «/clear to save»: для него работа похожа на законченную.
+	ClearHint bool
 	// Errors — что не прочиталось; любое — сомнение, не перезапускать.
 	Errors []string
 }
@@ -61,8 +64,10 @@ type paths struct {
 	hookStates string // состояния claude-hooks (internal/core/state.go: $XDG_RUNTIME_DIR/claude-hooks/sessions)
 	proc       string
 	claude     string // claude из PATH
-	// prompt — поле ввода процесса по экрану его терминала (screen.Reader.Prompt).
-	prompt func(pid int) (screen.Prompt, error)
+	// view — поле ввода и подсказка сброса по экрану терминала процесса (screen.Reader.View).
+	view func(pid int) (screen.View, error)
+	// tree — незакоммиченное в git-дереве папки (gitStatus); спрашивается только для решения о сбросе.
+	tree func(dir string) ([]string, error)
 }
 
 // pathsFor — пути живой машины: реестр и транскрипты в home, остальное — из раздела [restart].
@@ -73,8 +78,24 @@ func pathsFor(home string, cfg *Config) paths {
 		hookStates: cfg.HookStates,
 		proc:       "/proc",
 		claude:     cfg.Claude,
-		prompt:     screen.NewReader().Prompt,
+		view:       screen.NewReader().View,
+		tree:       gitStatus,
 	}
+}
+
+// gitStatus — строки `git status --porcelain` папки: изменённые и новые файлы; пусто — дерево чистое.
+func gitStatus(dir string) ([]string, error) {
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git status %s: %w", dir, err)
+	}
+	var dirty []string
+	for l := range strings.Lines(string(out)) {
+		if l = strings.TrimSpace(l); l != "" {
+			dirty = append(dirty, l)
+		}
+	}
+	return dirty, nil
 }
 
 func readSession(file string) (session, error) {
@@ -157,9 +178,11 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 	if f.Children, err = descendants(p.proc, pid); err != nil {
 		fail(err)
 	}
-	if f.Prompt, err = p.prompt(pid); err != nil {
+	v, err := p.view(pid)
+	if err != nil {
 		f.PromptErr = err.Error()
 	}
+	f.Prompt, f.ClearHint = v.Prompt, v.ClearHint
 }
 
 // hookRecord — запись claude-hooks о сессии.

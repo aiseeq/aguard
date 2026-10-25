@@ -36,7 +36,8 @@ func newSessionWorld(t *testing.T, at worldTimes, transcript ...string) sessionW
 		hookStates: filepath.Join(dir, "hooks"),
 		proc:       filepath.Join(dir, "proc"),
 		claude:     filepath.Join(dir, "bin", "claude"),
-		prompt:     func(int) (screen.Prompt, error) { return screen.Empty, nil },
+		view:       func(int) (screen.View, error) { return screen.View{Prompt: screen.Empty}, nil },
+		tree:       func(string) ([]string, error) { return nil, nil },
 	}}
 	turn := at.now.Add(-at.turnAgo)
 	write(t, filepath.Join(dir, "versions", "2.1.310"), "#!/bin/sh\n")

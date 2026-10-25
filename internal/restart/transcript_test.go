@@ -135,7 +135,7 @@ func TestScanTranscriptBrokenLine(t *testing.T) {
 }
 
 func answer(ts, sidechain string, input, cacheRead, cacheWrite, output int) string {
-	return `{"type":"assistant","isSidechain":` + sidechain + `,"timestamp":"` + ts + `","message":{"content":[{"type":"text","text":"ok"}],` +
+	return `{"type":"assistant","isSidechain":` + sidechain + `,"timestamp":"` + ts + `","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"ok"}],` +
 		`"usage":{"input_tokens":` + itoa(input) + `,"cache_read_input_tokens":` + itoa(cacheRead) +
 		`,"cache_creation_input_tokens":` + itoa(cacheWrite) + `,"output_tokens":` + itoa(output) + `}}}`
 }
@@ -149,13 +149,16 @@ func TestScanTranscriptContext(t *testing.T) {
 	f := scanLines(t, since, since.Add(5*time.Hour),
 		`{"type":"user","timestamp":"`+tsOld+`","message":{"content":"привет"}}`,
 		answer("2026-10-24T08:00:30.000Z", "false", 3, 0, 5000, 100),
-		`{"type":"user","timestamp":"2026-10-24T08:10:00.000Z","message":{"content":"дальше"}}`,
+		`{"type":"user","timestamp":"2026-10-24T08:05:00.000Z","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"вывод"}]}}`,
+		`{"type":"user","isMeta":true,"timestamp":"2026-10-24T08:06:00.000Z","message":{"content":"служебное"}}`,
+		`{"type":"user","timestamp":"2026-10-24T08:10:00.000Z","message":{"content":[{"type":"text","text":"дальше,\n  по плану"}]}}`,
 		answer("2026-10-24T08:12:00.000Z", "false", 2, 120000, 3000, 900),
 		answer("2026-10-24T08:12:01.000Z", "false", 2, 120000, 3000, 1000), // тот же ответ, следующий блок
 		`{"type":"user","isSidechain":true,"timestamp":"2026-10-24T08:20:00.000Z","message":{"content":"суб-агент"}}`,
 		answer("2026-10-24T08:21:00.000Z", "true", 5, 0, 900000, 10),
 	)
-	want := contextFacts{Request: mustTime(t, "2026-10-24T08:10:00Z"), Tokens: 2 + 120000 + 3000 + 1000, CacheRead: 120000}
+	want := contextFacts{Request: mustTime(t, "2026-10-24T08:10:00Z"), Tokens: 2 + 120000 + 3000 + 1000, CacheRead: 120000,
+		Model: "claude-opus-5-5", Reply: "ok", Prompt: "дальше, по плану", PromptAt: mustTime(t, "2026-10-24T08:10:00Z")}
 	if f.Context != want {
 		t.Errorf("запрос: %+v, ждали %+v", f.Context, want)
 	}

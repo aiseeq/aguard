@@ -21,35 +21,57 @@ type Summary struct {
 
 // Report — сводка журнала: решения, доводы против и исходы.
 type Report struct {
-	Decisions map[string]int `json:"decisions"` // would, would_not
+	Decisions map[string]int `json:"decisions"` // would, would_not, would_reset, would_not_reset
+	// Held — по решению: сколько контекста держали беседы и во что обошёлся бы следующий запрос при мёртвом кэше.
+	Held map[string]Tally `json:"held"`
 	// Against — would_not по доводу: сколько раз довод был среди причин.
 	Against map[string]int `json:"against"`
+	// ResetAgainst — то же для would_not_reset.
+	ResetAgainst map[string]int `json:"reset_against"`
 	// Outcomes — по «решение/исход»: сколько и сколько токенов контекста.
 	Outcomes map[string]Tally `json:"outcomes"`
 	Bad      int              `json:"bad"` // нечитаемые строки журнала
 }
 
-// Tally — число исходов и сумма контекста в них.
+// Tally — число записей, сумма контекста в них и оценка запись кэша заново (rewrite_micro_usd записей) в миллионных
+// долях доллара.
 type Tally struct {
-	Count  int   `json:"count"`
-	Tokens int64 `json:"tokens"`
+	Count    int   `json:"count"`
+	Tokens   int64 `json:"tokens"`
+	MicroUSD int64 `json:"micro_usd"`
 }
+
+func (t *Tally) add(rec *Record) {
+	t.Count++
+	t.Tokens += rec.Tokens
+	t.MicroUSD += rec.RewriteMicroUSD
+}
+
+// dollars — миллионные доли доллара в долларах для печати.
+func dollars(micro int64) float64 { return float64(micro) / 1e6 }
 
 // Collect — сводка по записям, которые read отдаёт в fn.
 func Collect(read func(fn func(*Record)) (int, error)) (*Report, error) {
-	r := &Report{Decisions: map[string]int{}, Against: map[string]int{}, Outcomes: map[string]Tally{}}
+	r := &Report{Decisions: map[string]int{}, Held: map[string]Tally{}, Against: map[string]int{}, ResetAgainst: map[string]int{},
+		Outcomes: map[string]Tally{}}
 	bad, err := read(func(rec *Record) {
 		switch rec.Kind {
-		case KindWould, KindWouldNot:
+		case KindWould, KindWouldNot, KindWouldReset, KindWouldNotReset:
 			r.Decisions[rec.Kind]++
+			t := r.Held[rec.Kind]
+			t.add(rec)
+			r.Held[rec.Kind] = t
+			against := r.Against
+			if rec.Kind == KindWouldNotReset {
+				against = r.ResetAgainst
+			}
 			for _, a := range rec.Against {
-				r.Against[a]++
+				against[a]++
 			}
 		case KindOutcome:
 			key := rec.Decision + "/" + rec.Outcome
 			t := r.Outcomes[key]
-			t.Count++
-			t.Tokens += rec.Tokens
+			t.add(rec)
 			r.Outcomes[key] = t
 		}
 	})
@@ -61,12 +83,17 @@ func Collect(read func(fn func(*Record)) (int, error)) (*Report, error) {
 func (r *Report) Print(w io.Writer) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "сжал бы: %d, не стал бы: %d\n", r.Decisions[KindWould], r.Decisions[KindWouldNot])
+	fmt.Fprintf(&b, "сбросил бы: %d (контекст %d тыс., запись заново $%.2f), не стал бы: %d\n", r.Decisions[KindWouldReset],
+		r.Held[KindWouldReset].Tokens/1000, dollars(r.Held[KindWouldReset].MicroUSD), r.Decisions[KindWouldNotReset])
 	for _, code := range slices.Sorted(maps.Keys(r.Against)) {
-		fmt.Fprintf(&b, "  против %s: %d\n", code, r.Against[code])
+		fmt.Fprintf(&b, "  против сжатия %s: %d\n", code, r.Against[code])
+	}
+	for _, code := range slices.Sorted(maps.Keys(r.ResetAgainst)) {
+		fmt.Fprintf(&b, "  против сброса %s: %d\n", code, r.ResetAgainst[code])
 	}
 	for _, key := range slices.Sorted(maps.Keys(r.Outcomes)) {
 		t := r.Outcomes[key]
-		fmt.Fprintf(&b, "исход %s: %d, контекст %d тыс. токенов\n", key, t.Count, t.Tokens/1000)
+		fmt.Fprintf(&b, "исход %s: %d, контекст %d тыс. токенов, $%.2f\n", key, t.Count, t.Tokens/1000, dollars(t.MicroUSD))
 	}
 	if r.Bad > 0 {
 		fmt.Fprintf(&b, "нечитаемых строк: %d\n", r.Bad)
