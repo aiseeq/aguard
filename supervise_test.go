@@ -33,7 +33,7 @@ exec sleep 25`)
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
 	l := launcher{systemdRun: run, claude: w.p.claude, home: d, configFile: filepath.Join(d, "config.json"), paths: w.p, name: "x-master"}
 
-	code := l.supervise(append(sessionFlags(), "-n", "x-master"), []string{"--model", "opus", "--effort=high"})
+	code := l.supervise(append(sessionFlags(d), "-n", "x-master"), []string{"--model", "opus", "--effort=high"})
 	if code != 3 {
 		t.Errorf("код выхода cl = %d, want 3 (код второго запуска)", code)
 	}

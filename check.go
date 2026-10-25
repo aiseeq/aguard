@@ -39,7 +39,7 @@ func runCheck(l launcher) int {
 		f := probe(l.paths, &scanCache{}, s.PID, now)
 		problem := "командная строка процесса не прочиталась"
 		if args, err := cmdlineArgs(l.paths.proc, s.PID); err == nil {
-			_, problem = restartArgs(args)
+			_, problem = restartArgs(withoutOwnFlags(args, l.home))
 		}
 		v := l.verdict(cfg, f, problem)
 		line := "check " + journalLine(cfg.Restart.Mode, s.Name, s.PID, f, v)
@@ -47,6 +47,19 @@ func runCheck(l launcher) int {
 		journal(cfg.Restart.Journal, now, line)
 	}
 	return 0
+}
+
+// withoutOwnFlags — командная строка процесса без флагов, которые cl ставит сам (sessionFlags): перезапуск поставит их
+// заново, а restartArgs судит только об аргументах пользователя.
+func withoutOwnFlags(args []string, home string) []string {
+	own := sessionFlags(home)
+	var user []string
+	for _, a := range args {
+		if !slices.Contains(own, a) {
+			user = append(user, a)
+		}
+	}
+	return user
 }
 
 // cmdlineArgs — аргументы claude живого процесса (без самой программы).

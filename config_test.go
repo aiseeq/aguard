@@ -35,6 +35,16 @@ func TestRestartArgs(t *testing.T) {
 	if keep, problem := restartArgs([]string{"--resume", "abc", "--chrome"}); problem != "" || !slices.Equal(keep, []string{"--chrome"}) {
 		t.Errorf("--resume со значением: %q %q", keep, problem)
 	}
+	// Командная строка сессии, запущенной cl: свои флаги cl не держат перезапуск и не повторяются дважды.
+	home := t.TempDir()
+	worktrees := filepath.Join(home, ".cache", "worktrees")
+	if err := os.MkdirAll(worktrees, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmdline := append(sessionFlags(home), "-n", "lead", "--model", "opus", "Ты лид")
+	if keep, problem := restartArgs(withoutOwnFlags(cmdline, home)); problem != "" || !slices.Equal(keep, []string{"--model", "opus"}) {
+		t.Errorf("свои флаги cl: keep %q problem %q", keep, problem)
+	}
 	if !bare(nil) || !bare([]string{"-n", "x"}) || !bare([]string{"--name=x"}) || bare([]string{"-c"}) || bare([]string{"привет"}) {
 		t.Error("bare")
 	}
