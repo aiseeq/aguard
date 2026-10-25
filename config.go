@@ -16,6 +16,8 @@ import (
 const (
 	modeLog = "log"
 	modeAct = "act"
+	// modeOff — только для compact_mode: не сжимать и не писать «сжал бы».
+	modeOff = "off"
 )
 
 // Когда роль говорит строку при обычном старте (при перезапуске cl она говорит всегда).
@@ -44,6 +46,10 @@ type restartConfig struct {
 	Journal      string `json:"journal"`
 	ResumeDir    string `json:"resume_dir"`
 	ResumeHours  int    `json:"resume_max_age_hours"`
+	// CompactMode — сжатие беседы по вердикту aguard: log — «сжал бы» в журнал, act — сжать, off — молчать.
+	CompactMode string `json:"compact_mode"`
+	// CompactNames — в act сжимать только сессии с подходящим именем (path.Match), для пилота; пусто — все.
+	CompactNames []string `json:"compact_names"`
 }
 
 // role — строка роли для сессий с подходящим именем.
@@ -67,6 +73,7 @@ func defaultConfig(home string) config {
 		Journal:      filepath.Join(home, ".local", "state", "cl", "restart.log"),
 		ResumeDir:    filepath.Join(home, ".claude", "restart"),
 		ResumeHours:  24,
+		CompactMode:  modeLog,
 	}}
 }
 
@@ -87,6 +94,9 @@ func loadConfig(file, home string) (config, error) {
 	if cfg.Restart.Mode != modeLog && cfg.Restart.Mode != modeAct {
 		return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.mode %q, нужно %q или %q", file, cfg.Restart.Mode, modeLog, modeAct)
 	}
+	if m := cfg.Restart.CompactMode; m != modeOff && m != modeLog && m != modeAct {
+		return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.compact_mode %q, нужно %q, %q или %q", file, m, modeOff, modeLog, modeAct)
+	}
 	cfg.Restart.Journal = expand(cfg.Restart.Journal, home)
 	cfg.Restart.ResumeDir = expand(cfg.Restart.ResumeDir, home)
 	return cfg, nil
@@ -101,13 +111,32 @@ func (c restartConfig) interval() time.Duration {
 	return time.Duration(max(c.CheckSeconds, 10)) * time.Second
 }
 
+// compactAct — сжимать ли сессию с этим именем всерьёз: режим act и имя в пилоте (или пилот не задан).
+func (c restartConfig) compactAct(name string) bool {
+	if c.CompactMode != modeAct {
+		return false
+	}
+	if len(c.CompactNames) == 0 {
+		return true
+	}
+	return matchAny(c.CompactNames, name)
+}
+
+// matchAny — имя подходит к одному из шаблонов path.Match.
+func matchAny(patterns []string, name string) bool {
+	for _, pattern := range patterns {
+		if ok, err := path.Match(pattern, name); err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
 // roleFor — первая роль, шаблон которой подходит к имени сессии.
 func (c config) roleFor(name string) (role, bool) {
 	for _, r := range c.Roles {
-		for _, pattern := range r.Names {
-			if ok, err := path.Match(pattern, name); err == nil && ok {
-				return r, true
-			}
+		if matchAny(r.Names, name) {
+			return r, true
 		}
 	}
 	return role{}, false

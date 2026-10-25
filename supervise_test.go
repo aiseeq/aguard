@@ -72,3 +72,85 @@ func TestExitCode(t *testing.T) {
 		t.Errorf("SIGTERM: %d", got)
 	}
 }
+
+// Сжатие в режиме act целиком, со сбоем сжатия: версия свежая (перезапуска нет), aguard отвечает «сжать». cl шлёт
+// SIGTERM, запускает `claude -p --resume s1 /compact` — оно падает, — и всё равно поднимает беседу с теми же флагами,
+// без строки роли (таймеров не было); в журнале — «сжимаю» и «не сжалось … поднимаю без сжатия».
+func TestSuperviseCompact(t *testing.T) {
+	w := newSessionWorld(t, worldTimes{now: time.Now(), turnAgo: 10 * time.Minute, ttyAgo: 20 * time.Minute})
+	w.setRunning(t, "2.1.310")
+	d := w.dir
+	write(t, filepath.Join(d, "config.json"), `{"restart":{"mode":"act","idle_minutes":1,"check_seconds":10,`+
+		`"journal":"`+filepath.Join(d, "restart.log")+`","resume_dir":"`+filepath.Join(d, "restart")+`",`+
+		`"compact_mode":"act","compact_names":["x-*"]},`+
+		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"always"}]}`)
+	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
+		`if [ -e "$D/run2" ]; then printf '%s\n' "$@" > "$D/run3"; exit 3; fi
+if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; echo 'API Error: overloaded'; exit 1; fi
+printf '%s\n' "$@" > "$D/run1"
+ln -s "$D/proc-tmpl" "$D/proc/$$" && ln -s "$D/session.json" "$D/sessions/$$.json"
+exec sleep 25`)
+	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
+	socket := fakeAguard(t, `{"v":1,"restart":false,"fresh":true,"key":"fresh","session_id":"s1","name":"x-master",`+
+		`"compact":true,"compact_key":"true","tokens":150000}`)
+	l := launcher{systemdRun: run, claude: w.p.claude, home: d, configFile: filepath.Join(d, "config.json"), paths: w.p,
+		aguard: socket, name: "x-master"}
+
+	if code := l.supervise(append(sessionFlags(d), "-n", "x-master"), []string{"--model", "opus"}); code != 3 {
+		t.Errorf("код выхода cl = %d, want 3 (код подъёма)", code)
+	}
+	pid := strconv.Itoa(os.Getpid())
+	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice"}
+	own := sessionFlags(d)
+	compact := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-c1", "--", w.p.claude), own...),
+		"--model", "opus", "-p", "--resume", "s1", "/compact")
+	journalText := strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n")
+	if _, err := os.Stat(filepath.Join(d, "run3")); err != nil {
+		t.Fatalf("подъёма нет: %v; журнал:\n%s", err, journalText)
+	}
+	if got := readLines(t, filepath.Join(d, "run2")); !slices.Equal(got, compact) {
+		t.Errorf("сжатие:\n%q\nwant\n%q", got, compact)
+	}
+	resume := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-r1", "--", w.p.claude), own...),
+		"-n", "x-master", "--model", "opus", "--resume", "s1")
+	if got := readLines(t, filepath.Join(d, "run3")); !slices.Equal(got, resume) {
+		t.Errorf("подъём:\n%q\nwant\n%q", got, resume)
+	}
+	for _, want := range []string{"act: сжимаю: контекст 150 тыс.", "не сжалось (exit status 1: API Error: overloaded) — поднимаю без сжатия"} {
+		if !strings.Contains(journalText, want) {
+			t.Errorf("в журнале нет %q:\n%s", want, journalText)
+		}
+	}
+}
+
+// wantCompact: log и act вне пилота — «сжал бы» один раз на решение; ответ о другой беседе — не сжимать; таймеры —
+// подъём со строкой роли.
+func TestWantCompact(t *testing.T) {
+	cfg := defaultConfig(t.TempDir())
+	l := launcher{name: "x-master"}
+	f := facts{session: session{SessionID: "s1", Name: "x-master"}}
+	a := aguardAnswer{SessionID: "s1", Compact: true, CompactKey: "true", Tokens: 120_000}
+	out, line, key := l.wantCompact(cfg, 7, f, a, "")
+	if out.restart || !strings.Contains(line, "log: сжал бы: контекст 120 тыс.") {
+		t.Errorf("log: %+v %q", out, line)
+	}
+	if _, line, _ := l.wantCompact(cfg, 7, f, a, key); line != "" {
+		t.Errorf("повтор того же решения: %q", line)
+	}
+	cfg.Restart.CompactMode, cfg.Restart.CompactNames = modeAct, []string{"lead"}
+	if out, line, _ := l.wantCompact(cfg, 7, f, a, key); out.restart || !strings.Contains(line, "сжал бы (не в compact_names)") {
+		t.Errorf("вне пилота: %+v %q", out, line)
+	}
+	cfg.Restart.CompactNames = nil
+	if out, line, _ := l.wantCompact(cfg, 7, f, aguardAnswer{SessionID: "s2", Compact: true}, ""); out.restart || !strings.Contains(line, "не сжимаю") {
+		t.Errorf("другая беседа: %+v %q", out, line)
+	}
+	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон"}}
+	if out, _, _ := l.wantCompact(cfg, 7, f, a, ""); !out.restart || !out.compact || !out.crons || out.sessionID != "s1" {
+		t.Errorf("act: %+v", out)
+	}
+	cfg.Restart.CompactMode = modeOff
+	if out, line, _ := l.wantCompact(cfg, 7, f, a, ""); out.restart || line != "" {
+		t.Errorf("off: %+v %q", out, line)
+	}
+}

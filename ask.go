@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,12 @@ type aguardAnswer struct {
 	Running   string         `json:"running"`
 	Installed string         `json:"installed"`
 	Error     string         `json:"error"`
+	// Compact — сжать беседу сейчас (кэш ещё жив, сессия свободна, поле ввода пустое по экрану); CompactAgainst —
+	// почему нет, CompactKey — решение без чисел, Tokens — контекст последнего ответа.
+	Compact        bool           `json:"compact"`
+	CompactAgainst []aguardReason `json:"compact_against"`
+	CompactKey     string         `json:"compact_key"`
+	Tokens         int64          `json:"tokens"`
 }
 
 // aguardSocket — сокет aguard: $XDG_RUNTIME_DIR/aguard/aguard.sock.
@@ -90,6 +97,21 @@ func askAguard(socket string, req aguardRequest) (aguardAnswer, error) {
 		return aguardAnswer{}, errors.New("aguard: " + a.Error)
 	}
 	return a, nil
+}
+
+// compactNote — вердикт aguard о сжатии для --cl-check: « сжатие: да» или « сжатие: нет (коды доводов)».
+func compactNote(a aguardAnswer, err error) string {
+	switch {
+	case err != nil:
+		return ""
+	case a.Compact:
+		return fmt.Sprintf("; сжатие: да, контекст %d тыс.", a.Tokens/1000)
+	}
+	codes := make([]string, len(a.CompactAgainst))
+	for i, r := range a.CompactAgainst {
+		codes[i] = r.Code
+	}
+	return "; сжатие: нет (" + strings.Join(codes, ", ") + ")"
 }
 
 // compareLine — сверка своего вердикта с ответом aguard на время перехода (строка журнала сверки).

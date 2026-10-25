@@ -5,7 +5,9 @@
     "check_seconds": 60,
     "journal": "~/.local/state/cl/restart.log",
     "resume_dir": "~/.claude/restart",
-    "resume_max_age_hours": 24
+    "resume_max_age_hours": 24,
+    "compact_mode": "log",
+    "compact_names": []
   },
   "roles": [
     {

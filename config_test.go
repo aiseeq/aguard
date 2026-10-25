@@ -102,6 +102,12 @@ func TestLoadConfig(t *testing.T) {
 	if cfg, err := loadConfig(file, "/home/u"); err == nil || cfg.Restart.Mode != modeLog {
 		t.Errorf("неизвестный режим — ошибка и журнал: %+v %v", cfg.Restart, err)
 	}
+	if err := os.WriteFile(file, []byte(`{"restart":{"mode":"log","compact_mode":"yes"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := loadConfig(file, "/home/u"); err == nil || cfg.Restart.CompactMode != modeLog {
+		t.Errorf("неизвестный режим сжатия — ошибка и журнал: %+v %v", cfg.Restart, err)
+	}
 }
 
 // Конфиг репо (его ставят в ~/.config/cl) читается и даёт лиду строку роли с восстановимыми Сном и Дайджестом.
