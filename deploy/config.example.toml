@@ -1,0 +1,45 @@
+# tmpguard: ~/.config/tmpguard/config.toml. Перечитывается каждый проход.
+# Размеры: "500K", "5MB", "1G" (двоичные). Длительности: "5m", "72h".
+
+# observe — ничего не шлёт, пишет в журнал, кому и что отправил бы;
+# alert — шлёт сводки в сессии Claude Code.
+# alert с 20.10 23:25 после суток наблюдения 19.10 23:11 – 20.10 23:17 (290 проходов)
+mode = "alert"
+interval = "5m"
+lead = "lead"
+
+# comm бойцов в цепочке между создателем и сессией (claude здесь — это claude -p
+# под сессией; сама сессия бойцом не считается)
+fighters = ["opencode", "opencode.exe", "codex", "claude"]
+
+# шаблоны путей, которые не учитываются вовсе (filepath.Match)
+ignore = ["/tmp/.X11-unix", "/tmp/.ICE-unix", "/tmp/.font-unix", "/tmp/cc-socks"]
+
+[policy]
+min_entry = "1MB"      # записи <1 МБ: 10351 из 10376 живых, всего 36 МБ — шум, не учитываем
+min_owner = "5MB"      # владельцы 1–5 МБ: 13 записей, 30 МБ всего; крупнее — уже заметно в tmpfs 16 ГБ
+# порог меры «размер × время» на владельца, ГБ·мин (100 = 1 ГБ на 100 мин ≈ 100 МБ на 17 ч ≈ 14 МБ на 5 сут):
+budget_gb_min = 100    # сутки: закрытые ≤3.8, живые хвосты ≤34 (demu go-build 77 МБ), выброс git-admin 736 (1.4 ГБ, 9 ч); 100 ≈ 3× нормы
+max_listed = 15        # строк в сводке
+
+[pressure]
+# под давлением памяти порог умножается на factor
+psi_some_avg60 = 5.0   # /proc/pressure/memory, some avg60, %
+swap_used_pct = 50.0   # занятый своп, %
+factor = 0.5           # под давлением был 1 проход из 290 (22:11); ×0.5 → 50 ГБ·мин, выше нормальных 34 (×0.25 дало бы 25 — ложные)
+
+[escalation]
+after_summaries = 2    # не убрано за столько сводок — ступень выше
+top_repeat = "30m"     # верхней ступени (лиду) повтор не чаще
+
+[escalation.admins]    # префикс cwd сессии-создателя -> админ пространства
+"~/work" = "work-admin"
+"~/git" = "git-admin"
+
+[cache]
+# общие кеши без владельца: сводка размера и возраста в отчёте;
+# больше max — чистка файлов старше clean_older (только в режиме alert)
+paths = ["/tmp/.cache", "/tmp/node-compile-cache", "/tmp/claude-tmp/node-compile-cache", "/tmp/playwright-transform-cache-*", "/tmp/jest_rs"]
+max = "1G"             # общие кеши сейчас 13 МБ (2 шт.), чистка только при выбросе в 80 раз
+clean_older = "72h"
+clean = true

@@ -1,0 +1,34 @@
+# procguard: ~/.config/procguard/config.toml. Перечитывается каждый проход.
+# Сирота — свой процесс, у которого CLAUDE_PID в окружении указывает на мёртвую
+# сессию (pid нет или его занял процесс моложе самого раннего процесса сессии).
+# Снимается дерево: корень-сирота и все его потомки по ppid.
+
+# observe — ничего не снимает и не шлёт: журнал ~/.local/state/procguard/journal.log,
+#           строка «снял бы» по разу на дерево;
+# act     — SIGTERM всему дереву, через term_wait SIGKILL оставшимся; контейнер podman — podman stop.
+mode = "observe"
+interval = "5m"
+min_dead = "1h"    # сколько процесс должен прожить после смерти сессии (отсчёт — с момента, когда смерть замечена)
+term_wait = "30s"
+lead = "lead"
+
+[notify.admins]    # префикс cwd сессии -> админ пространства; остальное — лиду
+"~/work" = "work-admin"
+"~/git" = "git-admin"
+
+[notify.mute_until] # префикс cwd -> дата, до которой сводок нет, только журнал
+"~/work" = "2026-10-26"
+
+# Исключения: поля одной записи должны совпасть все (comm — regexp целиком,
+# args — regexp-поиск по командной строке, cwd — префикс cwd процесса,
+# session — CLAUDE_CODE_SESSION_ID, until — после этой даты не действует).
+# Совпал любой процесс дерева — дерево не трогаем. Сервисы (*.service в cgroup),
+# деревья под живой claude и с claude внутри не трогаются и без исключений.
+
+[[exclude]]
+comm = "catatonit"
+reason = "pause-процесс rootless podman: держит namespace всех контейнеров"
+
+[[exclude]]
+comm = "chrome|chromium|firefox|konsole|dolphin|okular|gwenview|kate|code"
+reason = "GUI-приложение, запущенное из сессии: окно пользователя"
