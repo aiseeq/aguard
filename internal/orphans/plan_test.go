@@ -77,6 +77,25 @@ func TestLiveSessionNotOrphan(t *testing.T) {
 	}
 }
 
+// Ячейка фермы (24.10): claude в песочнице bwrap --unshare-pid, CLAUDE_PID=12 — pid внутри;
+// на хосте pid 12 нет, но сессия жива, пока жив claude песочницы.
+func TestSandboxSessionAlive(t *testing.T) {
+	inNS := func(p *proc.Proc, ns uint64, nspid ...int) *proc.Proc {
+		p.PidNS, p.NSpid = ns, nspid
+		return p
+	}
+	claude := inNS(mkProc(900, 899, "claude", 1, 0), 7, 900, 12)
+	tank := inNS(mkProc(2963, 899, "outcome-tank", 2, 12), 7, 2963, 40) // отвязан от claude, родитель — bwrap
+	if trees := Plan(snap(claude, tank), testCfg(t), map[string]time.Time{}); len(trees) != 0 {
+		t.Fatalf("сессия песочницы жива: %+v", trees)
+	}
+	other := mkProc(12, 2, "kworker", 0, 0) // pid 12 хоста — поток ядра старше сироты
+	other.UID = 0
+	if tr := only(t, Plan(snap(other, tank), testCfg(t), map[string]time.Time{})); tr.Session.Pid != 12 {
+		t.Fatalf("claude песочницы умер — сирота: %+v", tr)
+	}
+}
+
 func TestReusedPidMeansDead(t *testing.T) {
 	seen := map[string]time.Time{}
 	s := snap(

@@ -90,11 +90,12 @@ func Plan(s *proc.Snapshot, cfg *Config, seen map[string]time.Time) []Tree {
 	return trees
 }
 
-// deadSessions — сессии, которых нет: процесса с pid CLAUDE_PID нет или он
-// стартовал позже самого раннего процесса этой сессии (pid переиспользован —
-// сессия старше любого своего потомка).
+// deadSessions — сессии, которых нет: процесса с pid CLAUDE_PID нет (в pid namespace
+// процесса — песочница bwrap, контейнер — и на хосте) или он стартовал позже самого
+// раннего процесса этой сессии (pid переиспользован — сессия старше любого своего потомка).
 func deadSessions(s *proc.Snapshot) map[SessionKey]deadSession {
 	first := map[SessionKey]uint64{}
+	holders := map[SessionKey]*proc.Proc{}
 	for _, p := range s.Procs {
 		if p.Session == 0 {
 			continue
@@ -103,12 +104,15 @@ func deadSessions(s *proc.Snapshot) map[SessionKey]deadSession {
 		if v, ok := first[k]; !ok || p.Start < v {
 			first[k] = p.Start
 		}
+		if holders[k] == nil {
+			holders[k] = s.Holder(p)
+		}
 	}
 	out := map[SessionKey]deadSession{}
 	for k, start := range first {
-		holder, ok := s.Procs[k.Pid]
+		holder := holders[k]
 		switch {
-		case !ok:
+		case holder == nil:
 			out[k] = deadSession{}
 		case holder.Start > start:
 			out[k] = deadSession{reusedAt: holder.StartAt}
