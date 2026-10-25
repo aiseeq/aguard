@@ -37,7 +37,7 @@ type AlertState struct {
 	LastSent   time.Time `json:"last_sent"`
 }
 
-// UserState — состояние эскалации, хранится в ~/.local/state/tmpguard/state.json.
+// UserState — состояние эскалации, хранится в ~/.local/state/aguard/tmp/state.json.
 type UserState struct {
 	Mode   string                 `json:"mode"`
 	Alerts map[string]*AlertState `json:"alerts"`

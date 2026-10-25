@@ -141,7 +141,7 @@ func ReadState(path string) (*State, error) {
 		return &State{}, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("снимок: %w", err)
 	}
 	var s State
 	if err := json.Unmarshal(b, &s); err != nil {
@@ -155,23 +155,24 @@ func ReadState(path string) (*State, error) {
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
-		return err
+		return fmt.Errorf("запись %s: %w", path, err)
 	}
 	name := tmp.Name()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(name)
-		return err
+	_, err = tmp.Write(data)
+	err = errors.Join(err, tmp.Close())
+	if err == nil {
+		err = os.Chmod(name, perm)
 	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(name)
-		return err
+	if err == nil {
+		err = os.Rename(name, path)
 	}
-	if err := os.Chmod(name, perm); err != nil {
-		_ = os.Remove(name)
-		return err
+	if err != nil {
+		if rerr := os.Remove(name); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			err = errors.Join(err, rerr)
+		}
+		return fmt.Errorf("запись %s: %w", path, err)
 	}
-	return os.Rename(name, path)
+	return nil
 }
 
 // ParseEvents разбирает owners.jsonl. Битые строки (например, оборванная
@@ -195,21 +196,27 @@ func ParseEvents(r io.Reader, fn func(Event)) (bad int, err error) {
 }
 
 // ReadEventFiles читает журнал вместе с ротированной частью (сначала старую).
+// Нечитаемый файл не мешает прочитать второй: ошибки возвращаются вместе.
 func ReadEventFiles(dir string, fn func(Event)) (bad int, err error) {
+	var errs []error
 	for _, name := range []string{RotatedOwner, OwnersFile} {
-		f, err := os.Open(filepath.Join(dir, name))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return bad, err
-		}
-		b, perr := ParseEvents(f, fn)
-		_ = f.Close()
+		b, ferr := readEventFile(filepath.Join(dir, name), fn)
 		bad += b
-		if perr != nil {
-			return bad, fmt.Errorf("%s: %w", name, perr)
+		if ferr != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, ferr))
 		}
 	}
-	return bad, nil
+	return bad, errors.Join(errs...)
+}
+
+func readEventFile(path string, fn func(Event)) (int, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("журнал: %w", err)
+	}
+	defer f.Close()
+	return ParseEvents(f, fn)
 }

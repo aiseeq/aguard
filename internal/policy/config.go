@@ -1,4 +1,4 @@
-// Package policy — чистая логика user-части tmpguard: конфиг, классы
+// Package policy — чистая логика наблюдателя tmp (бывший tmpguard): конфиг, классы
 // создателей, учёт «размер × время» по владельцам, адресат и эскалация,
 // сборка текста сводки.
 package policy
@@ -6,13 +6,11 @@ package policy
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/BurntSushi/toml"
 )
 
 // Режимы работы.
@@ -71,25 +69,26 @@ func (d *Duration) UnmarshalText(b []byte) error {
 // D — значение как time.Duration.
 func (d Duration) D() time.Duration { return time.Duration(d) }
 
-// Config — ~/.config/tmpguard/config.toml.
+// Config — раздел [tmp] конфига aguard. Lead, SendAuth и Escalation.Admins —
+// общие для всего конфига, их подставляет загрузчик aguard.
 type Config struct {
 	Mode     string   `toml:"mode"`
 	Interval Duration `toml:"interval"`
 	TrackDir string   `toml:"track_state_dir"` // owners.jsonl и долговременный снимок
 	RunDir   string   `toml:"track_run_dir"`   // частый снимок state.json
-	Lead     string   `toml:"lead"`            // имя сессии лида
+	Lead     string   `toml:"-"`               // имя сессии лида
 	Fighters []string `toml:"fighters"`        // comm бойцов в цепочке до сессии
 	Ignore   []string `toml:"ignore"`          // шаблоны путей, которые не учитываются
-	SendAuth bool     `toml:"send_auth"`       // слать токен peerToken первой строкой
+	SendAuth bool     `toml:"-"`               // слать токен peerToken первой строкой
 
-	Policy     PolicyConfig     `toml:"policy"`
+	Policy     LimitsConfig     `toml:"policy"`
 	Pressure   PressureConfig   `toml:"pressure"`
 	Escalation EscalationConfig `toml:"escalation"`
 	Cache      CacheConfig      `toml:"cache"`
 }
 
-// PolicyConfig — пороги учёта.
-type PolicyConfig struct {
+// LimitsConfig — пороги учёта.
+type LimitsConfig struct {
 	MinEntry  Size    `toml:"min_entry"`     // записи меньше не учитываются вовсе
 	MinOwner  Size    `toml:"min_owner"`     // владелец с суммой меньше не получает сводку
 	BudgetGBM float64 `toml:"budget_gb_min"` // порог «ГБ × минуты» на владельца
@@ -107,7 +106,7 @@ type PressureConfig struct {
 type EscalationConfig struct {
 	After     int               `toml:"after_summaries"` // не убрано за столько сводок — ступень выше
 	TopRepeat Duration          `toml:"top_repeat"`      // как часто повторять верхней ступени
-	Admins    map[string]string `toml:"admins"`          // префикс cwd сессии -> имя админа пространства
+	Admins    map[string]string `toml:"-"`               // префикс cwd сессии -> имя админа пространства
 }
 
 // CacheConfig — общие кеши без владельца.
@@ -129,7 +128,7 @@ func Default(home string) Config {
 		Lead:     "lead",
 		Fighters: []string{"opencode", "opencode.exe", "codex", "claude"},
 		Ignore:   []string{"/tmp/.X11-unix", "/tmp/.ICE-unix", "/tmp/.font-unix", "/tmp/cc-socks"},
-		Policy:   PolicyConfig{MinEntry: 1 << 20, MinOwner: 5 << 20, BudgetGBM: 12, MaxListed: 15},
+		Policy:   LimitsConfig{MinEntry: 1 << 20, MinOwner: 5 << 20, BudgetGBM: 12, MaxListed: 15},
 		Pressure: PressureConfig{PSISomeAvg60: 5, SwapUsedPct: 50, Factor: 0.25},
 		Escalation: EscalationConfig{
 			After: 2, TopRepeat: Duration(30 * time.Minute),
@@ -144,25 +143,14 @@ func Default(home string) Config {
 	}
 }
 
-// Load читает конфиг поверх значений по умолчанию; нет файла — значения по умолчанию.
-func Load(path, home string) (Config, error) {
-	c := Default(home)
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return c, nil
-	}
-	if err != nil {
-		return c, err
-	}
-	if _, err := toml.Decode(string(b), &c); err != nil {
-		return c, fmt.Errorf("%s: %w", path, err)
-	}
+// Validate проверяет раздел и раскрывает ~ в префиксах админов.
+func (c *Config) Validate(home string) error {
 	admins := map[string]string{}
 	for k, v := range c.Escalation.Admins {
 		admins[ExpandHome(k, home)] = v
 	}
 	c.Escalation.Admins = admins
-	return c, c.validate()
+	return c.validate()
 }
 
 // ExpandHome раскрывает ~ и ~/ в начале пути.
@@ -179,6 +167,11 @@ func ExpandHome(p, home string) string {
 func (c *Config) validate() error {
 	if c.Mode != ModeObserve && c.Mode != ModeAlert {
 		return fmt.Errorf("mode = %q: ожидается observe или alert", c.Mode)
+	}
+	for _, p := range append(slices.Clone(c.Ignore), c.Cache.Paths...) {
+		if _, err := filepath.Match(p, ""); err != nil {
+			return fmt.Errorf("шаблон пути %q: %w", p, err)
+		}
 	}
 	if c.Interval.D() < time.Minute {
 		return fmt.Errorf("interval = %v: не чаще раза в минуту", c.Interval.D())

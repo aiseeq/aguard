@@ -14,7 +14,7 @@ import (
 )
 
 // FromName — имя отправителя в конверте по умолчанию.
-const FromName = "tmpguard"
+const FromName = "aguard"
 
 // Envelope — конверт межсессионного сообщения от отправителя from. from-mode="bypass" совпадает
 // с классом наших сессий (--dangerously-skip-permissions), поэтому сообщение
@@ -42,7 +42,7 @@ func Frames(from, body, token, uuid string) ([]byte, error) {
 	if token != "" {
 		a, err := json.Marshal(map[string]string{"type": "auth", "token": token})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("кадр auth: %w", err)
 		}
 		out = append(append(out, a...), '\n')
 	}
@@ -53,7 +53,7 @@ func Frames(from, body, token, uuid string) ([]byte, error) {
 		Message: message{Role: "user", Content: Envelope(from, body)},
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("кадр сообщения: %w", err)
 	}
 	return append(append(out, f...), '\n'), nil
 }
@@ -61,7 +61,7 @@ func Frames(from, body, token, uuid string) ([]byte, error) {
 // NewUUID — случайный UUID v4.
 func NewUUID() string {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
+	_, _ = rand.Read(b[:]) //nolint:ignored-error // с Go 1.24 crypto/rand.Read не возвращает ошибку: при сбое источника программа падает сама
 	b[6] = b[6]&0x0f | 0x40
 	b[8] = b[8]&0x3f | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
@@ -78,23 +78,26 @@ func SendFrom(from, socket, token, body string) error {
 	}
 	conn, err := net.DialTimeout("unix", socket, 3*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("сокет %s: %w", socket, err)
 	}
 	defer conn.Close()
 	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return err
+		return fmt.Errorf("срок записи в %s: %w", socket, err)
 	}
 	if _, err := conn.Write(data); err != nil {
 		return fmt.Errorf("запись в %s: %w", socket, err)
 	}
 	if uc, ok := conn.(*net.UnixConn); ok {
 		if err := uc.CloseWrite(); err != nil {
-			return err
+			return fmt.Errorf("закрытие записи в %s: %w", socket, err)
 		}
 	}
 	// как в проверенном send_test.py: дождаться, пока сторона сессии закроет
-	// соединение (ответа протокол не шлёт); таймаут здесь не ошибка
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	_, _ = io.Copy(io.Discard, conn)
+	// соединение (ответа протокол не шлёт)
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		return fmt.Errorf("срок ожидания %s: %w", socket, err)
+	}
+	// кадр уже записан целиком: таймаут или обрыв при ожидании закрытия доставку не отменяют
+	_, _ = io.Copy(io.Discard, conn) //nolint:ignored-error // см. строку выше
 	return nil
 }

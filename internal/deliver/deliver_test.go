@@ -30,7 +30,7 @@ func TestFrames(t *testing.T) {
 		t.Errorf("кадр: %+v", f)
 	}
 	c := f.Message.Content
-	if !strings.HasPrefix(c, `<cross-session-message from-name="tmpguard" from-mode="bypass">`+"\nстрока 1\n") ||
+	if !strings.HasPrefix(c, `<cross-session-message from-name="aguard" from-mode="bypass">`+"\nстрока 1\n") ||
 		!strings.HasSuffix(c, "\n</cross-session-message>") || strings.Count(c, "</cross-session-message>") != 1 {
 		t.Errorf("конверт: %q", c)
 	}

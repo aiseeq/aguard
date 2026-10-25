@@ -11,10 +11,10 @@ import (
 	"regexp"
 	"time"
 
-	"tmpguard/internal/record"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
-// State — память между проходами (~/.local/state/procguard/state.json).
+// State — память между проходами (~/.local/state/aguard/orphans/state.json).
 type State struct {
 	Seen   map[string]time.Time `json:"seen"`   // ключ сессии -> когда впервые замечена мёртвой
 	Logged map[string]time.Time `json:"logged"` // корень дерева -> когда записан в журнал «снял бы»

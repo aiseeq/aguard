@@ -4,17 +4,27 @@
 package main
 
 import (
+	"errors"
 	"flag"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
 
-	"tmpguard/internal/record"
-	"tmpguard/internal/track"
+	"github.com/aiseeq/aguard/internal/journal"
+	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/track"
 )
 
 func main() {
+	lg := journal.New()
+	if err := run(lg); err != nil {
+		lg.Error("tmpguard-track: " + err.Error())
+		os.Exit(1)
+	}
+}
+
+func run(lg *slog.Logger) error {
 	roots := flag.String("roots", "/tmp", "помечаемые папки через запятую (первая — корень файловой системы для open_by_handle_at)")
 	containers := flag.String("containers", "/tmp/claude-tmp", "папки-контейнеры через запятую: учитывается их содержимое")
 	stateDir := flag.String("state-dir", record.DefaultDir, "журнал owners.jsonl и долговременный снимок")
@@ -25,25 +35,22 @@ func main() {
 	persist := flag.Duration("persist", 30*time.Minute, "период копирования снимка на диск")
 	rotateMB := flag.Int64("rotate-mb", 64, "размер owners.jsonl до ротации, МБ")
 	flag.Parse()
-	log.SetFlags(0)
 	if os.Geteuid() != 0 {
-		log.Fatal("tmpguard-track: нужен root (fanotify и proc connector)")
+		return errors.New("нужен root (fanotify и proc connector)")
 	}
 	cfg := track.Config{
 		Roots: split(*roots), Containers: split(*containers), StateDir: *stateDir, RunDir: *runDir,
 		Full: *full, Young: *young, YoungEvery: *youngEvery, Persist: *persist, RotateBytes: *rotateMB << 20,
 	}
 	if len(cfg.Roots) == 0 {
-		log.Fatal("tmpguard-track: пустой -roots")
+		return errors.New("пустой -roots")
 	}
-	if err := track.Run(cfg); err != nil {
-		log.Fatalf("tmpguard-track: %v", err)
-	}
+	return track.Run(cfg, lg)
 }
 
 func split(s string) []string {
 	var out []string
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, strings.TrimRight(p, "/"))
 		}

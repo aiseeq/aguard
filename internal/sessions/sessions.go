@@ -47,7 +47,7 @@ type Stat struct {
 func ProcStat(procRoot string, pid int) (Stat, error) {
 	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return Stat{}, err
+		return Stat{}, fmt.Errorf("stat pid %d: %w", pid, err)
 	}
 	return ParseStat(string(b))
 }
@@ -80,11 +80,11 @@ func (r Registry) Get(pid int) (*Info, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("реестр сессий: %w", err)
 	}
 	var in Info
 	if err := json.Unmarshal(b, &in); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("реестр сессий, pid %d: %w", pid, err)
 	}
 	return &in, nil
 }
@@ -97,19 +97,16 @@ func (r Registry) List() ([]Info, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("реестр сессий: %w", err)
 	}
 	var out []Info
 	var errs []error
 	for _, e := range ents {
+		pid, ok := registryPid(e.Name())
+		if !ok {
+			continue // не запись сессии: <pid>.<sha>.key и прочее
+		}
 		n := e.Name()
-		if !strings.HasSuffix(n, ".json") {
-			continue
-		}
-		pid, err := strconv.Atoi(strings.TrimSuffix(n, ".json"))
-		if err != nil {
-			continue
-		}
 		in, err := r.Get(pid)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", n, err)) // файл мог писаться прямо сейчас
@@ -152,12 +149,12 @@ func (r Registry) Alive() (map[string]Info, error) {
 func (r Registry) Token(pid int) (string, error) {
 	m, err := filepath.Glob(filepath.Join(r.Dir, strconv.Itoa(pid)+".*.key"))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("ключ сессии %d: %w", pid, err)
 	}
 	for _, p := range m {
 		b, err := os.ReadFile(p)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("ключ сессии: %w", err)
 		}
 		var k struct {
 			PeerToken string `json:"peerToken"`
@@ -170,4 +167,19 @@ func (r Registry) Token(pid int) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// registryPid — pid из имени записи реестра "<pid>.json".
+func registryPid(name string) (int, bool) {
+	s, ok := strings.CutSuffix(name, ".json")
+	if !ok || s == "" {
+		return 0, false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	pid, err := strconv.Atoi(s)
+	return pid, err == nil
 }

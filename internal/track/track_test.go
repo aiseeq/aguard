@@ -2,12 +2,13 @@ package track
 
 import (
 	"encoding/binary"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"tmpguard/internal/record"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 func TestApplyUsageIntegral(t *testing.T) {
@@ -51,7 +52,7 @@ func TestParseDirName(t *testing.T) {
 // (все записи старые и уже замерены) — иначе отчёт показывал бы удалённое.
 func TestDeleteReachesLogAndSnapshot(t *testing.T) {
 	dir := t.TempDir()
-	l, err := openEventLog(filepath.Join(dir, record.OwnersFile), 0)
+	l, err := openEventLog(filepath.Join(dir, record.OwnersFile), 0, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,8 @@ func TestDeleteReachesLogAndSnapshot(t *testing.T) {
 	born := now.Add(-48 * time.Hour)
 	tr := &Tracker{
 		cfg:     Config{RunDir: dir, StateDir: dir, Young: 15 * time.Minute, Persist: time.Hour},
-		log:     l,
+		owners:  l,
+		log:     slog.New(slog.DiscardHandler),
 		entries: map[string]*record.Entry{},
 		watched: map[string]string{},
 	}

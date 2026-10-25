@@ -1,13 +1,11 @@
 package policy
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"tmpguard/internal/record"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 const (
@@ -53,44 +51,6 @@ func TestParseSize(t *testing.T) {
 	}
 	if _, err := ParseSize("много"); err == nil {
 		t.Error("ParseSize(много): ждали ошибку")
-	}
-}
-
-func TestLoadConfig(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "config.toml")
-	body := `mode = "alert"
-interval = "2m"
-[policy]
-min_entry = "2MB"
-budget_gb_min = 6
-[escalation.admins]
-"~/proj" = "proj-admin"
-`
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c, err := Load(p, home)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Mode != ModeAlert || c.Interval.D() != 2*time.Minute || c.Policy.MinEntry != Size(2*mib) || c.Policy.BudgetGBM != 6 {
-		t.Errorf("конфиг разобран неверно: %+v", c)
-	}
-	if c.Escalation.Admins["/home/u/proj"] != "proj-admin" {
-		t.Errorf("~ в admins не раскрыт: %v", c.Escalation.Admins)
-	}
-	if c.Policy.MinOwner != Size(5*mib) || c.Escalation.After != 2 {
-		t.Error("значения по умолчанию потерялись")
-	}
-	if err := os.WriteFile(p, []byte(`mode = "loud"`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(p, home); err == nil {
-		t.Error("ждали ошибку на неизвестный mode")
-	}
-	if c, err := Load(filepath.Join(dir, "нет.toml"), home); err != nil || c.Mode != ModeObserve {
-		t.Errorf("без файла — observe по умолчанию: %v %v", c.Mode, err)
 	}
 }
 
@@ -189,12 +149,15 @@ func TestPressureFactor(t *testing.T) {
 		t.Errorf("PSI 7: factor=%v", f)
 	}
 	psi := "some avg10=1.00 avg60=6.50 avg300=0.01 total=1\nfull avg10=0.00 avg60=9.00 avg300=0.00 total=1\n"
-	if v := ParsePSI(psi); v != 6.5 {
-		t.Errorf("ParsePSI = %v", v)
+	if v, err := ParsePSI(psi); err != nil || v != 6.5 {
+		t.Errorf("ParsePSI = %v, %v", v, err)
 	}
 	mi := "MemTotal: 100 kB\nSwapTotal:       1000 kB\nSwapFree:         250 kB\n"
-	if v := ParseSwapUsedPct(mi); v != 75 {
-		t.Errorf("ParseSwapUsedPct = %v", v)
+	if v, err := ParseSwapUsedPct(mi); err != nil || v != 75 {
+		t.Errorf("ParseSwapUsedPct = %v, %v", v, err)
+	}
+	if _, err := ParsePSI("full avg60=1\n"); err == nil {
+		t.Error("PSI без some: ждали ошибку")
 	}
 }
 

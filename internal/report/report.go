@@ -1,19 +1,21 @@
-// Package report строит `tmpguard report`: распределение времени жизни
+// Package report строит `aguard tmp report`: распределение времени жизни
 // записей по корзинам размера и по классам создателей — по нему лид
 // выбирает пороги политики.
 package report
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"tmpguard/internal/policy"
-	"tmpguard/internal/record"
+	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 // Корзины размера и времени жизни.
@@ -69,7 +71,8 @@ type Data struct {
 // Collect собирает данные из событий журнала и снимка.
 func Collect(cfg *policy.Config, events []record.Event, st *record.State, since time.Time, myUID int, now time.Time) Data {
 	d := Data{To: now, TrackSeen: st.Updated}
-	for _, e := range events {
+	for i := range events {
+		e := &events[i]
 		if !e.Closed() || e.T.Before(since) || cfg.Ignored(e.Path) {
 			continue
 		}
@@ -82,7 +85,9 @@ func Collect(cfg *policy.Config, events []record.Event, st *record.State, since 
 			MaxBytes: e.MaxBytes, Measured: e.Measured, GBMin: e.ByteSec / policy.GiBMin,
 		})
 	}
-	for _, it := range cfg.Items(st.Entries, myUID) {
+	items := cfg.Items(st.Entries, myUID)
+	for i := range items {
+		it := &items[i]
 		d.Live = append(d.Live, Rec{
 			Path: it.Entry.Path, Class: it.Class, Creator: creatorOf(it.Class, it.Entry.Owner), Life: now.Sub(it.Entry.Born),
 			MaxBytes: it.Entry.MaxBytes, Bytes: it.Entry.Bytes, Measured: !it.Entry.MeasuredAt.IsZero(), GBMin: it.GBMin(), Live: true,
@@ -114,25 +119,25 @@ func creatorName(o *record.Owner) string {
 }
 
 // Print печатает отчёт.
-func Print(w io.Writer, d Data) {
-	fmt.Fprintf(w, "tmpguard report: закрытых записей %d (с %s), живых %d (снимок %s)\n",
-		len(d.Closed), d.From.Format("2006-01-02 15:04"), len(d.Live), d.TrackSeen.Format("15:04:05"))
+func Print(w io.Writer, d Data) error {
+	fmt.Fprintf(w, "aguard tmp report: закрытых записей %d (с %s по %s), живых %d (снимок %s)\n",
+		len(d.Closed), d.From.Format("2006-01-02 15:04"), d.To.Format("2006-01-02 15:04"), len(d.Live), d.TrackSeen.Format("15:04:05"))
 	if d.BadLines > 0 {
 		fmt.Fprintf(w, "битых строк журнала: %d\n", d.BadLines)
 	}
 	fmt.Fprintln(w, "\n1. Закрытые записи: наибольший размер × время жизни (число записей).")
 	fmt.Fprintln(w, "   «не замерено» — умерли раньше первого замера (молодые записи замеряются раз в минуту);")
 	fmt.Fprintln(w, "   на политику не влияют: за минуту порог набирает только запись больше порога в ГБ.")
-	matrix(w, d.Closed)
+	err := matrix(w, d.Closed)
 	fmt.Fprintln(w, "\n2. Живые записи: наибольший размер × возраст сейчас.")
-	matrix(w, d.Live)
+	err = errors.Join(err, matrix(w, d.Live))
 	fmt.Fprintln(w, "\n3. По классам создателей (жизнь — медиана и 90-й процентиль закрытых; мера — ГБ·мин).")
-	byClass(w, d)
+	err = errors.Join(err, byClass(w, d))
 	fmt.Fprintln(w, "\n4. Создатели с наибольшей мерой (закрытые + живые), топ 15.")
-	topCreators(w, append(append([]Rec{}, d.Closed...), d.Live...))
+	return errors.Join(err, topCreators(w, append(append([]Rec{}, d.Closed...), d.Live...)))
 }
 
-func matrix(w io.Writer, recs []Rec) {
+func matrix(w io.Writer, recs []Rec) error {
 	rows := append(append([]string{}, sizeLabels...), unmeasured)
 	m := make([][]int, len(rows))
 	for i := range m {
@@ -156,7 +161,10 @@ func matrix(w io.Writer, recs []Rec) {
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%d\t\n", label, strings.Join(cells, "\t"), total)
 	}
-	_ = tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("отчёт: %w", err)
+	}
+	return nil
 }
 
 func dash(v int) string {
@@ -166,7 +174,7 @@ func dash(v int) string {
 	return fmt.Sprint(v)
 }
 
-func byClass(w io.Writer, d Data) {
+func byClass(w io.Writer, d Data) error {
 	type agg struct {
 		lifes            []time.Duration
 		closedGB, liveGB float64
@@ -205,7 +213,10 @@ func byClass(w io.Writer, d Data) {
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", c, a.nClosed, p50, p90, policy.FormatGBMin(a.closedGB),
 			a.nLive, policy.HumanBytes(a.liveB), policy.FormatGBMin(a.liveGB), policy.HumanBytes(a.maxB))
 	}
-	_ = tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("отчёт: %w", err)
+	}
+	return nil
 }
 
 func pct(ds []time.Duration, q float64) string {
@@ -213,7 +224,7 @@ func pct(ds []time.Duration, q float64) string {
 		return "—"
 	}
 	s := append([]time.Duration{}, ds...)
-	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
+	slices.Sort(s)
 	return lifeText(s[int(q*float64(len(s)-1))])
 }
 
@@ -226,7 +237,7 @@ func lifeText(d time.Duration) string {
 	return policy.HumanAge(d)
 }
 
-func topCreators(w io.Writer, recs []Rec) {
+func topCreators(w io.Writer, recs []Rec) error {
 	type agg struct {
 		n   int
 		gb  float64
@@ -248,7 +259,12 @@ func topCreators(w io.Writer, recs []Rec) {
 	for k := range m {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool { return m[keys[i]].gb > m[keys[j]].gb })
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]].gb != m[keys[j]].gb {
+			return m[keys[i]].gb > m[keys[j]].gb
+		}
+		return keys[i] < keys[j]
+	})
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "создатель\tкласс\tзаписей\tмера, ГБ·мин\tсамая большая")
 	for i, k := range keys {
@@ -258,5 +274,8 @@ func topCreators(w io.Writer, recs []Rec) {
 		a := m[k]
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", k, a.cl, a.n, policy.FormatGBMin(a.gb), policy.HumanBytes(a.max))
 	}
-	_ = tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("отчёт: %w", err)
+	}
+	return nil
 }

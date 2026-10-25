@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"tmpguard/internal/sessions"
+	"github.com/aiseeq/aguard/internal/sessions"
 )
 
 // clockTicks — USER_HZ: поле starttime в /proc/<pid>/stat идёт в этих тиках.
@@ -92,7 +92,7 @@ func bootTime(procRoot string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("время загрузки: %w", err)
 	}
-	for _, l := range strings.Split(string(b), "\n") {
+	for l := range strings.SplitSeq(string(b), "\n") {
 		if v, ok := strings.CutPrefix(l, "btime "); ok {
 			sec, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 			if err != nil {
@@ -144,7 +144,7 @@ func (p *Proc) readOwn(dir string) error {
 	if err != nil {
 		return fmt.Errorf("environ: %w", err)
 	}
-	for _, kv := range strings.Split(string(env), "\x00") {
+	for kv := range strings.SplitSeq(string(env), "\x00") {
 		if v, ok := strings.CutPrefix(kv, "CLAUDE_PID="); ok {
 			if p.Session, err = strconv.Atoi(v); err != nil {
 				return fmt.Errorf("CLAUDE_PID=%q: %w", v, err)
@@ -171,7 +171,7 @@ func (p *Proc) readOwn(dir string) error {
 
 // parseCgroup — путь из строки cgroup v2 "0::/path".
 func parseCgroup(s string) string {
-	for _, l := range strings.Split(s, "\n") {
+	for l := range strings.SplitSeq(s, "\n") {
 		if v, ok := strings.CutPrefix(l, "0::"); ok {
 			return v
 		}
@@ -182,7 +182,7 @@ func parseCgroup(s string) string {
 // serviceUnit — systemd-сервис, под которым идёт процесс (компонент пути
 // cgroup с .service, кроме самого user@<uid>.service), или "".
 func serviceUnit(cgroup string) string {
-	for _, c := range strings.Split(cgroup, "/") {
+	for c := range strings.SplitSeq(cgroup, "/") {
 		if strings.HasSuffix(c, ".service") && !strings.HasPrefix(c, "user@") {
 			return c
 		}

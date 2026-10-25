@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"tmpguard/internal/policy"
-	"tmpguard/internal/record"
+	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 func TestCollectAndPrint(t *testing.T) {

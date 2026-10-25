@@ -3,7 +3,8 @@ package track
 import (
 	"encoding/binary"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -16,8 +17,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"tmpguard/internal/record"
-	"tmpguard/internal/sessions"
+	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/sessions"
 )
 
 const (
@@ -31,6 +32,7 @@ type Resolver struct {
 	homes   map[int]string
 	cgPaths map[uint64]string
 	cgSess  map[string]cgHit
+	log     *slog.Logger
 }
 
 type cgHit struct {
@@ -38,8 +40,8 @@ type cgHit struct {
 	at time.Time
 }
 
-func newResolver(t *Tombs) *Resolver {
-	return &Resolver{tombs: t, homes: map[int]string{}, cgPaths: map[uint64]string{}, cgSess: map[string]cgHit{}}
+func newResolver(t *Tombs, lg *slog.Logger) *Resolver {
+	return &Resolver{tombs: t, homes: map[int]string{}, cgPaths: map[uint64]string{}, cgSess: map[string]cgHit{}, log: lg}
 }
 
 // procData — сведения о живом процессе из /proc.
@@ -55,20 +57,20 @@ func readProc(pid int) (procData, error) {
 	d := procData{uid: -1}
 	comm, err := os.ReadFile(ps + "/comm")
 	if err != nil {
-		return d, err
+		return d, fmt.Errorf("процесс %d: comm: %w", pid, err)
 	}
 	d.comm = strings.TrimSpace(string(comm))
 	cmdline, err := os.ReadFile(ps + "/cmdline")
 	if err != nil {
-		return d, err
+		return d, fmt.Errorf("процесс %d: cmdline: %w", pid, err)
 	}
 	d.args = truncate(strings.ReplaceAll(strings.TrimRight(string(cmdline), "\x00"), "\x00", " "), argsMax)
 	if d.cwd, err = os.Readlink(ps + "/cwd"); err != nil {
-		return d, err
+		return d, fmt.Errorf("процесс %d: cwd: %w", pid, err)
 	}
 	fi, err := os.Stat(ps)
 	if err != nil {
-		return d, err
+		return d, fmt.Errorf("процесс %d: %w", pid, err)
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		d.uid = int(st.Uid)
@@ -90,7 +92,7 @@ func truncate(s string, n int) string {
 func readCgroup(pid int) (string, error) {
 	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cgroup")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("cgroup процесса %d: %w", pid, err)
 	}
 	return strings.TrimSpace(strings.TrimPrefix(string(b), "0::")), nil
 }
@@ -124,7 +126,7 @@ func (r *Resolver) live(o *record.Owner, pid, pidfd int) (sessions.Stat, error) 
 		return sessions.Stat{}, errors.New("нет pidfd: процесс ушёл до чтения события")
 	}
 	if err := unix.PidfdSendSignal(pidfd, 0, nil, 0); err != nil {
-		return sessions.Stat{}, err
+		return sessions.Stat{}, fmt.Errorf("pidfd процесса %d: %w", pid, err)
 	}
 	st, err := sessions.ProcStat("/proc", pid)
 	if err != nil {
@@ -150,8 +152,8 @@ func (r *Resolver) dead(o *record.Owner, pid, pidfd int) int {
 		return ppid
 	}
 	inf, err := pidfdInfo(pidfd)
-	if err != nil {
-		return ppid // ядро не сохранило сведений о вышедшем процессе
+	if err != nil { //nolint:silent-error-handling // ядро старше 6.15 или не сохранило сведений о вышедшем процессе: остаётся то, что дал proc connector
+		return ppid
 	}
 	if o.Proc.Cgroup == "" {
 		o.Proc.Cgroup = r.cgPath(inf.cgroupid)
@@ -185,7 +187,7 @@ func (r *Resolver) chain(ppid int) ([]record.Link, *record.Session) {
 	var links []record.Link
 	for depth := 0; ppid > 1 && depth < chainDepth; depth++ {
 		st, err := sessions.ProcStat("/proc", ppid)
-		if err != nil { // предок тоже умер: берём из proc connector
+		if err != nil { //nolint:silent-error-handling // предок тоже умер: берём его из proc connector
 			t, ok := r.tombs.lookup(ppid)
 			if !ok {
 				links = append(links, record.Link{Pid: ppid, Comm: "?"})
@@ -206,7 +208,7 @@ func (r *Resolver) chain(ppid int) ([]record.Link, *record.Session) {
 
 func procUID(pid int) int {
 	fi, err := os.Stat("/proc/" + strconv.Itoa(pid))
-	if err != nil {
+	if err != nil { //nolint:silent-error-handling // процесс ушёл: uid неизвестен (-1), и sessionAt сессию по нему не ищет
 		return -1
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
@@ -238,8 +240,8 @@ func (r *Resolver) sessionAt(pid int, start string, uid int) *record.Session {
 	}
 	in, err := sessions.ForHome(h).Get(pid)
 	if err != nil {
-		log.Printf("tmpguard-track: реестр сессий, pid %d: %v", pid, err)
-		return nil
+		r.log.Warn("tmpguard-track: сессия не проверена", "pid", pid, "err", err)
+		return nil //nolint:log-and-return-zero // нечитаемая запись реестра для цепочки — то же, что «не сессия»: идём к следующему предку и к cgroup
 	}
 	if in == nil || in.ProcStart != start {
 		return nil
@@ -261,16 +263,16 @@ func (r *Resolver) byCgroup(cg string, uid int) *record.Session {
 	if home := r.home(uid); home != "" {
 		reg := sessions.ForHome(home)
 		all, err := reg.List()
-		if err != nil {
-			log.Printf("tmpguard-track: реестр сессий: %v", err) // прочитанное всё равно проверяем
+		if err != nil { //nolint:fallback-return // List отдаёт прочитанную часть реестра вместе с ошибкой о нечитаемых записях
+			r.log.Warn("tmpguard-track: реестр сессий, проверяю прочитанную часть", "err", err)
 		}
 		for _, in := range all {
 			if !reg.IsAlive(in.Pid, in.ProcStart) {
 				continue
 			}
 			c, err := readCgroup(in.Pid)
-			if err != nil {
-				continue // сессия завершилась между проверками
+			if err != nil { //nolint:silent-error-handling // сессия завершилась между проверками: в счёт не идёт
+				continue
 			}
 			if c != cg {
 				continue
@@ -298,9 +300,9 @@ func (r *Resolver) cgPath(id uint64) string {
 		return p
 	}
 	found := ""
-	_ = filepath.WalkDir("/sys/fs/cgroup", func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return filepath.SkipDir // cgroup удалили во время обхода
+	err := filepath.WalkDir("/sys/fs/cgroup", func(path string, d os.DirEntry, err error) error {
+		if err != nil { //nolint:silent-error-handling // cgroup удалили во время обхода: пропускаем её
+			return filepath.SkipDir
 		}
 		if !d.IsDir() {
 			return nil
@@ -322,6 +324,9 @@ func (r *Resolver) cgPath(id uint64) string {
 		}
 		return nil
 	})
+	if err != nil {
+		r.log.Warn("tmpguard-track: обход /sys/fs/cgroup", "id", id, "err", err)
+	}
 	return found
 }
 

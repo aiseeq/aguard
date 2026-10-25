@@ -1,9 +1,25 @@
-# Glint configuration
+# Glint: https://github.com/aiseeq/glint
 version: 1
 
 settings:
   exclude:
-    - vendor/**
-    - "**/*_test.go"
+    - vendor/*
+    - bin/*
+    - testdata/*
+    - "*.md"
   min_severity: low
+  fail_on: low  # гейт — по коду выхода glint, падает на любой находке
   output: console
+
+categories:
+  architecture:
+    enabled: true
+    rules:
+      python-file: {enabled: true}
+  duplication: {enabled: true}
+  patterns: {enabled: true}
+  typesafety: {enabled: true}
+  security: {enabled: true}
+  deadcode: {enabled: true}
+  naming: {enabled: true}
+  documentation: {enabled: true}

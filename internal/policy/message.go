@@ -57,7 +57,7 @@ func FormatGBMin(v float64) string {
 }
 
 // TestMark — первая строка тестовой сводки.
-const TestMark = "тест tmpguard, отвечать не нужно."
+const TestMark = "тест aguard, отвечать не нужно."
 
 func sectionTitle(l *Line) string {
 	name := l.CreatorName
@@ -87,7 +87,7 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 	if test {
 		b.WriteString(TestMark + "\n\n")
 	}
-	b.WriteString("tmpguard: сводка по временным записям. /tmp и /tmp/claude-tmp — tmpfs, то есть оперативка; " +
+	b.WriteString("aguard: сводка по временным записям. /tmp и /tmp/claude-tmp — tmpfs, то есть оперативка; " +
 		"записи ниже держат её дольше порога. Ненужное удалите, нужное перенесите на диск в scratchpad сессии.\n")
 	listed := 0
 	section := ""

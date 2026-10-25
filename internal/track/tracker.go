@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,7 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"tmpguard/internal/record"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 // Config — настройки сторожа (флаги system-сервиса).
@@ -47,7 +47,8 @@ type Tracker struct {
 	mountFD    int
 	res        *Resolver
 	tombs      *Tombs
-	log        *eventLog
+	owners     *eventLog // owners.jsonl
+	log        *slog.Logger
 	entries    map[string]*record.Entry
 	watchKey   map[string]string // ключ handle папки -> путь
 	watched    map[string]string // путь папки -> ключ handle
@@ -73,31 +74,32 @@ type measureDone struct {
 	listing map[string][]string
 }
 
-// Run запускает сторож и работает до SIGTERM/SIGINT.
-func Run(cfg Config) error {
+// Run запускает сторож и работает до SIGTERM/SIGINT. Ошибка — сторож не
+// поднялся или дальше работать не может (чтение fanotify, журнал после ротации).
+func Run(cfg Config, lg *slog.Logger) error {
 	t := &Tracker{
-		cfg: cfg, entries: map[string]*record.Entry{}, watchKey: map[string]string{},
+		cfg: cfg, log: lg, entries: map[string]*record.Entry{}, watchKey: map[string]string{},
 		watched: map[string]string{}, containers: map[string]bool{}, started: time.Now(),
 	}
 	for _, c := range cfg.Containers {
 		t.containers[c] = true
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
-		return err
+		return fmt.Errorf("папка состояния: %w", err)
 	}
 	if err := os.MkdirAll(cfg.RunDir, 0o755); err != nil {
-		return err
+		return fmt.Errorf("папка частого снимка: %w", err)
 	}
 	var err error
-	if t.log, err = openEventLog(filepath.Join(cfg.StateDir, record.OwnersFile), cfg.RotateBytes); err != nil {
+	if t.owners, err = openEventLog(filepath.Join(cfg.StateDir, record.OwnersFile), cfg.RotateBytes, lg); err != nil {
 		return err
 	}
-	defer t.log.close()
-	t.tombs = newTombs(2 * time.Minute)
+	defer t.owners.close()
+	t.tombs = newTombs(2*time.Minute, lg)
 	if err := t.tombs.listen(); err != nil {
 		return err
 	}
-	t.res = newResolver(t.tombs)
+	t.res = newResolver(t.tombs, lg)
 	if t.fd, err = fanInit(); err != nil {
 		return fmt.Errorf("fanotify_init: %w", err)
 	}
@@ -110,17 +112,22 @@ func Run(cfg Config) error {
 		}
 	}
 	t.restore()
+	return t.loop()
+}
 
+// loop — главная горутина: события, замеры, снимки и сводка.
+func (t *Tracker) loop() error {
 	evCh := make(chan []fevent, 64)
-	go t.readLoop(evCh)
+	readErr := make(chan error, 1)
+	go t.readLoop(evCh, readErr)
 	doneCh := make(chan measureDone, 1)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-	tick := time.NewTicker(cfg.YoungEvery)
+	tick := time.NewTicker(t.cfg.YoungEvery)
 	defer tick.Stop()
 	hourly := time.NewTicker(time.Hour)
 	defer hourly.Stop()
-	log.Printf("tmpguard-track: следим за %v, контейнеры %v, записей при старте %d", cfg.Roots, cfg.Containers, len(t.entries))
+	t.log.Info(fmt.Sprintf("tmpguard-track: следим за %v, контейнеры %v, записей при старте %d", t.cfg.Roots, t.cfg.Containers, len(t.entries)))
 	t.startMeasure(doneCh, true)
 	for {
 		select {
@@ -128,16 +135,21 @@ func Run(cfg Config) error {
 			for i := range evs {
 				t.handle(&evs[i])
 			}
+		case err := <-readErr:
+			return err
 		case d := <-doneCh:
 			t.finishMeasure(d)
 		case <-tick.C:
-			t.startMeasure(doneCh, time.Since(t.lastFull) >= cfg.Full)
+			t.startMeasure(doneCh, time.Since(t.lastFull) >= t.cfg.Full)
 		case <-hourly.C:
 			t.logStats()
 		case s := <-sig:
-			log.Printf("tmpguard-track: %v, сохраняю снимок", s)
+			t.log.Info(fmt.Sprintf("tmpguard-track: %v, сохраняю снимок", s))
 			t.save(true)
 			return nil
+		}
+		if t.owners.err != nil {
+			return t.owners.err
 		}
 	}
 }
@@ -162,17 +174,35 @@ func (t *Tracker) unmarkGone(dir string) {
 	}
 }
 
-func (t *Tracker) readLoop(ch chan<- []fevent) {
-	buf := make([]byte, 256<<10)
+// fanReadBuf — буфер одного read(2) группы fanotify.
+const fanReadBuf = 256 << 10
+
+// readLoop читает события fanotify до неустранимой ошибки чтения; её
+// отдаёт в errCh, и главный цикл завершает сторож.
+func (t *Tracker) readLoop(ch chan<- []fevent, errCh chan<- error) {
+	buf := make([]byte, fanReadBuf)
 	for {
-		n, err := unix.Read(t.fd, buf)
+		evs, err := t.readOnce(buf)
 		if err != nil {
-			if errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) {
-				continue
-			}
-			log.Fatalf("tmpguard-track: read fanotify: %v", err)
+			errCh <- err
+			return
 		}
-		ch <- parseEvents(buf[:n])
+		ch <- evs
+	}
+}
+
+// readOnce — один read(2) и разбор буфера; паника в разборе пишется в лог,
+// а чтение продолжается.
+func (t *Tracker) readOnce(buf []byte) ([]fevent, error) {
+	defer recovered(t.log, "разбор событий fanotify")
+	n, err := unix.Read(t.fd, buf)
+	switch {
+	case err == nil:
+		return parseEvents(buf[:n]), nil
+	case errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN):
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("read fanotify: %w", err)
 	}
 }
 
@@ -196,7 +226,7 @@ func (t *Tracker) handle(fe *fevent) {
 	t.st.events++
 	if fe.ovf {
 		t.st.overflow++
-		log.Printf("tmpguard-track: переполнение очереди fanotify, полная сверка на следующем тике")
+		t.log.Warn("tmpguard-track: переполнение очереди fanotify, полная сверка на следующем тике")
 		t.lastFull = time.Time{}
 		return
 	}
@@ -215,69 +245,84 @@ func (t *Tracker) handle(fe *fevent) {
 	}()
 	switch {
 	case fe.mask&unix.FAN_RENAME != 0:
-		t.st.renames++
-		od, ow, oerr := t.dirOf(fe.old)
-		nd, nw, nerr := t.dirOf(fe.new)
-		if oerr != nil && nerr != nil {
-			log.Printf("tmpguard-track: переименование без папок: %v; %v", oerr, nerr)
-			return
-		}
-		op, np := "", ""
-		if oerr == nil {
-			op = filepath.Join(od, fe.old.name)
-		}
-		if nerr == nil {
-			np = filepath.Join(nd, fe.new.name)
-		}
-		if ow && t.containers[op] {
-			t.unmarkGone(op)
-		}
-		if nw && t.containers[np] {
-			if ow {
-				t.remove(op, record.EvDelete, np, now) // запись стала контейнером
-			}
-			if err := t.mark(np); err != nil {
-				log.Printf("tmpguard-track: %v", err)
-			}
-			return
-		}
-		switch {
-		case ow && nw:
-			t.rename(op, np, fe.isDir(), owner, now)
-		case ow:
-			t.remove(op, record.EvDelete, np, now)
-		case nw:
-			t.create(np, fe.isDir(), owner(), now)
-		}
+		t.handleRename(fe, owner, now)
 	case fe.mask&(unix.FAN_CREATE|unix.FAN_DELETE) != 0:
-		d, w, err := t.dirOf(fe.dn)
-		if err != nil {
-			log.Printf("tmpguard-track: событие без папки: %v", err)
-			return
+		t.handleCreateDelete(fe, owner, now)
+	}
+}
+
+// handleRename — переименование: внутри помеченных папок, внутрь, наружу,
+// или запись стала контейнером.
+func (t *Tracker) handleRename(fe *fevent, owner func() *record.Owner, now time.Time) {
+	t.st.renames++
+	od, ow, oerr := t.dirOf(fe.old)
+	nd, nw, nerr := t.dirOf(fe.new)
+	if oerr != nil && nerr != nil {
+		t.log.Warn("tmpguard-track: переименование без папок", "old", oerr, "new", nerr)
+		return
+	}
+	op, np := "", ""
+	if oerr == nil {
+		op = filepath.Join(od, fe.old.name)
+	}
+	if nerr == nil {
+		np = filepath.Join(nd, fe.new.name)
+	}
+	if ow && t.containers[op] {
+		t.unmarkGone(op)
+	}
+	if nw && t.containers[np] {
+		if ow {
+			t.remove(op, record.EvDelete, np, now) // запись стала контейнером
 		}
-		if !w {
-			return // событие от папки, с которой метку уже сняли
+		t.markLogged(np)
+		return
+	}
+	switch {
+	case ow && nw:
+		t.rename(op, np, fe.isDir(), owner, now)
+	case ow:
+		t.remove(op, record.EvDelete, np, now)
+	case nw:
+		t.create(np, fe.isDir(), owner(), now)
+	}
+}
+
+// handleCreateDelete — создание и удаление в помеченной папке.
+func (t *Tracker) handleCreateDelete(fe *fevent, owner func() *record.Owner, now time.Time) {
+	d, w, err := t.dirOf(fe.dn)
+	if err != nil {
+		t.log.Warn("tmpguard-track: событие без папки", "err", err)
+		return
+	}
+	if !w {
+		return // событие от папки, с которой метку уже сняли
+	}
+	p := filepath.Join(d, fe.dn.name)
+	if t.containers[p] {
+		if fe.mask&unix.FAN_CREATE != 0 && exists(p) {
+			t.markLogged(p)
+		} else if fe.mask&unix.FAN_DELETE != 0 {
+			t.unmarkGone(p)
 		}
-		p := filepath.Join(d, fe.dn.name)
-		if t.containers[p] {
-			if fe.mask&unix.FAN_CREATE != 0 && exists(p) {
-				if err := t.mark(p); err != nil {
-					log.Printf("tmpguard-track: %v", err)
-				}
-			} else if fe.mask&unix.FAN_DELETE != 0 {
-				t.unmarkGone(p)
-			}
-			return
-		}
-		if fe.mask&unix.FAN_CREATE != 0 {
-			t.st.creates++
-			t.create(p, fe.isDir(), owner(), now)
-		}
-		// create и delete одного имени ядро может слить в одно событие
-		if fe.mask&unix.FAN_DELETE != 0 && !exists(p) {
-			t.st.deletes++
-			t.remove(p, record.EvDelete, "", now)
-		}
+		return
+	}
+	if fe.mask&unix.FAN_CREATE != 0 {
+		t.st.creates++
+		t.create(p, fe.isDir(), owner(), now)
+	}
+	// create и delete одного имени ядро может слить в одно событие
+	if fe.mask&unix.FAN_DELETE != 0 && !exists(p) {
+		t.st.deletes++
+		t.remove(p, record.EvDelete, "", now)
+	}
+}
+
+// markLogged помечает появившийся контейнер; неудача — в лог, полная сверка
+// попробует снова.
+func (t *Tracker) markLogged(dir string) {
+	if err := t.mark(dir); err != nil {
+		t.log.Warn("tmpguard-track: метка контейнера", "err", err)
 	}
 }
 
@@ -305,8 +350,8 @@ func (t *Tracker) create(path string, dir bool, o *record.Owner, now time.Time) 
 		t.close(old, record.EvGone, "", now) // пропущенное удаление
 	}
 	e := &record.Entry{Path: path, Dir: dir, UID: -1, Born: now, Owner: o}
-	if m, err := statMeta(path); err != nil {
-		if o != nil { // уже удалена: владелец по процессу
+	if m, err := statMeta(path); err != nil { //nolint:silent-error-handling // записи на диске уже нет: uid берём у создателя
+		if o != nil {
 			e.UID = o.Proc.UID
 		}
 	} else {
@@ -314,7 +359,7 @@ func (t *Tracker) create(path string, dir bool, o *record.Owner, now time.Time) 
 	}
 	t.entries[path] = e
 	t.dirty = true
-	t.log.write(e.Event(now, record.EvCreate))
+	t.owners.write(e.Event(now, record.EvCreate))
 }
 
 func (t *Tracker) remove(path, ev, to string, now time.Time) {
@@ -338,13 +383,13 @@ func (t *Tracker) rename(op, np string, dir bool, owner func() *record.Owner, no
 	t.dirty = true
 	ev := e.Event(now, record.EvRename)
 	ev.Old = op
-	t.log.write(ev)
+	t.owners.write(ev)
 }
 
 func (t *Tracker) close(e *record.Entry, ev, to string, now time.Time) {
 	line := e.Event(now, ev)
 	line.To = to
-	t.log.write(line)
+	t.owners.write(line)
 	delete(t.entries, e.Path)
 	t.dirty = true
 }
@@ -454,22 +499,20 @@ func (t *Tracker) adopt(p string, now time.Time) {
 		if _, ok := t.watched[p]; ok {
 			return
 		}
-		if err := t.mark(p); err != nil {
-			log.Printf("tmpguard-track: %v", err)
-		}
+		t.markLogged(p)
 		return
 	}
 	if t.entries[p] != nil {
 		return
 	}
 	m, err := statMeta(p)
-	if err != nil {
-		return // удалена после листинга
+	if err != nil { //nolint:silent-error-handling // записи на диске уже нет, хотя листинг её видел: заводить нечего
+		return
 	}
 	e := &record.Entry{Path: p, Dir: m.dir, Ino: m.ino, UID: m.uid, Born: m.born}
 	t.entries[p] = e
 	t.dirty = true
-	t.log.write(e.Event(now, record.EvPreexisting))
+	t.owners.write(e.Event(now, record.EvPreexisting))
 }
 
 // restore поднимает таблицу из снимка: свежий из /run, иначе с диска.
@@ -479,7 +522,7 @@ func (t *Tracker) restore() {
 	for _, dir := range []string{t.cfg.RunDir, t.cfg.StateDir} {
 		s, err := record.ReadState(filepath.Join(dir, record.StateFile))
 		if err != nil {
-			log.Printf("tmpguard-track: снимок %s: %v", dir, err)
+			t.log.Warn("tmpguard-track: снимок не прочитан", "dir", dir, "err", err)
 			continue
 		}
 		if st == nil || s.Updated.After(st.Updated) {
@@ -512,15 +555,15 @@ func (t *Tracker) save(persist bool) {
 	b, err := json.Marshal(s)
 	t.dirty = false
 	if err != nil {
-		log.Printf("tmpguard-track: снимок: %v", err)
+		t.log.Error("tmpguard-track: снимок не собран", "err", err)
 		return
 	}
 	if err := record.WriteFileAtomic(filepath.Join(t.cfg.RunDir, record.StateFile), b, 0o644); err != nil {
-		log.Printf("tmpguard-track: снимок: %v", err)
+		t.log.Error("tmpguard-track: снимок", "err", err)
 	}
 	if persist {
 		if err := record.WriteFileAtomic(filepath.Join(t.cfg.StateDir, record.StateFile), b, 0o644); err != nil {
-			log.Printf("tmpguard-track: снимок на диск: %v", err)
+			t.log.Error("tmpguard-track: снимок на диск", "err", err)
 		}
 		t.lastSave = now
 	}
@@ -528,10 +571,10 @@ func (t *Tracker) save(persist bool) {
 
 func (t *Tracker) logStats() {
 	s := t.st
-	log.Printf("tmpguard-track: за час событий %d (создано %d, удалено %d, переименовано %d, переполнений %d); "+
+	t.log.Info(fmt.Sprintf("tmpguard-track: за час событий %d (создано %d, удалено %d, переименовано %d, переполнений %d); "+
 		"создатель: жив %d, восстановлен %d, неизвестен %d; сессия по ppid %d, по cgroup %d, нет %d; "+
 		"потерь proc connector %d; записей %d",
 		s.events, s.creates, s.deletes, s.renames, s.overflow, s.procOK, s.procReaped, s.procUnknown,
-		s.sessPpid, s.sessCgroup, s.noSession, t.tombs.overrun.Load(), len(t.entries))
+		s.sessPpid, s.sessCgroup, s.noSession, t.tombs.overrun.Load(), len(t.entries)))
 	t.st = counters{}
 }

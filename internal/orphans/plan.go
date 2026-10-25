@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"tmpguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/policy"
 )
 
 // Verdict — что делать с деревом сироты.

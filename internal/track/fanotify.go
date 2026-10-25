@@ -131,7 +131,7 @@ func parseDirName(body []byte) *dirName {
 func resolveHandle(mountFD int, h unix.FileHandle) (string, error) {
 	fd, err := unix.OpenByHandleAt(mountFD, h, unix.O_PATH)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("open_by_handle_at: %w", err)
 	}
 	defer unix.Close(fd)
 	return os.Readlink("/proc/self/fd/" + strconv.Itoa(fd))

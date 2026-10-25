@@ -1,0 +1,12 @@
+[Unit]
+Description=aguard: страж агентов (сироты, /tmp, память сессий)
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/aguard run
+Restart=on-failure
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=default.target

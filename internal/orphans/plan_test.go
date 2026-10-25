@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"tmpguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/policy"
 )
 
 const (
@@ -43,7 +43,7 @@ func testCfg(t *testing.T, ex ...Exclude) *Config {
 	t.Helper()
 	c := Default("/home/u")
 	c.Exclude = ex
-	if err := c.compile("/home/u"); err != nil {
+	if err := c.Compile("/home/u"); err != nil {
 		t.Fatal(err)
 	}
 	return &c
@@ -250,12 +250,12 @@ func TestServiceUnit(t *testing.T) {
 func TestConfigValidate(t *testing.T) {
 	c := Default("/home/u")
 	c.Exclude = []Exclude{{Reason: "пусто"}}
-	if err := c.compile("/home/u"); err == nil {
+	if err := c.Compile("/home/u"); err == nil {
 		t.Fatal("пустое исключение должно быть ошибкой")
 	}
 	c = Default("/home/u")
 	c.MinDead = policy.Duration(time.Second)
-	if err := c.compile("/home/u"); err == nil {
+	if err := c.Compile("/home/u"); err == nil {
 		t.Fatal("min_dead < 1m должно быть ошибкой")
 	}
 }

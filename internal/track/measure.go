@@ -2,6 +2,7 @@ package track
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -23,7 +24,7 @@ func statMeta(path string) (meta, error) {
 	err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW,
 		unix.STATX_TYPE|unix.STATX_INO|unix.STATX_UID|unix.STATX_BTIME|unix.STATX_MTIME, &sx)
 	if err != nil {
-		return meta{}, err
+		return meta{}, fmt.Errorf("statx %s: %w", path, err)
 	}
 	m := meta{dir: sx.Mode&unix.S_IFMT == unix.S_IFDIR, ino: sx.Ino, uid: int(sx.Uid)}
 	if sx.Mask&unix.STATX_BTIME != 0 && sx.Btime.Sec > 0 {
@@ -87,7 +88,7 @@ func measure(path string, ino uint64) usage {
 
 func walk(dir string, dev uint64, add func(*unix.Stat_t)) {
 	ents, err := os.ReadDir(dir)
-	if err != nil {
+	if err != nil { //nolint:silent-error-handling // папку удалили во время замера: в размер идёт то, что успели обойти
 		return
 	}
 	for _, e := range ents {
@@ -107,12 +108,12 @@ func walk(dir string, dev uint64, add func(*unix.Stat_t)) {
 func listDir(dir string) ([]string, error) {
 	f, err := os.Open(dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("папка %s: %w", dir, err)
 	}
 	defer f.Close()
 	names, err := f.Readdirnames(-1)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return names, err
+		return names, fmt.Errorf("папка %s: %w", dir, err)
 	}
 	return names, nil
 }

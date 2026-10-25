@@ -1,0 +1,35 @@
+# Коммит aguard — graft: graft commit -m "…" — гейт, git add -A, проверки, коммит, push.
+schema: 1
+graft: '>=2.37.0'
+# go fix -diff ./... идёт после go vet с его окружением: модернизаторы тулчейна не оставляют правок.
+go_fix:
+  enabled: true
+
+tasks:
+  test:
+    desc: все тесты
+    tests: go
+    run:
+      - go test -p {threads} -json {args} ./...
+
+# Гейт: go vet (graft сам, первым шагом), gofmt, тесты и glint без находок.
+gate:
+  - sh: 'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }'
+  - task: test
+  # glint падает кодом выхода на любой находке: fail_on: low в .glint.yaml.
+  - sh: GOWORK=off ~/bin/glint check .
+
+version:
+  mode: none
+
+push:
+  force_with_lease: ['w/*']
+
+checks:
+  large_files:
+    max_binary_bytes: 1048576
+    max_text_bytes: 1048576
+    binary_extensions: [png, jpg, jpeg, gif, webp, pdf, gz, zst]
+
+lock:
+  scope: worktree

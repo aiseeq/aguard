@@ -1,12 +1,13 @@
 package policy
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
-	"tmpguard/internal/record"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 // Class — класс создателя записи.
@@ -36,7 +37,7 @@ func (c *Config) IsCache(path string) bool { return matchAny(c.Cache.Paths, path
 
 func matchAny(patterns []string, path string) bool {
 	for _, p := range patterns {
-		if ok, _ := filepath.Match(p, path); ok {
+		if ok, _ := filepath.Match(p, path); ok { //nolint:ignored-error // единственная ошибка Match — ErrBadPattern, шаблоны проверены в Config.Validate
 			return true
 		}
 	}
@@ -130,12 +131,13 @@ func OwnerKey(cl Class, e *record.Entry) string {
 // Items классифицирует живые записи, отбрасывая игнорируемые.
 func (c *Config) Items(entries []record.Entry, myUID int) []Item {
 	out := make([]Item, 0, len(entries))
-	for _, e := range entries {
+	for i := range entries {
+		e := &entries[i]
 		if c.Ignored(e.Path) {
 			continue
 		}
 		cl, f := c.Classify(e.Path, e.Owner, e.UID, myUID)
-		out = append(out, Item{Entry: e, Class: cl, Fighter: f, OwnerKey: OwnerKey(cl, &e)})
+		out = append(out, Item{Entry: *e, Class: cl, Fighter: f, OwnerKey: OwnerKey(cl, e)})
 	}
 	return out
 }
@@ -144,7 +146,8 @@ func (c *Config) Items(entries []record.Entry, myUID int) []Item {
 // Кеши сюда не попадают: у них своя чистка.
 func (c *Config) Over(items []Item, factor float64) []Group {
 	groups := map[string]*Group{}
-	for _, it := range items {
+	for i := range items {
+		it := &items[i]
 		if it.Class == ClassCache || it.Entry.Bytes < int64(c.Policy.MinEntry) {
 			continue
 		}
@@ -153,7 +156,7 @@ func (c *Config) Over(items []Item, factor float64) []Group {
 			g = &Group{Key: it.OwnerKey, Class: it.Class}
 			groups[it.OwnerKey] = g
 		}
-		g.Items = append(g.Items, it)
+		g.Items = append(g.Items, *it)
 		g.Bytes += it.Entry.Bytes
 		g.GBMin += it.GBMin()
 	}
@@ -166,7 +169,12 @@ func (c *Config) Over(items []Item, factor float64) []Group {
 		sort.Slice(g.Items, func(i, j int) bool { return g.Items[i].Entry.ByteSec > g.Items[j].Entry.ByteSec })
 		out = append(out, *g)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].GBMin > out[j].GBMin })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].GBMin != out[j].GBMin {
+			return out[i].GBMin > out[j].GBMin
+		}
+		return out[i].Key < out[j].Key
+	})
 	return out
 }
 
@@ -186,4 +194,26 @@ func CreatorText(o *record.Owner) string {
 		cmd = string(r[:90]) + "…"
 	}
 	return strings.TrimSpace(cmd) + " (pid " + strconv.Itoa(o.Proc.Pid) + ")"
+}
+
+// LinesBytes — сумма размеров записей строк сводки.
+func LinesBytes(ls []Line) int64 {
+	var n int64
+	for i := range ls {
+		n += ls[i].Item.Entry.Bytes
+	}
+	return n
+}
+
+// OverText — «владельцев сверх порога N (записей M, X)»: у записей без
+// создателя владелец — сама запись, поэтому числа могут совпадать.
+func OverText(items []Item, groups []Group, factor float64) string {
+	n := 0
+	var b int64
+	for i := range groups {
+		n += len(groups[i].Items)
+		b += groups[i].Bytes
+	}
+	return fmt.Sprintf("записей всего %d; владельцев сверх порога %d (их записей %d, %s); порог ×%s",
+		len(items), len(groups), n, HumanBytes(b), FormatGBMin(factor))
 }

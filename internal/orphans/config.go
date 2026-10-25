@@ -1,4 +1,4 @@
-// Package orphans — логика procguard: процессы, оставшиеся от умерших
+// Package orphans — логика наблюдателя orphans (бывший procguard): процессы, оставшиеся от умерших
 // сессий Claude Code (CLAUDE_PID в окружении указывает на сессию, которой
 // больше нет), выбор, что снимать, и само снятие.
 package orphans
@@ -6,15 +6,12 @@ package orphans
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/BurntSushi/toml"
-
-	"tmpguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/policy"
 )
 
 // Режимы работы.
@@ -23,22 +20,18 @@ const (
 	ModeAct     = "act"     // снимает и шлёт сводки
 )
 
-// Config — ~/.config/procguard/config.toml.
+// Config — раздел [orphans] конфига aguard. Lead, SendAuth и Admins — общие
+// для всего конфига, их подставляет загрузчик aguard.
 type Config struct {
-	Mode     string          `toml:"mode"`
-	Interval policy.Duration `toml:"interval"`
-	MinDead  policy.Duration `toml:"min_dead"`  // сколько процесс должен прожить после смерти сессии
-	TermWait policy.Duration `toml:"term_wait"` // от SIGTERM до SIGKILL (и -t у podman stop)
-	Lead     string          `toml:"lead"`      // имя сессии лида
-	SendAuth bool            `toml:"send_auth"` // слать peerToken первой строкой
-	Notify   NotifyConfig    `toml:"notify"`
-	Exclude  []Exclude       `toml:"exclude"`
-}
-
-// NotifyConfig — кому сводка о снятом.
-type NotifyConfig struct {
-	Admins    map[string]string `toml:"admins"`     // префикс cwd сессии -> имя админа пространства
+	Mode      string            `toml:"mode"`
+	Interval  policy.Duration   `toml:"interval"`
+	MinDead   policy.Duration   `toml:"min_dead"`   // сколько процесс должен прожить после смерти сессии
+	TermWait  policy.Duration   `toml:"term_wait"`  // от SIGTERM до SIGKILL (и -t у podman stop)
 	MuteUntil map[string]string `toml:"mute_until"` // префикс cwd -> дата, до которой сводок нет (только журнал)
+	Exclude   []Exclude         `toml:"exclude"`
+	Lead      string            `toml:"-"` // имя сессии лида
+	SendAuth  bool              `toml:"-"` // слать peerToken первой строкой
+	Admins    map[string]string `toml:"-"` // префикс cwd сессии -> имя админа пространства
 }
 
 // Exclude — исключение: все заданные поля должны совпасть с процессом дерева.
@@ -68,30 +61,15 @@ func Default(home string) Config {
 		MinDead:  policy.Duration(defaultMinDead),
 		TermWait: policy.Duration(defaultTermWait),
 		Lead:     "lead",
-		Notify: NotifyConfig{Admins: map[string]string{
+		Admins: map[string]string{
 			filepath.Join(home, "work"): "work-admin",
 			filepath.Join(home, "git"):  "git-admin",
-		}},
+		},
 	}
 }
 
-// Load читает конфиг поверх значений по умолчанию; нет файла — значения по умолчанию.
-func Load(path, home string) (Config, error) {
-	c := Default(home)
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return c, c.compile(home)
-	}
-	if err != nil {
-		return c, fmt.Errorf("конфиг: %w", err)
-	}
-	if _, err := toml.Decode(string(b), &c); err != nil {
-		return c, fmt.Errorf("%s: %w", path, err)
-	}
-	return c, c.compile(home)
-}
-
-func (c *Config) compile(home string) error {
+// Compile проверяет раздел, раскрывает ~ в путях и компилирует исключения.
+func (c *Config) Compile(home string) error {
 	if c.Mode != ModeObserve && c.Mode != ModeAct {
 		return fmt.Errorf("mode = %q: ожидается observe или act", c.Mode)
 	}
@@ -101,16 +79,16 @@ func (c *Config) compile(home string) error {
 	if c.MinDead.D() < time.Minute || c.TermWait.D() < time.Second {
 		return errors.New("min_dead >= 1m и term_wait >= 1s")
 	}
-	c.Notify.Admins = expandKeys(c.Notify.Admins, home)
-	c.Notify.MuteUntil = expandKeys(c.Notify.MuteUntil, home)
-	for k, v := range c.Notify.MuteUntil {
+	c.Admins = expandKeys(c.Admins, home)
+	c.MuteUntil = expandKeys(c.MuteUntil, home)
+	for k, v := range c.MuteUntil {
 		if _, err := ParseUntil(v); err != nil {
-			return fmt.Errorf("notify.mute_until %q: %w", k, err)
+			return fmt.Errorf("orphans.mute_until %q: %w", k, err)
 		}
 	}
 	for i := range c.Exclude {
 		if err := c.Exclude[i].compile(home); err != nil {
-			return fmt.Errorf("exclude[%d]: %w", i, err)
+			return fmt.Errorf("orphans.exclude[%d]: %w", i, err)
 		}
 	}
 	return nil

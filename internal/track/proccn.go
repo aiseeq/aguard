@@ -4,7 +4,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,9 +32,12 @@ type Tombs struct {
 	m       map[int]*tomb
 	keep    time.Duration
 	overrun atomic.Int64
+	log     *slog.Logger
 }
 
-func newTombs(keep time.Duration) *Tombs { return &Tombs{m: map[int]*tomb{}, keep: keep} }
+func newTombs(keep time.Duration, lg *slog.Logger) *Tombs {
+	return &Tombs{m: map[int]*tomb{}, keep: keep, log: lg}
+}
 
 func (t *Tombs) lookup(pid int) (tomb, bool) {
 	t.mu.Lock()
@@ -48,6 +53,11 @@ const (
 	procEvFork = 0x1
 	procEvExec = 0x2
 	procEvExit = 0x80000000
+
+	// cnListenLen — подписка на proc connector: nlmsghdr(16) + cn_msg(20) + op(4).
+	cnListenLen = 16 + 20 + 4
+	// expireEvery — как часто чистить надгробия старше keep.
+	expireEvery = 30 * time.Second
 )
 
 // listen подписывается на proc connector и разбирает события до ошибки сокета.
@@ -61,9 +71,8 @@ func (t *Tombs) listen() error {
 	if err := unix.Bind(s, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: 1, Pid: pid}); err != nil {
 		return fmt.Errorf("proc connector bind: %w", err)
 	}
-	// nlmsghdr(16) + cn_msg(20) + op(4)
-	msg := make([]byte, 40)
-	binary.LittleEndian.PutUint32(msg[0:], 40)
+	msg := make([]byte, cnListenLen)
+	binary.LittleEndian.PutUint32(msg[0:], cnListenLen)
 	binary.LittleEndian.PutUint16(msg[4:], unix.NLMSG_DONE)
 	binary.LittleEndian.PutUint32(msg[12:], pid)
 	binary.LittleEndian.PutUint32(msg[16:], 1) // CN_IDX_PROC
@@ -77,38 +86,65 @@ func (t *Tombs) listen() error {
 		return fmt.Errorf("proc connector rcvbuf: %w", err)
 	}
 	go t.expire()
-	go func() {
-		buf := make([]byte, 64<<10)
-		for {
-			n, _, err := unix.Recvfrom(s, buf, 0)
-			if err != nil {
-				if errors.Is(err, unix.ENOBUFS) {
-					t.overrun.Add(1)
-				}
-				continue
-			}
-			for b := buf[:n]; len(b) >= 16; {
-				l := int(binary.LittleEndian.Uint32(b))
-				if l < 16 || l > len(b) {
-					break
-				}
-				t.handle(b[16:l])
-				b = b[min((l+3)&^3, len(b)):]
-			}
-		}
-	}()
+	go t.recvLoop(s)
 	return nil
 }
 
-func (t *Tombs) expire() {
-	for range time.Tick(30 * time.Second) {
-		t.mu.Lock()
-		for pid, x := range t.m {
-			if !x.exited.IsZero() && time.Since(x.exited) > t.keep {
-				delete(t.m, pid)
-			}
+func (t *Tombs) recvLoop(s int) {
+	buf := make([]byte, 64<<10)
+	for {
+		t.recvOnce(s, buf)
+	}
+}
+
+// recvOnce читает и разбирает одну датаграмму; паника в разборе пишется в
+// лог, и цикл чтения продолжается.
+func (t *Tombs) recvOnce(s int, buf []byte) {
+	defer recovered(t.log, "разбор proc connector")
+	n, _, err := unix.Recvfrom(s, buf, 0)
+	switch {
+	case err == nil:
+	case errors.Is(err, unix.ENOBUFS):
+		t.overrun.Add(1) // события потеряны: число идёт в часовую сводку
+		return
+	case errors.Is(err, unix.EINTR):
+		return
+	default:
+		t.log.Warn("tmpguard-track: proc connector, чтение", "err", err)
+		return
+	}
+	for b := buf[:n]; len(b) >= 16; {
+		l := int(binary.LittleEndian.Uint32(b))
+		if l < 16 || l > len(b) {
+			break
 		}
-		t.mu.Unlock()
+		t.handle(b[16:l])
+		b = b[min((l+3)&^3, len(b)):]
+	}
+}
+
+func (t *Tombs) expire() {
+	for range time.Tick(expireEvery) {
+		t.expireOnce()
+	}
+}
+
+func (t *Tombs) expireOnce() {
+	defer recovered(t.log, "чистка надгробий")
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for pid, x := range t.m {
+		if !x.exited.IsZero() && time.Since(x.exited) > t.keep {
+			delete(t.m, pid)
+		}
+	}
+}
+
+// recovered — отложенный recover фоновой горутины: паника пишется в лог со
+// стеком, а не роняет сторож.
+func recovered(lg *slog.Logger, what string) {
+	if r := recover(); r != nil {
+		lg.Error("tmpguard-track: паника: "+what, "panic", r, "stack", string(debug.Stack()))
 	}
 }
 
@@ -136,8 +172,8 @@ func (t *Tombs) handle(cn []byte) {
 	case procEvExec: // process_pid, process_tgid
 		pid := u(1)
 		d, err := readProc(pid)
-		if err != nil {
-			return // процесс уже вышел: останется то, что унаследовано при fork
+		if err != nil { //nolint:silent-error-handling // процесс вышел раньше, чем прочитали /proc: обычно для однодневок, остаётся унаследованное при fork
+			return
 		}
 		t.mu.Lock()
 		x := t.m[pid]

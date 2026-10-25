@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"tmpguard/internal/sessions"
+	"github.com/aiseeq/aguard/internal/sessions"
 )
 
 // Outcome — чем кончилось снятие дерева.
