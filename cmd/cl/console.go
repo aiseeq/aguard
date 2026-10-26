@@ -74,7 +74,9 @@ func (c *console) pump() {
 			c.mu.Unlock()
 		}
 		if err != nil {
-			c.report("ввод cl кончился", err) // вкладку закрыли: дальше cl выйдет по SIGHUP
+			if !gone(err) { // вкладку закрыли — терминала нет, дальше cl выйдет по SIGHUP
+				c.report("ввод cl кончился", err)
+			}
 			return
 		}
 	}
@@ -121,7 +123,7 @@ func (c *console) start(cmd *exec.Cmd) (func(), error) {
 	drained := make(chan struct{})
 	go func() {
 		// конец — EIO: claude вышел и закрыл свою сторону; иное — сбой вывода
-		if _, err := io.Copy(c.out, master); err != nil && !errors.Is(err, syscall.EIO) {
+		if _, err := io.Copy(c.out, master); err != nil && !gone(err) {
 			c.report("вывод claude", err)
 		}
 		close(drained)
@@ -162,10 +164,16 @@ func (c *console) restore() {
 	c.raw = nil
 	c.mu.Unlock()
 	if raw != nil {
-		if err := term.Restore(int(c.in.Fd()), raw); err != nil { // вкладку закрыли — терминала нет
+		if err := term.Restore(int(c.in.Fd()), raw); err != nil && !gone(err) { // вкладку закрыли — возвращать некуда
 			c.report("вернуть режим терминала", err)
 		}
 	}
+}
+
+// gone — терминала больше нет: вкладку закрыли (EIO на pty без master) или ввод кончился. Обычный конец, не сбой
+// (пилот 26.10: закрытие панели tmux давало обе строки в журнал).
+func gone(err error) bool {
+	return errors.Is(err, syscall.EIO) || errors.Is(err, io.EOF)
 }
 
 // idle — сколько человек ничего не вводил; не вводил с запуска cl — с нуля unix-времени (очень долго).
