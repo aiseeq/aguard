@@ -47,9 +47,11 @@ func TestObserve(t *testing.T) {
 	if recs := tr.Observe(check(t0, true, true), at(54)); len(recs) != 0 {
 		t.Errorf("по тому же запросу — одно решение: %+v", recs)
 	}
-	// человек вернулся через полтора часа, кэш умер: прочитано только общее
-	back := check(at(90), false, false, "early")
-	back.CacheRead = 18_000
+	// человек вернулся через полтора часа, кэш умер: первый запрос прочитал только общее, а следующий к проверке —
+	// уже заново записанный кэш; исход — по первому
+	back := check(at(91), false, false, "early")
+	back.CacheRead = 150_000
+	back.Requests = []restart.RequestMark{{At: t0, CacheRead: 140_000}, {At: at(90), CacheRead: 18_000}, {At: at(91), CacheRead: 150_000}}
 	recs = tr.Observe(back, at(91))
 	if !slices.Equal(kinds(recs), []string{"outcome/" + OutcomeCacheExpired}) || recs[0].Decision != KindWould ||
 		recs[0].AfterS != 90*60 || recs[0].CacheRead != 18_000 {
@@ -57,11 +59,11 @@ func TestObserve(t *testing.T) {
 	}
 
 	// не стал бы из-за черновика, а потом беседу сжали
-	recs = tr.Observe(check(at(90), true, false, "screen", "draft"), at(143))
+	recs = tr.Observe(check(at(91), true, false, "screen", "draft"), at(143))
 	if len(recs) != 1 || recs[0].Kind != KindWouldNot || !slices.Equal(recs[0].Against, []string{"screen", "draft"}) {
 		t.Fatalf("не стал бы: %+v", recs)
 	}
-	sq := check(at(90), false, false, "compacted")
+	sq := check(at(91), false, false, "compacted")
 	sq.Compacted, sq.Trigger = at(144), "auto"
 	recs = tr.Observe(sq, at(145))
 	if !slices.Equal(kinds(recs), []string{"outcome/" + OutcomeCompacted}) || recs[0].Trigger != "auto" || recs[0].Decision != KindWouldNot {

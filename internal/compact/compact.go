@@ -225,18 +225,31 @@ func outcome(p pending, c restart.CompactCheck, now time.Time) (Record, bool) {
 	case !c.Compacted.IsZero() && c.Compacted.After(p.Request):
 		r.Outcome, r.Trigger, r.AfterS = OutcomeCompacted, c.Trigger, seconds(c.Compacted.Sub(p.Request))
 	case c.Request.After(p.Request):
-		r.Outcome, r.CacheRead, r.AfterS = OutcomeCacheExpired, c.CacheRead, seconds(c.Request.Sub(p.Request))
+		next := nextRequest(c, p.Request)
+		r.Outcome, r.CacheRead, r.AfterS = OutcomeCacheExpired, next.CacheRead, seconds(next.At.Sub(p.Request))
 		if c.PromptAt.After(p.Request) {
 			r.Prompt = c.Prompt
 		}
 		// После смерти кэша из него читается только общий для всех бесед кусок (подсказка и инструменты).
-		if c.CacheRead*2 >= p.Tokens {
+		if r.CacheRead*2 >= p.Tokens {
 			r.Outcome = OutcomeCacheAlive
 		}
 	default:
 		return r, false
 	}
 	return r, true
+}
+
+// nextRequest — первый запрос после at: жил ли кэш, видно только по нему. Следующие читают уже заново записанный
+// кэш (sc2go 26.10 11:02 CET: первый запрос после шести часов простоя записал 196 тыс., последний к проверке прочитал
+// 234 тыс., и исход вышел cache_alive). Список запросов не дотянулся до at — последний запрос, как раньше.
+func nextRequest(c restart.CompactCheck, at time.Time) restart.RequestMark {
+	for _, m := range c.Requests {
+		if m.At.After(at) {
+			return m
+		}
+	}
+	return restart.RequestMark{At: c.Request, CacheRead: c.CacheRead}
 }
 
 // Expire — решения без исхода дольше lostAfter: сессия пропала. Заодно забывает давние решённые запросы.

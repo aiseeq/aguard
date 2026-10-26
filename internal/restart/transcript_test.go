@@ -1,6 +1,8 @@
 package restart
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,7 +39,7 @@ func scanLines(t *testing.T, since, now time.Time, lines ...string) transcriptFa
 
 func TestScanTranscriptTasks(t *testing.T) {
 	since, _ := time.Parse(time.RFC3339, "2026-10-24T09:00:00Z")
-	now := since.Add(5 * time.Hour)
+	now := since.Add(75 * time.Minute)
 	f := scanLines(t, since, now,
 		// Запуск прошлого процесса не считается: его задачи умерли с ним.
 		use(tsOld, "t0", "Bash", `{"command":"sleep 1000","run_in_background":true}`),
@@ -66,6 +68,9 @@ func TestScanTranscriptTasks(t *testing.T) {
 		result(tsNew, "t6", "Monitor started (task m6, expires in 30m)", `null`),
 		use(tsNew, "t7", "TaskStop", `{"task_id":"m6"}`),
 		result(tsNew, "t7", "ok", `{"message":"Successfully stopped task: m6","task_id":"m6"}`),
+		// Монитор после своего срока: уведомления об истечении нет, но Claude Code его уже снял.
+		use(tsNew, "t9", "Monitor", `{"description":"короткий"}`),
+		result(tsNew, "t9", "Monitor started (task m9, expires in 5m unless the source ends first)", `null`),
 		// Инструмент без результата: идёт или ждёт ответа человека.
 		use(tsNew, "t8", "AskUserQuestion", `{}`),
 		`{"type":"api-request-blob","sessionId":"x","content":"tool_use"}`,
@@ -75,6 +80,42 @@ func TestScanTranscriptTasks(t *testing.T) {
 	}
 	if want := []string{"AskUserQuestion t8"}; !slices.Equal(f.Pending, want) {
 		t.Errorf("Pending = %q, want %q", f.Pending, want)
+	}
+}
+
+// Суб-агент кончил ход, пока его монитор жил, — «is waiting on its own background work»; монитор потом истёк молча,
+// и второго уведомления родителю не пришло (sc2go 25.10). Ждёт ли он ещё — по его транскрипту.
+func TestScanTranscriptWaitingAgent(t *testing.T) {
+	since, _ := time.Parse(time.RFC3339, "2026-10-24T09:00:00Z")
+	sub := filepath.Join(t.TempDir(), "a1.output")
+	writeLines(t, sub,
+		use(tsNew, "s1", "Monitor", `{"description":"партии"}`),
+		result(tsNew, "s1", "Monitor started (task ms, expires in 30m unless the source ends first)", `null`),
+		notice(tsNew, "user", `<task-id>ms</task-id>\n<event>g03 exit=0</event>`),
+	)
+	lines := []string{
+		use(tsNew, "t1", "Agent", `{"description":"части"}`),
+		result(tsNew, "t1", "Async agent launched", `{"isAsync":true,"agentId":"a1"}`),
+		notice(tsNew, "queue-operation", `<task-id>a1</task-id>\n<output-file>`+sub+`</output-file>\n<status>completed</status>\n<summary>Agent \"части\" is waiting on its own background work</summary>`),
+	}
+	if f := scanLines(t, since, mustTime(t, tsNew).Add(10*time.Minute), lines...); !slices.Equal(f.Tasks, []string{"Agent «части» a1"}) {
+		t.Errorf("монитор суб-агента жив — агент ждёт: %q", f.Tasks)
+	}
+	if f := scanLines(t, since, mustTime(t, tsNew).Add(31*time.Minute), lines...); len(f.Tasks) != 0 {
+		t.Errorf("монитор суб-агента истёк — агент кончил: %q", f.Tasks)
+	}
+	if err := os.Remove(sub); err != nil {
+		t.Fatal(err)
+	}
+	if f := scanLines(t, since, mustTime(t, tsNew).Add(31*time.Minute), lines...); len(f.Tasks) != 1 || !strings.Contains(f.Tasks[0], "транскрипт суб-агента") {
+		t.Errorf("транскрипта суб-агента нет — не проверить, агент ждёт: %q", f.Tasks)
+	}
+}
+
+func writeLines(t *testing.T, file string, lines ...string) {
+	t.Helper()
+	if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -161,6 +202,10 @@ func TestScanTranscriptContext(t *testing.T) {
 		Model: "claude-opus-5-5", Reply: "ok", Prompt: "дальше, по плану", PromptAt: mustTime(t, "2026-10-24T08:10:00Z")}
 	if f.Context != want {
 		t.Errorf("запрос: %+v, ждали %+v", f.Context, want)
+	}
+	marks := []RequestMark{{At: mustTime(t, "2026-10-24T08:00:00Z")}, {At: mustTime(t, "2026-10-24T08:10:00Z"), CacheRead: 120000}}
+	if !slices.Equal(f.Requests, marks) {
+		t.Errorf("запросы: %+v, ждали %+v", f.Requests, marks)
 	}
 	f = scanLines(t, since, since,
 		answer(tsNew, "false", 1, 0, 200000, 10),

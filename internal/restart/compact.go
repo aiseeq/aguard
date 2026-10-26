@@ -163,8 +163,10 @@ type CompactCheck struct {
 	Request     time.Time `json:"request"`    // начало последнего запроса
 	Tokens      int64     `json:"tokens"`     // контекст последнего ответа
 	CacheRead   int64     `json:"cache_read"` // сколько последний ответ прочитал из кэша
-	Compacted   time.Time `json:"compacted"`  // последнее сжатие
-	Trigger     string    `json:"trigger"`
+	// Requests — последние запросы: исход решения смотрит первый после решения, а не последний.
+	Requests  []RequestMark `json:"-"`
+	Compacted time.Time     `json:"compacted"` // последнее сжатие
+	Trigger   string        `json:"trigger"`
 	// Pid — процесс сессии: /clear меняет беседу у того же процесса.
 	Pid int `json:"pid"`
 	// Model, Reply, Prompt, PromptAt — модель, итог последнего хода, последняя реплика человека (contextFacts).
@@ -202,7 +204,8 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProble
 	}
 	return CompactCheck{
 		CompactVerdict: v, SessionID: f.SessionID, Name: f.Name, SessionKind: f.Kind,
-		Request: ctx.Request, Tokens: ctx.Tokens, CacheRead: ctx.CacheRead, Compacted: ctx.Compacted, Trigger: ctx.Trigger,
+		Request: ctx.Request, Tokens: ctx.Tokens, CacheRead: ctx.CacheRead, Requests: f.Transcript.Requests,
+		Compacted: ctx.Compacted, Trigger: ctx.Trigger,
 		Pid: pid, Model: ctx.Model, Reply: ctx.Reply, Prompt: ctx.Prompt, PromptAt: ctx.PromptAt, Reset: r,
 	}
 }

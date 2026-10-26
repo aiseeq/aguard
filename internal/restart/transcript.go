@@ -27,7 +27,18 @@ type transcriptFacts struct {
 	Wakeups []string
 	// Context — последний запрос основной ветки, с любого процесса беседы: кэш подсказки переживает перезапуск.
 	Context contextFacts
+	// Requests — последние запросы основной ветки: исход решения о сжатии смотрит первый запрос после решения.
+	Requests []RequestMark
 }
+
+// RequestMark — запрос основной ветки: начало и сколько он прочитал из кэша.
+type RequestMark struct {
+	At        time.Time `json:"at"`
+	CacheRead int64     `json:"cache_read"`
+}
+
+// requestsKept — сколько последних запросов помнить: проверка раз в минуту, а за минуту запросов меньше.
+const requestsKept = 64
 
 // contextFacts — последний запрос основной ветки беседы. Кэш подсказки живёт час от начала запроса, который его
 // прочитал или записал.
@@ -121,8 +132,9 @@ type toolUse struct {
 }
 
 var (
-	monitorStarted = regexp.MustCompile(`Monitor started \(task ([A-Za-z0-9_-]+)`)
+	monitorStarted = regexp.MustCompile(`Monitor started \(task ([A-Za-z0-9_-]+)(?:, expires in (\d+[smh]))?`)
 	notifyTaskID   = regexp.MustCompile(`<task-id>([^<]+)</task-id>`)
+	notifyOutput   = regexp.MustCompile(`<output-file>([^<]+)</output-file>`)
 	notifyStatus   = regexp.MustCompile(`<status>([a-z_]+)</status>`)
 )
 
@@ -138,11 +150,17 @@ type transcriptScan struct {
 	pending map[string]string
 	tasks   map[string]string
 	closed  map[string]bool
-	crons   map[string]cronJob
-	fired   map[string]bool
-	wakeup  time.Time
-	userAt  time.Time // последняя реплика или результат инструмента основной ветки: после неё уходит запрос
-	context contextFacts
+	// expires — срок монитора: после него Claude Code монитор снимает, а уведомление об этом приходит не всегда.
+	expires map[string]time.Time
+	// waiting — суб-агент, который ждёт свою фоновую работу, и его транскрипт; subs — разбор этих транскриптов.
+	waiting  map[string]string
+	subs     map[string]*scanCache
+	crons    map[string]cronJob
+	fired    map[string]bool
+	wakeup   time.Time
+	userAt   time.Time // последняя реплика или результат инструмента основной ветки: после неё уходит запрос
+	context  contextFacts
+	requests []RequestMark
 }
 
 // scanTranscript разбирает транскрипт процесса, начавшегося в since; незакрытое на момент now — s.facts(now).
@@ -157,7 +175,8 @@ func scanTranscript(r io.Reader, since time.Time) (*transcriptScan, error) {
 
 func newScan(since time.Time) *transcriptScan {
 	return &transcriptScan{since: since, uses: map[string]toolUse{}, pending: map[string]string{}, tasks: map[string]string{},
-		closed: map[string]bool{}, crons: map[string]cronJob{}, fired: map[string]bool{}}
+		closed: map[string]bool{}, expires: map[string]time.Time{}, waiting: map[string]string{}, subs: map[string]*scanCache{},
+		crons: map[string]cronJob{}, fired: map[string]bool{}}
 }
 
 // feed разбирает строки до конца r; n — сколько байт целых строк разобрано: с этого места продолжит следующий feed.
@@ -272,6 +291,13 @@ func (s *transcriptScan) request(rec object, at time.Time) error {
 			s.context.Request = at
 		}
 		s.context.CacheRead = u.num("cache_read_input_tokens")
+		if n := len(s.requests); n == 0 || !s.requests[n-1].At.Equal(s.context.Request) {
+			if n >= 2*requestsKept {
+				s.requests = slices.Clone(s.requests[n-requestsKept:])
+			}
+			s.requests = append(s.requests, RequestMark{At: s.context.Request})
+		}
+		s.requests[len(s.requests)-1].CacheRead = s.context.CacheRead
 		s.context.Tokens = u.num("input_tokens") + s.context.CacheRead + u.num("cache_creation_input_tokens") + u.num("output_tokens")
 		s.context.Model = msg.str("model")
 		bs, err := blocks(msg["content"])
@@ -361,10 +387,15 @@ func (s *transcriptScan) notifications(text string) {
 		switch {
 		case strings.Contains(chunk, "is waiting on its own background work"):
 			s.closed[id[1]] = false
+			if out := notifyOutput.FindStringSubmatch(chunk); out != nil {
+				s.waiting[id[1]] = out[1]
+			}
 		case strings.Contains(chunk, "[Monitor expired after"):
 			s.closed[id[1]] = true
+			delete(s.waiting, id[1])
 		case status != nil && status[1] != "running":
 			s.closed[id[1]] = true
+			delete(s.waiting, id[1])
 		}
 	}
 }
@@ -392,6 +423,9 @@ func (s *transcriptScan) result(b block, raw json.RawMessage) error {
 	case "Monitor":
 		if m := monitorStarted.FindStringSubmatch(string(b.Content)); m != nil {
 			s.tasks[m[1]] = label
+			if ttl, err := time.ParseDuration(m[2]); err == nil {
+				s.expires[m[1]] = use.at.Add(ttl)
+			}
 		}
 	case "TaskStop":
 		if id := res.str("task_id"); id != "" && strings.Contains(res.str("message"), "Successfully") {
@@ -437,10 +471,17 @@ func (s *transcriptScan) facts(now time.Time) transcriptFacts {
 		f.Pending = append(f.Pending, name+" "+id)
 	}
 	for id, label := range s.tasks {
-		if !s.closed[id] {
+		if s.closed[id] {
+			continue
+		}
+		switch done, err := s.ended(id, now); {
+		case err != nil:
+			f.Tasks = append(f.Tasks, label+" "+id+" ("+err.Error()+")")
+		case !done:
 			f.Tasks = append(f.Tasks, label+" "+id)
 		}
 	}
+	f.Requests = slices.Clone(s.requests[max(0, len(s.requests)-requestsKept):])
 	for id, job := range s.crons {
 		// Разовый таймер, который уже сработал, Claude Code удаляет сам.
 		if !job.Recurring && s.fired[id] {
@@ -456,6 +497,34 @@ func (s *transcriptScan) facts(now time.Time) transcriptFacts {
 	slices.Sort(f.Tasks)
 	slices.SortFunc(f.Crons, func(a, b cronJob) int { return strings.Compare(a.ID, b.ID) })
 	return f
+}
+
+// ended — задача без уведомления о конце, но кончилась: монитор после своего срока или суб-агент, чья фоновая
+// работа закончилась. Монитор суб-агента истекает после конца хода молча, и родителю уведомление не приходит
+// (sc2go 25.10: агент a0505c3725309a1d5 держал довод tasks 29 часов). Транскрипта суб-агента нет или он не
+// разбирается — не проверить: задача остаётся, ошибка — в её подписи.
+func (s *transcriptScan) ended(id string, now time.Time) (bool, error) {
+	if exp, ok := s.expires[id]; ok && !now.Before(exp) {
+		return true, nil
+	}
+	file, ok := s.waiting[id]
+	if !ok {
+		return false, nil
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		return false, fmt.Errorf("транскрипт суб-агента: %w", err)
+	}
+	c := s.subs[file]
+	if c == nil {
+		c = &scanCache{}
+		s.subs[file] = c
+	}
+	sub, err := c.read(file, info, time.Time{}, now)
+	if err != nil {
+		return false, fmt.Errorf("суб-агент: %w", err)
+	}
+	return len(sub.Tasks) == 0, nil
 }
 
 // blocks — содержимое сообщения массивом блоков; строка (простой текст) блоков не даёт.
