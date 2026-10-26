@@ -173,7 +173,6 @@ func (l launcher) withRoleLine(args []string, name, event string) []string {
 	line, err := l.roleLine(name, event)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cl: строка роли:", err)
-		return args
 	}
 	if line == "" {
 		return args
@@ -195,7 +194,15 @@ func (l launcher) roleLine(name, event string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return cfg.roleLine(name, why, resume, event), nil
+	line := cfg.roleLine(name, why, resume, event)
+	if resume == "" || !strings.Contains(line, resume) {
+		return line, nil
+	}
+	used, err := takeResume(resume)
+	if err != nil {
+		return line, err // не убрался — отдаётся по прежнему пути: строка роли важнее разовости файла
+	}
+	return strings.ReplaceAll(line, resume, used), nil
 }
 
 // signalChild шлёт сигнал claude; вышедший процесс — не ошибка (его выход и так придёт в done).

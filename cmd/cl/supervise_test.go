@@ -132,7 +132,10 @@ func TestSuperviseReset(t *testing.T) {
 	write(t, filepath.Join(d, "config.json"), `{"restart":{"mode":"act","check_seconds":10,`+
 		`"journal":"`+filepath.Join(d, "restart.log")+`","resume_dir":"`+filepath.Join(d, "restart")+`",`+
 		`"compact_mode":"act","reset_mode":"act","reset_names":["x-*"]},`+
-		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"resume_file"}],"reset_note":"Беседа новая."}`)
+		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"resume_file"}],"resume_text":"Файл: {path}.",`+
+		`"reset_note":"Беседа новая."}`)
+	resume := filepath.Join(d, "restart", "2026-10-26", "x-master.md")
+	write(t, resume, "сводка")
 	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
 		`if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; exit 4; fi
 printf '%s\n' "$@" > "$D/run1"
@@ -150,13 +153,18 @@ exec sleep 25`)
 	pid := strconv.Itoa(os.Getpid())
 	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice"}
 	fresh := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-r1", "--", w.claude), sessionFlags(d)...),
-		"-n", "x-master", "--model", "opus", "Роль (сброс cl на Claude Code 2.1.310). Беседа новая.")
+		"-n", "x-master", "--model", "opus", "Роль (сброс cl на Claude Code 2.1.310). Файл: "+
+			filepath.Join(d, "restart", "2026-10-26", "used", "x-master.md")+". Беседа новая.")
 	journalText := strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n")
 	if got := readLines(t, filepath.Join(d, "run2")); !slices.Equal(got, fresh) {
 		t.Errorf("новая беседа:\n%q\nwant\n%q\nжурнал:\n%s", got, fresh, journalText)
 	}
 	if want := "act: сбрасываю: контекст 200 тыс.; SIGTERM, поднимаю новую беседу вместо s1"; !strings.Contains(journalText, want) {
 		t.Errorf("в журнале нет %q:\n%s", want, journalText)
+	}
+	// файл возобновления разовый: отдан новой беседе — убран, следующий подъём его не получит
+	if got, err := freshResume(filepath.Join(d, "restart"), "x-master", 24*time.Hour, time.Now()); err != nil || got != "" {
+		t.Errorf("отданный файл возобновления снова выдаётся: %q %v", got, err)
 	}
 }
 

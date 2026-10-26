@@ -168,6 +168,23 @@ func (c config) roleLine(name, why, resume, event string) string {
 	return strings.Join(parts, " ")
 }
 
+// usedDir — куда cl убирает отданный файл возобновления, в той же папке-дате: файл разовый, и следующий подъём,
+// ручной или сбросом, его не получит (пользователь 26.10 11:14 CET в транскрипте лида: «такой файл, по видимому не
+// удаляется после поднятия новой консоли, а должен»).
+const usedDir = "used"
+
+// takeResume убирает отданный файл возобновления в usedDir рядом и возвращает его новый путь.
+func takeResume(file string) (string, error) {
+	used := filepath.Join(filepath.Dir(file), usedDir, filepath.Base(file))
+	if err := os.MkdirAll(filepath.Dir(used), 0o755); err != nil {
+		return "", fmt.Errorf("файл возобновления: %w", err)
+	}
+	if err := os.Rename(file, used); err != nil {
+		return "", fmt.Errorf("файл возобновления: %w", err)
+	}
+	return used, nil
+}
+
 // freshResume — файл возобновления <имя>.md в последней папке-дате ~/.claude/restart, не старше maxAge. Нет папки,
 // файла или он старый — пусто без ошибки.
 func freshResume(dir, name string, maxAge time.Duration, now time.Time) (string, error) {
