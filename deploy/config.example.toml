@@ -78,7 +78,7 @@ mode = "log"
 idle = "10m"
 # socket = "/run/user/1000/aguard/aguard.sock"
 # claude = "~/.local/bin/claude"
-# hook_states = "/run/user/1000/claude-hooks/sessions"
+# hook_states = "/run/user/1000/chooks/sessions"
 
 # Таймеры, которые роль ставит заново сама: их потеря перезапуск не держит.
 [[restart.roles]]

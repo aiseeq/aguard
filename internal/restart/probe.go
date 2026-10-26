@@ -22,12 +22,12 @@ type facts struct {
 	session.Info        // запись реестра Claude Code (~/.claude/sessions/<pid>.json)
 	Running      string // версия бинаря процесса
 	Installed    string // версия, которую запустит claude из PATH
-	// HookState — состояние от claude-hooks: done (ход закончен), waiting (ждёт человека), paused (ждёт фоновые
+	// HookState — состояние от chooks: done (ход закончен), waiting (ждёт человека), paused (ждёт фоновые
 	// задачи или таймеры), working; пусто — записи нет.
 	HookState string
-	// HookTasks — на последнем Stop Claude Code перечислил фоновые задачи (файл <сессия>.tasks claude-hooks).
+	// HookTasks — на последнем Stop Claude Code перечислил фоновые задачи (файл <сессия>.tasks chooks).
 	HookTasks bool
-	// Quiet — сколько времени не менялись транскрипт, состояние claude-hooks и статус в реестре.
+	// Quiet — сколько времени не менялись транскрипт, состояние chooks и статус в реестре.
 	Quiet time.Duration
 	// TTYQuiet — сколько времени в терминал сессии не приходил ввод (atime pts: клавиатура, фокус окна).
 	TTYQuiet time.Duration
@@ -49,7 +49,7 @@ type facts struct {
 type paths struct {
 	sessions   string // реестр Claude Code
 	projects   string // транскрипты Claude Code
-	hookStates string // состояния claude-hooks (internal/core/state.go: $XDG_RUNTIME_DIR/claude-hooks/sessions)
+	hookStates string // состояния chooks (internal/core/state.go: $XDG_RUNTIME_DIR/chooks/sessions)
 	proc       string
 	claude     string // claude из PATH
 	// view — поле ввода и подсказка сброса по экрану терминала процесса (screen.Reader.View).
@@ -173,14 +173,14 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 	f.Prompt, f.ClearHint = v.Prompt, v.ClearHint
 }
 
-// hookRecord — запись claude-hooks о сессии.
+// hookRecord — запись chooks о сессии.
 type hookRecord struct {
 	state   string    // done, waiting, paused, working; пусто — записи нет
 	tasks   bool      // есть <сессия>.tasks: на последнем Stop Claude Code перечислил фоновые задачи
 	written time.Time // время записи состояния
 }
 
-// readHookState читает состояние claude-hooks; записи нет — пустое состояние без ошибки (решение его не примет).
+// readHookState читает состояние chooks; записи нет — пустое состояние без ошибки (решение его не примет).
 func readHookState(p paths, sessionID string) (hookRecord, error) {
 	file := filepath.Join(p.hookStates, filepath.Base(sessionID))
 	info, err := os.Stat(file)
@@ -188,11 +188,11 @@ func readHookState(p paths, sessionID string) (hookRecord, error) {
 		return hookRecord{}, nil
 	}
 	if err != nil {
-		return hookRecord{}, fmt.Errorf("состояние claude-hooks: %w", err)
+		return hookRecord{}, fmt.Errorf("состояние chooks: %w", err)
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return hookRecord{}, fmt.Errorf("состояние claude-hooks: %w", err)
+		return hookRecord{}, fmt.Errorf("состояние chooks: %w", err)
 	}
 	rec := hookRecord{state: strings.TrimSpace(string(data)), written: info.ModTime()}
 	_, err = os.Stat(file + ".tasks")
@@ -200,7 +200,7 @@ func readHookState(p paths, sessionID string) (hookRecord, error) {
 	case err == nil:
 		rec.tasks = true
 	case !errors.Is(err, fs.ErrNotExist):
-		return rec, fmt.Errorf("задачи claude-hooks: %w", err)
+		return rec, fmt.Errorf("задачи chooks: %w", err)
 	}
 	return rec, nil
 }

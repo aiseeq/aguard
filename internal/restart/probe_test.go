@@ -70,7 +70,7 @@ func TestTranscriptFile(t *testing.T) {
 	}
 }
 
-// probe на подменённой сессии: сведения собраны из реестра, /proc, claude-hooks, транскрипта и терминала, и решение
+// probe на подменённой сессии: сведения собраны из реестра, /proc, chooks, транскрипта и терминала, и решение
 // по ним то же, что по готовым facts в decide_test.go.
 func TestProbe(t *testing.T) {
 	now := time.Now()
@@ -117,7 +117,7 @@ func TestProbeBusy(t *testing.T) {
 	}
 }
 
-// Свежая версия — дальше probe не смотрит: без транскрипта и claude-hooks ошибки нет. Нет записи реестра — ошибка.
+// Свежая версия — дальше probe не смотрит: без транскрипта и chooks ошибки нет. Нет записи реестра — ошибка.
 func TestProbeFreshAndMissing(t *testing.T) {
 	now := time.Now()
 	w := newSessionWorld(t, worldTimes{now: now, turnAgo: time.Minute, ttyAgo: time.Minute})

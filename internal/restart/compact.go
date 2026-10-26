@@ -178,7 +178,7 @@ type CompactCheck struct {
 	Reset ResetVerdict `json:"reset"`
 }
 
-// Compact — решение о сжатии сессии процесса pid; cfg — раздел [restart] (пути claude-hooks и claude, роли), name —
+// Compact — решение о сжатии сессии процесса pid; cfg — раздел [restart] (пути chooks и claude, роли), name —
 // имя сессии у cl, argsProblem — почему перезапуск потерял бы аргументы (знает только cl; пусто — восстановимы).
 func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProblem string, now time.Time) CompactCheck {
 	ch := j.cache(pid, now)

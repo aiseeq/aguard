@@ -11,7 +11,7 @@ import (
 	"github.com/aiseeq/aguard/internal/screen"
 )
 
-// sessionWorld — подменённые реестр Claude Code, транскрипты, состояния claude-hooks, /proc, терминал и claude из
+// sessionWorld — подменённые реестр Claude Code, транскрипты, состояния chooks, /proc, терминал и claude из
 // PATH в t.TempDir: одна сессия s1 «x-master» на 2.1.309 при установленной 2.1.310. Процесс с любым pid становится
 // этой сессией через link (папка /proc/<pid> и запись реестра — ссылки на общий образец), поэтому её может
 // подхватить и подменённый systemd-run, чей pid заранее не известен. Ни настоящей сессии, ни claude тест не трогает.
@@ -23,7 +23,7 @@ type sessionWorld struct {
 // worldTimes — когда в подменённой сессии что было, относительно now.
 type worldTimes struct {
 	now     time.Time
-	turnAgo time.Duration // последняя запись транскрипта, состояние claude-hooks и статус реестра
+	turnAgo time.Duration // последняя запись транскрипта, состояние chooks и статус реестра
 	ttyAgo  time.Duration // последний ввод в терминал (atime)
 }
 

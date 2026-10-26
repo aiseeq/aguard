@@ -137,7 +137,7 @@ func workChecks(f facts, against againstFunc) {
 	}
 }
 
-// hookChecks — состояние от claude-hooks. done — ход закончен без фоновых задач и таймеров (по списку Claude Code на
+// hookChecks — состояние от chooks. done — ход закончен без фоновых задач и таймеров (по списку Claude Code на
 // Stop). waiting — минутное напоминание после done или вопрос человеку; вопрос виден идущим инструментом (Pending).
 // paused — Stop при фоновых задачах или таймерах: годится, только если задач нет (файла .tasks нет), а таймеры по
 // транскрипту есть и все восстановимы ролью.
@@ -146,13 +146,13 @@ func hookChecks(f facts, against againstFunc) {
 	case "done", "waiting":
 	case "paused":
 		if f.HookTasks {
-			against("hook-tasks", "claude-hooks: на последнем Stop были фоновые задачи")
+			against("hook-tasks", "chooks: на последнем Stop были фоновые задачи")
 		}
 		if !f.HookTasks && len(f.Transcript.Crons) == 0 {
-			against("hook-paused", "claude-hooks: paused, а таймеров в транскрипте нет — непонятно, чего ждёт")
+			against("hook-paused", "chooks: paused, а таймеров в транскрипте нет — непонятно, чего ждёт")
 		}
 	default:
-		against("hook", "claude-hooks: %s", OrDash(f.HookState))
+		against("hook", "chooks: %s", OrDash(f.HookState))
 	}
 }
 

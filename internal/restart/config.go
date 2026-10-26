@@ -25,7 +25,7 @@ type Config struct {
 	Idle   policy.Duration `toml:"idle"`   // сколько сессия должна простоять, чтобы её можно было перезапустить
 	Socket string          `toml:"socket"` // где aguard ждёт вопросы cl
 	Claude string          `toml:"claude"` // claude из PATH сессий: версию по этой ссылке запустит перезапуск
-	// HookStates — состояния claude-hooks (internal/core/state.go: $XDG_RUNTIME_DIR/claude-hooks/sessions).
+	// HookStates — состояния chooks (internal/core/state.go: $XDG_RUNTIME_DIR/chooks/sessions).
 	HookStates string `toml:"hook_states"`
 	// Roles — роли по имени сессии, первая подходящая: какие таймеры роль ставит заново сама.
 	Roles []Role `toml:"roles"`
@@ -46,7 +46,7 @@ func Default(home, runtime string) Config {
 		Idle:       policy.Duration(10 * time.Minute),
 		Socket:     filepath.Join(runtime, "aguard", "aguard.sock"),
 		Claude:     filepath.Join(home, ".local", "bin", "claude"),
-		HookStates: filepath.Join(runtime, "claude-hooks", "sessions"),
+		HookStates: filepath.Join(runtime, "chooks", "sessions"),
 	}
 }
 
