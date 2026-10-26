@@ -103,6 +103,12 @@ func TestLines(t *testing.T) {
 	fakeProc(t, root, 500, 1, "claude", "/dev/pts/7", "TMUX=/run/tmux/s,42,0", "HOME=/h")
 	fakeProc(t, root, 600, 1, "claude", "/dev/pts/8")
 	fakeProc(t, root, 700, 1, "claude", "/dev/null")
+	// claude под pty cl: его ввод — внутренний pts, вкладка — терминал cl и оболочки
+	fakeProc(t, root, 210, 100, "bash", "/dev/pts/4")
+	fakeProc(t, root, 310, 210, "cl", "/dev/pts/4")
+	fakeProc(t, root, 410, 310, "claude", "/dev/pts/9", "HOME=/h")
+	fakeProc(t, root, 510, 1, "cl", "/dev/pts/5", "TMUX=/run/tmux/s,42,0")
+	fakeProc(t, root, 520, 510, "claude", "/dev/pts/10", "TMUX=/run/tmux/s,42,0")
 
 	term := &fakeTerm{lines: frame("❯ ")}
 	r := &Reader{Proc: root, Term: term}
@@ -111,6 +117,12 @@ func TestLines(t *testing.T) {
 	}
 	if _, err := r.Lines(500); err != nil || term.asked != "tmux /run/tmux/s /dev/pts/7" {
 		t.Errorf("tmux: %v, спросили %q", err, term.asked)
+	}
+	if _, err := r.Lines(410); err != nil || term.asked != "konsole 100 /dev/pts/4" {
+		t.Errorf("Konsole, pty cl: %v, спросили %q", err, term.asked)
+	}
+	if _, err := r.Lines(520); err != nil || term.asked != "tmux /run/tmux/s /dev/pts/5" {
+		t.Errorf("tmux, pty cl: %v, спросили %q", err, term.asked)
 	}
 	if v, err := r.View(600); !errors.Is(err, ErrNoTerminal) || v.Prompt != Unknown {
 		t.Errorf("без терминала: %s %v", v.Prompt, err)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -30,6 +31,8 @@ type launcher struct {
 	aguard string
 	// name — имя, которое дал cl (или пользователь через -n); после перезапуска — имя из реестра Claude Code.
 	name string
+	// console — claude под pty cl (restart.pty_names); nil — claude получает терминал cl напрямую.
+	console *console
 }
 
 // outcome — чем кончился один запуск claude.
@@ -46,7 +49,21 @@ type outcome struct {
 	crons   bool
 	// reset — поднять не прежнюю беседу, а новую: строка роли и файл возобновления.
 	reset bool
+	// typed — не перезапускать, а набрать это в живой сессии под pty (restart.type_mode act).
+	typed []typedText
 }
+
+// typedText — что набрать в поле ввода: команду или (role) строку роли вставкой.
+type typedText struct {
+	text string
+	role bool
+}
+
+// humanQuiet — сколько человек не должен ничего вводить, чтобы cl набирал в его сессии.
+const humanQuiet = time.Minute
+
+// roleTyped — после /clear: пауза, пока Claude Code поднимет пустую беседу, перед вставкой строки роли.
+const roleTyped = 2 * time.Second
 
 // Что случилось с сессией перед запуском claude: от этого зависит {why} строки роли.
 const (
@@ -64,6 +81,20 @@ const compactTimeout = 10 * time.Minute
 func (l launcher) supervise(pre, userArgs []string) int {
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
+	if cfg, err := loadConfig(l.configFile, l.home); err == nil && matchAny(cfg.Restart.PtyNames, l.name) {
+		l.console = openConsole(os.Stdin, os.Stdout, func(s string) {
+			journal(cfg.Restart.Journal, time.Now(), l.name+": "+s)
+		})
+	}
+	if l.console != nil {
+		defer l.console.restore()
+		defer func() {
+			if r := recover(); r != nil {
+				l.console.restore()
+				panic(r)
+			}
+		}()
+	}
 	keep, argsProblem := restartArgs(userArgs)
 	args := append(append([]string{}, pre...), userArgs...)
 	if bare(userArgs) {
@@ -75,11 +106,12 @@ func (l launcher) supervise(pre, userArgs []string) int {
 			unit += "-r" + strconv.Itoa(n)
 		}
 		cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, l.name, unit, args)[1:]...)
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		if err := cmd.Start(); err != nil {
+		finish, err := l.launch(cmd)
+		if err != nil {
 			fail(fmt.Errorf("запуск claude: %w", err))
 		}
 		out := l.watch(cmd, sigs, argsProblem)
+		finish()
 		if !out.restart {
 			return exitCode(out.err)
 		}
@@ -205,6 +237,15 @@ func (l launcher) roleLine(name, event string) (string, error) {
 	return strings.ReplaceAll(line, resume, used), nil
 }
 
+// launch запускает claude: под pty cl или прямо на терминале cl. finish — после выхода claude.
+func (l launcher) launch(cmd *exec.Cmd) (finish func(), err error) {
+	if l.console != nil {
+		return l.console.start(cmd)
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return func() {}, cmd.Start()
+}
+
 // signalChild шлёт сигнал claude; вышедший процесс — не ошибка (его выход и так придёт в done).
 func signalChild(cmd *exec.Cmd, sig os.Signal) error {
 	if err := cmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
@@ -237,9 +278,11 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 			out.restart = out.restart && !stopping
 			return out
 		case sig := <-sigs:
-			// Ctrl+C и Ctrl+\ терминал отдаёт всей группе, claude их получил сам. TERM и HUP — выход: передать claude.
-			if sig == syscall.SIGTERM || sig == syscall.SIGHUP {
-				stopping = true
+			// Ctrl+C и Ctrl+\ терминал отдаёт всей группе, claude их получил сам; под pty cl они — байты ввода, а
+			// сигнал извне claude не получит: передать. TERM и HUP — выход: передать claude.
+			exit := sig == syscall.SIGTERM || sig == syscall.SIGHUP
+			if exit || l.console != nil {
+				stopping = stopping || exit
 				if err := signalChild(cmd, sig); err != nil {
 					journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: %v", l.name, pid, err))
 				}
@@ -255,7 +298,12 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 			}
 			now := time.Now()
 			a, askErr := l.ask(pid, argsProblem)
-			if out, last = l.next(cfg, now, pid, a, askErr, last); !out.restart {
+			out, last = l.next(cfg, now, pid, a, askErr, last)
+			if len(out.typed) > 0 {
+				l.typeInto(cfg, now, pid, out)
+				out = outcome{}
+			}
+			if !out.restart {
 				continue
 			}
 			if err := signalChild(cmd, syscall.SIGTERM); err != nil {
@@ -320,6 +368,22 @@ type idleAction struct {
 	would, none string   // «сжал бы: …» и «не сжимаю» — для журнала
 	doing       string   // строка журнала в act
 	out         outcome  // что сделать в act
+	// typeMode, typed, typing — то же набором в живой сессии под pty: режим, что набрать, строка журнала в act.
+	typeMode string
+	typed    []typedText
+	typing   string
+}
+
+// typedNote — добавка к строке журнала сессии под pty в type_mode log: что cl набрал бы вместо перезапуска.
+func (x idleAction) typedNote(pty bool) string {
+	if !pty || x.typeMode != modeLog {
+		return ""
+	}
+	var parts []string
+	for _, t := range x.typed {
+		parts = append(parts, cmp.Or(t.text, "строку роли"))
+	}
+	return "; под pty набрал бы " + strings.Join(parts, ", ")
 }
 
 // wantCompact — что делать с вердиктом aguard «сжать»: остановить сессию, сжать беседу и поднять её снова.
@@ -327,8 +391,10 @@ func (l launcher) wantCompact(cfg config, pid int, a restart.Answer, last string
 	return l.wantIdle(pid, a, last, idleAction{
 		mode: cfg.Restart.CompactMode, names: "compact_names", pilot: cfg.Restart.CompactNames, key: a.CompactKey,
 		would: fmt.Sprintf("сжал бы%%s: контекст %d тыс., кэш жив, ничего не идёт", a.Tokens/1000), none: "не сжимаю",
-		doing: fmt.Sprintf("сжимаю: контекст %d тыс.; SIGTERM, /compact, поднимаю --resume %s", a.Tokens/1000, a.SessionID),
-		out:   outcome{compact: true, crons: a.Crons, version: a.Running},
+		doing:    fmt.Sprintf("сжимаю: контекст %d тыс.; SIGTERM, /compact, поднимаю --resume %s", a.Tokens/1000, a.SessionID),
+		out:      outcome{compact: true, crons: a.Crons, version: a.Running},
+		typeMode: cfg.Restart.TypeMode, typed: []typedText{{text: "/compact"}},
+		typing: fmt.Sprintf("сжимаю: контекст %d тыс.; набираю /compact в живой сессии", a.Tokens/1000),
 	})
 }
 
@@ -337,8 +403,10 @@ func (l launcher) wantReset(cfg config, pid int, a restart.Answer, last string) 
 	return l.wantIdle(pid, a, last, idleAction{
 		mode: cfg.Restart.ResetMode, names: "reset_names", pilot: cfg.Restart.ResetNames, key: a.ResetKey,
 		would: fmt.Sprintf("сбросил бы%%s: контекст %d тыс., работа закрыта, простаивает", a.Tokens/1000), none: "не сбрасываю",
-		doing: fmt.Sprintf("сбрасываю: контекст %d тыс.; SIGTERM, поднимаю новую беседу вместо %s", a.Tokens/1000, a.SessionID),
-		out:   outcome{reset: true, version: a.Running},
+		doing:    fmt.Sprintf("сбрасываю: контекст %d тыс.; SIGTERM, поднимаю новую беседу вместо %s", a.Tokens/1000, a.SessionID),
+		out:      outcome{reset: true, version: a.Running},
+		typeMode: cfg.Restart.TypeMode, typed: []typedText{{text: "/clear"}, {role: true}},
+		typing: fmt.Sprintf("сбрасываю: контекст %d тыс.; набираю /clear и строку роли в живой сессии", a.Tokens/1000),
 	})
 }
 
@@ -348,6 +416,7 @@ func (l launcher) wantIdle(pid int, a restart.Answer, last string, x idleAction)
 	name := firstNonEmpty(a.Name, l.name)
 	key := fmt.Sprintf("%s/%s/%d", x.mode, x.key, a.Tokens)
 	head := fmt.Sprintf("%s pid=%d %s: ", name, pid, x.mode)
+	note := x.typedNote(l.console != nil)
 	switch {
 	case x.mode == modeOff:
 		return outcome{}, "", last
@@ -358,11 +427,39 @@ func (l launcher) wantIdle(pid int, a restart.Answer, last string, x idleAction)
 		if x.mode == modeAct {
 			why = " (не в " + x.names + ")"
 		}
-		return outcome{}, onceLine(key, last, head+fmt.Sprintf(x.would, why)), key
+		return outcome{}, onceLine(key, last, head+fmt.Sprintf(x.would, why)+note), key
+	case l.console != nil && x.typeMode == modeAct:
+		return outcome{typed: x.typed, name: name, sessionID: a.SessionID}, head + x.typing, key
 	}
 	out := x.out
 	out.restart, out.sessionID, out.name = true, a.SessionID, name
-	return out, head + x.doing, key
+	return out, head + x.doing + note, key
+}
+
+// typeInto набирает out.typed в живой сессии под pty; человек вводил меньше humanQuiet назад — не набирает.
+func (l launcher) typeInto(cfg config, now time.Time, pid int, out outcome) {
+	head := fmt.Sprintf("%s pid=%d: ", out.name, pid)
+	if quiet := l.console.idle(now); quiet < humanQuiet {
+		journal(cfg.Restart.Journal, now, head+fmt.Sprintf("человек вводил %v назад — не набираю", quiet.Round(time.Second)))
+		return
+	}
+	for i, t := range out.typed {
+		text := t.text
+		if t.role {
+			time.Sleep(roleTyped)
+			line, err := l.roleLine(out.name, eventReset)
+			if err != nil || line == "" {
+				journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("строки роли нет (%v) — беседа новая без неё", err))
+				return
+			}
+			text = line
+		}
+		if err := l.console.typeLine(text, t.role); err != nil {
+			journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("набор %d/%d: %v", i+1, len(out.typed), err))
+			return
+		}
+	}
+	journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("набрал в беседе %s", out.sessionID))
 }
 
 // onceLine — line, если ключ не тот, что в прошлый раз; иначе пусто.

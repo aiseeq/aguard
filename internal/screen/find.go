@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +57,9 @@ func (r *Reader) Lines(pid int) ([]string, error) {
 	if !strings.HasPrefix(tty, "/dev/pts/") {
 		return nil, fmt.Errorf("ввод процесса не терминал: %s", tty)
 	}
+	if tty, err = r.outerTTY(pid, tty); err != nil {
+		return nil, err
+	}
 	env, err := os.ReadFile(filepath.Join(dir, "environ"))
 	if err != nil {
 		return nil, fmt.Errorf("окружение процесса: %w", err)
@@ -85,6 +89,33 @@ func tmuxSocket(environ []byte) string {
 		}
 	}
 	return ""
+}
+
+// outerTTY — терминал вкладки или панели: claude под pty cl читает внутренний pts, а вкладка показывает внешний,
+// с которого читает cl. Подъём по предкам, пока их ввод — терминал; у konsole и сервера tmux ввод не терминал.
+// Родителя нет или он чужой (sshd от root) — подъём кончился.
+func (r *Reader) outerTTY(pid int, tty string) (string, error) {
+	for p, i := pid, 0; i < ancestors; i++ {
+		st, err := proc.ReadStat(r.Proc, p)
+		if err != nil {
+			return "", fmt.Errorf("предки процесса %d: %w", pid, err)
+		}
+		if st.Ppid <= 1 {
+			break
+		}
+		up, err := ttyOf(r.Proc, st.Ppid)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("терминал предка %d: %w", st.Ppid, err)
+		}
+		if !strings.HasPrefix(up, "/dev/pts/") {
+			break
+		}
+		p, tty = st.Ppid, up
+	}
+	return tty, nil
 }
 
 // ttyOf — терминал ввода процесса: для сверки вкладки Konsole по процессу её оболочки.

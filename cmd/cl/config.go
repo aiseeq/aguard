@@ -59,6 +59,11 @@ type restartConfig struct {
 	ResetMode string `json:"reset_mode"`
 	// ResetNames — в act сбрасывать только сессии с подходящим именем, для пилота; пусто — все.
 	ResetNames []string `json:"reset_names"`
+	// PtyNames — сессии с подходящим именем cl запускает под своим pty (console.go); пусто — ни одной, для пилота.
+	PtyNames []string `json:"pty_names"`
+	// TypeMode — сжатие и сброс сессии под pty набором /compact и /clear в живой сессии: log — «набрал бы» в журнал
+	// (действует прежний путь через перезапуск), act — набрать вместо перезапуска, off — молчать.
+	TypeMode string `json:"type_mode"`
 }
 
 // role — строка роли для сессий с подходящим именем.
@@ -81,6 +86,7 @@ func defaultConfig(home string) config {
 		ResumeHours:  24,
 		CompactMode:  modeLog,
 		ResetMode:    modeLog,
+		TypeMode:     modeLog,
 	}}
 }
 
@@ -101,7 +107,8 @@ func loadConfig(file, home string) (config, error) {
 	if cfg.Restart.Mode != modeLog && cfg.Restart.Mode != modeAct {
 		return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.mode %q, нужно %q или %q", file, cfg.Restart.Mode, modeLog, modeAct)
 	}
-	for key, m := range map[string]string{"compact_mode": cfg.Restart.CompactMode, "reset_mode": cfg.Restart.ResetMode} {
+	for key, m := range map[string]string{"compact_mode": cfg.Restart.CompactMode, "reset_mode": cfg.Restart.ResetMode,
+		"type_mode": cfg.Restart.TypeMode} {
 		if m != modeOff && m != modeLog && m != modeAct {
 			return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.%s %q, нужно %q, %q или %q", file, key, m, modeOff, modeLog, modeAct)
 		}
