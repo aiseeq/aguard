@@ -35,7 +35,8 @@ type Line struct {
 // Window — наблюдатель за одно окно.
 type Window struct {
 	From time.Time `json:"from"`
-	// Covered — с какого момента в окне есть учёт: до первой записи учёта aguard ещё не стоял или не вёл учёт.
+	// Covered — с какого момента в окне есть учёт наблюдателя: до его первой записи aguard ещё не стоял, не вёл учёт
+	// или наблюдателя ещё не было.
 	Covered       time.Time `json:"covered_from,omitzero"`
 	Passes        int       `json:"passes"`
 	Failed        int       `json:"failed"`
@@ -81,10 +82,12 @@ type Spec struct {
 // Build собирает отчёт на момент at из записей учёта recs (все записи за месяц).
 func Build(at time.Time, recs []Record, specs []Spec) (*Report, error) {
 	r := &Report{V: Version, At: at, Daemon: Daemon{Starts: map[string]int{}}}
-	var first time.Time
+	// first — первая запись учёта каждого наблюдателя: до неё его ещё не было (disk и said появились 26.10, и часы до
+	// них считались часами без проходов)
+	first := map[string]time.Time{}
 	for i := range recs {
-		if first.IsZero() || recs[i].From.Before(first) {
-			first = recs[i].From
+		if f, ok := first[recs[i].Watcher]; !ok || recs[i].From.Before(f) {
+			first[recs[i].Watcher] = recs[i].From
 		}
 	}
 	for _, w := range Windows {
@@ -98,7 +101,7 @@ func Build(at time.Time, recs []Record, specs []Spec) (*Report, error) {
 	for _, s := range specs {
 		wr := &Watcher{Name: s.Name, Mode: s.Mode, Windows: map[string]*Window{}}
 		for _, w := range Windows {
-			win, err := window(at, at.Add(-w.Len), first, recs, s)
+			win, err := window(at, at.Add(-w.Len), first[s.Name], recs, s)
 			if err != nil {
 				return r, fmt.Errorf("%s %s: %w", s.Name, w.Name, err)
 			}

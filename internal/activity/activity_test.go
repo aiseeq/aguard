@@ -80,6 +80,8 @@ func TestBuild(t *testing.T) {
 		{From: h(3 * time.Hour), To: at, Watcher: "tmp", Kind: KindPass, Count: 180},
 		{From: h(3 * time.Hour), To: at, Watcher: "tmp", Kind: KindPanic, What: "boom", Count: 1},
 		{From: h(3 * time.Hour), To: at, Watcher: "tmp", Kind: "would_send", Target: "lead", Count: 2, Max: 9, Unit: "entries"},
+		// наблюдатель появился 2 часа назад: часы до него — не часы без проходов
+		{From: h(2 * time.Hour), To: at, Watcher: "disk", Kind: KindPass, Count: 120},
 		// позже момента отчёта — не входит
 		{From: at, To: at.Add(time.Minute), Watcher: "tmp", Kind: KindPass, Count: 1},
 		{From: at.Add(time.Hour), To: at.Add(time.Hour), Watcher: "aguard", Kind: KindStart, Count: 1},
@@ -87,7 +89,8 @@ func TestBuild(t *testing.T) {
 	extra := func(from, to time.Time) ([]Line, error) {
 		return []Line{{Kind: "hook_timeout", What: "PostToolBatch", Count: 1, Max: 23900, Unit: "ms"}}, nil
 	}
-	r, err := Build(at, recs, []Spec{{Name: "tmp", Mode: "observe", Looped: true}, {Name: "waits", Looped: true, Extra: extra}})
+	r, err := Build(at, recs, []Spec{{Name: "tmp", Mode: "observe", Looped: true}, {Name: "waits", Looped: true, Extra: extra},
+		{Name: "disk", Mode: "log", Looped: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +107,9 @@ func TestBuild(t *testing.T) {
 	}
 	if !week.Covered.Equal(h(50*time.Hour)) || week.SilentHours != 50-3-2 {
 		t.Errorf("неделя: учёт с %v, часов без проходов %d", week.Covered, week.SilentHours)
+	}
+	if dw := r.Watchers[2].Windows["week"]; !dw.Covered.Equal(h(2*time.Hour)) || dw.SilentHours != 0 {
+		t.Errorf("новый наблюдатель: учёт с %v, часов без проходов %d", dw.Covered, dw.SilentHours)
 	}
 	var send *Line
 	for i := range week.Lines {
