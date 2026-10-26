@@ -323,6 +323,10 @@ func (a *app) diskTracesNow(cfg *config.Config, all bool) error {
 	if err != nil {
 		a.warn("disk", "записи", "err", err)
 	}
+	free, err := disk.Free(a.home)
+	if err != nil {
+		return err
+	}
 	owners := a.diskOwners(cfg)
 	usage := cfg.Disk.MeasureAll(entries)
 	traces := cfg.Disk.FindTraces(now, entries, usage, a.diskFacts(cfg, owners, entries), owners.Of)
@@ -340,7 +344,7 @@ func (a *app) diskTracesNow(cfg *config.Config, all bool) error {
 		sort.Slice(traces, func(i, j int) bool { return traces[i].Bytes > traces[j].Bytes })
 		for i := range traces {
 			t := &traces[i]
-			r := disk.Record{Kind: disk.KindTrace, At: now, Path: t.Path, Bytes: t.Bytes, Since: t.Born, Owner: t.Owner,
+			r := disk.Record{Kind: disk.KindTrace, At: now, Free: free, Path: t.Path, Bytes: t.Bytes, Since: t.Born, Owner: t.Owner,
 				Why: t.Why, Admin: owners.AdminOf(t.Owner), Trace: t}
 			b.WriteString(r.Line(a.home))
 			b.WriteByte('\n')
