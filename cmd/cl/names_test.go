@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+
+	"github.com/aiseeq/aguard/internal/names"
 )
 
 func TestNameFor(t *testing.T) {
@@ -21,7 +23,7 @@ func TestNameFor(t *testing.T) {
 		"/tmp":                       "",
 	}
 	for cwd, want := range cases {
-		if got := nameFor(cwd, home, table); got != want {
+		if got := names.For(cwd, home, table); got != want {
 			t.Errorf("nameFor(%q) = %q, want %q", cwd, got, want)
 		}
 	}
@@ -52,11 +54,11 @@ func TestReadTableAndLive(t *testing.T) {
 	if err := os.WriteFile(tab, []byte("# c\n~\tlead\n~/git\tadmin-sc2\n\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	table, err := readTable(tab, "/home/u")
+	table, err := names.ReadTable(tab, "/home/u")
 	if err != nil || table["/home/u"] != "lead" || table["/home/u/git"] != "admin-sc2" {
 		t.Fatalf("table = %v, err = %v", table, err)
 	}
-	if empty, err := readTable(filepath.Join(dir, "none"), "/home/u"); err != nil || len(empty) != 0 {
+	if empty, err := names.ReadTable(filepath.Join(dir, "none"), "/home/u"); err != nil || len(empty) != 0 {
 		t.Fatalf("нет файла: %v %v", empty, err)
 	}
 	live := `{"pid":` + strconv.Itoa(os.Getpid()) + `,"name":"sc2demu-master"}`

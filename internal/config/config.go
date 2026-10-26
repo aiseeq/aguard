@@ -14,6 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
@@ -34,6 +35,7 @@ type Config struct {
 	Waits   waits.Config    `toml:"waits"`   // отказы и ожидания агентов по транскриптам
 	// Compact — своё сжатие сессий в простое, пока кэш подсказки жив.
 	Compact restart.CompactConfig `toml:"compact"`
+	Disk    disk.Config           `toml:"disk"` // рост папок кэшей и состояний, остатки временного
 }
 
 // Path — путь конфига в домашней папке.
@@ -53,6 +55,7 @@ func Default(home string) Config {
 		Restart: restart.Default(home, runtimeDir()),
 		Waits:   waits.Default(),
 		Compact: restart.DefaultCompact(),
+		Disk:    disk.Default(),
 	}
 }
 
@@ -108,6 +111,9 @@ func (c *Config) finish(home string, uid int) error {
 	}
 	if err := c.Waits.Validate(); err != nil {
 		return fmt.Errorf("waits: %w", err)
+	}
+	if err := c.Disk.Validate(home); err != nil {
+		return err
 	}
 	return c.Compact.Validate()
 }

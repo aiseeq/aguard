@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/aiseeq/aguard/internal/names"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -57,13 +58,13 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	table, err := readTable(filepath.Join(home, ".config", "cl", "names.tsv"), home)
+	table, err := names.ReadTable(filepath.Join(home, names.File), home)
 	if err != nil {
 		fail(err)
 	}
 	pre := sessionFlags(home)
 	l.name = nameArg(args)
-	if name := nameFor(cwd, home, table); name != "" && l.name == "" {
+	if name := names.For(cwd, home, table); name != "" && l.name == "" {
 		taken, err := liveNames(filepath.Join(home, ".claude", "sessions"))
 		if err != nil {
 			fail(err)

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/names"
 )
 
 // Режимы перезапуска: modeLog — только журнал «перезапустил бы / не стал бы», modeAct — перезапуск всерьёз.
@@ -104,8 +106,8 @@ func loadConfig(file, home string) (config, error) {
 			return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.%s %q, нужно %q, %q или %q", file, key, m, modeOff, modeLog, modeAct)
 		}
 	}
-	cfg.Restart.Journal = expand(cfg.Restart.Journal, home)
-	cfg.Restart.ResumeDir = expand(cfg.Restart.ResumeDir, home)
+	cfg.Restart.Journal = names.Expand(cfg.Restart.Journal, home)
+	cfg.Restart.ResumeDir = names.Expand(cfg.Restart.ResumeDir, home)
 	return cfg, nil
 }
 

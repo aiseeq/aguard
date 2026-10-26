@@ -104,3 +104,27 @@ interval = "1m"
 keep = "1440h"         # 60 дней
 reset_min_tokens = 150000  # «сбросил бы» (/clear, только журнал): контекст от
 reset_idle = "1h"          # и последний запрос не ближе; плюс подсказка «/clear to save» на экране и чистое дерево
+
+# ── disk: рост папок кэшей и состояний, остатки временного, быстрое наполнение ─
+# Записи — дети roots и дети папок по шаблонам containers (scratchpad сессий, worktree). Место — по экстентам
+# (FIEMAP): reflink-копии внутри записи считаются один раз, длины — до сжатия. Только журнал: кому и что сообщил бы.
+# Задним числом: aguard disk retro -days 7.
+[disk]
+mode = "log"
+interval = "1m"        # замер свободного места
+walk = "1h"            # полный обход записей (~4 мин 26.10); раньше — если место тает быстро
+roots = ["~/.cache", "~/.local/state", "/var/tmp"]
+containers = ["~/.cache/claude-tmp/claude-*/*", "~/.cache/worktrees/*"]
+grow = "5G"            # рост записи за сутки
+fast = "5G"            # убыль свободного места за fast_window
+fast_window = "10m"
+stale = "48h"          # столько без изменений — остаток временного
+stale_min = "1G"       # остаток от этого размера
+# Долгоживущие кэши инструментов: не остатки и меряются по st_blocks (быстрее). Список в файле заменяет умолчание.
+lasting = ["~/.cache/go-build", "~/.cache/gopls", "~/.cache/goimports", "~/.cache/staticcheck", "~/.cache/uv",
+  "~/.cache/pip", "~/.cache/ms-playwright", "~/.cache/puppeteer", "~/.cache/google-chrome*"]
+keep = "1440h"         # 60 дней
+
+[disk.owners]          # папка -> сессия-хозяин; остальных хозяин ищется по сессиям и таблице имён cl, иначе — лид
+"~/.cache/farm-hard" = "llmark-master"
+"~/.local/state/worker" = "llmark-master"
