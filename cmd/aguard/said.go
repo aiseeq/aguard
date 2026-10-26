@@ -140,6 +140,10 @@ func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State
 		p.Attempts++
 		rec, entries := cfg.Classify(ctx, model, p, a.home, prior, time.Now())
 		switch {
+		case rec.Down && ctx.Err() != nil: // демон останавливается: вызов отменён, модель ни при чём — без паузы
+			p.Attempts--
+			left = append(left, *p)
+			continue // в журнал не идёт: вызова модели по сути не было
 		case rec.Down:
 			a.warn("said", "модель не ответила, очередь ждёт", "queue", len(st.Pending), "err", rec.Err)
 			p.Attempts--
