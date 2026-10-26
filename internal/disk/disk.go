@@ -6,6 +6,7 @@
 package disk
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -170,7 +171,7 @@ const unreadKept = 3
 
 // walkEntry обходит запись в пределах её файловой системы. Нечитаемое не прерывает обход: оно считается в unread,
 // первые ошибки — в err; ошибка visit — тоже.
-func walkEntry(path string, visit func(p string, d fs.DirEntry, st *syscall.Stat_t) error) (int, error) {
+func walkEntry(ctx context.Context, path string, visit func(p string, d fs.DirEntry, st *syscall.Stat_t) error) (int, error) {
 	var dev uint64
 	unread := 0
 	var errs []error
@@ -181,6 +182,9 @@ func walkEntry(path string, visit func(p string, d fs.DirEntry, st *syscall.Stat
 		}
 	}
 	werr := filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if cerr := ctx.Err(); cerr != nil { // остановка: обход в 2 млн файлов держал бы её минуту
+			return cerr
+		}
 		if err != nil {
 			note(err)
 			return nil
@@ -236,10 +240,10 @@ func (f *fileSpace) add(p string, d fs.DirEntry, st *syscall.Stat_t) (int64, err
 
 // measure обходит запись. exact — место по экстентам; иначе по st_blocks: долгоживущий кэш инструмента (go-build —
 // 2,1 млн файлов 26.10) reflink-копий не делает, а экстенты — половина времени обхода.
-func measure(path string, seen map[inode]bool, buf *fiemapBuf, exact bool) Usage {
+func measure(ctx context.Context, path string, seen map[inode]bool, buf *fiemapBuf, exact bool) Usage {
 	var u Usage
 	space := fileSpace{exact: exact, buf: buf}
-	u.Unread, u.Err = walkEntry(path, func(p string, d fs.DirEntry, st *syscall.Stat_t) error {
+	u.Unread, u.Err = walkEntry(ctx, path, func(p string, d fs.DirEntry, st *syscall.Stat_t) error {
 		if ct := time.Unix(st.Ctim.Unix()); ct.After(u.Changed) {
 			u.Changed = ct
 		}
@@ -274,11 +278,11 @@ func Free(path string) (int64, error) {
 
 // ByDay — место записи по местным дням последнего изменения файлов (ctime; ключ — полночь дня): прикидка роста
 // задним числом. Видит только то, что лежит сейчас, и относит файл ко дню его последнего изменения.
-func ByDay(path string, exact bool) (map[time.Time]int64, error) {
+func ByDay(ctx context.Context, path string, exact bool) (map[time.Time]int64, error) {
 	out := map[time.Time]int64{}
 	days := map[time.Time]*fileSpace{}
 	buf := new(fiemapBuf)
-	_, err := walkEntry(path, func(p string, d fs.DirEntry, st *syscall.Stat_t) error {
+	_, err := walkEntry(ctx, path, func(p string, d fs.DirEntry, st *syscall.Stat_t) error {
 		y, m, dd := time.Unix(st.Ctim.Unix()).Date()
 		day := time.Date(y, m, dd, 0, 0, 0, 0, time.Local)
 		f := days[day]

@@ -1,6 +1,8 @@
 package disk
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -236,9 +238,27 @@ func TestMeasureReflink(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exact := measure(dir, map[inode]bool{}, new(fiemapBuf), true)
-	blocks := measure(dir, map[inode]bool{}, new(fiemapBuf), false)
+	exact := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), true)
+	blocks := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), false)
 	if exact.Files != 3 || blocks.Bytes < 2<<20 || exact.Bytes >= 3<<19 {
 		t.Errorf("по экстентам %d, по блокам %d, файлов %d", exact.Bytes, blocks.Bytes, exact.Files)
+	}
+}
+
+// Остановка демона обрывает обход: отменённый ctx — ни одной записи и ошибка обхода, а не полный замер.
+func TestMeasureCanceled(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"a", "b"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if got := testConfig(t, dir).MeasureAll(ctx, []string{dir}); len(got) != 0 {
+		t.Errorf("отменённый замер: %v", got)
+	}
+	if u := measure(ctx, dir, map[inode]bool{}, new(fiemapBuf), true); !errors.Is(u.Err, context.Canceled) || u.Files != 0 {
+		t.Errorf("обход после отмены: %+v", u)
 	}
 }

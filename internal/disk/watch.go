@@ -2,6 +2,7 @@ package disk
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,12 +115,16 @@ func (s *State) Save(path string) error {
 type Measure func(entries []string) map[string]Usage
 
 // MeasureAll — замер с диска: жёсткие ссылки считаются один раз на весь обход; долгоживущие кэши — по st_blocks.
-func (c *Config) MeasureAll(entries []string) map[string]Usage {
+// Отменённый ctx обрывает обход (остановка демона): замер неполон, вызывающий его не сохраняет.
+func (c *Config) MeasureAll(ctx context.Context, entries []string) map[string]Usage {
 	seen := map[inode]bool{}
 	buf := new(fiemapBuf)
 	out := make(map[string]Usage, len(entries))
 	for _, e := range entries {
-		out[e] = measure(e, seen, buf, !c.IsLasting(e))
+		if ctx.Err() != nil {
+			break
+		}
+		out[e] = measure(ctx, e, seen, buf, !c.IsLasting(e))
 	}
 	return out
 }

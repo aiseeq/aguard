@@ -105,7 +105,7 @@ func main() {
 	case "compact":
 		err = a.compactCmd(os.Args[2:])
 	case "disk":
-		err = a.diskCmd(os.Args[2:])
+		err = a.diskCmd(ctx, os.Args[2:])
 	case "said":
 		err = a.saidCmd(ctx, os.Args[2:])
 	case "report":
@@ -210,7 +210,7 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Waits.Interval.D() }},
 		{"compact", func(_ context.Context, c *config.Config) error { return a.compactRound(judge, c, false) },
 			func(c *config.Config) time.Duration { return c.Compact.Interval.D() }},
-		{"disk", func(_ context.Context, c *config.Config) error { return a.diskRound(c) },
+		{"disk", func(ctx context.Context, c *config.Config) error { return a.diskRound(ctx, c) },
 			func(c *config.Config) time.Duration { return c.Disk.Interval.D() }},
 		{"said", func(ctx context.Context, c *config.Config) error { return a.saidRound(ctx, &c.Said, false) },
 			func(c *config.Config) time.Duration { return c.Said.Interval.D() }},

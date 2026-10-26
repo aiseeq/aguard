@@ -27,7 +27,7 @@ import (
 	"github.com/aiseeq/aguard/internal/waits"
 )
 
-func (a *app) diskCmd(args []string) error {
+func (a *app) diskCmd(ctx context.Context, args []string) error {
 	cmd, rest := sub(args)
 	cfg, err := a.config()
 	if err != nil {
@@ -39,19 +39,19 @@ func (a *app) diskCmd(args []string) error {
 		dry := fl.Bool("dry-run", false, "обойти записи сейчас и напечатать замеры, ничего не писать")
 		parse(fl, rest)
 		if *dry {
-			return a.diskDry(&cfg)
+			return a.diskDry(ctx, &cfg)
 		}
-		return a.diskRound(&cfg)
+		return a.diskRound(ctx, &cfg)
 	case "retro":
 		fl := flag.NewFlagSet("disk retro", flag.ContinueOnError)
 		days := fl.Int("days", 7, "за сколько дней")
 		parse(fl, rest)
-		return a.diskRetro(&cfg, *days)
+		return a.diskRetro(ctx, &cfg, *days)
 	case "traces":
 		fl := flag.NewFlagSet("disk traces", flag.ContinueOnError)
 		all := fl.Bool("all", false, "кроме находок — каждый след")
 		parse(fl, rest)
-		return a.diskTracesNow(&cfg, *all)
+		return a.diskTracesNow(ctx, &cfg, *all)
 	case "report":
 		fl := flag.NewFlagSet("disk report", flag.ContinueOnError)
 		since := fl.Duration("since", 7*24*time.Hour, "за какой срок")
@@ -111,7 +111,8 @@ func (a *app) diskProjects() map[string]string {
 }
 
 // diskRound — один проход: свободное место, по сроку или тревоге — обход записей и сигналы в журнал.
-func (a *app) diskRound(cfg *config.Config) error {
+// Остановка демона посреди обхода — проход бросается без записи: неполный замер дал бы ложные сигналы и следы.
+func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	now := time.Now()
 	free, err := disk.Free(a.home)
 	if err != nil {
@@ -123,7 +124,11 @@ func (a *app) diskRound(cfg *config.Config) error {
 		return err
 	}
 	owners := a.diskOwners(cfg)
-	recs, usage, err := st.Pass(&cfg.Disk, now, free, cfg.Disk.Entries, cfg.Disk.MeasureAll, owners.Of)
+	measure := func(entries []string) map[string]disk.Usage { return cfg.Disk.MeasureAll(ctx, entries) }
+	recs, usage, err := st.Pass(&cfg.Disk, now, free, cfg.Disk.Entries, measure, owners.Of)
+	if ctx.Err() != nil {
+		return nil
+	}
 	if err != nil { // список записей неполон: сигналы по прочитанным всё равно пишем
 		a.warn("disk", "записи", "err", err)
 	}
@@ -149,7 +154,7 @@ func (a *app) diskRound(cfg *config.Config) error {
 }
 
 // diskRetro — какие записи выросли бы на grow за день, по ctime файлов, что лежат сейчас (удалённое не видно).
-func (a *app) diskRetro(cfg *config.Config, days int) error {
+func (a *app) diskRetro(ctx context.Context, cfg *config.Config, days int) error {
 	entries, err := cfg.Disk.Entries()
 	if err != nil {
 		a.warn("disk", "записи", "err", err)
@@ -159,7 +164,7 @@ func (a *app) diskRetro(cfg *config.Config, days int) error {
 	from := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
 	var b strings.Builder
 	for _, e := range entries {
-		byDay, err := disk.ByDay(e, !cfg.Disk.IsLasting(e))
+		byDay, err := disk.ByDay(ctx, e, !cfg.Disk.IsLasting(e))
 		if err != nil { // нечитаемое в записи: прикидка по прочитанному
 			a.warn("disk", "retro: не прочиталось "+e, "err", err)
 		}
@@ -179,13 +184,13 @@ func (a *app) diskRetro(cfg *config.Config, days int) error {
 }
 
 // diskDry — замер всех записей сейчас: размер, файлы, последнее изменение, хозяин.
-func (a *app) diskDry(cfg *config.Config) error {
+func (a *app) diskDry(ctx context.Context, cfg *config.Config) error {
 	entries, err := cfg.Disk.Entries()
 	if err != nil {
 		a.warn("disk", "записи", "err", err)
 	}
 	owners := a.diskOwners(cfg)
-	usage := cfg.Disk.MeasureAll(entries)
+	usage := cfg.Disk.MeasureAll(ctx, entries)
 	enc := json.NewEncoder(a.out)
 	for _, e := range entries {
 		u := usage[e]
@@ -317,7 +322,7 @@ func (a *app) diskTraces(cfg *config.Config, st *disk.State, owners *disk.Owners
 }
 
 // diskTracesNow — следы на диске сейчас: обход всех записей, находки по классам, с -all — каждый след; ничего не пишет.
-func (a *app) diskTracesNow(cfg *config.Config, all bool) error {
+func (a *app) diskTracesNow(ctx context.Context, cfg *config.Config, all bool) error {
 	now := time.Now()
 	entries, err := cfg.Disk.Entries()
 	if err != nil {
@@ -328,7 +333,7 @@ func (a *app) diskTracesNow(cfg *config.Config, all bool) error {
 		return err
 	}
 	owners := a.diskOwners(cfg)
-	usage := cfg.Disk.MeasureAll(entries)
+	usage := cfg.Disk.MeasureAll(ctx, entries)
 	traces := cfg.Disk.FindTraces(now, entries, usage, a.diskFacts(cfg, owners, entries), owners.Of)
 	var b strings.Builder
 	findings := cfg.Disk.Findings(now, traces)
