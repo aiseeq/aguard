@@ -67,7 +67,7 @@ func TestDecideAgainst(t *testing.T) {
 		"hook":     func(f *facts) { f.HookState = "waiting" }, // вопрос человеку
 		"quiet":    func(f *facts) { f.Quiet = 9 * time.Minute },
 		"tty":      func(f *facts) { f.TTYQuiet = 2 * time.Minute },
-		"draft":    func(f *facts) { f.TTYQuiet = 12 * time.Minute },
+		"draft":    func(f *facts) { f.TTYQuiet, f.Prompt = 12*time.Minute, screen.Unknown },
 		"children": func(f *facts) { f.Children = []string{"42 bash"} },
 		"pending":  func(f *facts) { f.Transcript.Pending = []string{"AskUserQuestion t1"} },
 		"tasks":    func(f *facts) { f.Transcript.Tasks = []string{"Agent «ревью» a1"} },
@@ -123,13 +123,27 @@ func TestVerdictKeyIgnoresNumbers(t *testing.T) {
 
 func TestDecideDraftWithinTTYGranularity(t *testing.T) {
 	f := idleFacts()
+	f.Prompt = screen.Unknown                // поля не видно: черновик — только по времени ввода
 	f.TTYQuiet = f.TurnQuiet + 5*time.Second // atime pts отстаёт до 8 с: ввод мог быть уже после конца хода
 	if v := decide(f, allowance{idle: 10 * time.Minute}); v.Restart || !slices.Contains(codes(v), "draft") {
 		t.Errorf("ввод в пределах 8 с до конца хода — тоже возможный черновик: %+v", v)
 	}
 	f.TTYQuiet = f.TurnQuiet + 30*time.Second
-	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart {
+	if v := decide(f, allowance{idle: 10 * time.Minute}); slices.Contains(codes(v), "draft") {
 		t.Errorf("ввод за 30 с до конца хода — отправка реплики, не черновик: %+v", v)
+	}
+}
+
+// Ввод после конца хода при пустом поле на экране — байты фокуса вкладки, не черновик.
+func TestDecideDraftEmptyScreen(t *testing.T) {
+	f := idleFacts()
+	f.TTYQuiet = f.TurnQuiet - time.Minute
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart {
+		t.Errorf("поле пусто по экрану — ввод после хода не держит: %+v", v)
+	}
+	f.PromptErr = "терминал не Konsole и не tmux"
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !slices.Equal(codes(v), []string{"draft", "screen"}) {
+		t.Errorf("экран не прочитался — держит и время ввода: %+v", v)
 	}
 }
 

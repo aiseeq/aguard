@@ -6,6 +6,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/screen"
 )
 
 func write(t *testing.T, file, data string) {
@@ -96,8 +98,12 @@ func TestProbeDraftAfterTurn(t *testing.T) {
 	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 5 * time.Minute})
 	w.link(t, 4242)
 	f := probe(w.p, &scanCache{}, 4242, now)
-	if v := decide(f, allowance{idle: time.Minute}); v.Restart || !slices.Equal(codes(v), []string{"draft"}) {
-		t.Errorf("ввод 5 мин назад после хода 10 мин назад — черновик: %+v (facts %+v)", v, f)
+	if v := decide(f, allowance{idle: time.Minute}); !v.Restart {
+		t.Errorf("ввод 5 мин назад после хода 10 мин назад при пустом поле — фокус вкладки: %+v (facts %+v)", v, f)
+	}
+	f.Prompt = screen.Unknown
+	if v := decide(f, allowance{idle: time.Minute}); v.Restart || !slices.Equal(codes(v), []string{"draft", "screen"}) {
+		t.Errorf("ввод 5 мин назад после хода 10 мин назад, поля не видно — черновик: %+v (facts %+v)", v, f)
 	}
 }
 
