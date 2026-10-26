@@ -45,10 +45,12 @@ type Config struct {
 	// Context — сколько знаков конца сообщения агента дать модели как «в ответ на».
 	Context int `toml:"context"`
 	// Candidates — сколько прежних записей той же области дать модели для поля supersedes.
-	Candidates int             `toml:"candidates"`
-	Retries    int             `toml:"retries"` // попыток на реплику, если модель не ответила
-	Batch      int             `toml:"batch"`   // реплик за проход; остальные ждут следующего
-	Keep       policy.Duration `toml:"keep"`    // срок журнала
+	Candidates int `toml:"candidates"`
+	Retries    int `toml:"retries"` // попыток на реплику, если модель не ответила
+	Batch      int `toml:"batch"`   // реплик за проход; остальные ждут следующего
+	// Pause — пауза после того, как модель не ответила (лимит, сбой мощности, сеть): один вызов за паузу.
+	Pause policy.Duration `toml:"pause"`
+	Keep  policy.Duration `toml:"keep"` // срок журнала
 }
 
 // defaultContext — знаков конца сообщения агента: вопрос, на который отвечает реплика, обычно в последнем абзаце.
@@ -59,7 +61,8 @@ func Default() Config {
 	return Config{
 		Mode: ModeLog, Interval: policy.Duration(time.Minute), Names: []string{"lead", "*-admin", "*-master"},
 		Model: "luna", Effort: "low", Timeout: policy.Duration(2 * time.Minute), File: "~/.claude/said.tsv",
-		Context: defaultContext, Candidates: 8, Retries: 3, Batch: 20, Keep: policy.Duration(60 * 24 * time.Hour),
+		Context: defaultContext, Candidates: 8, Retries: 3, Batch: 20, Pause: policy.Duration(15 * time.Minute),
+		Keep: policy.Duration(60 * 24 * time.Hour),
 	}
 }
 
@@ -70,8 +73,9 @@ func (c *Config) Validate(home string) error {
 	default:
 		return fmt.Errorf("said.mode = %q: off, log или write", c.Mode)
 	}
-	if c.Interval.D() < 10*time.Second || c.Timeout.D() < 10*time.Second || c.Keep.D() < 24*time.Hour {
-		return errors.New("said: interval и timeout от 10s, keep от суток")
+	if c.Interval.D() < 10*time.Second || c.Timeout.D() < 10*time.Second || c.Pause.D() < c.Interval.D() ||
+		c.Keep.D() < 24*time.Hour {
+		return errors.New("said: interval и timeout от 10s, pause не меньше interval, keep от суток")
 	}
 	if c.Model == "" || c.File == "" || c.Context < 0 || c.Candidates < 0 || c.Retries < 1 || c.Batch < 1 {
 		return errors.New("said: нужны model и file, context и candidates не меньше 0, retries и batch от 1")

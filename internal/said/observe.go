@@ -108,6 +108,8 @@ type State struct {
 	Tail    *tail.State       `json:"tail"`
 	Last    map[string]string `json:"last"` // сессия -> конец последнего текста агента
 	Pending []Pending         `json:"pending,omitempty"`
+	// Pause — модель не ответила: до этого момента не звать (сбой мощности не лечится частыми повторами).
+	Pause time.Time `json:"pause,omitzero"`
 }
 
 // LoadState — состояние из файла; нет файла — пустое.

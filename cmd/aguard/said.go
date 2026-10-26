@@ -114,9 +114,10 @@ func (a *app) saidRound(ctx context.Context, cfg *said.Config, dry bool) error {
 
 // saidClassify — до Batch реплик из очереди — модели, находки в режиме write — в указатель. В очереди остаются
 // неразмеченные: сверх Batch, с непригодным ответом модели (до Retries попыток), с несохранённой записью и все, если
-// модель не ответила: тогда проход кончается — лимит или сеть одинаковы для всех реплик, попытки не тратятся.
+// модель не ответила: тогда проход кончается и до pause модель не зовётся — лимит или сбой мощности одинаковы для
+// всех реплик, попытки не тратятся.
 func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State) ([]said.Record, error) {
-	if len(st.Pending) == 0 {
+	if len(st.Pending) == 0 || time.Now().Before(st.Pause) {
 		return nil, nil
 	}
 	model := cfg.OneShot()
@@ -142,7 +143,7 @@ func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State
 		case rec.Down:
 			a.warn("said", "модель не ответила, очередь ждёт", "queue", len(st.Pending), "err", rec.Err)
 			p.Attempts--
-			down = true
+			down, st.Pause = true, time.Now().Add(cfg.Pause.D())
 			left = append(left, *p)
 		case rec.Err != "":
 			a.warn("said", "модель не разметила реплику", "ref", rec.Ref, "attempt", p.Attempts, "err", rec.Err)
