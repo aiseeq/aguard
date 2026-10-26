@@ -1,11 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/aiseeq/akit v0.1.1 h1:0G1cQH8RPqwA/toJBjA6Irku/wE0F3jDJFH9eU8GeTA=
-github.com/aiseeq/akit v0.1.1/go.mod h1:AArmOybYwruLC8Rf0HI81TjCFq3UeDq2DMsgRShwvJ8=
-github.com/aiseeq/akit v0.4.0 h1:cT6lyO+TT7fM+JIhn1zNqoShxYfL0ccE366SG4bUpPU=
-github.com/aiseeq/akit v0.4.0/go.mod h1:PMWw9oA0PT1QSv4vcmsBBRvydDi3AWIU611kp/yR9WY=
-github.com/aiseeq/akit v0.5.0 h1:XTlxnP6a9k4/QLEPT1u4dAkMnXBhUXScopuM/QKmLkA=
-github.com/aiseeq/akit v0.5.0/go.mod h1:PMWw9oA0PT1QSv4vcmsBBRvydDi3AWIU611kp/yR9WY=
+github.com/aiseeq/akit v0.7.0 h1:Z5zkNmd5XfKyeUKA6PHjZcmlimG/YUftqglLY9Xcow4=
+github.com/aiseeq/akit v0.7.0/go.mod h1:PMWw9oA0PT1QSv4vcmsBBRvydDi3AWIU611kp/yR9WY=
 github.com/godbus/dbus/v5 v5.2.2 h1:TUR3TgtSVDmjiXOgAAyaZbYmIeP3DPkld3jgKGV8mXQ=
 github.com/godbus/dbus/v5 v5.2.2/go.mod h1:3AAv2+hPq5rdnr5txxxRwiGjPXamgoIHgz9FPBfOp3c=
 golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=

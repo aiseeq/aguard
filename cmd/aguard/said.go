@@ -118,14 +118,7 @@ func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State
 	if len(st.Pending) == 0 {
 		return nil, nil
 	}
-	id, err := said.ApprovedID(a.home, cfg.Model)
-	if err != nil {
-		return nil, err
-	}
-	model, err := said.Codex(id, cfg.Effort, filepath.Join(a.dir("said"), "call"))
-	if err != nil {
-		return nil, err
-	}
+	model := cfg.OneShot()
 	prior, bad, err := said.Read(cfg.File)
 	if err != nil {
 		return nil, err
@@ -143,7 +136,6 @@ func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State
 		}
 		p.Attempts++
 		rec, entries := cfg.Classify(ctx, model, p, a.home, prior, time.Now())
-		rec.Model = id
 		if rec.Err != "" {
 			a.warn("said", "модель не разметила реплику", "ref", rec.Ref, "attempt", p.Attempts, "err", rec.Err)
 			if p.Attempts < cfg.Retries {

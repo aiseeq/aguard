@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/oneshot"
 	"github.com/aiseeq/akit/price"
+	"github.com/aiseeq/akit/transcript"
 )
 
 const (
@@ -36,7 +38,7 @@ func TestParse(t *testing.T) {
 		lineNoText: {kind: evAgent, text: "x"},
 	}
 	for line, want := range cases {
-		ev, ok, name, err := Parse([]byte(line))
+		ev, ok, name, err := Parse(transcript.NewParser(), []byte(line))
 		if err != nil || ok != (want.kind != "") || ev.Kind != want.kind || ev.Text != want.text || name != want.name {
 			t.Errorf("%.60s: %+v ok=%v name=%q err=%v", line, ev, ok, name, err)
 		}
@@ -92,8 +94,8 @@ func TestTailAndCollect(t *testing.T) {
 }
 
 func fake(out string, err error) Model {
-	return func(context.Context, string) (string, price.Usage, error) {
-		return out, price.Usage{Input: 6000, Output: 70}, err
+	return func(context.Context, string) (oneshot.Result, error) {
+		return oneshot.Result{Text: out, ID: "gpt-6-luna", Usage: price.Usage{Input: 6000, Output: 70}}, err
 	}
 }
 
@@ -115,7 +117,7 @@ func TestClassify(t *testing.T) {
 		e.Words != "моки база" || e.Quote != "Делаем без моков, всегда." {
 		t.Errorf("правило %+v", e)
 	}
-	if e := entries[1]; e.Scope != "global" || e.Supersedes != "" {
+	if e := entries[1]; e.Scope != "global" || e.Supersedes != "" || e.Ref != "01234567:4#2" {
 		t.Errorf("обещание: чужой supersedes должен сброситься, %+v", e)
 	}
 	rec, entries = c.Classify(context.Background(), fake("", errors.New("таймаут")), p, home, prior, time.Now())
@@ -171,16 +173,10 @@ func TestWatched(t *testing.T) {
 	}
 }
 
-func TestCodexAnswer(t *testing.T) {
-	out := `{"type":"thread.started"}
-{"type":"item.completed","item":{"type":"reasoning","text":"…"}}
-{"type":"item.completed","item":{"type":"agent_message","text":"{\"items\":[]}"}}
-{"type":"turn.completed","usage":{"input_tokens":6012,"cached_input_tokens":12,"output_tokens":64}}`
-	msg, u, err := codexAnswer([]byte(out))
-	if err != nil || msg != `{"items":[]}` || u.Input != 6000 || u.CacheRead != 12 || u.Output != 64 {
-		t.Errorf("%q %+v %v", msg, u, err)
-	}
-	if _, _, err := codexAnswer([]byte(`{"type":"turn.failed","error":{"message":"лимит"}}`)); err == nil {
-		t.Error("turn.failed без ошибки")
+func TestParseQueued(t *testing.T) {
+	line := `{"type":"attachment","timestamp":"2026-10-26T13:06:00Z","cwd":"/h/git/x","attachment":{"type":"queued_command","prompt":"и ещё: без моков","origin":{"kind":"human"}}}`
+	ev, ok, _, err := Parse(transcript.NewParser(), []byte(line))
+	if err != nil || !ok || ev.Kind != evUser || ev.Text != "и ещё: без моков" {
+		t.Errorf("реплика из очереди: %+v ok=%v err=%v", ev, ok, err)
 	}
 }

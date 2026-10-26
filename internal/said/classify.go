@@ -8,11 +8,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/akit/oneshot"
 	"github.com/aiseeq/akit/price"
 )
 
-// Model — разовый вызов модели: инструкция Prompt, ответ по Schema; расход — токены вызова.
-type Model func(ctx context.Context, input string) (string, price.Usage, error)
+// Model — разовый вызов модели: инструкция Prompt, ответ по Schema; в ответе id модели и токены вызова.
+type Model func(ctx context.Context, input string) (oneshot.Result, error)
+
+// OneShot — Model через akit/oneshot: модель из списка одобренных, без инструментов.
+func (c *Config) OneShot() Model {
+	return func(ctx context.Context, input string) (oneshot.Result, error) {
+		return oneshot.Ask(ctx, oneshot.Request{Model: c.Model, Effort: c.Effort, System: Prompt, Schema: Schema,
+			Input: input})
+	}
+}
 
 // Item — находка модели.
 type Item struct {
@@ -34,7 +43,7 @@ type Record struct {
 	Items   []Item    `json:"items,omitempty"`
 	// Dropped — находки, чья цитата не нашлась в реплике дословно: в указатель не идут.
 	Dropped []Item      `json:"dropped,omitempty"`
-	Model   string      `json:"model"` // id модели: по нему price.Cost
+	Model   string      `json:"model,omitempty"` // id модели: по нему price.Cost
 	Usage   price.Usage `json:"usage"`
 	Ms      int64       `json:"ms"`
 	Attempt int         `json:"attempt"`
@@ -92,8 +101,8 @@ func (c *Config) Classify(ctx context.Context, model Model, p *Pending, home str
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout.D())
 	defer cancel()
 	start := time.Now()
-	out, usage, err := model(ctx, Input(p, home, candidates))
-	rec.Ms, rec.Usage = time.Since(start).Milliseconds(), usage
+	out, err := model(ctx, Input(p, home, candidates))
+	rec.Ms, rec.Model, rec.Usage = time.Since(start).Milliseconds(), out.ID, out.Usage
 	if err != nil {
 		rec.Err = err.Error()
 		return rec, nil
@@ -101,7 +110,7 @@ func (c *Config) Classify(ctx context.Context, model Model, p *Pending, home str
 	var res struct {
 		Items []Item `json:"items"`
 	}
-	if err := json.Unmarshal([]byte(out), &res); err != nil {
+	if err := json.Unmarshal([]byte(out.Text), &res); err != nil {
 		rec.Err = fmt.Sprintf("ответ модели не JSON: %v", err)
 		return rec, nil
 	}
@@ -112,6 +121,9 @@ func (c *Config) Classify(ctx context.Context, model Model, p *Pending, home str
 	text := squash(ev.Text)
 	var entries []Entry
 	for _, it := range res.Items {
+		if len(entries) > 0 { // вторая запись той же реплики — своя ссылка, чтобы supersedes отменял одну
+			ref = fmt.Sprintf("%s#%d", Ref(ev.Session, ev.Line), len(entries)+1)
+		}
 		if it.Kind != KindRule && it.Kind != KindDecision && it.Kind != KindPromise || squash(it.Quote) == "" ||
 			!strings.Contains(text, squash(it.Quote)) {
 			rec.Dropped = append(rec.Dropped, it)

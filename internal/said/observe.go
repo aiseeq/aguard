@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/akit/transcript"
 
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/tail"
@@ -32,86 +34,63 @@ type Event struct {
 	Line    int64
 }
 
+// markers — признаки строк, нужных said, до разбора JSON: реплика человека (и из очереди), окно вопроса (вызов —
+// чтобы Parser узнал ответ, и сам ответ), текст агента. Остальное — вывод инструментов в мегабайты — не разбирается.
 var (
-	humanMarker = []byte(`"origin":{"kind":"human"`)
+	markers     = [][]byte{[]byte(`"kind":"human"`), []byte(`"AskUserQuestion"`), []byte(`"answers"`)}
 	agentMarker = []byte(`"type":"assistant"`)
 	textMarker  = []byte(`"type":"text"`)
-	nameMarker  = []byte(`"agent-name"`)
-	// reminder — напоминание обвязки внутри реплики: его никто не набирал.
-	reminder = regexp.MustCompile(`(?s)<system-reminder[^>]*>.*?</system-reminder[^>]*>`)
+	namePrefix  = []byte(`{"type":"agent-name","agentName":"`)
 )
 
-type rawLine struct {
-	Type      string    `json:"type"`
-	Timestamp time.Time `json:"timestamp"`
-	Cwd       string    `json:"cwd"`
-	AgentName string    `json:"agentName"`
-	Sidechain bool      `json:"isSidechain"`
-	Origin    *struct {
-		Kind string `json:"kind"`
-	} `json:"origin"`
-	Message *struct {
-		Content json.RawMessage `json:"content"`
-	} `json:"message"`
-}
-
-// text — слова содержимого сообщения: строка или части type=text.
-func text(raw json.RawMessage) string {
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
+// Parse — строка транскрипта: реплика человека или его ответ в окне вопроса, текст агента или имя сессии.
+// Parser помнит вызовы инструментов: один на проход.
+func Parse(p *transcript.Parser, line []byte) (Event, bool, string, error) {
+	if rest, ok := bytes.CutPrefix(line, namePrefix); ok {
+		name, _, _ := bytes.Cut(rest, []byte(`"`))
+		return Event{}, false, string(name), nil
 	}
-	var parts []struct {
-		Type, Text string
-	}
-	if json.Unmarshal(raw, &parts) != nil {
-		return ""
-	}
-	var b strings.Builder
-	for _, p := range parts {
-		if p.Type == "text" && p.Text != "" {
-			if b.Len() > 0 {
-				b.WriteByte('\n')
-			}
-			b.WriteString(p.Text)
-		}
-	}
-	return b.String()
-}
-
-// Parse — строка транскрипта: реплика человека, текст агента или имя сессии.
-func Parse(line []byte) (Event, bool, string, error) {
-	human := bytes.Contains(line, humanMarker)
-	agent := !human && bytes.Contains(line, agentMarker) && bytes.Contains(line, textMarker)
-	if !human && !agent && !bytes.Contains(line, nameMarker) {
+	if !slices.ContainsFunc(markers, func(m []byte) bool { return bytes.Contains(line, m) }) &&
+		!(bytes.Contains(line, agentMarker) && bytes.Contains(line, textMarker)) {
 		return Event{}, false, "", nil
 	}
-	var r rawLine
-	if err := json.Unmarshal(line, &r); err != nil {
+	evs, err := p.Parse(line)
+	if err != nil {
 		return Event{}, false, "", fmt.Errorf("строка транскрипта: %w", err)
 	}
-	switch {
-	case r.Type == "agent-name":
-		return Event{}, false, r.AgentName, nil
-	case r.Sidechain || r.Message == nil:
-		return Event{}, false, "", nil
-	case r.Type == "user" && r.Origin != nil && r.Origin.Kind == "human":
-		t := strings.TrimSpace(reminder.ReplaceAllString(text(r.Message.Content), ""))
-		if t == "" {
-			return Event{}, false, "", nil
+	var user, agent []string
+	var out Event
+	for i := range evs {
+		e := &evs[i]
+		if e.Sidechain || strings.TrimSpace(e.Text) == "" {
+			continue
 		}
-		return Event{At: r.Timestamp, Kind: evUser, Text: t, Cwd: r.Cwd}, true, "", nil
-	case r.Type == "assistant":
-		if t := strings.TrimSpace(text(r.Message.Content)); t != "" {
-			return Event{At: r.Timestamp, Kind: evAgent, Text: t, Cwd: r.Cwd}, true, "", nil
+		switch e.Role {
+		case transcript.User, transcript.Ask:
+			user = append(user, strings.TrimSpace(e.Text))
+		case transcript.Agent:
+			agent = append(agent, strings.TrimSpace(e.Text))
+		default:
+			continue
 		}
+		out.At, out.Cwd = e.Time, e.Cwd
 	}
-	return Event{}, false, "", nil
+	switch {
+	case len(user) > 0:
+		out.Kind, out.Text = evUser, strings.Join(user, "\n")
+	case len(agent) > 0:
+		out.Kind, out.Text = evAgent, strings.Join(agent, "\n")
+	default:
+		return Event{}, false, "", nil
+	}
+	return out, true, "", nil
 }
 
 // NewTail — проход said: только транскрипты сессий, с номерами строк.
 func NewTail(projects string) *tail.Tail[Event] {
-	return &tail.Tail[Event]{Projects: projects, Parse: Parse, Lines: true,
+	p := transcript.NewParser()
+	return &tail.Tail[Event]{Projects: projects, Lines: true,
+		Parse: func(line []byte) (Event, bool, string, error) { return Parse(p, line) },
 		Stamp: func(ev *Event, src tail.Source) {
 			ev.Session, ev.Project, ev.Name, ev.Line = src.Session, src.Project, src.Name, src.Line
 		}}
