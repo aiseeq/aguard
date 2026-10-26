@@ -1,0 +1,31 @@
+[Unit]
+Description=tmpguard-track-home: кто оставляет следы работы агентов в ~/.cache и ~/.local/state (fanotify + proc connector)
+After=local-fs.target
+RequiresMountsFor=/home /var/lib
+
+# Только папки классов следов ([[disk.traces]] aguard): их дети — записи; ~/.cache целиком не помечается — иначе
+# полный замер обходил бы go-build и другие кэши. Папка, которой не было при старте, — после перезапуска службы.
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/tmpguard-track -roots "" -mount /home/alice/.cache \
+	-containers /home/alice/.cache/sc2go-scene-orders,/home/alice/.cache/farm-hard,/home/alice/.local/state/worker,/home/alice/.cache/moment-frame \
+	-state-dir /var/lib/tmpguard-home -run-dir /run/tmpguard-home -full 6h
+Restart=always
+RestartSec=5
+StateDirectory=tmpguard-home
+StateDirectoryMode=0755
+RuntimeDirectory=tmpguard-home
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=256M
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=yes
+# как у tmpguard-track: fanotify (SYS_ADMIN), proc connector (NET_ADMIN), open_by_handle_at и du (DAC_READ_SEARCH),
+# cwd чужих процессов (SYS_PTRACE), проверка pidfd (KILL)
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_SYS_PTRACE CAP_KILL
+
+[Install]
+WantedBy=multi-user.target

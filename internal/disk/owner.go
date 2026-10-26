@@ -130,3 +130,29 @@ func worktreeRepo(path string) (string, error) {
 	}
 	return repo, nil
 }
+
+// AdminOf — через кого сигнал хозяину owner: админ пространства его папки (живая сессия или проект таблицы cl),
+// админу — лид, лиду — никто.
+func (o *Owners) AdminOf(owner string) string {
+	if owner == o.Lead {
+		return ""
+	}
+	for _, a := range o.Admins {
+		if a == owner {
+			return o.Lead
+		}
+	}
+	for _, s := range o.Live {
+		if s.Name == owner {
+			admin, _ := o.admin(func(prefix string) bool { return strings.HasPrefix(s.Cwd, prefix+"/") })
+			return admin
+		}
+	}
+	for project, name := range o.Projects {
+		if name == owner {
+			admin, _ := o.admin(func(prefix string) bool { return strings.HasPrefix(project, projectDir(prefix)+"-") })
+			return admin
+		}
+	}
+	return o.Lead
+}

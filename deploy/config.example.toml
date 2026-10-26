@@ -124,7 +124,44 @@ stale_min = "1G"       # остаток от этого размера
 lasting = ["~/.cache/go-build", "~/.cache/gopls", "~/.cache/goimports", "~/.cache/staticcheck", "~/.cache/uv",
   "~/.cache/pip", "~/.cache/ms-playwright", "~/.cache/puppeteer", "~/.cache/google-chrome*"]
 keep = "1440h"         # 60 дней
+trace_min = "1G"       # scratchpad умершей сессии и копии транскриптов — следы от этого; находка по классу — от него
+# снимки tmpguard-track-home: кто создал след; первый свежий из списка
+track = ["/run/tmpguard-home/state.json", "/var/lib/tmpguard-home/state.json"]
 
 [disk.owners]          # папка -> сессия-хозяин; остальных хозяин ищется по сессиям и таблице имён cl, иначе — лид
 "~/.cache/farm-hard" = "llmark-master"
 "~/.local/state/worker" = "llmark-master"
+
+# Следы работы агентов (задание лида 26.10 13:43 CET): папки, где каждый ребёнок — один след; уборка и срок — по
+# коду хозяина (sc2go tools/repo/scene-orders.sh, llmark farm/worker prune, ~/.claude/improve/moment-frame.sh).
+[[disk.traces]]
+dir = "~/.cache/sc2go-scene-orders"
+kind = "неудача"
+what = "материалы неудачной сверки приказов сцен (tools/repo/scene-orders.sh)"
+owner = "sc2go-master"
+cleanup = "scene-orders.sh при следующей неудаче удаляет старше 2 суток"
+lifetime = "48h"
+
+[[disk.traces]]
+dir = "~/.cache/farm-hard"
+kind = "прогон"
+what = "прогоны фермы llmark"
+owner = "llmark-master"
+cleanup = "farm prune: 72 ч после конца, в начале run и lane"
+lifetime = "72h"
+
+[[disk.traces]]
+dir = "~/.local/state/worker"
+kind = "прогон"
+what = "прогоны worker llmark"
+owner = "llmark-master"
+cleanup = "worker prune: 3 суток после итога, в начале run"
+lifetime = "72h"
+
+[[disk.traces]]
+dir = "~/.cache/moment-frame"
+kind = "копия"
+what = "снимки кейсов evals Сна (~/.claude/improve/moment-frame.sh)"
+owner = "lead"
+cleanup = "moment-frame.sh убирает после кейса"
+lifetime = "24h"

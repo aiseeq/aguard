@@ -25,6 +25,7 @@ import (
 type Config struct {
 	Roots       []string      // помечаемые папки; их прямые потомки — записи
 	Containers  []string      // папки-контейнеры: сами не запись, их потомки — записи
+	Mount       string        // папка файловой системы для open_by_handle_at; пусто — первая из Roots
 	StateDir    string        // журнал и долговременный снимок (диск)
 	RunDir      string        // частый снимок (tmpfs /run)
 	Full        time.Duration // полный замер и сверка с диском
@@ -103,8 +104,12 @@ func Run(cfg Config, lg *slog.Logger) error {
 	if t.fd, err = fanInit(); err != nil {
 		return fmt.Errorf("fanotify_init: %w", err)
 	}
-	if t.mountFD, err = unix.Open(cfg.Roots[0], unix.O_RDONLY|unix.O_DIRECTORY, 0); err != nil {
-		return fmt.Errorf("open %s: %w", cfg.Roots[0], err)
+	mount := cfg.Mount
+	if mount == "" {
+		mount = cfg.Roots[0]
+	}
+	if t.mountFD, err = unix.Open(mount, unix.O_RDONLY|unix.O_DIRECTORY, 0); err != nil {
+		return fmt.Errorf("open %s: %w", mount, err)
 	}
 	for _, d := range append(append([]string{}, cfg.Roots...), cfg.Containers...) {
 		if err := t.mark(d); err != nil && !t.containers[d] {

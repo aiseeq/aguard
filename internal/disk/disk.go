@@ -36,6 +36,13 @@ type Config struct {
 	// Owners — папка (запись или её предок) -> сессия-хозяин; остальных хозяин ищется по сессиям, иначе — лид.
 	Owners map[string]string `toml:"owners"`
 	Keep   policy.Duration   `toml:"keep"` // срок журнала
+	// Traces — папки, где каждый ребёнок — след работы (traces.go): их дети — тоже записи.
+	Traces []TraceClass `toml:"traces"`
+	// TraceMin — scratchpad умершей сессии и копии транскриптов — следы от этого размера; находка по классу — от него.
+	TraceMin policy.Size `toml:"trace_min"`
+	// Track — снимки tmpguard-track по ~/.cache и ~/.local/state (служба tmpguard-track-home): кто создал запись.
+	// Первый свежий из списка; нет ни одного — создатель неизвестен.
+	Track []string `toml:"track"`
 }
 
 // ModeLog — только журнал.
@@ -54,7 +61,9 @@ func Default() Config {
 			"~/.cache/mesa_shader_cache*", "~/.cache/ms-playwright", "~/.cache/puppeteer", "~/.cache/pip",
 			"~/.cache/uv", "~/.cache/node-gyp", "~/.cache/trivy", "~/.cache/libdnf5", "~/.cache/fontconfig",
 			"~/.cache/typescript", "~/.cache/JetBrains", "~/.cache/mozilla"},
-		Keep: policy.Duration(60 * 24 * time.Hour),
+		Keep:     policy.Duration(60 * 24 * time.Hour),
+		TraceMin: 1 << 30,
+		Track:    []string{"/run/tmpguard-home/state.json", "/var/lib/tmpguard-home/state.json"},
 	}
 }
 
@@ -66,9 +75,10 @@ func (c *Config) Validate(home string) error {
 	if c.Interval.D() < 10*time.Second || c.Walk.D() < c.Interval.D() || c.FastWindow.D() < c.Interval.D() {
 		return errors.New("disk: interval >= 10s, walk и fast_window не меньше interval")
 	}
-	if c.Grow <= 0 || c.Fast <= 0 || c.StaleMin <= 0 || c.Stale.D() < time.Hour || c.Keep.D() < 24*time.Hour {
-		return errors.New("disk: grow, fast, stale_min > 0, stale >= 1h, keep >= 24h")
+	if c.Grow <= 0 || c.Fast <= 0 || c.StaleMin <= 0 || c.TraceMin <= 0 || c.Stale.D() < time.Hour || c.Keep.D() < 24*time.Hour {
+		return errors.New("disk: grow, fast, stale_min, trace_min > 0, stale >= 1h, keep >= 24h")
 	}
+
 	expand := func(ps []string) {
 		for i, p := range ps {
 			ps[i] = policy.ExpandHome(p, home)
@@ -77,6 +87,9 @@ func (c *Config) Validate(home string) error {
 	expand(c.Roots)
 	expand(c.Containers)
 	expand(c.Lasting)
+	if err := c.validateTraces(home); err != nil {
+		return err
+	}
 	owners := make(map[string]string, len(c.Owners))
 	for k, v := range c.Owners {
 		owners[filepath.Clean(policy.ExpandHome(k, home))] = v
@@ -147,6 +160,7 @@ type Usage struct {
 	Changed time.Time
 	Unread  int
 	Err     error
+	Copies  int64 // копии транскриптов Claude Code (copyName) по st_blocks
 }
 
 type inode struct{ dev, ino uint64 }
@@ -238,6 +252,9 @@ func measure(path string, seen map[inode]bool, buf *fiemapBuf, exact bool) Usage
 		}
 		u.Blocks += st.Blocks * 512
 		u.Files++
+		if copyName.MatchString(d.Name()) {
+			u.Copies += st.Blocks * 512
+		}
 		n, err := space.add(p, d, st)
 		u.Bytes += n
 		return err
@@ -277,4 +294,20 @@ func ByDay(path string, exact bool) (map[time.Time]int64, error) {
 		out[day] += spanBytes(f.shared)
 	}
 	return out, err
+}
+
+// validateTraces раскрывает папки классов следов и добавляет их в контейнеры: каждый их ребёнок — отдельная запись.
+// Вызывается после раскрытия контейнеров.
+func (c *Config) validateTraces(home string) error {
+	for i := range c.Traces {
+		t := &c.Traces[i]
+		if t.Dir == "" || t.Kind == "" {
+			return fmt.Errorf("disk.traces[%d]: нужны dir и kind", i)
+		}
+		t.Dir = filepath.Clean(policy.ExpandHome(t.Dir, home))
+		if !slices.Contains(c.Containers, t.Dir) {
+			c.Containers = append(c.Containers, t.Dir)
+		}
+	}
+	return nil
 }

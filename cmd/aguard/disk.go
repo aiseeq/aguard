@@ -3,14 +3,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +23,8 @@ import (
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/names"
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/waits"
 )
 
 func (a *app) diskCmd(args []string) error {
@@ -40,6 +47,11 @@ func (a *app) diskCmd(args []string) error {
 		days := fl.Int("days", 7, "за сколько дней")
 		parse(fl, rest)
 		return a.diskRetro(&cfg, *days)
+	case "traces":
+		fl := flag.NewFlagSet("disk traces", flag.ContinueOnError)
+		all := fl.Bool("all", false, "кроме находок — каждый след")
+		parse(fl, rest)
+		return a.diskTracesNow(&cfg, *all)
 	case "report":
 		fl := flag.NewFlagSet("disk report", flag.ContinueOnError)
 		since := fl.Duration("since", 7*24*time.Hour, "за какой срок")
@@ -119,6 +131,9 @@ func (a *app) diskRound(cfg *config.Config) error {
 		if u.Unread > 0 {
 			a.log.Debug("aguard disk: не прочиталось", "path", path, "unread", u.Unread, "err", u.Err)
 		}
+	}
+	if usage != nil { // был обход: следы по свежим замерам
+		recs = append(recs, a.diskTraces(cfg, st, owners, now, free, usage)...)
 	}
 	for i := range recs {
 		a.log.Info("aguard disk: " + recs[i].Line(a.home))
@@ -200,4 +215,145 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// graftTimeout — сухой прогон graft worktree clean по одному репозиторию.
+const graftTimeout = 2 * time.Minute
+
+// diskFacts — что известно о записях помимо замера: живые сессии, имена сессий по транскриптам (waits), создатели
+// по снимку tmpguard-track-home, вердикты graft о worktree, время создания по statx.
+func (a *app) diskFacts(cfg *config.Config, owners *disk.Owners, list []string) *disk.Facts {
+	f := &disk.Facts{Live: map[string]bool{}, Names: map[string]string{}, Created: map[string]disk.Creator{},
+		Verdicts: map[string]disk.Verdict{}}
+	for _, s := range owners.Live {
+		f.Live[s.ID] = true
+	}
+	if st, err := waits.LoadState(filepath.Join(a.dir("waits"), "offsets.json")); err != nil {
+		a.warn("disk", "имена сессий (waits)", "err", err)
+	} else {
+		for rel, file := range st.Files {
+			if id := disk.SessionID(rel); id != "" && file.Name != "" {
+				f.Names[id] = file.Name
+			}
+		}
+	}
+	a.diskCreators(cfg, f)
+	repos, err := disk.WorktreeRepos(list)
+	if err != nil { // часть worktree не прочиталась: вердикты по остальным
+		a.warn("disk", "репозитории worktree", "err", err)
+	}
+	for _, repo := range slices.Sorted(maps.Keys(repos)) {
+		ctx, cancel := context.WithTimeout(context.Background(), graftTimeout)
+		cmd := exec.CommandContext(ctx, "graft", "worktree", "clean")
+		cmd.Dir = repo
+		out, err := cmd.Output()
+		cancel()
+		disk.ParseVerdicts(out, f.Verdicts)
+		if err == nil {
+			continue
+		}
+		// graft не судит репозиторий (нет remote): его worktree — следы, только если давно не менялись
+		why := err.Error()
+		if ee, ok := errors.AsType[*exec.ExitError](err); ok && len(ee.Stderr) > 0 {
+			why = lastLine(ee.Stderr)
+		}
+		a.log.Info("aguard disk: graft worktree clean", "repo", repo, "err", why)
+		for _, p := range repos[repo] {
+			if _, ok := f.Verdicts[p]; !ok {
+				f.Verdicts[p] = disk.Verdict{Word: disk.NoVerdict, Reason: why}
+			}
+		}
+	}
+	f.Born = func(path string) time.Time {
+		t, err := disk.Btime(path)
+		if err != nil { // запись исчезла после обхода: время создания неизвестно
+			a.log.Debug("aguard disk: время создания", "err", err)
+			return time.Time{}
+		}
+		return t
+	}
+	return f
+}
+
+// diskCreators — создатели записей по самому свежему снимку tmpguard-track-home; снимка нет — создатели неизвестны.
+func (a *app) diskCreators(cfg *config.Config, f *disk.Facts) {
+	var best *record.State
+	for _, path := range cfg.Disk.Track {
+		s, err := record.ReadState(path)
+		if err != nil {
+			a.warn("disk", "снимок tmpguard-track "+path, "err", err)
+			continue
+		}
+		if best == nil || s.Updated.After(best.Updated) {
+			best = s
+		}
+	}
+	if best == nil {
+		return
+	}
+	for i := range best.Entries {
+		e := &best.Entries[i]
+		cr := disk.Creator{Born: e.Born}
+		if o := e.Owner; o != nil {
+			cr.Command = o.Proc.Args
+			if o.Session != nil {
+				cr.Session = o.Session.Name
+			}
+		}
+		f.Created[e.Path] = cr
+	}
+}
+
+// diskTraces — следы среди замеренных записей и записи журнала о них.
+func (a *app) diskTraces(cfg *config.Config, st *disk.State, owners *disk.Owners, now time.Time, free int64,
+	usage map[string]disk.Usage) []disk.Record {
+	list := slices.Sorted(maps.Keys(usage))
+	traces := cfg.Disk.FindTraces(now, list, usage, a.diskFacts(cfg, owners, list), owners.Of)
+	exists := func(path string) bool {
+		_, err := os.Lstat(path)
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	return st.Account(&cfg.Disk, now, traces, free, a.home, exists, owners.AdminOf)
+}
+
+// diskTracesNow — следы на диске сейчас: обход всех записей, находки по классам, с -all — каждый след; ничего не пишет.
+func (a *app) diskTracesNow(cfg *config.Config, all bool) error {
+	now := time.Now()
+	entries, err := cfg.Disk.Entries()
+	if err != nil {
+		a.warn("disk", "записи", "err", err)
+	}
+	owners := a.diskOwners(cfg)
+	usage := cfg.Disk.MeasureAll(entries)
+	traces := cfg.Disk.FindTraces(now, entries, usage, a.diskFacts(cfg, owners, entries), owners.Of)
+	var b strings.Builder
+	findings := cfg.Disk.Findings(now, traces)
+	for i := range findings {
+		g := &findings[i]
+		fmt.Fprintf(&b, "%s → %s (%s)", g.Text(a.home), g.Owner, g.Why)
+		if admin := owners.AdminOf(g.Owner); admin != "" {
+			fmt.Fprintf(&b, " через %s", admin)
+		}
+		b.WriteByte('\n')
+	}
+	if all {
+		sort.Slice(traces, func(i, j int) bool { return traces[i].Bytes > traces[j].Bytes })
+		for i := range traces {
+			t := &traces[i]
+			r := disk.Record{Kind: disk.KindTrace, At: now, Path: t.Path, Bytes: t.Bytes, Since: t.Born, Owner: t.Owner,
+				Why: t.Why, Admin: owners.AdminOf(t.Owner), Trace: t}
+			b.WriteString(r.Line(a.home))
+			b.WriteByte('\n')
+		}
+	}
+	if _, err := io.WriteString(a.out, b.String()); err != nil {
+		return fmt.Errorf("вывод: %w", err)
+	}
+	return nil
+}
+
+// lastLine — последняя непустая строка вывода.
+func lastLine(b []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	return lines[len(lines)-1]
 }

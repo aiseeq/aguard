@@ -20,6 +20,10 @@ const (
 	KindGrew  = "grew"  // запись выросла за сутки на grow и больше
 	KindStale = "stale" // запись от stale_min лежит без изменений дольше stale
 	KindFast  = "fast"  // свободное место за fast_window убыло на fast и больше: кто вырос с прошлого обхода
+	// Следы работы (traces.go).
+	KindTrace     = "trace"      // след встречен впервые: учтён
+	KindTraceGone = "trace_gone" // след исчез с диска: убран хозяином или кем-то ещё
+	KindFinding   = "finding"    // находка о работе по классу следов хозяина, раз в сутки
 )
 
 // Повтор того же сигнала о той же записи — не чаще: рост и остаток — раз в сутки, быстрое наполнение — раз в окно.
@@ -44,6 +48,9 @@ type Record struct {
 	Owner string    `json:"owner"`
 	Why   string    `json:"why"` // откуда хозяин: config, session, project, worktree, names, admin, lead
 	Free  int64     `json:"free"`
+	Admin string    `json:"admin,omitempty"` // через кого сигнал хозяину: админ его пространства, иначе лид
+	Trace *Trace    `json:"trace,omitempty"` // trace, trace_gone
+	Text  string    `json:"text,omitempty"`  // finding: находка словами
 }
 
 // Point — замер.
@@ -57,7 +64,8 @@ type State struct {
 	Sizes    map[string][]Point   `json:"sizes"`
 	Free     []Point              `json:"free"`
 	LastWalk time.Time            `json:"last_walk"`
-	Told     map[string]time.Time `json:"told"` // вид и путь -> когда записан
+	Told     map[string]time.Time `json:"told"`             // вид и путь -> когда записан
+	Traces   map[string]Trace     `json:"traces,omitempty"` // учтённые следы, путь -> последний замер
 }
 
 // Load читает состояние; нет файла — пустое.
@@ -179,6 +187,50 @@ func (s *State) entry(c *Config, now time.Time, path string, u Usage, fast bool,
 		tell(Record{Kind: KindStale, Path: path, Bytes: u.Bytes, Since: u.Changed}, repeatDaily)
 	}
 	return grewFast
+}
+
+// Account — учёт следов: новый след и исчезнувший с диска — в журнал (след учтён до уборки и после неё), находки по
+// классу и хозяину — раз в сутки. exists — есть ли путь на диске; admin — через кого сигнал хозяину.
+func (s *State) Account(c *Config, now time.Time, traces []Trace, free int64, home string, exists func(string) bool,
+	admin func(owner string) string) []Record {
+	if s.Traces == nil {
+		s.Traces = map[string]Trace{}
+	}
+	var out []Record
+	rec := func(r Record) Record {
+		r.At, r.Free, r.Admin = now, free, admin(r.Owner)
+		return r
+	}
+	seen := make(map[string]bool, len(traces))
+	for i := range traces {
+		t := traces[i]
+		seen[t.Path] = true
+		if _, ok := s.Traces[t.Path]; !ok {
+			out = append(out, rec(Record{Kind: KindTrace, Path: t.Path, Bytes: t.Bytes, Since: t.Born, Owner: t.Owner, Why: t.Why, Trace: &t}))
+		}
+		s.Traces[t.Path] = t
+	}
+	for _, path := range slices.Sorted(maps.Keys(s.Traces)) {
+		if seen[path] {
+			continue
+		}
+		t := s.Traces[path]
+		delete(s.Traces, path)
+		if !exists(path) { // путь на месте, но уже не след (сессия ожила, ветка в работе) — не уборка
+			out = append(out, rec(Record{Kind: KindTraceGone, Path: path, Bytes: t.Bytes, Since: t.Born, Owner: t.Owner, Why: t.Why, Trace: &t}))
+		}
+	}
+	findings := c.Findings(now, traces)
+	for i := range findings {
+		g := &findings[i]
+		key := KindFinding + " " + g.Class + " " + g.Owner + " " + g.Kind
+		if t, ok := s.Told[key]; ok && now.Sub(t) < repeatDaily {
+			continue
+		}
+		s.Told[key] = now
+		out = append(out, rec(Record{Kind: KindFinding, Path: g.Class, Bytes: g.Bytes, Owner: g.Owner, Why: g.Why, Text: g.Text(home)}))
+	}
+	return out
 }
 
 // baseline — самый ранний замер за последние сутки: от него считается рост.

@@ -27,6 +27,7 @@ func main() {
 func run(lg *slog.Logger) error {
 	roots := flag.String("roots", "/tmp", "помечаемые папки через запятую (первая — корень файловой системы для open_by_handle_at)")
 	containers := flag.String("containers", "/tmp/claude-tmp", "папки-контейнеры через запятую: учитывается их содержимое")
+	mount := flag.String("mount", "", "папка файловой системы для open_by_handle_at, если -roots пуст или на другой (по умолчанию — первая из -roots)")
 	stateDir := flag.String("state-dir", record.DefaultDir, "журнал owners.jsonl и долговременный снимок")
 	runDir := flag.String("run-dir", "/run/tmpguard", "частый снимок state.json (tmpfs)")
 	full := flag.Duration("full", 5*time.Minute, "период полного замера и сверки")
@@ -39,11 +40,11 @@ func run(lg *slog.Logger) error {
 		return errors.New("нужен root (fanotify и proc connector)")
 	}
 	cfg := track.Config{
-		Roots: split(*roots), Containers: split(*containers), StateDir: *stateDir, RunDir: *runDir,
+		Roots: split(*roots), Containers: split(*containers), Mount: *mount, StateDir: *stateDir, RunDir: *runDir,
 		Full: *full, Young: *young, YoungEvery: *youngEvery, Persist: *persist, RotateBytes: *rotateMB << 20,
 	}
-	if len(cfg.Roots) == 0 {
-		return errors.New("пустой -roots")
+	if len(cfg.Roots) == 0 && (cfg.Mount == "" || len(cfg.Containers) == 0) {
+		return errors.New("пустой -roots: тогда нужны -mount и -containers")
 	}
 	return track.Run(cfg, lg)
 }
