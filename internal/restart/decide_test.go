@@ -39,9 +39,9 @@ func TestDecideRestartsIdleSession(t *testing.T) {
 		t.Fatalf("простаивающую старую сессию перезапускать: %+v", v)
 	}
 	f := idleFacts()
-	f.HookState = "waiting" // минутное напоминание после конца хода
+	f.HookState = "idle" // человек открыл вкладку после конца хода
 	if !decide(f, allowance{idle: 10 * time.Minute}).Restart {
-		t.Error("waiting без идущих инструментов — тоже простой")
+		t.Error("idle — тоже простой")
 	}
 }
 
@@ -64,7 +64,7 @@ func TestDecideAgainst(t *testing.T) {
 		"version":  func(f *facts) { f.Installed = "latest" },
 		"kind":     func(f *facts) { f.Kind = "background" },
 		"status":   func(f *facts) { f.Status = "busy" },
-		"hook":     func(f *facts) { f.HookState = "working" },
+		"hook":     func(f *facts) { f.HookState = "waiting" }, // вопрос человеку
 		"quiet":    func(f *facts) { f.Quiet = 9 * time.Minute },
 		"tty":      func(f *facts) { f.TTYQuiet = 2 * time.Minute },
 		"draft":    func(f *facts) { f.TTYQuiet = 12 * time.Minute },

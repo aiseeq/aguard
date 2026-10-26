@@ -22,8 +22,9 @@ type facts struct {
 	session.Info        // запись реестра Claude Code (~/.claude/sessions/<pid>.json)
 	Running      string // версия бинаря процесса
 	Installed    string // версия, которую запустит claude из PATH
-	// HookState — состояние от chooks: done (ход закончен), waiting (ждёт человека), paused (ждёт фоновые
-	// задачи или таймеры), working; пусто — записи нет.
+	// HookState — состояние от chooks: done и idle (ход закончен, idle — человек открыл вкладку), waiting (вопрос
+	// человеку), paused (ждёт фоновые задачи или таймеры), working, error (ход оборвала ошибка API); пусто — записи
+	// нет.
 	HookState string
 	// HookTasks — на последнем Stop Claude Code перечислил фоновые задачи (файл <сессия>.tasks chooks).
 	HookTasks bool
@@ -175,7 +176,7 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 
 // hookRecord — запись chooks о сессии.
 type hookRecord struct {
-	state   string    // done, waiting, paused, working; пусто — записи нет
+	state   string    // done, idle, waiting, paused, working, error; пусто — записи нет
 	tasks   bool      // есть <сессия>.tasks: на последнем Stop Claude Code перечислил фоновые задачи
 	written time.Time // время записи состояния
 }
