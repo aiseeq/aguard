@@ -82,6 +82,7 @@ func TestBuild(t *testing.T) {
 		{From: h(3 * time.Hour), To: at, Watcher: "tmp", Kind: "would_send", Target: "lead", Count: 2, Max: 9, Unit: "entries"},
 		// позже момента отчёта — не входит
 		{From: at, To: at.Add(time.Minute), Watcher: "tmp", Kind: KindPass, Count: 1},
+		{From: at.Add(time.Hour), To: at.Add(time.Hour), Watcher: "aguard", Kind: KindStart, Count: 1},
 	}
 	extra := func(from, to time.Time) ([]Line, error) {
 		return []Line{{Kind: "hook_timeout", What: "PostToolBatch", Count: 1, Max: 23900, Unit: "ms"}}, nil

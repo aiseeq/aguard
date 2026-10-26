@@ -133,11 +133,12 @@ func TestStateSaveLoad(t *testing.T) {
 	at := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	s.Sizes["/a"] = []Point{{At: at, Bytes: 5}}
 	s.Told["grew /a"] = at
+	s.Traces = map[string]Trace{"/t": {Path: "/t", Lifetime: 72 * time.Hour}} // срок следа читается обратно
 	if err := s.Save(path); err != nil {
 		t.Fatal(err)
 	}
 	back, err := Load(path)
-	if err != nil || back.Sizes["/a"][0].Bytes != 5 || !back.Told["grew /a"].Equal(at) {
+	if err != nil || back.Sizes["/a"][0].Bytes != 5 || !back.Told["grew /a"].Equal(at) || back.Traces["/t"].Lifetime != 72*time.Hour {
 		t.Fatalf("Load = %+v, %v", back, err)
 	}
 }

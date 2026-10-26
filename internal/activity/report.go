@@ -90,7 +90,7 @@ func Build(at time.Time, recs []Record, specs []Spec) (*Report, error) {
 	for _, w := range Windows {
 		from := at.Add(-w.Len)
 		for i := range recs {
-			if recs[i].Kind == KindStart && recs[i].To.After(from) {
+			if recs[i].Kind == KindStart && recs[i].To.After(from) && !recs[i].To.After(at) {
 				r.Daemon.Starts[w.Name] += recs[i].Count
 			}
 		}

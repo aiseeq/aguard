@@ -46,21 +46,23 @@ type TraceClass struct {
 
 // Trace — след.
 type Trace struct {
-	Path     string          `json:"path"`
-	Class    string          `json:"class"` // scratchpad, worktree или dir класса каталога
-	Kind     string          `json:"kind"`
-	Producer string          `json:"producer,omitempty"` // сессия, ветка или боец
-	Command  string          `json:"command,omitempty"`  // команда создателя по tmpguard-track
-	Note     string          `json:"note,omitempty"`     // подробность: вердикт graft и т. п.
-	Owner    string          `json:"owner"`
-	Why      string          `json:"why"`
-	Cleanup  string          `json:"cleanup,omitempty"`
-	Lifetime policy.Duration `json:"lifetime,omitempty"`
-	Bytes    int64           `json:"bytes"`
-	Copies   int64           `json:"copies,omitempty"` // из них копии транскриптов
-	Born     time.Time       `json:"born,omitzero"`
-	Changed  time.Time       `json:"changed,omitzero"`
-	Outlived bool            `json:"outlived,omitempty"` // старше срока уборки хозяина: уборка не сработала
+	Path     string `json:"path"`
+	Class    string `json:"class"` // scratchpad, worktree или dir класса каталога
+	Kind     string `json:"kind"`
+	Producer string `json:"producer,omitempty"` // сессия, ветка или боец
+	Command  string `json:"command,omitempty"`  // команда создателя по tmpguard-track
+	Note     string `json:"note,omitempty"`     // подробность: вердикт graft и т. п.
+	Owner    string `json:"owner"`
+	Why      string `json:"why"`
+	Cleanup  string `json:"cleanup,omitempty"`
+	// Lifetime — числом наносекунд, как time.Duration: у policy.Duration нет MarshalText, JSON писал число и не читал
+	// его обратно (проход падал с 26.10 15:00 CET).
+	Lifetime time.Duration `json:"lifetime,omitempty"`
+	Bytes    int64         `json:"bytes"`
+	Copies   int64         `json:"copies,omitempty"` // из них копии транскриптов
+	Born     time.Time     `json:"born,omitzero"`
+	Changed  time.Time     `json:"changed,omitzero"`
+	Outlived bool          `json:"outlived,omitempty"` // старше срока уборки хозяина: уборка не сработала
 }
 
 // Creator — создатель записи по tmpguard-track.
@@ -139,7 +141,7 @@ func (c *Config) FindTraces(now time.Time, list []string, usage map[string]Usage
 
 func (c *Config) scratchTrace(t *Trace, now time.Time, f *Facts) bool {
 	id := filepath.Base(t.Path)
-	t.Class, t.Cleanup, t.Lifetime = ClassScratchpad, scratchCleanup, policy.Duration(scratchLife)
+	t.Class, t.Cleanup, t.Lifetime = ClassScratchpad, scratchCleanup, scratchLife
 	if name := f.Names[id]; name != "" {
 		t.Producer = name
 	} else if t.Producer == "" {
@@ -185,14 +187,14 @@ func (c *Config) classTrace(t *Trace, now time.Time) bool {
 	}
 	tc := &c.Traces[i]
 	t.Class, t.Kind, t.Note, t.Owner, t.Why = tc.Dir, tc.Kind, tc.What, tc.Owner, "config"
-	t.Cleanup, t.Lifetime = tc.Cleanup, tc.Lifetime
+	t.Cleanup, t.Lifetime = tc.Cleanup, tc.Lifetime.D()
 	if t.Owner == "" {
 		t.Why = ""
 	}
 	// срок уборки хозяев — от конца работы (farm prune — 72 ч после конца, scene-orders — по mtime): от последнего
 	// изменения, а создание — если изменений не видно
 	end := cmp.Or(t.Changed, t.Born)
-	t.Outlived = tc.Lifetime > 0 && !end.IsZero() && now.Sub(end) > tc.Lifetime.D()+slack
+	t.Outlived = t.Lifetime > 0 && !end.IsZero() && now.Sub(end) > t.Lifetime+slack
 	return true
 }
 
@@ -227,7 +229,7 @@ func (c *Config) Findings(now time.Time, traces []Trace) []Finding {
 		k := key{t.Class, t.Owner, t.Kind}
 		g := groups[k]
 		if g == nil {
-			g = &Finding{Class: t.Class, Owner: t.Owner, Why: t.Why, Kind: t.Kind, Cleanup: t.Cleanup, Lifetime: t.Lifetime.D()}
+			g = &Finding{Class: t.Class, Owner: t.Owner, Why: t.Why, Kind: t.Kind, Cleanup: t.Cleanup, Lifetime: t.Lifetime}
 			groups[k], producers[k] = g, map[string]int{}
 			order = append(order, k)
 		}
