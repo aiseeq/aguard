@@ -1,6 +1,6 @@
 // Package config — единый конфиг aguard (~/.config/aguard/config.toml):
 // общие поля (лид, админы пространств) и разделы наблюдателей [orphans], [tmp],
-// [memory], [restart], [waits], [compact]. Перечитывается каждый проход.
+// [memory], [restart], [waits], [compact], [disk], [said]. Перечитывается каждый проход.
 package config
 
 import (
@@ -19,6 +19,7 @@ import (
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/aguard/internal/said"
 	"github.com/aiseeq/aguard/internal/waits"
 )
 
@@ -36,6 +37,7 @@ type Config struct {
 	// Compact — своё сжатие сессий в простое, пока кэш подсказки жив.
 	Compact restart.CompactConfig `toml:"compact"`
 	Disk    disk.Config           `toml:"disk"` // рост папок кэшей и состояний, остатки временного
+	Said    said.Config           `toml:"said"` // указатель сказанного пользователем
 }
 
 // Path — путь конфига в домашней папке.
@@ -56,6 +58,7 @@ func Default(home string) Config {
 		Waits:   waits.Default(),
 		Compact: restart.DefaultCompact(),
 		Disk:    disk.Default(),
+		Said:    said.Default(),
 	}
 }
 
@@ -113,6 +116,9 @@ func (c *Config) finish(home string, uid int) error {
 		return fmt.Errorf("waits: %w", err)
 	}
 	if err := c.Disk.Validate(home); err != nil {
+		return err
+	}
+	if err := c.Said.Validate(home); err != nil {
 		return err
 	}
 	return c.Compact.Validate()

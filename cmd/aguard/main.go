@@ -14,7 +14,9 @@
 //
 //   - compact — своё сжатие сессий в простое, пока кэш подсказки жив: пока только журнал «сжал бы» и сверка;
 //
-//   - disk — рост папок кэшей и состояний за сутки, остатки временного, быстрое наполнение: журнал, кому сообщил бы.
+//   - disk — рост папок кэшей и состояний за сутки, остатки временного, быстрое наполнение: журнал, кому сообщил бы;
+//
+//   - said — реплики пользователя лиду, админам и мастерам: правила, решения и обещания — в ~/.claude/said.tsv.
 //
 //     aguard run                                         демон (user-сервис)
 //     aguard orphans tick [-dry-run] [-min-dead 0s]      один проход сирот
@@ -24,6 +26,7 @@
 //     aguard waits tick [-dry-run] | report [-since 24h]
 //     aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время]
 //     aguard disk tick [-dry-run] | retro [-days 7] | traces [-all] | report [-since 168h]
+//     aguard said tick [-dry-run] | report [-since 168h]  разметка реплик, расход по суткам
 //     aguard report [-json] [-at время]                 срабатывания и сбои за сутки, неделю, месяц
 package main
 
@@ -103,6 +106,8 @@ func main() {
 		err = a.compactCmd(os.Args[2:])
 	case "disk":
 		err = a.diskCmd(os.Args[2:])
+	case "said":
+		err = a.saidCmd(ctx, os.Args[2:])
 	case "report":
 		err = a.reportCmd(os.Args[2:])
 	default:
@@ -125,6 +130,7 @@ func usage() {
   aguard waits tick [-dry-run] | report [-since 24h]
   aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время RFC3339]
   aguard disk tick [-dry-run] | retro [-days 7] | traces [-all] | report [-since 168h]
+  aguard said tick [-dry-run] | report [-since 168h]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }
@@ -169,7 +175,7 @@ type watcher struct {
 // проход; не прочитался — проход пропускается (по неизвестным правилам ничего
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "compact", "disk", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "compact", "disk", "said", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -190,6 +196,8 @@ func (a *app) run(ctx context.Context) error {
 			func(c *config.Config) time.Duration { return c.Compact.Interval.D() }},
 		{"disk", func(_ context.Context, c *config.Config) error { return a.diskRound(c) },
 			func(c *config.Config) time.Duration { return c.Disk.Interval.D() }},
+		{"said", func(ctx context.Context, c *config.Config) error { return a.saidRound(ctx, &c.Said, false) },
+			func(c *config.Config) time.Duration { return c.Said.Interval.D() }},
 	}
 	a.act = activity.New(a.dir("activity"), time.Now())
 	a.note("aguard", activity.KindStart, "", "", 0, "")

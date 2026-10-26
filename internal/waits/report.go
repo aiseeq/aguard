@@ -46,7 +46,7 @@ func (c *Config) Validate() error {
 
 // Tail — проход по транскриптам в projects по разделу.
 func (c *Config) Tail(projects string) *Tail {
-	return &Tail{Projects: projects, Backfill: c.Backfill.D(), BackfillBytes: c.BackfillMB << 20}
+	return NewTail(projects, c.Backfill.D(), c.BackfillMB<<20)
 }
 
 // NewStore — дневные файлы событий в dir.

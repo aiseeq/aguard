@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
-	_ "time/tzdata" // пояс для TestHoursDST без системной базы поясов
+	_ "time/tzdata"
+
+	"github.com/aiseeq/aguard/internal/tail" // пояс для TestHoursDST без системной базы поясов
 )
 
 const (
@@ -71,8 +73,8 @@ func TestTailPass(t *testing.T) {
 	old := filepath.Join(dir, "-home-u-git-x", "s1.jsonl")
 	write(t, old, lineName, lineHook, linePlain, lineCompact)
 	now := time.Now()
-	tl := &Tail{Projects: dir, Backfill: 7 * 24 * time.Hour, BackfillBytes: 1 << 20}
-	st := &State{Files: map[string]*File{}}
+	tl := NewTail(dir, 7*24*time.Hour, 1<<20)
+	st := &State{Files: map[string]*tail.File{}}
 
 	// первый проход: старый файл — с конца, его начало — догрузкой
 	evs, err := tl.Pass(st, now)
@@ -115,8 +117,8 @@ func TestBackfillBudget(t *testing.T) {
 		lines = append(lines, lineHook)
 	}
 	write(t, p, lines...)
-	tl := &Tail{Projects: dir, Backfill: time.Hour, BackfillBytes: int64(len(lineHook)) * 3}
-	st := &State{Files: map[string]*File{}}
+	tl := NewTail(dir, time.Hour, int64(len(lineHook))*3)
+	st := &State{Files: map[string]*tail.File{}}
 	total := 0
 	for range 20 {
 		evs, err := tl.Pass(st, time.Now())
@@ -165,7 +167,7 @@ func TestHoursDST(t *testing.T) {
 
 func TestStateSaveReport(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "offsets.json")
-	st := &State{Started: true, Files: map[string]*File{"p/s.jsonl": {Offset: 10, Name: "x"}}}
+	st := &State{Started: true, Files: map[string]*tail.File{"p/s.jsonl": {Offset: 10, Name: "x"}}}
 	if err := st.Save(path); err != nil {
 		t.Fatal(err)
 	}

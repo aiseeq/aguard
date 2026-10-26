@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "quote", "scope", "words", "supersedes"],
+        "properties": {
+          "kind": {"type": "string", "enum": ["rule", "decision", "promise"]},
+          "quote": {"type": "string"},
+          "scope": {"type": "string"},
+          "words": {"type": "string"},
+          "supersedes": {"type": "string"}
+        }
+      }
+    }
+  }
+}

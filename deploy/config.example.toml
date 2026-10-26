@@ -165,3 +165,17 @@ what = "снимки кейсов evals Сна (~/.claude/improve/moment-frame.s
 owner = "lead"
 cleanup = "moment-frame.sh убирает после кейса"
 lifetime = "24h"
+
+[said]                 # указатель сказанного: реплики пользователя -> Luna -> ~/.claude/said.tsv
+mode = "log"           # off | log (разметка и расход только в журнал) | write (и в said.tsv)
+interval = "1m"
+names = ["lead", "*-admin", "*-master"]  # чьи реплики, шаблоны по имени сессии
+model = "luna"         # имя из ~/.config/models/approved
+effort = "low"
+timeout = "2m"
+file = "~/.claude/said.tsv"
+context = 800          # знаков конца сообщения агента как «в ответ на»
+candidates = 8         # прежних записей той же области для supersedes
+retries = 3
+batch = 20             # реплик за проход
+keep = "1440h"         # срок журнала ~/.local/state/aguard/said

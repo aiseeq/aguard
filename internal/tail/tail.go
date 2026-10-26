@@ -1,8 +1,11 @@
-package waits
+// Package tail — чтение дописанного в транскриптах ~/.claude/projects между проходами: смещения по файлам,
+// догрузка задним числом, имя сессии по записям agent-name. Что искать в строках, решает наблюдатель (Parse).
+package tail
 
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +26,20 @@ type File struct {
 	Offset int64  `json:"offset"` // до куда прочитано (конец последней целой строки)
 	From   int64  `json:"from"`   // начало прочитанного: старше — догрузка задним числом; 0 — прочитано с начала
 	Name   string `json:"name,omitempty"`
+	// Lines — целых строк до Offset, если Counted: номер строки события (ссылка «<id>:<строка>»). Считается
+	// лениво, при первом событии файла: пересчёт гигабайт транскриптов на первом проходе не нужен.
+	Lines   int64 `json:"lines,omitempty"`
+	Counted bool  `json:"counted,omitempty"`
 }
+
+// Source — откуда событие: файл, сессия, суб-агент, имя сессии и номер строки (с 1; 0 — не считали).
+type Source struct {
+	Rel, Session, Agent, Project, Name string
+	Line                               int64
+}
+
+// Parse — разбор строки: событие (ok) и/или новое имя сессии; строка без нужного — пусто без ошибки.
+type Parse[E any] func(line []byte) (ev E, ok bool, name string, err error)
 
 // State — смещения по транскриптам. Started — первый проход был: файлы, которых тогда не было, читаются с начала.
 type State struct {
@@ -32,8 +48,15 @@ type State struct {
 }
 
 // Tail — проход по транскриптам.
-type Tail struct {
-	Projects string // ~/.claude/projects
+type Tail[E any] struct {
+	Parse Parse[E]
+	// Stamp — ставит событию его источник.
+	Stamp func(ev *E, src Source)
+	// Lines — считать номера строк событий.
+	Lines bool
+	// Subagents — читать и транскрипты суб-агентов.
+	Subagents bool
+	Projects  string // ~/.claude/projects
 	// Backfill — насколько назад догружать транскрипты, которые были до первого прохода; 0 — не догружать.
 	Backfill time.Duration
 	// BackfillBytes — сколько байт догрузки читать за проход: старые транскрипты — гигабайты, машину не грузим.
@@ -73,12 +96,12 @@ func (st *State) Save(path string) error {
 
 // Pass читает дописанное с прошлого прохода и кусок догрузки. Ошибки отдельных файлов возвращаются вместе с
 // событиями; смещение такого файла не двигается.
-func (t *Tail) Pass(st *State, now time.Time) ([]Event, error) {
+func (t *Tail[E]) Pass(st *State, now time.Time) ([]E, error) {
 	files, err := t.list()
 	if err != nil {
 		return nil, err
 	}
-	var out []Event
+	var out []E
 	var errs []error
 	seen := map[string]bool{}
 	for _, f := range files {
@@ -91,8 +114,7 @@ func (t *Tail) Pass(st *State, now time.Time) ([]Event, error) {
 			}
 			st.Files[f.rel] = s
 		}
-		evs, err := t.read(f, s, s.Offset, f.size, true)
-		t.inherit(st, f, evs)
+		evs, err := t.read(f, s, s.Offset, f.size, true, t.parent(st, f))
 		out = append(out, evs...)
 		errs = append(errs, err)
 	}
@@ -108,12 +130,12 @@ func (t *Tail) Pass(st *State, now time.Time) ([]Event, error) {
 
 // backfill догружает начало транскриптов, бывших до первого прохода и изменённых не раньше now−Backfill.
 // За проход — не больше BackfillBytes; файл, недочитанный до конца догрузки, продолжится в следующий проход.
-func (t *Tail) backfill(st *State, files []file, now time.Time) ([]Event, error) {
+func (t *Tail[E]) backfill(st *State, files []file, now time.Time) ([]E, error) {
 	if t.Backfill <= 0 {
 		return nil, nil
 	}
 	budget := t.BackfillBytes
-	var out []Event
+	var out []E
 	var errs []error
 	for _, f := range files {
 		s := st.Files[f.rel]
@@ -134,33 +156,27 @@ func (t *Tail) backfill(st *State, files []file, now time.Time) ([]Event, error)
 				start = 0
 			}
 		}
-		evs, err := t.read(f, s, start, s.From, false)
+		evs, err := t.read(f, s, start, s.From, false, t.parent(st, f))
 		if err != nil {
 			errs = append(errs, err)
 			continue
 		}
 		budget -= s.From - start
 		s.From = start
-		t.inherit(st, f, evs)
 		out = append(out, evs...)
 	}
 	return out, errors.Join(errs...)
 }
 
-// inherit — имя для событий без него: у суб-агента — имя его сессии (своей записи agent-name у него нет).
-func (t *Tail) inherit(st *State, f file, evs []Event) {
+// parent — имя сессии суб-агента: своей записи agent-name у него нет.
+func (t *Tail[E]) parent(st *State, f file) string {
 	if f.agent == "" {
-		return
+		return ""
 	}
-	parent := st.Files[filepath.Join(f.project(), f.session+".jsonl")]
-	if parent == nil || parent.Name == "" {
-		return
+	if p := st.Files[filepath.Join(f.project(), f.session+".jsonl")]; p != nil {
+		return p.Name
 	}
-	for i := range evs {
-		if evs[i].Name == "" {
-			evs[i].Name = parent.Name
-		}
-	}
+	return ""
 }
 
 // lineStart — начало первой целой строки не раньше off.
@@ -190,9 +206,13 @@ type file struct {
 }
 
 // list — транскрипты сессий (<проект>/<сессия>.jsonl) и их суб-агентов (<проект>/<сессия>/subagents/agent-<id>.jsonl).
-func (t *Tail) list() ([]file, error) {
+func (t *Tail[E]) list() ([]file, error) {
 	var out []file
-	for _, pattern := range []string{"*/*.jsonl", "*/*/subagents/agent-*.jsonl"} {
+	patterns := []string{"*/*.jsonl"}
+	if t.Subagents {
+		patterns = append(patterns, "*/*/subagents/agent-*.jsonl")
+	}
+	for _, pattern := range patterns {
 		paths, err := filepath.Glob(filepath.Join(t.Projects, pattern))
 		if err != nil {
 			return nil, fmt.Errorf("транскрипты: %w", err)
@@ -231,9 +251,9 @@ func (f file) project() string { return strings.SplitN(f.rel, string(filepath.Se
 // имя сессии обновляется. Догрузка смещение не трогает; имя ставит, только если его ещё нет: догрузка идёт от
 // конца к началу, первая найденная ею запись agent-name — самая поздняя. События куска до первой записи имени
 // в нём получают уже известное (более позднее) имя: имя сессии меняется редко.
-func (t *Tail) read(f file, s *File, from, to int64, tail bool) ([]Event, error) {
+func (t *Tail[E]) read(f file, s *File, from, to int64, tail bool, parent string) ([]E, error) {
 	if to < from && tail { // файл переписан короче: читать заново с начала
-		from, s.From = 0, 0
+		from, s.From, s.Lines, s.Counted = 0, 0, 0, false
 	}
 	if to <= from {
 		return nil, nil
@@ -246,21 +266,34 @@ func (t *Tail) read(f file, s *File, from, to int64, tail bool) ([]Event, error)
 	sc := bufio.NewScanner(io.NewSectionReader(fh, from, to-from))
 	sc.Buffer(make([]byte, 0, 1<<16), 64<<20) // строки с результатами инструментов бывают в десятки мегабайт
 	sc.Split(scanFullLines)
-	var out []Event
+	var out []E
 	var bad int
 	name := s.Name
 	pos := from
+	// base — строк до from: при чтении нового известен, если файл уже считали; иначе — по первому событию
+	ln := lineNo{fh: fh, from: from, known: from == 0}
+	if tail && s.Counted {
+		ln.base, ln.known = s.Lines, true
+	}
+	var n int64
 	for sc.Scan() {
 		line := sc.Bytes()
 		pos += int64(len(line)) + 1
-		ev, ok, n, err := parse(line)
+		n++
+		ev, ok, nm, err := t.Parse(line)
 		switch {
 		case err != nil:
 			bad++
-		case n != "":
-			name = n
+		case nm != "":
+			name = nm
 		case ok:
-			ev.Session, ev.Agent, ev.Project, ev.Name = f.session, f.agent, f.project(), name
+			src := Source{Rel: f.rel, Session: f.session, Agent: f.agent, Project: f.project(), Name: cmp.Or(name, parent)}
+			if t.Lines || ln.known {
+				if src.Line, err = ln.at(n); err != nil {
+					return nil, err
+				}
+			}
+			t.Stamp(&ev, src)
 			out = append(out, ev)
 		}
 	}
@@ -272,11 +305,48 @@ func (t *Tail) read(f file, s *File, from, to int64, tail bool) ([]Event, error)
 	}
 	if tail {
 		s.Offset = pos
+		s.Lines, s.Counted = ln.base+n, ln.known
 	}
 	if bad > 0 {
 		return out, fmt.Errorf("транскрипт %s: строк не JSON %d", f.rel, bad)
 	}
 	return out, nil
+}
+
+// lineNo — номера строк куска с from: base строк до него известен сразу или считается при первом событии.
+type lineNo struct {
+	fh         *os.File
+	from, base int64
+	known      bool
+}
+
+// at — номер n-й строки куска.
+func (l *lineNo) at(n int64) (int64, error) {
+	if !l.known {
+		b, err := countLines(l.fh, l.from)
+		if err != nil {
+			return 0, err
+		}
+		l.base, l.known = b, true
+	}
+	return l.base + n, nil
+}
+
+// countLines — целых строк в первых to байтах файла.
+func countLines(fh *os.File, to int64) (int64, error) {
+	r := bufio.NewReaderSize(io.NewSectionReader(fh, 0, to), 1<<20)
+	buf := make([]byte, 1<<20)
+	var n int64
+	for {
+		k, err := r.Read(buf)
+		n += int64(bytes.Count(buf[:k], []byte{'\n'}))
+		if errors.Is(err, io.EOF) {
+			return n, nil
+		}
+		if err != nil {
+			return 0, fmt.Errorf("строки транскрипта %s: %w", fh.Name(), err)
+		}
+	}
 }
 
 // scanFullLines — только строки с переводом строки: недописанный хвост оставляем следующему проходу.
