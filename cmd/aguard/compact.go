@@ -104,7 +104,8 @@ func (a *app) compactRound(j *restart.Judge, cfg *config.Config, dry bool) error
 	}
 	var recs []compact.Record
 	enc := json.NewEncoder(a.out)
-	for _, in := range infos {
+	for i := range infos {
+		in := &infos[i]
 		if !a.reg.IsAlive(in.Pid, in.ProcStart) {
 			continue
 		}

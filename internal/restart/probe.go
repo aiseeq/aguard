@@ -1,7 +1,6 @@
 package restart
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,25 +14,14 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/screen"
+	"github.com/aiseeq/akit/session"
 )
-
-// session — запись реестра живых сессий Claude Code (~/.claude/sessions/<pid>.json).
-type session struct {
-	PID             int    `json:"pid"`
-	SessionID       string `json:"sessionId"`
-	CWD             string `json:"cwd"`
-	Name            string `json:"name"`
-	Kind            string `json:"kind"`
-	Status          string `json:"status"`
-	StartedAt       int64  `json:"startedAt"`
-	StatusUpdatedAt int64  `json:"statusUpdatedAt"`
-}
 
 // facts — всё, что известно о живой сессии к решению о перезапуске.
 type facts struct {
-	session
-	Running   string // версия бинаря процесса
-	Installed string // версия, которую запустит claude из PATH
+	session.Info        // запись реестра Claude Code (~/.claude/sessions/<pid>.json)
+	Running      string // версия бинаря процесса
+	Installed    string // версия, которую запустит claude из PATH
 	// HookState — состояние от claude-hooks: done (ход закончен), waiting (ждёт человека), paused (ждёт фоновые
 	// задачи или таймеры), working; пусто — записи нет.
 	HookState string
@@ -98,16 +86,16 @@ func gitStatus(dir string) ([]string, error) {
 	return dirty, nil
 }
 
-func readSession(file string) (session, error) {
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return session{}, fmt.Errorf("реестр сессий: %w", err)
+// readSession — запись реестра Claude Code в папке dir о процессе pid; записи нет — ошибка.
+func readSession(dir string, pid int) (session.Info, error) {
+	in, err := session.Registry{Dir: dir}.Get(pid)
+	switch {
+	case err != nil:
+		return session.Info{}, fmt.Errorf("реестр сессий: %w", err)
+	case in == nil:
+		return session.Info{}, fmt.Errorf("реестр сессий: нет записи о процессе %d", pid)
 	}
-	var s session
-	if err := json.Unmarshal(data, &s); err != nil {
-		return session{}, fmt.Errorf("реестр сессий %s: %w", file, err)
-	}
-	return s, nil
+	return *in, nil
 }
 
 // probe собирает сведения о сессии процесса pid; cache — прошлый разбор транскрипта этой сессии. Версия свежая —
@@ -117,12 +105,12 @@ func probe(p paths, cache *scanCache, pid int, now time.Time) facts {
 	fail := func(err error) {
 		f.Errors = append(f.Errors, err.Error())
 	}
-	s, err := readSession(filepath.Join(p.sessions, strconv.Itoa(pid)+".json"))
+	s, err := readSession(p.sessions, pid)
 	if err != nil {
 		fail(err)
 		return f
 	}
-	f.session = s
+	f.Info = s
 	if f.Running, err = runningVersion(p.proc, pid); err != nil {
 		fail(err)
 	}
@@ -144,12 +132,12 @@ func probe(p paths, cache *scanCache, pid int, now time.Time) facts {
 	return f
 }
 
-// state — всё о сессии, кроме версий: ход, ввод, дети, транскрипт, экран. f.session уже прочитан.
+// state — всё о сессии, кроме версий: ход, ввод, дети, транскрипт, экран. f.Info уже прочитан.
 func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 	fail := func(err error) {
 		f.Errors = append(f.Errors, err.Error())
 	}
-	s := f.session
+	s := f.Info
 	latest := time.UnixMilli(s.StatusUpdatedAt)
 	hook, err := readHookState(p, s.SessionID)
 	if err != nil {

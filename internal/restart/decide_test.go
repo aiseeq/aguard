@@ -6,12 +6,13 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/screen"
+	"github.com/aiseeq/akit/session"
 )
 
 // idleFacts — сессия, которую можно перезапускать: старая версия, ход закончен, давно тихо, ничего не идёт.
 func idleFacts() facts {
 	return facts{
-		session:   session{Name: "sc2go-master", Kind: "interactive", Status: "idle", SessionID: "s1"},
+		Info:      session.Info{Name: "sc2go-master", Kind: "interactive", Status: "idle", SessionID: "s1"},
 		Running:   "2.1.309",
 		Installed: "2.1.310",
 		HookState: "done",
@@ -84,7 +85,7 @@ func TestDecideAgainst(t *testing.T) {
 	if v := decide(idleFacts(), allowance{idle: 10 * time.Minute, argsProblem: "свой флаг claude --bare"}); v.Restart {
 		t.Error("невосстановимые аргументы держат перезапуск")
 	}
-	if v := decide(facts{session: session{Name: "x"}, HookState: "", Errors: nil}, allowance{}); v.Restart {
+	if v := decide(facts{Info: session.Info{Name: "x"}, HookState: "", Errors: nil}, allowance{}); v.Restart {
 		t.Error("пустые сведения — сомнение")
 	}
 }

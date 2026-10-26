@@ -267,7 +267,8 @@ func (r *Resolver) byCgroup(cg string, uid int) *record.Session {
 		if err != nil { //nolint:fallback-return // List отдаёт прочитанную часть реестра вместе с ошибкой о нечитаемых записях
 			r.log.Warn("tmpguard-track: реестр сессий, проверяю прочитанную часть", "err", err)
 		}
-		for _, in := range all {
+		for i := range all {
+			in := &all[i]
 			if !reg.IsAlive(in.Pid, in.ProcStart) {
 				continue
 			}

@@ -3,8 +3,6 @@ package restart
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -185,11 +183,11 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProble
 	ch.mu.Lock()
 	var f facts
 	p := pathsFor(j.Home, cfg)
-	s, err := readSession(filepath.Join(p.sessions, strconv.Itoa(pid)+".json"))
+	s, err := readSession(p.sessions, pid)
 	if err != nil {
 		f.Errors = append(f.Errors, err.Error())
 	} else {
-		f.session = s
+		f.Info = s
 		state(p, &ch.scan, pid, now, &f)
 	}
 	ch.mu.Unlock()
@@ -199,7 +197,7 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProble
 	if c.Mode != CompactOff {
 		v = decideCompact(f, c, allowance{role: cfg.roleFor(firstNonEmpty(f.Name, name)), argsProblem: argsProblem}, now)
 		if r = decideReset(f, c, now); r.Reset {
-			treeCheck(&r, p.tree, f.CWD)
+			treeCheck(&r, p.tree, f.Cwd)
 		}
 	}
 	return CompactCheck{

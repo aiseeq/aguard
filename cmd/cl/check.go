@@ -27,9 +27,12 @@ func runCheck(l launcher) int {
 	if err != nil { //nolint:fallback-return // List отдаёт прочитанную часть реестра вместе с ошибкой о нечитаемых записях
 		fmt.Fprintln(os.Stderr, "cl:", err)
 	}
-	slices.SortFunc(sessions, func(a, b session.Info) int { return a.Pid - b.Pid })
+	slices.SortFunc(sessions, func(a, b session.Info) int { //nolint:large-value-copied-per-element // десяток записей раз за ручной запуск
+		return a.Pid - b.Pid
+	})
 	now := time.Now()
-	for _, s := range sessions {
+	for i := range sessions {
+		s := &sessions[i]
 		if !l.registry.IsAlive(s.Pid, s.ProcStart) {
 			continue
 		}
