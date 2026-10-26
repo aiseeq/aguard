@@ -27,8 +27,6 @@ const (
 	typePause = 400 * time.Millisecond
 	// drainTimeout — сколько ждать остаток вывода claude после его выхода: последний кадр экрана.
 	drainTimeout = time.Second
-	pasteStart   = "\x1b[200~"
-	pasteEnd     = "\x1b[201~"
 )
 
 // errNoSession — claude сейчас не запущен: набирать некуда.
@@ -175,12 +173,8 @@ func (c *console) idle(now time.Time) time.Duration {
 	return now.Sub(time.Unix(0, c.typed.Load()))
 }
 
-// typeLine набирает text в поле ввода claude и отдельно — Enter. paste — вставкой (bracketed paste): переводы строк
-// остаются в поле, а не отправляют его по строчке.
-func (c *console) typeLine(text string, paste bool) error {
-	if paste {
-		text = pasteStart + text + pasteEnd
-	}
+// typeLine набирает text в поле ввода claude и отдельно — Enter.
+func (c *console) typeLine(text string) error {
 	if err := c.write(text); err != nil {
 		return err
 	}

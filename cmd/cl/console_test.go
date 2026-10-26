@@ -101,7 +101,7 @@ func TestConsole(t *testing.T) {
 	if c.idle(time.Now()) > time.Second {
 		t.Errorf("ввод человека не отмечен: %v", c.idle(time.Now()))
 	}
-	if err := c.typeLine("/compact", false); err != nil {
+	if err := c.typeLine("/compact"); err != nil {
 		t.Fatal(err)
 	}
 	shown.wait(t, "got:/compact")
@@ -127,7 +127,7 @@ func TestConsole(t *testing.T) {
 	if after, err := term.GetState(int(tty.Fd())); err != nil || !reflect.DeepEqual(after, before) {
 		t.Errorf("терминал не вернулся в прежний режим: %v", err)
 	}
-	if err := c.typeLine("x", false); err == nil {
+	if err := c.typeLine("x"); err == nil {
 		t.Error("набор без claude — ошибка")
 	}
 	if len(warns) != 0 {
@@ -156,16 +156,16 @@ func TestWantIdleTyped(t *testing.T) {
 		t.Errorf("log: %+v %q", out, line)
 	}
 	_, line, _ = l.wantReset(cfg, 7, a, "")
-	if !strings.HasSuffix(line, "; под pty набрал бы /clear, строку роли") {
+	if !strings.HasSuffix(line, "; под pty набрал бы /clear") {
 		t.Errorf("сброс, log: %q", line)
 	}
 	cfg.Restart.TypeMode = modeAct
 	out, line, _ = l.wantReset(cfg, 7, a, "")
-	if out.restart || len(out.typed) != 2 || !out.typed[1].role || !strings.Contains(line, "набираю /clear") {
+	if out.restart || out.typed != "/clear" || !strings.Contains(line, "набираю /clear") {
 		t.Errorf("act: %+v %q", out, line)
 	}
 	cfg.Restart.CompactMode = modeLog // само сжатие в log — и набирать нечего
-	if out, line, _ := l.wantCompact(cfg, 7, a, ""); out.restart || len(out.typed) != 0 || !strings.Contains(line, "сжал бы") {
+	if out, line, _ := l.wantCompact(cfg, 7, a, ""); out.restart || out.typed != "" || !strings.Contains(line, "сжал бы") {
 		t.Errorf("сжатие в log: %+v %q", out, line)
 	}
 	l.console = nil
@@ -182,7 +182,7 @@ func TestTypeIntoHumanTyping(t *testing.T) {
 	c := &console{}
 	now := time.Now()
 	c.typed.Store(now.Add(-10 * time.Second).UnixNano())
-	launcher{console: c}.typeInto(cfg, now, 7, outcome{name: "x-master", typed: []typedText{{text: "/compact"}}})
+	launcher{console: c}.typeInto(cfg, now, 7, outcome{name: "x-master", typed: "/compact"})
 	data, err := os.ReadFile(cfg.Restart.Journal)
 	if err != nil || !strings.Contains(string(data), "человек вводил 10s назад — не набираю") {
 		t.Errorf("журнал: %q %v", data, err)

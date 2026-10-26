@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -49,21 +48,12 @@ type outcome struct {
 	crons   bool
 	// reset — поднять не прежнюю беседу, а новую: строка роли и файл возобновления.
 	reset bool
-	// typed — не перезапускать, а набрать это в живой сессии под pty (restart.type_mode act).
-	typed []typedText
-}
-
-// typedText — что набрать в поле ввода: команду или (role) строку роли вставкой.
-type typedText struct {
-	text string
-	role bool
+	// typed — не перезапускать, а набрать эту команду в живой сессии под pty (restart.type_mode act).
+	typed string
 }
 
 // humanQuiet — сколько человек не должен ничего вводить, чтобы cl набирал в его сессии.
 const humanQuiet = time.Minute
-
-// roleTyped — после /clear: пауза, пока Claude Code поднимет пустую беседу, перед вставкой строки роли.
-const roleTyped = 2 * time.Second
 
 // Что случилось с сессией перед запуском claude: от этого зависит {why} строки роли.
 const (
@@ -299,7 +289,7 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 			now := time.Now()
 			a, askErr := l.ask(pid, argsProblem)
 			out, last = l.next(cfg, now, pid, a, askErr, last)
-			if len(out.typed) > 0 {
+			if out.typed != "" {
 				l.typeInto(cfg, now, pid, out)
 				out = outcome{}
 			}
@@ -370,7 +360,7 @@ type idleAction struct {
 	out         outcome  // что сделать в act
 	// typeMode, typed, typing — то же набором в живой сессии под pty: режим, что набрать, строка журнала в act.
 	typeMode string
-	typed    []typedText
+	typed    string
 	typing   string
 }
 
@@ -379,11 +369,7 @@ func (x idleAction) typedNote(pty bool) string {
 	if !pty || x.typeMode != modeLog {
 		return ""
 	}
-	var parts []string
-	for _, t := range x.typed {
-		parts = append(parts, cmp.Or(t.text, "строку роли"))
-	}
-	return "; под pty набрал бы " + strings.Join(parts, ", ")
+	return "; под pty набрал бы " + x.typed
 }
 
 // wantCompact — что делать с вердиктом aguard «сжать»: остановить сессию, сжать беседу и поднять её снова.
@@ -393,20 +379,22 @@ func (l launcher) wantCompact(cfg config, pid int, a restart.Answer, last string
 		would: fmt.Sprintf("сжал бы%%s: контекст %d тыс., кэш жив, ничего не идёт", a.Tokens/1000), none: "не сжимаю",
 		doing:    fmt.Sprintf("сжимаю: контекст %d тыс.; SIGTERM, /compact, поднимаю --resume %s", a.Tokens/1000, a.SessionID),
 		out:      outcome{compact: true, crons: a.Crons, version: a.Running},
-		typeMode: cfg.Restart.TypeMode, typed: []typedText{{text: "/compact"}},
+		typeMode: cfg.Restart.TypeMode, typed: "/compact",
 		typing: fmt.Sprintf("сжимаю: контекст %d тыс.; набираю /compact в живой сессии", a.Tokens/1000),
 	})
 }
 
-// wantReset — что делать с вердиктом aguard «сбросить»: остановить сессию и поднять новую беседу со строкой роли.
+// wantReset — что делать с вердиктом aguard «сбросить»: остановить сессию и поднять новую беседу со строкой роли;
+// под pty — /clear без строки роли: таймеры CronCreate переживают /clear (пилот 26.10 18:06 CET), и строка не нужна
+// даже лиду (пользователь 26.10 18:00:18 CET в транскрипте 6eca916e: «даже ему не надо»).
 func (l launcher) wantReset(cfg config, pid int, a restart.Answer, last string) (outcome, string, string) {
 	return l.wantIdle(pid, a, last, idleAction{
 		mode: cfg.Restart.ResetMode, names: "reset_names", pilot: cfg.Restart.ResetNames, key: a.ResetKey,
 		would: fmt.Sprintf("сбросил бы%%s: контекст %d тыс., работа закрыта, простаивает", a.Tokens/1000), none: "не сбрасываю",
 		doing:    fmt.Sprintf("сбрасываю: контекст %d тыс.; SIGTERM, поднимаю новую беседу вместо %s", a.Tokens/1000, a.SessionID),
 		out:      outcome{reset: true, version: a.Running},
-		typeMode: cfg.Restart.TypeMode, typed: []typedText{{text: "/clear"}, {role: true}},
-		typing: fmt.Sprintf("сбрасываю: контекст %d тыс.; набираю /clear и строку роли в живой сессии", a.Tokens/1000),
+		typeMode: cfg.Restart.TypeMode, typed: "/clear",
+		typing: fmt.Sprintf("сбрасываю: контекст %d тыс.; набираю /clear в живой сессии", a.Tokens/1000),
 	})
 }
 
@@ -443,23 +431,11 @@ func (l launcher) typeInto(cfg config, now time.Time, pid int, out outcome) {
 		journal(cfg.Restart.Journal, now, head+fmt.Sprintf("человек вводил %v назад — не набираю", quiet.Round(time.Second)))
 		return
 	}
-	for i, t := range out.typed {
-		text := t.text
-		if t.role {
-			time.Sleep(roleTyped)
-			line, err := l.roleLine(out.name, eventReset)
-			if err != nil || line == "" {
-				journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("строки роли нет (%v) — беседа новая без неё", err))
-				return
-			}
-			text = line
-		}
-		if err := l.console.typeLine(text, t.role); err != nil {
-			journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("набор %d/%d: %v", i+1, len(out.typed), err))
-			return
-		}
+	if err := l.console.typeLine(out.typed); err != nil {
+		journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("набор %s: %v", out.typed, err))
+		return
 	}
-	journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("набрал в беседе %s", out.sessionID))
+	journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("набрал %s в беседе %s", out.typed, out.sessionID))
 }
 
 // onceLine — line, если ключ не тот, что в прошлый раз; иначе пусто.
