@@ -48,7 +48,9 @@ type Record struct {
 	Ms      int64       `json:"ms"`
 	Attempt int         `json:"attempt"`
 	Err     string      `json:"err,omitempty"`
-	Written bool        `json:"written,omitempty"` // записано в said.tsv (режим write)
+	// Down — модель не ответила (лимит, сеть, таймаут): реплика не виновата, попытка не считается.
+	Down    bool `json:"down,omitempty"`
+	Written bool `json:"written,omitempty"` // записано в said.tsv (режим write)
 }
 
 // Ref — ссылка на реплику: <8 знаков id>:<строка jsonl>.
@@ -104,7 +106,7 @@ func (c *Config) Classify(ctx context.Context, model Model, p *Pending, home str
 	out, err := model(ctx, Input(p, home, candidates))
 	rec.Ms, rec.Model, rec.Usage = time.Since(start).Milliseconds(), out.ID, out.Usage
 	if err != nil {
-		rec.Err = err.Error()
+		rec.Err, rec.Down = err.Error(), true
 		return rec, nil
 	}
 	var res struct {

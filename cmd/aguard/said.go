@@ -113,7 +113,8 @@ func (a *app) saidRound(ctx context.Context, cfg *said.Config, dry bool) error {
 }
 
 // saidClassify — до Batch реплик из очереди — модели, находки в режиме write — в указатель. В очереди остаются
-// неразмеченные: сверх Batch, со сбоем модели (до Retries попыток) и с несохранённой записью.
+// неразмеченные: сверх Batch, с непригодным ответом модели (до Retries попыток), с несохранённой записью и все, если
+// модель не ответила: тогда проход кончается — лимит или сеть одинаковы для всех реплик, попытки не тратятся.
 func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State) ([]said.Record, error) {
 	if len(st.Pending) == 0 {
 		return nil, nil
@@ -128,20 +129,27 @@ func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State
 	}
 	var recs []said.Record
 	var left []said.Pending
+	down := false
 	for i := range st.Pending {
 		p := &st.Pending[i]
-		if i >= cfg.Batch || ctx.Err() != nil {
+		if i >= cfg.Batch || down || ctx.Err() != nil {
 			left = append(left, *p)
 			continue
 		}
 		p.Attempts++
 		rec, entries := cfg.Classify(ctx, model, p, a.home, prior, time.Now())
-		if rec.Err != "" {
+		switch {
+		case rec.Down:
+			a.warn("said", "модель не ответила, очередь ждёт", "queue", len(st.Pending), "err", rec.Err)
+			p.Attempts--
+			down = true
+			left = append(left, *p)
+		case rec.Err != "":
 			a.warn("said", "модель не разметила реплику", "ref", rec.Ref, "attempt", p.Attempts, "err", rec.Err)
 			if p.Attempts < cfg.Retries {
 				left = append(left, *p)
 			}
-		} else if cfg.Mode == said.ModeWrite && len(entries) > 0 {
+		case cfg.Mode == said.ModeWrite && len(entries) > 0:
 			if err := said.Append(cfg.File, entries); err != nil { // реплика остаётся в очереди
 				a.warn("said", "указатель не записан", "file", cfg.File, "err", err)
 				rec.Err, rec.Items = err.Error(), nil
