@@ -125,6 +125,67 @@ exec sleep 25`)
 	}
 }
 
+// Сброс: в act cl останавливает claude и поднимает новую беседу — без --resume, со строкой роли и пометкой сброса.
+func TestSuperviseReset(t *testing.T) {
+	w := newWorld(t)
+	d := w.dir
+	write(t, filepath.Join(d, "config.json"), `{"restart":{"mode":"act","check_seconds":10,`+
+		`"journal":"`+filepath.Join(d, "restart.log")+`","resume_dir":"`+filepath.Join(d, "restart")+`",`+
+		`"compact_mode":"act","reset_mode":"act","reset_names":["x-*"]},`+
+		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"resume_file"}],"reset_note":"Беседа новая."}`)
+	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
+		`if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; exit 4; fi
+printf '%s\n' "$@" > "$D/run1"
+exec sleep 25`)
+	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
+	socket := fakeAguard(t, `{"v":1,"restart":false,"fresh":true,"key":"false,true","session_id":"s1","name":"x-master",`+
+		`"running":"2.1.310","installed":"2.1.310","compact":false,"compact_key":"false,late","tokens":200000,`+
+		`"reset":true,"reset_key":"true"}`)
+	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"),
+		aguard: socket, name: "x-master"}
+
+	if code := l.supervise(append(sessionFlags(d), "-n", "x-master"), []string{"--model", "opus"}); code != 4 {
+		t.Errorf("код выхода cl = %d, want 4 (код новой беседы)", code)
+	}
+	pid := strconv.Itoa(os.Getpid())
+	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice"}
+	fresh := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-r1", "--", w.claude), sessionFlags(d)...),
+		"-n", "x-master", "--model", "opus", "Роль (сброс cl на Claude Code 2.1.310). Беседа новая.")
+	journalText := strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n")
+	if got := readLines(t, filepath.Join(d, "run2")); !slices.Equal(got, fresh) {
+		t.Errorf("новая беседа:\n%q\nwant\n%q\nжурнал:\n%s", got, fresh, journalText)
+	}
+	if want := "act: сбрасываю: контекст 200 тыс.; SIGTERM, поднимаю новую беседу вместо s1"; !strings.Contains(journalText, want) {
+		t.Errorf("в журнале нет %q:\n%s", want, journalText)
+	}
+}
+
+// wantReset: log — «сбросил бы» один раз на решение; act вне пилота — тоже; act — новая беседа.
+func TestWantReset(t *testing.T) {
+	cfg := defaultConfig(t.TempDir())
+	l := launcher{name: "x-master"}
+	a := restart.Answer{SessionID: "s1", Name: "x-master", Reset: true, ResetKey: "true", Tokens: 200_000}
+	out, line, key := l.wantReset(cfg, 7, a, "")
+	if out.restart || !strings.Contains(line, "log: сбросил бы: контекст 200 тыс.") {
+		t.Errorf("log: %+v %q", out, line)
+	}
+	if _, line, _ := l.wantReset(cfg, 7, a, key); line != "" {
+		t.Errorf("повтор того же решения: %q", line)
+	}
+	cfg.Restart.ResetMode, cfg.Restart.ResetNames = modeAct, []string{"lead"}
+	if out, line, _ := l.wantReset(cfg, 7, a, key); out.restart || !strings.Contains(line, "сбросил бы (не в reset_names)") {
+		t.Errorf("вне пилота: %+v %q", out, line)
+	}
+	cfg.Restart.ResetNames = nil
+	if out, _, _ := l.wantReset(cfg, 7, a, ""); !out.restart || !out.reset || out.compact || out.sessionID != "s1" {
+		t.Errorf("act: %+v", out)
+	}
+	cfg.Restart.CompactMode = modeAct
+	if out, _ := l.next(cfg, time.Now(), 7, restart.Answer{SessionID: "s1", Compact: true, Reset: true, Tokens: 1}, nil, journalKeys{}); !out.compact || out.reset {
+		t.Errorf("сжатие важнее сброса: %+v", out)
+	}
+}
+
 // wantCompact: log и act вне пилота — «сжал бы» один раз на решение; ответ без беседы — не сжимать; таймеры —
 // подъём со строкой роли.
 func TestWantCompact(t *testing.T) {

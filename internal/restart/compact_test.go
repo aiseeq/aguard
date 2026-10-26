@@ -101,7 +101,7 @@ func TestDecideReset(t *testing.T) {
 		f.ClearHint = true
 		return f
 	}
-	if v := decideReset(resetFacts(), &c, now); !v.Reset || !v.Candidate {
+	if v := decideReset(resetFacts(), &c, allowance{}, now); !v.Reset || !v.Candidate {
 		t.Fatalf("закрытую большую беседу сбросил бы: %+v", v)
 	}
 	cases := map[string]func(*facts){
@@ -115,16 +115,19 @@ func TestDecideReset(t *testing.T) {
 	for code, spoil := range cases {
 		f := resetFacts()
 		spoil(&f)
-		if v := decideReset(f, &c, now); v.Reset || !slices.Contains(codes(Verdict{Against: v.Against}), code) {
+		if v := decideReset(f, &c, allowance{}, now); v.Reset || !slices.Contains(codes(Verdict{Against: v.Against}), code) {
 			t.Errorf("%s: %+v", code, v)
 		}
 	}
-	v := decideReset(resetFacts(), &c, now)
+	if v := decideReset(resetFacts(), &c, allowance{argsProblem: "свой флаг claude --foo"}, now); v.Reset || !slices.Contains(codes(Verdict{Against: v.Against}), "args") {
+		t.Errorf("args: новая беседа потеряла бы аргументы запуска: %+v", v)
+	}
+	v := decideReset(resetFacts(), &c, allowance{}, now)
 	treeCheck(&v, func(string) ([]string, error) { return []string{"M docs/design.md", "?? new.go"}, nil }, "/w")
 	if v.Reset || len(v.Against) != 1 || v.Against[0].Code != "tree" || !strings.Contains(v.Against[0].Text, "незакоммиченное (2)") {
 		t.Errorf("грязное дерево: %+v", v)
 	}
-	v = decideReset(resetFacts(), &c, now)
+	v = decideReset(resetFacts(), &c, allowance{}, now)
 	if treeCheck(&v, func(string) ([]string, error) { return nil, nil }, "/w"); !v.Reset {
 		t.Errorf("чистое дерево: %+v", v)
 	}

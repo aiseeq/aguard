@@ -86,7 +86,7 @@ func TestRunCheck(t *testing.T) {
 	journalFile := filepath.Join(w.dir, "restart.log")
 	write(t, filepath.Join(w.dir, "config.json"), `{"restart":{"mode":"log","journal":"`+journalFile+`"}}`)
 	socket := fakeAguard(t, `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",`+
-		`"running":"2.1.309","installed":"2.1.310","compact_against":[{"code":"early"}]}`)
+		`"running":"2.1.309","installed":"2.1.310","compact_against":[{"code":"early"}],"reset_against":[{"code":"hint"}]}`)
 	l := launcher{claude: w.claude, home: w.dir, configFile: filepath.Join(w.dir, "config.json"), registry: w.registry, aguard: socket}
 
 	out := captureStdout(t, func() {
@@ -95,7 +95,7 @@ func TestRunCheck(t *testing.T) {
 		}
 	})
 	want := "check x-master pid=" + strconv.Itoa(os.Getpid()) + " 2.1.309→2.1.310 log: перезапустил бы: простаивает, ничего не идёт" +
-		"; сжатие: нет (early)"
+		"; сжатие: нет (early); сброс: нет (hint)"
 	if strings.TrimSpace(out) != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}

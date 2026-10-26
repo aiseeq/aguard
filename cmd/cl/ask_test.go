@@ -43,7 +43,7 @@ func TestAskAguard(t *testing.T) {
 	if err != nil || !a.Restart || a.Key != "true false" {
 		t.Fatalf("ответ %+v, %v", a, err)
 	}
-	if note := compactNote(a, nil); note != "; сжатие: нет ()" {
+	if note := compactNote(a); note != "; сжатие: нет (); сброс: нет ()" {
 		t.Errorf("сжатие: %q", note)
 	}
 }
@@ -62,8 +62,5 @@ func TestAskAguardNoAnswer(t *testing.T) {
 		if d := time.Since(start); d > aguardTimeout+time.Second {
 			t.Errorf("%s: ждал %v, срок %v", name, d, aguardTimeout)
 		}
-	}
-	if note := compactNote(restart.Answer{}, net.ErrClosed); note != "" {
-		t.Errorf("сжатие без ответа: %q", note)
 	}
 }

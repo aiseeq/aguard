@@ -43,27 +43,31 @@ func testConfig() config {
 		},
 		ResumeText:  "Файл: {path}.",
 		RestartNote: "Служебная строка.",
+		ResetNote:   "Беседа новая.",
 	}
 }
 
 func TestRoleLine(t *testing.T) {
 	c := testConfig()
-	if got := c.roleLine("lead", "старт", "", false); got != "Ты лид (старт)." {
+	if got := c.roleLine("lead", "старт", "", eventStart); got != "Ты лид (старт)." {
 		t.Errorf("лид при старте: %q", got)
 	}
-	if got := c.roleLine("lead", "перезапуск", "/r/lead.md", true); got != "Ты лид (перезапуск). Файл: /r/lead.md. Служебная строка." {
+	if got := c.roleLine("lead", "перезапуск", "/r/lead.md", eventRestart); got != "Ты лид (перезапуск). Файл: /r/lead.md. Служебная строка." {
 		t.Errorf("лид после перезапуска: %q", got)
 	}
-	if got := c.roleLine("sc2go-master", "старт", "", false); got != "" {
+	if got := c.roleLine("sc2go-master", "старт", "", eventStart); got != "" {
 		t.Errorf("мастер без файла при старте молчит: %q", got)
 	}
-	if got := c.roleLine("sc2go-master", "старт", "/r/m.md", false); got != "Мастер (старт). Файл: /r/m.md." {
+	if got := c.roleLine("sc2go-master", "старт", "/r/m.md", eventStart); got != "Мастер (старт). Файл: /r/m.md." {
 		t.Errorf("мастер с файлом при старте: %q", got)
 	}
-	if got := c.roleLine("sc2go-master", "перезапуск", "", true); got != "Мастер (перезапуск). Служебная строка." {
+	if got := c.roleLine("sc2go-master", "перезапуск", "", eventRestart); got != "Мастер (перезапуск). Служебная строка." {
 		t.Errorf("мастер после перезапуска: %q", got)
 	}
-	if got := c.roleLine("lead-2", "старт", "", false); got != "" {
+	if got := c.roleLine("sc2go-master", "сброс", "", eventReset); got != "Мастер (сброс). Беседа новая." {
+		t.Errorf("мастер после сброса (без файла — всё равно строка роли): %q", got)
+	}
+	if got := c.roleLine("lead-2", "старт", "", eventStart); got != "" {
 		t.Errorf("второй сессии в ~ роли лида нет: %q", got)
 	}
 }
@@ -101,10 +105,10 @@ func TestRepoConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if line := cfg.roleLine("lead", "старт cl на Claude Code 2.1.310", "", false); !strings.Contains(line, "Ты лид") {
+	if line := cfg.roleLine("lead", "старт cl на Claude Code 2.1.310", "", eventStart); !strings.Contains(line, "Ты лид") {
 		t.Errorf("лид: %q", line)
 	}
-	if line := cfg.roleLine("demu-master", "перезапуск cl на Claude Code 2.1.310", "", true); !strings.Contains(line, "продолжай по своей роли") {
+	if line := cfg.roleLine("demu-master", "перезапуск cl на Claude Code 2.1.310", "", eventRestart); !strings.Contains(line, "продолжай по своей роли") {
 		t.Errorf("мастер: %q", line)
 	}
 }

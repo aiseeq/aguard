@@ -172,7 +172,7 @@ type CompactCheck struct {
 	Reply    string    `json:"reply"`
 	Prompt   string    `json:"prompt"`
 	PromptAt time.Time `json:"prompt_at"`
-	// Reset — сбросил бы беседу (только журнал).
+	// Reset — сбросить беседу: cl поднимает сессию новой беседой (режим act — в cl), aguard пишет «сбросил бы».
 	Reset ResetVerdict `json:"reset"`
 }
 
@@ -196,7 +196,7 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProble
 	v, r := CompactVerdict{Against: off}, ResetVerdict{Against: off}
 	if c.Mode != CompactOff {
 		v = decideCompact(f, c, allowance{role: cfg.roleFor(firstNonEmpty(f.Name, name)), argsProblem: argsProblem}, now)
-		if r = decideReset(f, c, now); r.Reset {
+		if r = decideReset(f, c, allowance{argsProblem: argsProblem}, now); r.Reset {
 			treeCheck(&r, p.tree, f.Cwd)
 		}
 	}
@@ -209,8 +209,13 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProble
 
 // Key — решение без чисел: cl пишет строку журнала, только когда оно меняется.
 func (v CompactVerdict) Key() string {
-	codes := []string{fmt.Sprint(v.Compact)}
-	for _, r := range v.Against {
+	return verdictKey(v.Compact, v.Against)
+}
+
+// verdictKey — решение и коды доводов против одной строкой.
+func verdictKey(yes bool, against []Reason) string {
+	codes := []string{fmt.Sprint(yes)}
+	for _, r := range against {
 		codes = append(codes, r.Code)
 	}
 	return strings.Join(codes, ",")

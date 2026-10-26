@@ -61,7 +61,7 @@ func checkLine(mode, name string, pid int, a restart.Answer, err error) string {
 	if err != nil {
 		return fmt.Sprintf("%s pid=%d %s: aguard не ответил (%v)", name, pid, mode, err)
 	}
-	return journalLine(mode, name, pid, a) + compactNote(a, nil)
+	return journalLine(mode, name, pid, a) + compactNote(a)
 }
 
 // withoutOwnFlags — командная строка процесса без флагов, которые cl ставит сам (sessionFlags): перезапуск поставит их

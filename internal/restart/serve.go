@@ -50,7 +50,12 @@ type Answer struct {
 	CompactAgainst []Reason `json:"compact_against"`
 	CompactKey     string   `json:"compact_key"`
 	Tokens         int64    `json:"tokens"`
-	Error          string   `json:"error,omitempty"`
+	// Reset — сбросить беседу: cl останавливает claude и поднимает новую беседу со строкой роли и файлом
+	// возобновления. ResetAgainst — почему нет, ResetKey — решение без чисел.
+	Reset        bool     `json:"reset"`
+	ResetAgainst []Reason `json:"reset_against"`
+	ResetKey     string   `json:"reset_key"`
+	Error        string   `json:"error,omitempty"`
 }
 
 // cacheTTL — сколько держать разбор транскрипта сессии, о которой не спрашивают: cl спрашивает раз в минуту.
@@ -109,6 +114,7 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 		V: Version, Verdict: v, Key: v.Key(), Mode: cfg.Mode,
 		SessionID: f.SessionID, Name: name, Running: f.Running, Installed: f.Installed, Crons: len(f.Transcript.Crons) > 0,
 		Compact: cv.Compact, CompactAgainst: cv.Against, CompactKey: cv.Key(), Tokens: cv.Tokens,
+		Reset: cv.Reset.Reset, ResetAgainst: cv.Reset.Against, ResetKey: cv.Reset.Key(),
 	}
 }
 

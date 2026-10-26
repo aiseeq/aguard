@@ -61,17 +61,19 @@ func askAguard(socket string, req restart.Request) (restart.Answer, error) {
 	return a, nil
 }
 
-// compactNote — вердикт aguard о сжатии для --cl-check: « сжатие: да» или « сжатие: нет (коды доводов)».
-func compactNote(a restart.Answer, err error) string {
-	switch {
-	case err != nil:
-		return ""
-	case a.Compact:
-		return fmt.Sprintf("; сжатие: да, контекст %d тыс.", a.Tokens/1000)
+// compactNote — вердикты aguard о сжатии и сбросе для --cl-check: «; сжатие: да…» или «; сжатие: нет (коды доводов)»,
+// так же «; сброс: …».
+func compactNote(a restart.Answer) string {
+	return idleNote("сжатие", a.Compact, a.Tokens, a.CompactAgainst) + idleNote("сброс", a.Reset, a.Tokens, a.ResetAgainst)
+}
+
+func idleNote(what string, yes bool, tokens int64, against []restart.Reason) string {
+	if yes {
+		return fmt.Sprintf("; %s: да, контекст %d тыс.", what, tokens/1000)
 	}
-	codes := make([]string, len(a.CompactAgainst))
-	for i, r := range a.CompactAgainst {
+	codes := make([]string, len(against))
+	for i, r := range against {
 		codes[i] = r.Code
 	}
-	return "; сжатие: нет (" + strings.Join(codes, ", ") + ")"
+	return "; " + what + ": нет (" + strings.Join(codes, ", ") + ")"
 }

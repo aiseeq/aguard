@@ -44,6 +44,8 @@ type outcome struct {
 	// подъём со строкой роли, чтобы роль поставила их заново.
 	compact bool
 	crons   bool
+	// reset — поднять не прежнюю беседу, а новую: строка роли и файл возобновления.
+	reset bool
 }
 
 // Что случилось с сессией перед запуском claude: от этого зависит {why} строки роли.
@@ -51,6 +53,7 @@ const (
 	eventStart   = "старт"
 	eventRestart = "перезапуск"
 	eventCompact = "сжатие"
+	eventReset   = "сброс"
 )
 
 // compactTimeout — срок на `claude -p … /compact`: сжатие большой беседы идёт минуты, дольше — зависло.
@@ -81,6 +84,10 @@ func (l launcher) supervise(pre, userArgs []string) int {
 			return exitCode(out.err)
 		}
 		l.name = out.name
+		if out.reset {
+			args = l.withRoleLine(append(append(sessionFlags(l.home), "-n", out.name), keep...), out.name, eventReset)
+			continue
+		}
 		event := eventRestart
 		if out.compact {
 			event = eventCompact
@@ -184,12 +191,11 @@ func (l launcher) roleLine(name, event string) (string, error) {
 		return "", err
 	}
 	why := event + " cl на Claude Code " + version
-	restart := event != eventStart
 	resume, err := freshResume(cfg.Restart.ResumeDir, name, time.Duration(max(cfg.Restart.ResumeHours, 1))*time.Hour, time.Now())
 	if err != nil {
 		return "", err
 	}
-	return cfg.roleLine(name, why, resume, restart), nil
+	return cfg.roleLine(name, why, resume, event), nil
 }
 
 // signalChild шлёт сигнал claude; вышедший процесс — не ошибка (его выход и так придёт в done).
@@ -261,13 +267,13 @@ func (l launcher) ask(pid int, argsProblem string) (restart.Answer, error) {
 	return askAguard(l.aguard, restart.NewRequest(pid, l.name, argsProblem))
 }
 
-// journalKeys — ключи последних строк журнала: решение о перезапуске и о сжатии пишутся один раз на решение.
+// journalKeys — ключи последних строк журнала: решения о перезапуске, сжатии и сбросе пишутся один раз на решение.
 type journalKeys struct {
-	verdict, compact string
+	verdict, compact, reset string
 }
 
-// next — что делать с сессией по ответу aguard: перезапуск (act) важнее сжатия. aguard не ответил — ничего: своего
-// решения у cl нет, а сомнение — не перезапускать.
+// next — что делать с сессией по ответу aguard: перезапуск (act) важнее сжатия, сжатие — сброса. aguard не ответил —
+// ничего: своего решения у cl нет, а сомнение — не перезапускать.
 func (l launcher) next(cfg config, now time.Time, pid int, a restart.Answer, askErr error, last journalKeys) (outcome, journalKeys) {
 	name := firstNonEmpty(a.Name, l.name)
 	if askErr != nil {
@@ -280,37 +286,76 @@ func (l launcher) next(cfg config, now time.Time, pid int, a restart.Answer, ask
 		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: SIGTERM, поднимаю --resume %s на %s", name, pid, a.SessionID, a.Installed))
 		return outcome{restart: true, sessionID: a.SessionID, name: name, version: a.Installed}, last
 	}
-	if a.Compact {
-		out, line, key := l.wantCompact(cfg, pid, a, last.compact)
+	steps := []struct {
+		on   bool
+		last *string
+		want func(config, int, restart.Answer, string) (outcome, string, string)
+	}{{a.Compact, &last.compact, l.wantCompact}, {a.Reset, &last.reset, l.wantReset}}
+	for _, s := range steps {
+		if !s.on {
+			continue
+		}
+		out, line, key := s.want(cfg, pid, a, *s.last)
 		if line != "" {
 			journal(cfg.Restart.Journal, now, line)
 		}
-		last.compact = key
+		*s.last = key
 		return out, last
 	}
 	return outcome{}, last
 }
 
-// wantCompact — что делать с вердиктом aguard «сжать»: в act (и в пилоте) — остановить сессию для сжатия, иначе
-// строка «сжал бы». Строка журнала — одна на решение (режим, ключ aguard и контекст: у нового запроса другой).
+// idleAction — действие над беседой в простое по вердикту aguard: сжатие или сброс.
+type idleAction struct {
+	mode, names string   // режим и ключ конфига пилота (compact_names, reset_names)
+	pilot       []string // имена пилота; пусто — все
+	key         string   // решение aguard без чисел
+	would, none string   // «сжал бы: …» и «не сжимаю» — для журнала
+	doing       string   // строка журнала в act
+	out         outcome  // что сделать в act
+}
+
+// wantCompact — что делать с вердиктом aguard «сжать»: остановить сессию, сжать беседу и поднять её снова.
 func (l launcher) wantCompact(cfg config, pid int, a restart.Answer, last string) (outcome, string, string) {
+	return l.wantIdle(pid, a, last, idleAction{
+		mode: cfg.Restart.CompactMode, names: "compact_names", pilot: cfg.Restart.CompactNames, key: a.CompactKey,
+		would: fmt.Sprintf("сжал бы%%s: контекст %d тыс., кэш жив, ничего не идёт", a.Tokens/1000), none: "не сжимаю",
+		doing: fmt.Sprintf("сжимаю: контекст %d тыс.; SIGTERM, /compact, поднимаю --resume %s", a.Tokens/1000, a.SessionID),
+		out:   outcome{compact: true, crons: a.Crons, version: a.Running},
+	})
+}
+
+// wantReset — что делать с вердиктом aguard «сбросить»: остановить сессию и поднять новую беседу со строкой роли.
+func (l launcher) wantReset(cfg config, pid int, a restart.Answer, last string) (outcome, string, string) {
+	return l.wantIdle(pid, a, last, idleAction{
+		mode: cfg.Restart.ResetMode, names: "reset_names", pilot: cfg.Restart.ResetNames, key: a.ResetKey,
+		would: fmt.Sprintf("сбросил бы%%s: контекст %d тыс., работа закрыта, простаивает", a.Tokens/1000), none: "не сбрасываю",
+		doing: fmt.Sprintf("сбрасываю: контекст %d тыс.; SIGTERM, поднимаю новую беседу вместо %s", a.Tokens/1000, a.SessionID),
+		out:   outcome{reset: true, version: a.Running},
+	})
+}
+
+// wantIdle — в act (и в пилоте) — остановить сессию для действия x, иначе строка «сжал бы» / «сбросил бы». Строка
+// журнала — одна на решение (режим, ключ aguard и контекст: у нового запроса другой).
+func (l launcher) wantIdle(pid int, a restart.Answer, last string, x idleAction) (outcome, string, string) {
 	name := firstNonEmpty(a.Name, l.name)
-	key := fmt.Sprintf("%s/%s/%d", cfg.Restart.CompactMode, a.CompactKey, a.Tokens)
-	head := fmt.Sprintf("%s pid=%d %s: ", name, pid, cfg.Restart.CompactMode)
+	key := fmt.Sprintf("%s/%s/%d", x.mode, x.key, a.Tokens)
+	head := fmt.Sprintf("%s pid=%d %s: ", name, pid, x.mode)
 	switch {
-	case cfg.Restart.CompactMode == modeOff:
+	case x.mode == modeOff:
 		return outcome{}, "", last
 	case a.SessionID == "":
-		return outcome{}, onceLine(key+"/nosession", last, head+"aguard не назвал беседу — не сжимаю"), key + "/nosession"
-	case !cfg.Restart.compactAct(name):
+		return outcome{}, onceLine(key+"/nosession", last, head+"aguard не назвал беседу — "+x.none), key + "/nosession"
+	case !act(x.mode, x.pilot, name):
 		why := ""
-		if cfg.Restart.CompactMode == modeAct {
-			why = " (не в compact_names)"
+		if x.mode == modeAct {
+			why = " (не в " + x.names + ")"
 		}
-		return outcome{}, onceLine(key, last, head+fmt.Sprintf("сжал бы%s: контекст %d тыс., кэш жив, ничего не идёт", why, a.Tokens/1000)), key
+		return outcome{}, onceLine(key, last, head+fmt.Sprintf(x.would, why)), key
 	}
-	line := head + fmt.Sprintf("сжимаю: контекст %d тыс.; SIGTERM, /compact, поднимаю --resume %s", a.Tokens/1000, a.SessionID)
-	return outcome{restart: true, compact: true, crons: a.Crons, sessionID: a.SessionID, name: name, version: a.Running}, line, key
+	out := x.out
+	out.restart, out.sessionID, out.name = true, a.SessionID, name
+	return out, head + x.doing, key
 }
 
 // onceLine — line, если ключ не тот, что в прошлый раз; иначе пусто.

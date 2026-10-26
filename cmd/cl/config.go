@@ -34,8 +34,10 @@ type config struct {
 	Roles []role `json:"roles"`
 	// ResumeText — добавка к строке роли, когда есть свежий файл возобновления; {path} — путь к нему.
 	ResumeText string `json:"resume_text"`
-	// RestartNote — добавка к строке роли после перезапуска cl: беседа сохранена, строка не ответ пользователя.
+	// RestartNote — добавка к строке роли после перезапуска и сжатия cl: беседа сохранена, строка не ответ пользователя.
 	RestartNote string `json:"restart_note"`
+	// ResetNote — добавка к строке роли после сброса cl: беседа новая, прошлая работа закрыта.
+	ResetNote string `json:"reset_note"`
 }
 
 // restartConfig — как cl перезапускает сессию на новую версию Claude Code; когда можно — решает aguard (его
@@ -50,6 +52,11 @@ type restartConfig struct {
 	CompactMode string `json:"compact_mode"`
 	// CompactNames — в act сжимать только сессии с подходящим именем (path.Match), для пилота; пусто — все.
 	CompactNames []string `json:"compact_names"`
+	// ResetMode — сброс беседы по вердикту aguard (работа закрыта, простой от часа): log — «сбросил бы» в журнал,
+	// act — поднять новую беседу со строкой роли и файлом возобновления, off — молчать.
+	ResetMode string `json:"reset_mode"`
+	// ResetNames — в act сбрасывать только сессии с подходящим именем, для пилота; пусто — все.
+	ResetNames []string `json:"reset_names"`
 }
 
 // role — строка роли для сессий с подходящим именем.
@@ -71,6 +78,7 @@ func defaultConfig(home string) config {
 		ResumeDir:    filepath.Join(home, ".claude", "restart"),
 		ResumeHours:  24,
 		CompactMode:  modeLog,
+		ResetMode:    modeLog,
 	}}
 }
 
@@ -91,8 +99,10 @@ func loadConfig(file, home string) (config, error) {
 	if cfg.Restart.Mode != modeLog && cfg.Restart.Mode != modeAct {
 		return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.mode %q, нужно %q или %q", file, cfg.Restart.Mode, modeLog, modeAct)
 	}
-	if m := cfg.Restart.CompactMode; m != modeOff && m != modeLog && m != modeAct {
-		return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.compact_mode %q, нужно %q, %q или %q", file, m, modeOff, modeLog, modeAct)
+	for key, m := range map[string]string{"compact_mode": cfg.Restart.CompactMode, "reset_mode": cfg.Restart.ResetMode} {
+		if m != modeOff && m != modeLog && m != modeAct {
+			return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.%s %q, нужно %q, %q или %q", file, key, m, modeOff, modeLog, modeAct)
+		}
 	}
 	cfg.Restart.Journal = expand(cfg.Restart.Journal, home)
 	cfg.Restart.ResumeDir = expand(cfg.Restart.ResumeDir, home)
@@ -103,15 +113,15 @@ func (c restartConfig) interval() time.Duration {
 	return time.Duration(max(c.CheckSeconds, 10)) * time.Second
 }
 
-// compactAct — сжимать ли сессию с этим именем всерьёз: режим act и имя в пилоте (или пилот не задан).
-func (c restartConfig) compactAct(name string) bool {
-	if c.CompactMode != modeAct {
+// act — делать ли действие над сессией с этим именем всерьёз: режим act и имя в пилоте (или пилот не задан).
+func act(mode string, pilot []string, name string) bool {
+	if mode != modeAct {
 		return false
 	}
-	if len(c.CompactNames) == 0 {
+	if len(pilot) == 0 {
 		return true
 	}
-	return matchAny(c.CompactNames, name)
+	return matchAny(pilot, name)
 }
 
 // matchAny — имя подходит к одному из шаблонов path.Match.
@@ -134,21 +144,26 @@ func (c config) roleFor(name string) (role, bool) {
 	return role{}, false
 }
 
-// roleLine — первая реплика сессии: строка роли, файл возобновления, после перезапуска — пометка cl. Пусто — молчать.
-func (c config) roleLine(name, why, resume string, restart bool) string {
+// roleLine — первая реплика сессии: строка роли, файл возобновления, после перезапуска, сжатия и сброса — пометка cl
+// (event — что случилось: eventStart, eventRestart…). Пусто — молчать.
+func (c config) roleLine(name, why, resume, event string) string {
 	r, ok := c.roleFor(name)
 	if !ok || r.Text == "" {
 		return ""
 	}
-	if !restart && r.OnStart != startAlways && (r.OnStart != startResume || resume == "") {
+	if event == eventStart && r.OnStart != startAlways && (r.OnStart != startResume || resume == "") {
 		return ""
 	}
 	parts := []string{strings.ReplaceAll(r.Text, "{why}", why)}
 	if resume != "" && c.ResumeText != "" {
 		parts = append(parts, strings.ReplaceAll(c.ResumeText, "{path}", resume))
 	}
-	if restart && c.RestartNote != "" {
-		parts = append(parts, c.RestartNote)
+	note := c.RestartNote
+	if event == eventReset {
+		note = c.ResetNote
+	}
+	if event != eventStart && note != "" {
+		parts = append(parts, note)
 	}
 	return strings.Join(parts, " ")
 }
