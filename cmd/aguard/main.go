@@ -183,7 +183,23 @@ func (a *app) run(ctx context.Context) error {
 	mw := memwatch.NewWatcher(a.reg)
 	defer a.closeWatcher(mw)
 	judge := restart.NewJudge(a.home) // общий разбор транскриптов для ответов cl и сжатия
-	ws := []watcher{
+	ws := a.watchers(mw, judge)
+	a.act = activity.New(a.dir("activity"), time.Now())
+	a.note("aguard", activity.KindStart, "", "", 0, "")
+	var wg sync.WaitGroup
+	wg.Go(func() { a.restartServe(ctx, judge) })
+	for _, w := range ws {
+		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей семь, список задан в watchers
+	}
+	wg.Go(func() { a.flushLoop(ctx) })
+	wg.Wait()
+	a.flush() // остановка: несохранённое — в файл
+	return nil
+}
+
+// watchers — наблюдатели демона по кругу; каждому нужна строка в reportSpecs.
+func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
+	return []watcher{
 		{"orphans", func(ctx context.Context, c *config.Config) error { return a.orphansRound(ctx, &c.Orphans, false) },
 			func(c *config.Config) time.Duration { return c.Orphans.Interval.D() }},
 		{"tmp", func(_ context.Context, c *config.Config) error { return a.tmpRound(&c.Tmp, false) },
@@ -199,17 +215,6 @@ func (a *app) run(ctx context.Context) error {
 		{"said", func(ctx context.Context, c *config.Config) error { return a.saidRound(ctx, &c.Said, false) },
 			func(c *config.Config) time.Duration { return c.Said.Interval.D() }},
 	}
-	a.act = activity.New(a.dir("activity"), time.Now())
-	a.note("aguard", activity.KindStart, "", "", 0, "")
-	var wg sync.WaitGroup
-	wg.Go(func() { a.restartServe(ctx, judge) })
-	for _, w := range ws {
-		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей шесть, список задан в коде выше
-	}
-	wg.Go(func() { a.flushLoop(ctx) })
-	wg.Wait()
-	a.flush() // остановка: несохранённое — в файл
-	return nil
 }
 
 func (a *app) loop(ctx context.Context, w watcher) {

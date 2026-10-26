@@ -14,6 +14,7 @@ import (
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/aguard/internal/said"
 	"github.com/aiseeq/aguard/internal/waits"
 )
 
@@ -91,19 +92,26 @@ func (a *app) buildReport(cfg *config.Config, at time.Time) (*activity.Report, e
 	if err != nil {
 		return nil, err
 	}
-	specs := []activity.Spec{
+	r, err := activity.Build(at, recs, a.reportSpecs(cfg))
+	if r != nil {
+		r.Bad += bad
+	}
+	return r, err
+}
+
+// reportSpecs — наблюдатели в отчёте: каждый из app.watchers и restart (вопросы cl). Наблюдателя без строки здесь в
+// отчёте нет, и его сбои не видны (disk и said до 26.10: сбой disk 15:00–17:40 страница Сна не показала).
+func (a *app) reportSpecs(cfg *config.Config) []activity.Spec {
+	return []activity.Spec{
 		{Name: "orphans", Mode: cfg.Orphans.Mode, Looped: true},
 		{Name: "tmp", Mode: cfg.Tmp.Mode, Looped: true},
 		{Name: "memory", Looped: true, Extra: a.memoryLines},
 		{Name: "waits", Looped: true, Extra: a.waitsLines},
 		{Name: "restart", Mode: cfg.Restart.Mode},
 		{Name: "compact", Mode: cfg.Compact.Mode, Looped: cfg.Compact.Mode != restart.CompactOff},
+		{Name: "disk", Mode: cfg.Disk.Mode, Looped: true},
+		{Name: "said", Mode: cfg.Said.Mode, Looped: cfg.Said.Mode != said.ModeOff},
 	}
-	r, err := activity.Build(at, recs, specs)
-	if r != nil {
-		r.Bad += bad
-	}
-	return r, err
 }
 
 // memoryLines — по имени сессии: наибольший пик за окно, события memory.high и OOM.
