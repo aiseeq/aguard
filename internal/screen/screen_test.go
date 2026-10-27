@@ -47,18 +47,6 @@ func TestParse(t *testing.T) {
 	}
 }
 
-// Подсказка сброса — в строках статуса под полем, пустые строки внизу экрана не мешают; в тексте беседы — не она.
-func TestReadClearHint(t *testing.T) {
-	screen := append(frame("❯ "), "  ⏵⏵ bypass permissions on", "      new task? /clear to save 222.3k tokens", "", "")
-	if v := Read(screen); v.Prompt != Empty || !v.ClearHint {
-		t.Errorf("подсказка: %+v", v)
-	}
-	talk := append([]string{"признак: подсказка «/clear to save» на экране"}, frame("❯ ")...)
-	if v := Read(talk); v.ClearHint {
-		t.Errorf("подсказка в тексте беседы: %+v", v)
-	}
-}
-
 // fakeTerm — терминал из теста: запоминает, что спросили.
 type fakeTerm struct {
 	asked string
@@ -112,8 +100,8 @@ func TestLines(t *testing.T) {
 
 	term := &fakeTerm{lines: frame("❯ ")}
 	r := &Reader{Proc: root, Term: term}
-	if v, err := r.View(400); err != nil || v.Prompt != Empty || term.asked != "konsole 100 /dev/pts/3" {
-		t.Errorf("Konsole: %s %v, спросили %q", v.Prompt, err, term.asked)
+	if p, err := r.Prompt(400); err != nil || p != Empty || term.asked != "konsole 100 /dev/pts/3" {
+		t.Errorf("Konsole: %s %v, спросили %q", p, err, term.asked)
 	}
 	if _, err := r.Lines(500); err != nil || term.asked != "tmux /run/tmux/s /dev/pts/7" {
 		t.Errorf("tmux: %v, спросили %q", err, term.asked)
@@ -124,8 +112,8 @@ func TestLines(t *testing.T) {
 	if _, err := r.Lines(520); err != nil || term.asked != "tmux /run/tmux/s /dev/pts/5" {
 		t.Errorf("tmux, pty cl: %v, спросили %q", err, term.asked)
 	}
-	if v, err := r.View(600); !errors.Is(err, ErrNoTerminal) || v.Prompt != Unknown {
-		t.Errorf("без терминала: %s %v", v.Prompt, err)
+	if p, err := r.Prompt(600); !errors.Is(err, ErrNoTerminal) || p != Unknown {
+		t.Errorf("без терминала: %s %v", p, err)
 	}
 	if _, err := r.Lines(700); err == nil {
 		t.Error("ввод не терминал — ошибка")

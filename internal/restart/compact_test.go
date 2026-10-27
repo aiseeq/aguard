@@ -91,23 +91,30 @@ func TestCompactConfigValidate(t *testing.T) {
 	}
 }
 
-// Сброс: большой контекст после часа простоя, подсказка Claude Code на экране, чистое дерево; любой довод держит.
+// Сброс: с порога и простоя сжатия, без верхней границы, после сжатия тоже, при чистом дереве; любой довод держит.
 func TestDecideReset(t *testing.T) {
 	now := time.Date(2026, 10, 25, 19, 0, 0, 0, time.UTC)
 	c := DefaultCompact()
 	resetFacts := func() facts {
 		f := idleFacts()
 		f.Transcript.Context = contextFacts{Request: now.Add(-3 * time.Hour), Tokens: 235_000}
-		f.ClearHint = true
 		return f
 	}
 	if v := decideReset(resetFacts(), &c, allowance{}, now); !v.Reset || !v.Candidate {
-		t.Fatalf("закрытую большую беседу сбросил бы: %+v", v)
+		t.Fatalf("закрытую большую беседу сбросить: %+v", v)
+	}
+	f := compactFacts(now) // окно сжатия: 54 мин, 150 тыс.
+	if v := decideReset(f, &c, allowance{}, now); !v.Reset {
+		t.Errorf("сброс с того же порога и простоя, что сжатие: %+v", v)
+	}
+	f = resetFacts()
+	f.Transcript.Context.Compacted, f.Transcript.Context.Trigger = now.Add(-time.Hour), "manual"
+	if v := decideReset(f, &c, allowance{}, now); !v.Reset {
+		t.Errorf("сжатую беседу тоже сбросить: %+v", v)
 	}
 	cases := map[string]func(*facts){
-		"tokens": func(f *facts) { f.Transcript.Context.Tokens = 149_000 },
-		"early":  func(f *facts) { f.Transcript.Context.Request = now.Add(-59 * time.Minute) },
-		"hint":   func(f *facts) { f.ClearHint = false },
+		"tokens": func(f *facts) { f.Transcript.Context.Tokens = 99_000 },
+		"early":  func(f *facts) { f.Transcript.Context.Request = now.Add(-52 * time.Minute) },
 		"screen": func(f *facts) { f.Prompt = screen.Draft },
 		"crons":  func(f *facts) { f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
 		"tasks":  func(f *facts) { f.Transcript.Tasks = []string{"Agent «ревью» a1"} },
@@ -130,5 +137,17 @@ func TestDecideReset(t *testing.T) {
 	v = decideReset(resetFacts(), &c, allowance{}, now)
 	if treeCheck(&v, func(string) ([]string, error) { return nil, nil }, "/w"); !v.Reset {
 		t.Errorf("чистое дерево: %+v", v)
+	}
+}
+
+// Можно сбросить — не сжимать; нельзя — сжатие как было.
+func TestPreferReset(t *testing.T) {
+	v := CompactVerdict{Compact: true, InWindow: true}
+	if preferReset(&v, ResetVerdict{Reset: true}); v.Compact || len(v.Against) != 1 || v.Against[0].Code != "reset" {
+		t.Errorf("сброс вместо сжатия: %+v", v)
+	}
+	v = CompactVerdict{Compact: true}
+	if preferReset(&v, ResetVerdict{Against: []Reason{{Code: "crons"}}}); !v.Compact {
+		t.Errorf("сброс нельзя — сжатие: %+v", v)
 	}
 }

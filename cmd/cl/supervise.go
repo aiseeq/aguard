@@ -340,11 +340,12 @@ func (l launcher) next(cfg config, now time.Time, pid int, a restart.Answer, ask
 		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: SIGTERM, поднимаю --resume %s на %s", name, pid, a.SessionID, a.Installed))
 		return outcome{restart: true, sessionID: a.SessionID, name: name, version: a.Installed, at: now}, last
 	}
+	// Сброс раньше сжатия: где можно сбросить, aguard и так не сжимает (preferReset), порядок — на случай обоих «да».
 	steps := []struct {
 		on   bool
 		last *string
 		want func(config, int, restart.Answer, string) (outcome, string, string)
-	}{{a.Compact, &last.compact, l.wantCompact}, {a.Reset, &last.reset, l.wantReset}}
+	}{{a.Reset, &last.reset, l.wantReset}, {a.Compact, &last.compact, l.wantCompact}}
 	for _, s := range steps {
 		if !s.on {
 			continue

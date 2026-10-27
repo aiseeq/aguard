@@ -27,28 +27,6 @@ const (
 	marker  = "❯"
 )
 
-// View — что на экране сессии: поле ввода и подсказка Claude Code «new task? /clear to save 235.7k tokens» под ним.
-// Подсказку Claude Code показывает сам у свободной сессии с большим контекстом — для него работа похожа на законченную.
-type View struct {
-	Prompt    Prompt
-	ClearHint bool
-}
-
-// clearHint — текст подсказки сброса.
-const clearHint = "/clear to save"
-
-// Read — поле ввода и подсказка сброса по строкам экрана сверху вниз. Подсказку ищем в строках статуса под полем.
-func Read(lines []string) View {
-	v := View{Prompt: Parse(lines)}
-	lines = trimBottom(lines)
-	if bottom := bottomRule(lines); bottom >= 0 {
-		for _, l := range lines[bottom+1:] {
-			v.ClearHint = v.ClearHint || strings.Contains(l, clearHint)
-		}
-	}
-	return v
-}
-
 // trimBottom — экран без пустых строк внизу.
 func trimBottom(lines []string) []string {
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {

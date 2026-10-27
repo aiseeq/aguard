@@ -21,18 +21,17 @@ type ResetVerdict struct {
 	Candidate bool `json:"candidate"`
 }
 
-// decideReset — сбросил бы беседу: контекст от ResetMinTokens, последний запрос не ближе ResetIdle, после него не
-// сжимали, сессия свободна, ничего не идёт, таймеров нет (сброс их не восстановит), человек не печатает, на экране
-// подсказка сброса, аргументы запуска восстановимы (p.argsProblem: cl поднимает новую беседу с ними). Дерево git
-// проверяет Judge последним: git — только когда остальное за.
+// decideReset — сбросить беседу: с того же контекста и простоя, что сжатие (MinTokens, After), без верхней границы
+// окна — кэш новой беседе не нужен; сжатие беседы сброс не держит; сессия свободна, ничего не идёт, таймеров нет
+// (сброс их не восстановит), человек не печатает, аргументы запуска восстановимы (p.argsProblem: cl поднимает новую
+// беседу с ними). Дерево git проверяет Judge последним: git — только когда остальное за. Где сброс можно, он вместо
+// сжатия (Judge.Compact): пользователь 27.10 10:48 CET «мы должны использовать сброс везде где можем. Компакт это
+// компромисс», вариант 3 лида — 11:12 CET «Да, давай 3»; подсказка Claude Code «/clear to save» больше не решает.
 func decideReset(f facts, c *CompactConfig, p allowance, now time.Time) ResetVerdict {
 	var v ResetVerdict
-	v.Against, v.Candidate = idleChecks(f, c, allowance{argsProblem: p.argsProblem}, idleWindow{c.ResetMinTokens, c.ResetIdle.D(), 0, "сброс"}, now)
+	v.Against, v.Candidate = idleChecks(f, c, allowance{argsProblem: p.argsProblem}, idleWindow{c.MinTokens, c.After.D(), 0, "сброс", true}, now)
 	if len(f.Transcript.Crons) > 0 {
 		v.Against = append(v.Against, Reason{Code: "crons", Text: "таймеры пропали бы: " + cronList(f.Transcript.Crons)})
-	}
-	if len(f.Errors) == 0 && !f.ClearHint {
-		v.Against = append(v.Against, Reason{Code: "hint", Text: "на экране нет подсказки Claude Code «/clear to save»"})
 	}
 	v.Reset = len(v.Against) == 0
 	return v

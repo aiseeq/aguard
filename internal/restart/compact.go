@@ -37,13 +37,7 @@ type CompactConfig struct {
 	Interval policy.Duration `toml:"interval"`
 	// Keep — сколько хранить записи «сжал бы» и их сверку.
 	Keep policy.Duration `toml:"keep"`
-	// ResetMinTokens и ResetIdle — с какого контекста и простоя от начала запроса писать «сбросил бы» (reset.go).
-	ResetMinTokens int64           `toml:"reset_min_tokens"`
-	ResetIdle      policy.Duration `toml:"reset_idle"`
 }
-
-// defaultResetTokens — с какого контекста писать «сбросил бы» (задача лида 25.10).
-const defaultResetTokens = 150_000
 
 // cacheTTL1h — сколько живёт кэш подсказки у Claude Code (TTL 1 ч).
 const cacheTTL1h = time.Hour
@@ -58,9 +52,6 @@ func DefaultCompact() CompactConfig {
 		TTYQuiet:  policy.Duration(2 * time.Minute),
 		Interval:  policy.Duration(time.Minute),
 		Keep:      policy.Duration(60 * 24 * time.Hour),
-
-		ResetMinTokens: defaultResetTokens,
-		ResetIdle:      policy.Duration(time.Hour),
 	}
 }
 
@@ -83,9 +74,6 @@ func (c *CompactConfig) Validate() error {
 	if c.TTYQuiet.D() < 0 || c.Keep.D() < 24*time.Hour {
 		return errors.New("compact: tty_quiet не меньше нуля, keep не меньше суток")
 	}
-	if c.ResetMinTokens <= 0 || c.ResetIdle.D() < c.Before.D() {
-		return fmt.Errorf("compact: reset_min_tokens = %d больше нуля, reset_idle = %v не меньше before", c.ResetMinTokens, c.ResetIdle.D())
-	}
 	return nil
 }
 
@@ -101,16 +89,17 @@ type CompactVerdict struct {
 // сессия свободна и перезапуск ничего не потеряет (как для перезапуска, без версии и порога простоя), человек не
 // печатает.
 func decideCompact(f facts, c *CompactConfig, p allowance, now time.Time) CompactVerdict {
-	against, in := idleChecks(f, c, p, idleWindow{c.MinTokens, c.After.D(), c.Before.D(), "окно"}, now)
+	against, in := idleChecks(f, c, p, idleWindow{c.MinTokens, c.After.D(), c.Before.D(), "окно", false}, now)
 	return CompactVerdict{Compact: len(against) == 0, Against: against, InWindow: in}
 }
 
 // idleWindow — когда решать о беседе в простое: контекст от minTokens, последний запрос from…to назад (to 0 — без
-// верхней границы); what — слово для доводов.
+// верхней границы); what — слово для доводов; afterCompaction — действие имеет смысл и после сжатия беседы (сброс).
 type idleWindow struct {
-	minTokens int64
-	from, to  time.Duration
-	what      string
+	minTokens       int64
+	from, to        time.Duration
+	what            string
+	afterCompaction bool
 }
 
 // idleChecks — доводы против действия над беседой в простое (сжатия или сброса) и в окне ли она: контекст и окно,
@@ -140,7 +129,7 @@ func idleChecks(f facts, c *CompactConfig, p allowance, w idleWindow, now time.T
 	default:
 		in = true
 	}
-	if !ctx.Compacted.IsZero() && !ctx.Compacted.Before(ctx.Request) {
+	if !w.afterCompaction && !ctx.Compacted.IsZero() && !ctx.Compacted.Before(ctx.Request) {
 		against("compacted", "уже сжата (%s) после последнего запроса", OrDash(ctx.Trigger))
 	}
 	sessionChecks(f, against)
@@ -201,12 +190,21 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProble
 		if r = decideReset(f, c, allowance{argsProblem: argsProblem}, now); r.Reset {
 			treeCheck(&r, p.tree, f.Cwd)
 		}
+		preferReset(&v, r)
 	}
 	return CompactCheck{
 		CompactVerdict: v, SessionID: f.SessionID, Name: f.Name, SessionKind: f.Kind,
 		Request: ctx.Request, Tokens: ctx.Tokens, CacheRead: ctx.CacheRead, Requests: f.Transcript.Requests,
 		Compacted: ctx.Compacted, Trigger: ctx.Trigger,
 		Pid: pid, Model: ctx.Model, Reply: ctx.Reply, Prompt: ctx.Prompt, PromptAt: ctx.PromptAt, Reset: r,
+	}
+}
+
+// preferReset — где можно сбросить, не сжимать: сжатие — компромисс (пользователь 27.10 10:48 CET, decideReset).
+func preferReset(v *CompactVerdict, r ResetVerdict) {
+	if r.Reset && v.Compact {
+		v.Compact = false
+		v.Against = append(v.Against, Reason{Code: "reset", Text: "сброс вместо сжатия: работа закрыта, беседа не нужна"})
 	}
 }
 

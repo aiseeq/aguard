@@ -190,8 +190,8 @@ func TestWantReset(t *testing.T) {
 		t.Errorf("act: %+v", out)
 	}
 	cfg.Restart.CompactMode = modeAct
-	if out, _ := l.next(cfg, time.Now(), 7, restart.Answer{SessionID: "s1", Compact: true, Reset: true, Tokens: 1}, nil, journalKeys{}); !out.compact || out.reset {
-		t.Errorf("сжатие важнее сброса: %+v", out)
+	if out, _ := l.next(cfg, time.Now(), 7, restart.Answer{SessionID: "s1", Compact: true, Reset: true, Tokens: 1}, nil, journalKeys{}); out.compact || !out.reset {
+		t.Errorf("сброс важнее сжатия: %+v", out)
 	}
 }
 
