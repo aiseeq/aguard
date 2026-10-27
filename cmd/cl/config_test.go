@@ -38,11 +38,10 @@ func TestRestartArgs(t *testing.T) {
 func testConfig() config {
 	return config{
 		Roles: []role{
-			{Names: []string{"lead"}, Text: "Ты лид ({why}).", OnStart: startAlways},
+			{Names: []string{"lead"}, Text: "Ты лид ({why}).", OnStart: startAlways, Prompt: "Ты {name}."},
 			{Names: []string{"*-master"}, Text: "Мастер ({why}).", OnStart: startResume},
 		},
 		ResumeText: "Файл: {path}.",
-		ResetNote:  "Беседа новая.",
 	}
 }
 
@@ -51,7 +50,7 @@ func TestRoleLine(t *testing.T) {
 	if got := c.roleLine("lead", "старт", "", eventStart); got != "Ты лид (старт)." {
 		t.Errorf("лид при старте: %q", got)
 	}
-	if got := c.roleLine("lead", "сброс", "/r/lead.md", eventReset); got != "Ты лид (сброс). Файл: /r/lead.md. Беседа новая." {
+	if got := c.roleLine("lead", "сброс", "/r/lead.md", eventReset); got != "Ты лид (сброс). Файл: /r/lead.md." {
 		t.Errorf("лид после сброса: %q", got)
 	}
 	if got := c.roleLine("sc2go-master", "старт", "", eventStart); got != "" {
@@ -61,8 +60,14 @@ func TestRoleLine(t *testing.T) {
 		t.Errorf("мастер с файлом при старте: %q", got)
 	}
 
-	if got := c.roleLine("sc2go-master", "сброс", "", eventReset); got != "Мастер (сброс). Беседа новая." {
-		t.Errorf("мастер после сброса (без файла — всё равно строка роли): %q", got)
+	if got := c.roleLine("lead", "сброс", "", eventReset); got != "" {
+		t.Errorf("после сброса без файла напоминать не о чем, даже лиду: %q", got)
+	}
+	if got := c.systemPrompt("lead"); got != "Ты lead." {
+		t.Errorf("промпт роли: %q", got)
+	}
+	if got := c.systemPrompt("sc2go-master"); got != "" {
+		t.Errorf("роль без промпта: %q", got)
 	}
 	if got := c.roleLine("lead-2", "старт", "", eventStart); got != "" {
 		t.Errorf("второй сессии в ~ роли лида нет: %q", got)
@@ -105,8 +110,13 @@ func TestRepoConfig(t *testing.T) {
 	if line := cfg.roleLine("lead", "старт cl на Claude Code 2.1.310", "", eventStart); !strings.Contains(line, "Ты лид") {
 		t.Errorf("лид: %q", line)
 	}
-	if line := cfg.roleLine("demu-master", "сброс", "", eventReset); !strings.Contains(line, "продолжай по своей роли") {
+	if line := cfg.roleLine("demu-master", "сброс", "/r/demu-master.md", eventReset); !strings.Contains(line, "продолжай по своей роли") {
 		t.Errorf("мастер: %q", line)
+	}
+	for _, name := range []string{"lead", "work-admin", "git-admin", "demu-master"} {
+		if p := cfg.systemPrompt(name); !strings.Contains(p, name) {
+			t.Errorf("промпт %s: %q", name, p)
+		}
 	}
 }
 

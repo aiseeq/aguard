@@ -12,26 +12,38 @@
   },
   "roles": [
     {
-      "names": ["lead"],
+      "names": [
+        "lead"
+      ],
       "text": "Ты лид ({why}): старт роли по скиллу coordinator.",
-      "on_start": "always"
+      "on_start": "always",
+      "prompt": "Ты лид (сессия {name}, пространство ~): роль — скилл coordinator."
     },
     {
-      "names": ["work-admin"],
+      "names": [
+        "work-admin"
+      ],
       "text": "Ты work-admin, админ пространства ~/work ({why}): старт роли по скиллу work-supervisor.",
-      "on_start": "always"
+      "on_start": "always",
+      "prompt": "Ты work-admin (сессия {name}), админ пространства ~/work: роль — скилл work-supervisor."
     },
     {
-      "names": ["git-admin"],
+      "names": [
+        "git-admin"
+      ],
       "text": "Ты git-admin, админ пространства ~/git ({why}): правила админа — скилл work-supervisor, продолжай по своей роли.",
-      "on_start": "always"
+      "on_start": "always",
+      "prompt": "Ты git-admin (сессия {name}), админ пространства ~/git: правила админа — скилл work-supervisor."
     },
     {
-      "names": ["*-master", "*-master-[0-9]*"],
+      "names": [
+        "*-master",
+        "*-master-[0-9]*"
+      ],
       "text": "Ты мастер проекта ({why}): продолжай по своей роли.",
-      "on_start": "resume_file"
+      "on_start": "resume_file",
+      "prompt": "Ты мастер проекта в этой папке (сессия {name})."
     }
   ],
-  "resume_text": "Файл возобновления: {path}.",
-  "reset_note": "Это служебная строка cl, не ответ пользователя: cl сбросил прошлую беседу — работа в ней была закрыта, сессия простаивала больше часа. Беседа новая: продолжай по роли и файлу возобновления, если он есть."
+  "resume_text": "Файл возобновления: {path}."
 }

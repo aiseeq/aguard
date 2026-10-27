@@ -37,9 +37,6 @@ type config struct {
 	Roles []role `json:"roles"`
 	// ResumeText — добавка к строке роли, когда есть свежий файл возобновления; {path} — путь к нему.
 	ResumeText string `json:"resume_text"`
-
-	// ResetNote — добавка к строке роли после сброса cl: беседа новая, прошлая работа закрыта.
-	ResetNote string `json:"reset_note"`
 }
 
 // restartConfig — как cl перезапускает сессию на новую версию Claude Code; когда можно — решает aguard (его
@@ -74,6 +71,8 @@ type role struct {
 	Text string `json:"text"`
 	// OnStart — always или resume_file; пусто — при обычном старте молчать.
 	OnStart string `json:"on_start"`
+	// Prompt — кто эта сессия, системным промптом при каждом подъёме (--append-system-prompt); {name} — имя сессии.
+	Prompt string `json:"prompt"`
 }
 
 // defaultConfig — без файла: только журнал, без строк ролей.
@@ -153,24 +152,36 @@ func (c config) roleFor(name string) (role, bool) {
 	return role{}, false
 }
 
-// roleLine — первая реплика сессии при старте и после сброса (event — eventStart или eventReset): строка роли, файл
-// возобновления, после сброса — пометка cl. Пусто — молчать.
+// roleLine — первая реплика сессии при старте и после сброса (event — eventStart или eventReset): строка роли и файл
+// возобновления. Пусто — молчать. После сброса — только с файлом возобновления: сбрасывается закрытая работа без
+// таймеров, напоминать не о чем, а реплика будит новую беседу впустую (пользователь 27.10 09:50 CET в транскрипте
+// лида: «если консоль работает, не надо её рестартить. А если не работает, то не о чем напоминать»; скрин git-admin
+// после сброса 13:52 CET — «видишь тут абсурдность ситуации?»). Кто она, беседа знает из Prompt.
 func (c config) roleLine(name, why, resume, event string) string {
 	r, ok := c.roleFor(name)
 	if !ok || r.Text == "" {
 		return ""
 	}
-	if event == eventStart && r.OnStart != startAlways && (r.OnStart != startResume || resume == "") {
+	switch {
+	case event == eventReset && resume == "":
+		return ""
+	case event == eventStart && r.OnStart != startAlways && (r.OnStart != startResume || resume == ""):
 		return ""
 	}
 	parts := []string{strings.ReplaceAll(r.Text, "{why}", why)}
 	if resume != "" && c.ResumeText != "" {
 		parts = append(parts, strings.ReplaceAll(c.ResumeText, "{path}", resume))
 	}
-	if event == eventReset && c.ResetNote != "" {
-		parts = append(parts, c.ResetNote)
-	}
 	return strings.Join(parts, " ")
+}
+
+// systemPrompt — Prompt роли сессии name; роли или текста нет — пусто.
+func (c config) systemPrompt(name string) string {
+	r, ok := c.roleFor(name)
+	if !ok {
+		return ""
+	}
+	return strings.ReplaceAll(r.Prompt, "{name}", name)
 }
 
 // usedDir — куда cl убирает отданный файл возобновления, в той же папке-дате: файл разовый, и следующий подъём,

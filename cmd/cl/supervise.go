@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -96,7 +97,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 		if n > 0 {
 			unit += "-r" + strconv.Itoa(n)
 		}
-		cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, l.name, unit, args)[1:]...)
+		cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, l.name, unit, l.withRolePrompt(args, l.name))[1:]...)
 		finish, err := l.launch(cmd)
 		if err != nil {
 			fail(fmt.Errorf("запуск claude: %w", err))
@@ -139,7 +140,7 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 	if err != nil {
 		journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: %v — журнал по умолчанию", out.name, err))
 	}
-	args := append(append(sessionFlags(l.home), keep...), "-p", "--resume", out.sessionID, "/compact")
+	args := l.withRolePrompt(append(append(sessionFlags(l.home), keep...), "-p", "--resume", out.sessionID, "/compact"), out.name)
 	cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, out.name, unit, args)[1:]...)
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output
@@ -175,6 +176,33 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 			}
 		}
 	}
+}
+
+// withRolePrompt добавляет Prompt роли флагом --append-system-prompt — при каждом подъёме: старт, перезапуск, сжатие,
+// сброс. Claude Code записывает системный промпт на первом запросе беседы и при --resume отдаёт записанный, пока
+// беседу не сожмут (--system-prompt-snapshot, по умолчанию on, claude --help 2.1.311): флаг без подъёма-другого
+// потерялся бы на ближайшем сжатии. Свой флаг системного промпта в аргументах или роли нет — аргументы как есть.
+func (l launcher) withRolePrompt(args []string, name string) []string {
+	cfg, err := loadConfig(l.configFile, l.home)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cl: роль:", err)
+		return args
+	}
+	text := cfg.systemPrompt(name)
+	if text == "" || slices.ContainsFunc(args, promptFlag) {
+		return args
+	}
+	return append([]string{"--append-system-prompt", text}, args...)
+}
+
+// promptFlag — флаг системного промпта Claude Code (с значением через = или следующим аргументом).
+func promptFlag(arg string) bool {
+	flag, _, _ := strings.Cut(arg, "=")
+	switch flag {
+	case "--system-prompt", "--system-prompt-file", "--append-system-prompt", "--append-system-prompt-file":
+		return true
+	}
+	return false
 }
 
 // withRoleLine добавляет первой репликой строку роли из конфига; роли нет или конфиг не прочитался — аргументы как

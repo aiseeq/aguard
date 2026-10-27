@@ -126,15 +126,15 @@ exec sleep 25`)
 	}
 }
 
-// Сброс: в act cl останавливает claude и поднимает новую беседу — без --resume, со строкой роли и пометкой сброса.
+// Сброс: в act cl останавливает claude и поднимает новую беседу — без --resume, с промптом роли и строкой роли (есть
+// файл возобновления).
 func TestSuperviseReset(t *testing.T) {
 	w := newWorld(t)
 	d := w.dir
 	write(t, filepath.Join(d, "config.json"), `{"restart":{"mode":"act","check_seconds":10,`+
 		`"journal":"`+filepath.Join(d, "restart.log")+`","resume_dir":"`+filepath.Join(d, "restart")+`",`+
 		`"compact_mode":"act","reset_mode":"act","reset_names":["x-*"]},`+
-		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"resume_file"}],"resume_text":"Файл: {path}.",`+
-		`"reset_note":"Беседа новая."}`)
+		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"resume_file","prompt":"Ты {name}."}],"resume_text":"Файл: {path}."}`)
 	resume := filepath.Join(d, "restart", "2026-10-26", "x-master.md")
 	write(t, resume, "сводка")
 	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
@@ -153,9 +153,9 @@ exec sleep 25`)
 	}
 	pid := strconv.Itoa(os.Getpid())
 	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice"}
-	fresh := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-r1", "--", w.claude), sessionFlags(d)...),
+	fresh := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-r1", "--", w.claude, "--append-system-prompt", "Ты x-master."), sessionFlags(d)...),
 		"-n", "x-master", "--model", "opus", "Роль (cl начал новую беседу в ЧЧ:ММ вместо простаивавшей; Claude Code 2.1.310). Файл: "+
-			filepath.Join(d, "restart", "2026-10-26", "used", "x-master.md")+". Беседа новая.")
+			filepath.Join(d, "restart", "2026-10-26", "used", "x-master.md")+".")
 	journalText := strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n")
 	if got := anyClock(readLines(t, filepath.Join(d, "run2"))); !slices.Equal(got, fresh) {
 		t.Errorf("новая беседа:\n%q\nwant\n%q\nжурнал:\n%s", got, fresh, journalText)
