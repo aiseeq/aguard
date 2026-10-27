@@ -22,7 +22,7 @@ type transcriptFacts struct {
 	// Tasks — фоновые команды, мониторы и суб-агенты без уведомления о завершении.
 	Tasks []string
 	// Crons — живые таймеры CronCreate: живут только в процессе и пропали бы с ним.
-	Crons []cronJob
+	Crons []CronJob
 	// Wakeups — ScheduleWakeup, срок которых не наступил.
 	Wakeups []string
 	// Context — последний запрос основной ветки, с любого процесса беседы: кэш подсказки переживает перезапуск.
@@ -63,11 +63,22 @@ type contextFacts struct {
 // textLimit — сколько знаков текста ответа и реплики держать для журнала.
 const textLimit = 300
 
-// cronJob — таймер сессии; поля — как в результате CronList.
-type cronJob struct {
+// CronJob — таймер сессии; поля — как в результате CronList.
+type CronJob struct {
 	ID        string `json:"id"`
+	Cron      string `json:"cron"`
 	Prompt    string `json:"prompt"`
 	Recurring bool   `json:"recurring"`
+}
+
+// String — таймер одной строкой для реплики cl: расписание, начало текста, разовый или повторяющийся. Текст целиком
+// сессия найдёт в своей беседе, у вызова CronCreate.
+func (j CronJob) String() string {
+	kind := "разовый"
+	if j.Recurring {
+		kind = "повторяющийся"
+	}
+	return fmt.Sprintf("%s «%s» (%s)", OrDash(j.Cron), head(j.Prompt, 100), kind)
 }
 
 // object — JSON-объект с полями как есть: инструменты и версии Claude Code кладут в одно поле разные типы, и разбор
@@ -155,7 +166,7 @@ type transcriptScan struct {
 	// waiting — суб-агент, который ждёт свою фоновую работу, и его транскрипт; subs — разбор этих транскриптов.
 	waiting  map[string]string
 	subs     map[string]*scanCache
-	crons    map[string]cronJob
+	crons    map[string]CronJob
 	fired    map[string]bool
 	wakeup   time.Time
 	userAt   time.Time // последняя реплика или результат инструмента основной ветки: после неё уходит запрос
@@ -176,7 +187,7 @@ func scanTranscript(r io.Reader, since time.Time) (*transcriptScan, error) {
 func newScan(since time.Time) *transcriptScan {
 	return &transcriptScan{since: since, uses: map[string]toolUse{}, pending: map[string]string{}, tasks: map[string]string{},
 		closed: map[string]bool{}, expires: map[string]time.Time{}, waiting: map[string]string{}, subs: map[string]*scanCache{},
-		crons: map[string]cronJob{}, fired: map[string]bool{}}
+		crons: map[string]CronJob{}, fired: map[string]bool{}}
 }
 
 // feed разбирает строки до конца r; n — сколько байт целых строк разобрано: с этого места продолжит следующий feed.
@@ -433,7 +444,7 @@ func (s *transcriptScan) result(b block, raw json.RawMessage) error {
 		}
 	case "CronCreate":
 		if id := res.str("id"); id != "" {
-			s.crons[id] = cronJob{ID: id, Prompt: use.input.str("prompt"), Recurring: res.flag("recurring")}
+			s.crons[id] = CronJob{ID: id, Cron: use.input.str("cron"), Prompt: use.input.str("prompt"), Recurring: res.flag("recurring")}
 		}
 	case "CronDelete":
 		delete(s.crons, res.str("id"))
@@ -454,11 +465,11 @@ func (s *transcriptScan) cronList(res object) error {
 	if !ok {
 		return nil
 	}
-	var jobs []cronJob
+	var jobs []CronJob
 	if err := json.Unmarshal(raw, &jobs); err != nil {
 		return fmt.Errorf("транскрипт: CronList: %w", err)
 	}
-	s.crons = map[string]cronJob{}
+	s.crons = map[string]CronJob{}
 	for _, j := range jobs {
 		s.crons[j.ID] = j
 	}
@@ -495,7 +506,7 @@ func (s *transcriptScan) facts(now time.Time) transcriptFacts {
 	}
 	slices.Sort(f.Pending)
 	slices.Sort(f.Tasks)
-	slices.SortFunc(f.Crons, func(a, b cronJob) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(f.Crons, func(a, b CronJob) int { return strings.Compare(a.ID, b.ID) })
 	return f
 }
 

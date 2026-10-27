@@ -34,7 +34,8 @@ printf '%s\n' "$@" > "$D/run1"
 exec sleep 25`)
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
 	socket := fakeAguard(t, `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",`+
-		`"running":"2.1.309","installed":"2.1.310","crons":true}`)
+		`"running":"2.1.309","installed":"2.1.310","crons":true,`+
+		`"cron_jobs":[{"id":"j1","cron":"47 1 * * *","prompt":"Сон (скилл sleep)","recurring":true}]}`)
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"), name: "x-master",
 		aguard: socket}
 
@@ -52,7 +53,8 @@ exec sleep 25`)
 	}
 	second := append(append(slices.Clone(scope), unit+"-r1", "--", w.claude),
 		"--dangerously-skip-permissions", "--allowedTools=Grep,Glob", "-n", "x-master", "--model", "opus", "--effort=high",
-		"--resume", "s1", "Роль (cl перезапустил консоль в ЧЧ:ММ для обновления Claude Code 2.1.309 → 2.1.310). Служебная.")
+		"--resume", "s1", "cl перезапустил консоль в ЧЧ:ММ для обновления Claude Code 2.1.309 → 2.1.310; таймеры CronCreate этой "+
+			"сессии при перезапуске пропали — поставь заново те, что ещё нужны: 47 1 * * * «Сон (скилл sleep)» (повторяющийся). Служебная.")
 	if _, err := os.Stat(filepath.Join(d, "run2")); err != nil {
 		t.Fatalf("второго запуска нет: %v; журнал:\n%s", err, strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n"))
 	}

@@ -71,7 +71,7 @@ func TestDecideAgainst(t *testing.T) {
 		"children": func(f *facts) { f.Children = []string{"42 bash"} },
 		"pending":  func(f *facts) { f.Transcript.Pending = []string{"AskUserQuestion t1"} },
 		"tasks":    func(f *facts) { f.Transcript.Tasks = []string{"Agent «ревью» a1"} },
-		"crons":    func(f *facts) { f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
+		"crons":    func(f *facts) { f.Transcript.Crons = []CronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
 		"wakeup":   func(f *facts) { f.Transcript.Wakeups = []string{"ScheduleWakeup до 19:00"} },
 	}
 	for code, spoil := range cases {
@@ -93,11 +93,11 @@ func TestDecideAgainst(t *testing.T) {
 func TestDecideLeadCrons(t *testing.T) {
 	f := idleFacts()
 	f.Name, f.HookState = "lead", "paused"
-	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)", Recurring: true}, {ID: "j2", Prompt: "Дайджест (скилл digest)", Recurring: true}}
+	f.Transcript.Crons = []CronJob{{ID: "j1", Prompt: "Сон (скилл sleep)", Recurring: true}, {ID: "j2", Prompt: "Дайджест (скилл digest)", Recurring: true}}
 	if v := decide(f, allowance{idle: 10 * time.Minute, role: leadRole}); !v.Restart {
 		t.Errorf("Сон и Дайджест лид ставит заново: %+v", v)
 	}
-	f.Transcript.Crons = append(f.Transcript.Crons, cronJob{ID: "j3", Prompt: "замер темпа Codex"})
+	f.Transcript.Crons = append(f.Transcript.Crons, CronJob{ID: "j3", Prompt: "замер темпа Codex"})
 	if v := decide(f, allowance{idle: 10 * time.Minute, role: leadRole}); v.Restart || !slices.Contains(codes(v), "crons") {
 		t.Errorf("чужой таймер лида пропал бы: %+v", v)
 	}

@@ -36,7 +36,8 @@ type config struct {
 	Roles []role `json:"roles"`
 	// ResumeText — добавка к строке роли, когда есть свежий файл возобновления; {path} — путь к нему.
 	ResumeText string `json:"resume_text"`
-	// RestartNote — добавка к строке роли после перезапуска и сжатия cl: беседа сохранена, строка не ответ пользователя.
+	// RestartNote — добавка к реплике о таймерах после перезапуска и сжатия cl (cronsLine): беседа сохранена, строка не
+	// ответ пользователя.
 	RestartNote string `json:"restart_note"`
 	// ResetNote — добавка к строке роли после сброса cl: беседа новая, прошлая работа закрыта.
 	ResetNote string `json:"reset_note"`

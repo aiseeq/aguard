@@ -144,6 +144,9 @@ func TestScanTranscriptCrons(t *testing.T) {
 	if !slices.Equal(ids, []string{"j1", "j2"}) {
 		t.Errorf("Crons = %q, want j1 j2", ids)
 	}
+	if want := "47 1 * * * «Сон (скилл sleep)» (повторяющийся)"; len(f.Crons) == 0 || f.Crons[0].String() != want {
+		t.Errorf("таймер для реплики cl: %v, want %q", f.Crons, want)
+	}
 	if len(f.Wakeups) != 0 {
 		t.Errorf("будильник через 20 минут после 10:00 к 11:00 сработал: %q", f.Wakeups)
 	}

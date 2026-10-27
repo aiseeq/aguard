@@ -162,7 +162,7 @@ func hookChecks(f facts, against againstFunc) {
 }
 
 // lostCrons — таймеры, которые роль не ставит заново сама.
-func lostCrons(crons []cronJob, r Role) []string {
+func lostCrons(crons []CronJob, r Role) []string {
 	var lost []string
 	for _, c := range crons {
 		if !r.restorable(c.Prompt) {

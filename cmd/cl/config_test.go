@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/restart"
 )
 
 func TestRestartArgs(t *testing.T) {
@@ -153,24 +155,18 @@ func TestWhyText(t *testing.T) {
 	}
 }
 
-func TestRoleWanted(t *testing.T) {
-	for _, c := range []struct {
-		event  string
-		crons  bool
-		resume string
-		want   bool
-	}{
-		{eventRestart, false, "", false},
-		{eventCompact, false, "", false},
-		{eventRestart, true, "", true},
-		{eventCompact, true, "", true},
-		{eventRestart, false, "/r/m.md", true},
-		{eventCompact, false, "/r/m.md", true},
-		{eventStart, false, "", true},
-		{eventReset, false, "", true},
-	} {
-		if got := roleWanted(c.event, c.crons, c.resume); got != c.want {
-			t.Errorf("%s crons=%v resume=%q: %v, ждали %v", c.event, c.crons, c.resume, got, c.want)
-		}
+func TestCronsLine(t *testing.T) {
+	why := "cl перезапустил консоль в 02:48 для обновления Claude Code 2.1.310 → 2.1.311"
+	if got := cronsLine(why, false, nil, "Служебная."); got != "" {
+		t.Errorf("без таймеров — голый --resume, без реплики: %q", got)
+	}
+	jobs := []restart.CronJob{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл sleep)", Recurring: true}, {ID: "j2", Cron: "5 10 27 10 *", Prompt: "замер"}}
+	want := why + "; таймеры CronCreate этой сессии при перезапуске пропали — поставь заново те, что ещё нужны: " +
+		"47 1 * * * «Сон (скилл sleep)» (повторяющийся); 5 10 27 10 * «замер» (разовый). Служебная."
+	if got := cronsLine(why, true, jobs, "Служебная."); got != want {
+		t.Errorf("с таймерами:\n%q\nждали\n%q", got, want)
+	}
+	if got := cronsLine(why, true, nil, ""); got != why+"; таймеры CronCreate этой сессии при перезапуске пропали — поставь заново те, что ещё нужны." {
+		t.Errorf("таймеры без списка: %q", got)
 	}
 }
