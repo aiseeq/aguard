@@ -1,16 +1,17 @@
 // Package cpuwatch — перегрузка процессора и чья она (задание лида 27.10 по словам пользователя в транскрипте лида
 // 2dc3ff44: «"Почему aguard молчал. Нагрузку на процессор он не отслеживает." - ну здрасьте. А кто кроме него
-// отслеживать то её будет?»). Мера — число готовых к работе задач в момент замера (procs_running), одно чтение:
-// «я когда контролировал нагрузку опирался на неусреднённое, моментальное значение задач готовых к работе», «Нам не
-// нужно точное число процессов. Нам нужно актуальное». Машина занята — по правилу akit/pressure: готовых задач не
-// меньше, чем потоков у машины.
+// отслеживать то её будет?»). Мера длительной перегрузки — системный load average, своя выборка не строится
+// (пользователь 27.10 23:43:07 CET, 2dc3ff44:3077: «Зачем делать свою копию LA, когда в системе уже есть LA?»;
+// ~/.claude/decisions.md load-measure): перегружена — load average за 5 минут не меньше потоков машины. Окно 5 минут —
+// по sar 19–27.10 (замер раз в 10 минут, порог 22): из 14 отрезков load за минуту длиной от двух замеров load за 5
+// минут ловит 13, за 15 минут — 6.
 //
-// Раз в интервал — замер: число готовых задач и сами готовые потоки (состояние R) с процессом, cgroup и окружением.
-// Владелец потока — мастер: сессия по scope cl или CLAUDE_PID, боец worker по своему unit и job.json, ферма llmark
-// по scope farm-*, на PC — ещё и по SSH_CONNECTION до ssh на ноуте. Занятых замеров в окне не меньше доли share —
-// перегрузка: письмо мастерам, чьих задач больше всего, и сводка лиду; пока длится — не чаще раза в repeat. Ничего не
-// снимает и не понижает (пользователь 22.10 про ферму: «зря ты дал задание ослабить задачи. Надо было разобраться
-// почему такие задачи вызывают тормоза»).
+// Раз в интервал — load average. В перегрузку — ещё и снимок готовых потоков (состояние R) с процессом, cgroup и
+// окружением. Владелец потока — мастер: сессия по scope cl или CLAUDE_PID, боец worker по своему unit и job.json,
+// ферма llmark по scope farm-*, на PC — ещё и по SSH_CONNECTION до ssh на ноуте. Перегрузка — письмо мастерам, чьих
+// задач больше всего, и сводка лиду; пока длится — не чаще раза в repeat. Ничего не снимает и не понижает
+// (пользователь 22.10 про ферму: «зря ты дал задание ослабить задачи. Надо было разобраться почему такие задачи
+// вызывают тормоза»).
 package cpuwatch
 
 import (
@@ -39,16 +40,33 @@ type Task struct {
 	SSH    string // SSH_CONNECTION из окружения: «адрес порт адрес порт» клиента и сервера
 }
 
-// Sample — замер машины: вердикт правила akit «машина занята» и готовые потоки.
+// Sample — замер машины: load average, потоки машины и, в перегрузку, готовые потоки.
 type Sample struct {
 	At      time.Time
-	Verdict pressure.Verdict
+	Load    pressure.LoadAvg
+	Threads int
 	Tasks   []Task
 }
 
-// Busy — машина занята по процессору: готовых к работе задач не меньше, чем потоков. Занятость по диску и свопу —
-// забота memory и disk: готовые потоки её владельца не показывают.
-func (s *Sample) Busy() bool { return s.Verdict.Measure == pressure.CPU }
+// Over — машина перегружена: load average за 5 минут не меньше потоков.
+func (s *Sample) Over() bool { return s.Threads > 0 && s.Load.Avg5 >= float64(s.Threads) }
+
+// ReadLoad — load average и число потоков машины procRoot (/proc или папка снятых по ssh файлов).
+func ReadLoad(procRoot string) (pressure.LoadAvg, int, error) {
+	la, err := pressure.ReadLoadAvg(procRoot)
+	if err != nil {
+		return la, 0, fmt.Errorf("load average: %w", err)
+	}
+	stat, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return la, 0, fmt.Errorf("потоки машины: %w", err)
+	}
+	_, threads, err := pressure.ParseStat(string(stat))
+	if err != nil {
+		return la, 0, fmt.Errorf("потоки машины: %w", err)
+	}
+	return la, threads, nil
+}
 
 // ReadTasks — готовые к работе потоки всех процессов procRoot. Процесс, ушедший во время чтения, пропускается;
 // окружение и cgroup чужих процессов не читаются — у них остаётся то, что прочиталось.
@@ -186,16 +204,17 @@ func claudePid(s string) (int, error) {
 	return n, nil
 }
 
-// remoteFiles — файлы /proc, которые читает правило akit: их RemoteScript отдаёт как есть.
-var remoteFiles = []string{"stat", "pressure/io", "pressure/cpu", "vmstat"}
+// remoteFiles — файлы /proc, которые читает ReadLoad: их RemoteScript отдаёт как есть.
+var remoteFiles = []string{"stat", "loadavg"}
 
-// RemoteScript — замер чужой машины одним вызовом ssh: файлы правила akit разделами «##<файл>» и готовые потоки
-// построчно (число потоков, pid, comm, cgroup, CLAUDE_PID, SSH_CONNECTION через табуляцию). Разбирает ParseRemote.
-const RemoteScript = `for f in stat pressure/io pressure/cpu vmstat; do echo "##$f"; cat /proc/$f; done
+// RemoteScript — замер чужой машины одним вызовом ssh: файлы ReadLoad разделами «##<файл>», а с аргументом tasks
+// (`sh -s tasks`) — ещё и готовые потоки построчно (число потоков, pid, comm, cgroup, CLAUDE_PID, SSH_CONNECTION
+// через табуляцию). Разбирает ParseRemote.
+const RemoteScript = `for f in stat loadavg; do echo "##$f"; cat /proc/$f; done
 echo '##tasks'
-grep -l ') R ' /proc/[0-9]*/task/[0-9]*/stat 2>/dev/null | cut -d/ -f3 | sort | uniq -c | while read -r n p; do
+[ "$1" = tasks ] && grep -l ') R ' /proc/[0-9]*/task/[0-9]*/stat 2>/dev/null | cut -d/ -f3 | sort | uniq -c | while read -r n p; do
 	c=$(cat /proc/$p/comm 2>/dev/null) || continue
-	g=$(cut -d: -f3- /proc/$p/cgroup 2>/dev/null)
+	g=$(sed -n 's/^0:://p' /proc/$p/cgroup 2>/dev/null)
 	e=$(tr '\0' '\n' </proc/$p/environ 2>/dev/null)
 	cl=$(printf '%s\n' "$e" | sed -n 's/^CLAUDE_PID=//p')
 	ss=$(printf '%s\n' "$e" | sed -n 's/^SSH_CONNECTION=//p')
@@ -204,8 +223,8 @@ done
 echo '##end'
 `
 
-// ParseRemote разбирает вывод RemoteScript: файлы правила кладёт в root (по нему замеряет pressure.Meter), готовые
-// потоки возвращает. Нет строки ##end — вывод оборван: ошибка.
+// ParseRemote разбирает вывод RemoteScript: файлы кладёт в root (по нему читает ReadLoad), готовые потоки
+// возвращает. Нет строки ##end — вывод оборван: ошибка.
 func ParseRemote(raw []byte, root string) ([]Task, error) {
 	files, rest, ok := bytes.Cut(raw, []byte("##tasks\n"))
 	if !ok {

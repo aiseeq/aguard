@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -108,8 +110,10 @@ var pcSpot = regexp.MustCompile(`^(?:worker|farm)-(.+)\.[0-9a-f]{16}\.scope$`)
 // unsafeName — то же, что pcguard.Prefix: имя дерева в имени unit.
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
-// ByTree — самое новое задание, чьё дерево (база dir) в имени scope на PC совпадает с tree.
-func (j *Jobs) ByTree(tree string) (*Job, error) {
+// ByTree — живые задания (боец не кончил), чьё дерево (база dir) в имени scope на PC совпадает с tree. Имя scope
+// знает только базу дерева, а она у разных мастеров бывает одна (tk-triage у sc2go-master и sc2demu-master, w-go126 у
+// четырёх — ревью 5572a22, 27.10): поэтому все живые, а не самое новое.
+func (j *Jobs) ByTree(tree string) ([]*Job, error) {
 	if !j.read {
 		ents, err := os.ReadDir(j.Dir)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -122,7 +126,14 @@ func (j *Jobs) ByTree(tree string) (*Job, error) {
 			if err != nil {
 				errs = append(errs, err)
 			}
-			if v != nil {
+			if v == nil {
+				continue
+			}
+			live, err := jobLive(filepath.Join(j.Dir, e.Name(), "status.json"))
+			if err != nil {
+				errs = append(errs, err)
+			}
+			if live {
 				j.all = append(j.all, v)
 			}
 		}
@@ -130,13 +141,32 @@ func (j *Jobs) ByTree(tree string) (*Job, error) {
 			return nil, err
 		}
 	}
-	var best *Job
+	var out []*Job
 	for _, v := range j.all {
-		if unsafeName.ReplaceAllString(filepath.Base(v.Dir), "_") == tree && (best == nil || v.Created.After(best.Created)) {
-			best = v
+		if unsafeName.ReplaceAllString(filepath.Base(v.Dir), "_") == tree {
+			out = append(out, v)
 		}
 	}
-	return best, nil
+	return out, nil
+}
+
+// jobLive — боец задания ещё работает: в status.json нет конца (worker пишет ended, когда боец кончил). Файла ещё
+// нет — задание только заведено, боец поднимается: живое.
+func jobLive(path string) (bool, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("состояние задания worker: %w", err)
+	}
+	var st struct {
+		Ended time.Time `json:"ended"`
+	}
+	if err := json.Unmarshal(b, &st); err != nil {
+		return false, fmt.Errorf("состояние задания worker %s: %w", path, err)
+	}
+	return st.Ended.IsZero(), nil
 }
 
 // Resolver находит владельца потока. Один на проход: кеши заданий живут проход. Сбой поиска (job.json не читается,
@@ -190,9 +220,17 @@ func (r *Resolver) RemoteOwner(t *Task) Owner {
 		if strings.HasPrefix(u, "farm-") {
 			return Owner{Master: farmMaster, Kind: KindFarm}
 		}
-		v, err := r.Jobs.ByTree(m[1])
-		if !r.fail(err) && v != nil {
-			return Owner{Master: v.Master, Kind: KindWorker, Label: v.Task}
+		jobs, err := r.Jobs.ByTree(m[1])
+		r.fail(err)
+		masters := map[string]bool{}
+		for _, v := range jobs {
+			masters[v.Master] = true
+		}
+		if len(masters) == 1 {
+			return Owner{Master: jobs[0].Master, Kind: KindWorker, Label: jobs[0].Task}
+		}
+		if len(masters) > 1 { // чей поток — не узнать: только сводке лиду, с именами
+			return Owner{Kind: KindWorker, Label: u + " (" + strings.Join(slices.Sorted(maps.Keys(masters)), " или ") + ")"}
 		}
 		return Owner{Kind: KindWorker, Label: u}
 	}

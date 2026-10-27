@@ -1,6 +1,6 @@
-// Наблюдатель cpu: перегрузка процессора ноута и PC и чья она (internal/cpuwatch). Замер раз в интервал; перегрузка
-// держится окно — письмо мастерам, чьих готовых задач больше всего, и сводка лиду, пока длится — не чаще repeat.
-// Ничего не снимает и не понижает.
+// Наблюдатель cpu: перегрузка процессора ноута и PC и чья она (internal/cpuwatch). Раз в интервал — load average;
+// за 5 минут не меньше потоков — снимок готовых потоков, письмо мастерам, чьих готовых задач больше всего, и сводка
+// лиду, пока длится — не чаще repeat. Ничего не снимает и не понижает.
 package main
 
 import (
@@ -16,19 +16,17 @@ import (
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/akit/deliver"
-	"github.com/aiseeq/akit/pressure"
 	"github.com/aiseeq/akit/session"
 )
 
 // sshTimeout — замер PC целиком; не успел — замера нет, окно PC ждёт следующего.
 const sshTimeout = 10 * time.Second
 
-// cpuHost — машина под наблюдением: окно замеров и замерщик правила akit (помнит прошлое чтение свопа).
+// cpuHost — машина под наблюдением и её перегрузка.
 type cpuHost struct {
-	ssh   string // "" — своя машина
-	root  string // procRoot замерщика: /proc или папка с файлами, снятыми по ssh
-	meter *pressure.Meter
-	win   cpuwatch.Host
+	ssh  string // "" — своя машина
+	root string // откуда читать load average: /proc или папка с файлами, снятыми по ssh
+	win  cpuwatch.Host
 }
 
 func (a *app) cpuCmd(ctx context.Context, args []string) error {
@@ -39,7 +37,7 @@ func (a *app) cpuCmd(ctx context.Context, args []string) error {
 	}
 	if cmd == "tick" {
 		fl := flag.NewFlagSet("cpu tick", flag.ContinueOnError)
-		dry := fl.Bool("dry-run", false, "один замер каждой машины: готовые задачи по владельцам, ничего не слать")
+		dry := fl.Bool("dry-run", false, "один замер каждой машины: load average и готовые задачи по владельцам, ничего не слать")
 		parse(fl, rest)
 		if !*dry {
 			return a.cpuRound(ctx, &cfg.Cpu)
@@ -64,7 +62,6 @@ func (a *app) cpuHosts(cfg *cpuwatch.Config) []*cpuHost {
 			if n != "" {
 				h.root, h.win.Name = filepath.Join(a.dir("cpu"), "proc-"+n), n
 			}
-			h.meter = pressure.NewMeter(h.root)
 			a.cpu[n] = h
 		}
 		out = append(out, h)
@@ -72,35 +69,47 @@ func (a *app) cpuHosts(cfg *cpuwatch.Config) []*cpuHost {
 	return out
 }
 
-// cpuSample — замер машины h: вердикт правила akit и готовые потоки. Свою машину без занятости не обходит: владельцы
-// нужны только занятым замерам, а обход ~5600 потоков — 80 мс процессора (замер 27.10 23:2x CET).
+// cpuSample — замер машины h: load average и потоки машины, а в перегрузку (или all) — готовые потоки. Без
+// перегрузки потоки не обходит: владельцы нужны только ей, а обход ~5600 потоков — 80 мс процессора (замер 27.10
+// 23:2x CET).
 func (a *app) cpuSample(ctx context.Context, h *cpuHost, now time.Time, all bool) (*cpuwatch.Sample, error) {
 	s := &cpuwatch.Sample{At: now}
 	var err error
 	if h.ssh != "" {
-		if s.Tasks, err = a.cpuRemote(ctx, h); err != nil {
+		if _, err = a.cpuRemote(ctx, h, false); err != nil {
 			return nil, err
 		}
 	}
-	if s.Verdict, err = h.meter.Check(ctx, pressure.DefaultLimits, false); err != nil {
-		return nil, fmt.Errorf("правило «машина занята»: %w", err)
+	if s.Load, s.Threads, err = cpuwatch.ReadLoad(h.root); err != nil {
+		return nil, err
 	}
-	if h.ssh == "" && (all || s.Busy()) {
-		// часть процессов не прочиталась — замер всё равно идёт: число готовых задач от этого не зависит
-		if s.Tasks, err = cpuwatch.ReadTasks(procRoot); err != nil {
-			a.warn("cpu", "процессы прочитаны не все", "err", err)
+	if !all && !s.Over() {
+		return s, nil
+	}
+	if h.ssh != "" {
+		if s.Tasks, err = a.cpuRemote(ctx, h, true); err != nil {
+			return nil, err
 		}
+		return s, nil
+	}
+	// часть процессов не прочиталась — замер всё равно идёт: load average от этого не зависит
+	if s.Tasks, err = cpuwatch.ReadTasks(procRoot); err != nil {
+		a.warn("cpu", "процессы прочитаны не все", "err", err)
 	}
 	return s, nil
 }
 
-// cpuRemote — замер по ssh: файлы правила — в h.root, готовые потоки — в ответ. Соединение одно на много замеров
-// (ControlPersist): ssh раз в 15 с не нагружает ни ноут, ни PC.
-func (a *app) cpuRemote(ctx context.Context, h *cpuHost) ([]cpuwatch.Task, error) {
+// cpuRemote — замер по ssh: файлы load average — в h.root, с tasks — и готовые потоки в ответ. Соединение одно на
+// много замеров (ControlPersist): ssh раз в минуту не нагружает ни ноут, ни PC.
+func (a *app) cpuRemote(ctx context.Context, h *cpuHost, tasks bool) ([]cpuwatch.Task, error) {
 	ctx, cancel := context.WithTimeout(ctx, sshTimeout)
 	defer cancel()
+	arg := "load"
+	if tasks {
+		arg = "tasks"
+	}
 	c := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ControlMaster=auto",
-		"-o", "ControlPath="+filepath.Join(a.dir("cpu"), "ssh-%C"), "-o", "ControlPersist=10m", h.ssh, "sh", "-s")
+		"-o", "ControlPath="+filepath.Join(a.dir("cpu"), "ssh-%C"), "-o", "ControlPersist=10m", h.ssh, "sh", "-s", arg)
 	c.Stdin = strings.NewReader(cpuwatch.RemoteScript)
 	if err := os.MkdirAll(a.dir("cpu"), 0o700); err != nil { // у команды папку не завёл run
 		return nil, fmt.Errorf("папка состояния: %w", err)
@@ -130,7 +139,7 @@ func (a *app) cpuResolver(cfg *cpuwatch.Config) *cpuwatch.Resolver {
 	}
 }
 
-// cpuRound — проход демона: замер каждой машины в её окно, решение о перегрузке и письма.
+// cpuRound — проход демона: замер каждой машины, решение о перегрузке и письма.
 func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 	if cfg.Mode == cpuwatch.ModeOff {
 		return nil
@@ -154,8 +163,7 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 		if h.ssh != "" {
 			owner = r.RemoteOwner
 		}
-		h.win.Add(s, owner, cfg.Window.D())
-		v := h.win.Judge(now, cfg.Window.D(), cfg.Share)
+		v := h.win.Judge(s, owner)
 		a.cpuAct(cfg, &h.win, &v, now)
 	}
 	if err := r.Err(); err != nil { // поток без найденного владельца идёт без мастера: в сводке лиду он виден
@@ -174,8 +182,8 @@ func (a *app) cpuAct(cfg *cpuwatch.Config, h *cpuwatch.Host, v *cpuwatch.Verdict
 		return
 	}
 	if v.Started {
-		a.log.Info("aguard cpu: перегрузка", "host", h.Name, "busy", v.Busy, "of", v.Total, "running", v.Running, "threads", v.Threads)
-		a.note("cpu", "overload", h.Name, "", int64(v.Running), "runnable")
+		a.log.Info("aguard cpu: перегрузка", "host", h.Name, "load5", v.Avg5, "threads", v.Threads)
+		a.note("cpu", "overload", h.Name, "", int64(v.Avg5), "load5")
 	}
 	alive, err := a.reg.Alive()
 	if err != nil {
@@ -193,13 +201,16 @@ func (a *app) cpuAct(cfg *cpuwatch.Config, h *cpuwatch.Host, v *cpuwatch.Verdict
 		}
 		wrote = append(wrote, m.Name)
 	}
-	if h.Due(cfg.Lead, now, cfg.Repeat.D()) {
+	if h.Due(leadKey+cfg.Lead, now, cfg.Repeat.D()) {
 		lead := cpuwatch.LeadMessage(h.Name, v, wrote, now)
-		if err := a.cpuSend(cfg, alive, cfg.Lead, lead, int64(v.Running)); err != nil {
-			a.cpuFailed(cfg.Lead, int64(v.Running), err)
+		if err := a.cpuSend(cfg, alive, cfg.Lead, lead, int64(v.Avg5)); err != nil {
+			a.cpuFailed(cfg.Lead, int64(v.Avg5), err)
 		}
 	}
 }
+
+// leadKey — сводка лиду в отметках писем: лид бывает и мастером (свои бойцы), это другое письмо.
+const leadKey = "сводка:"
 
 func (a *app) cpuFailed(to string, value int64, err error) {
 	a.warn("cpu", "письмо о перегрузке", "session", to, "err", err)
@@ -232,7 +243,7 @@ func (a *app) cpuSend(cfg *cpuwatch.Config, alive map[string]session.Info, to, m
 	return nil
 }
 
-// cpuDry — один замер каждой машины: вердикт правила и готовые потоки по владельцам.
+// cpuDry — один замер каждой машины: load average, готовые потоки по владельцам и, в перегрузку, письма.
 func (a *app) cpuDry(ctx context.Context, cfg *cpuwatch.Config) error {
 	r := a.cpuResolver(cfg)
 	for _, h := range a.cpuHosts(cfg) {
@@ -246,22 +257,17 @@ func (a *app) cpuDry(ctx context.Context, cfg *cpuwatch.Config) error {
 		if h.ssh != "" {
 			owner = r.RemoteOwner
 		}
-		h.win.Add(s, owner, cfg.Window.D())
-		v := h.win.Judge(now, 0, cfg.Share) // окно из одного замера: как если бы он держался всё окно
-		fmt.Fprintf(a.out, "%s: готовых %d при %d потоках, занята=%v %s\n", h.win.Name, s.Verdict.Load.Runnable,
-			s.Verdict.Load.Threads, s.Busy(), s.Verdict.Why())
-		all, forced := cpuwatch.Host{}, *s // владельцы готовых потоков и у свободной машины
-		forced.Verdict.Measure = pressure.CPU
-		all.Add(&forced, owner, cfg.Window.D())
-		lv := all.Judge(now, 0, cfg.Share)
-		for _, l := range lv.Loads {
+		fmt.Fprintf(a.out, "%s: load average %.2f %.2f %.2f при %d потоках, перегружена=%v\n", h.win.Name, s.Load.Avg1,
+			s.Load.Avg5, s.Load.Avg15, s.Threads, s.Over())
+		for _, l := range cpuwatch.Owners(s.Tasks, owner) { // владельцы готовых потоков и у свободной машины
 			fmt.Fprintf(a.out, "  %-20s %-8s %-40s %.0f %v\n", l.Owner.Master, l.Owner.Kind, l.Owner.Label, l.Avg, l.Comms)
 		}
-		if v.Over {
+		var win cpuwatch.Host // своя перегрузка: окно демона пробой не трогается
+		if v := win.Judge(s, owner); v.Over {
 			for _, m := range v.Recipients(cfg.Notify) {
-				fmt.Fprintf(a.out, "  → %s: %s\n", m.Name, cpuwatch.MasterMessage(h.win.Name, &v, &m, now.Add(cfg.Window.D()), true))
+				fmt.Fprintf(a.out, "  → %s: %s\n", m.Name, cpuwatch.MasterMessage(h.win.Name, &v, &m, now, true))
 			}
-			fmt.Fprintf(a.out, "  → %s: %s\n", cfg.Lead, cpuwatch.LeadMessage(h.win.Name, &v, nil, now.Add(cfg.Window.D())))
+			fmt.Fprintf(a.out, "  → %s: %s\n", cfg.Lead, cpuwatch.LeadMessage(h.win.Name, &v, nil, now))
 		}
 	}
 	return r.Err()

@@ -25,9 +25,7 @@ const (
 // Config — раздел [cpu] конфига aguard.
 type Config struct {
 	Mode     string          `toml:"mode"`
-	Interval policy.Duration `toml:"interval"` // как часто замер
-	Window   policy.Duration `toml:"window"`   // перегрузка — занятые замеры держатся столько
-	Share    float64         `toml:"share"`    // доля занятых замеров в окне, с которой перегрузка
+	Interval policy.Duration `toml:"interval"` // как часто читать load average и, в перегрузку, снимать готовые потоки
 	Repeat   policy.Duration `toml:"repeat"`   // письма одному адресату за перегрузку — не чаще
 	Notify   float64         `toml:"notify"`   // мастеру пишется, если его доля готовых задач не меньше (и самому большому)
 	Hosts    []string        `toml:"hosts"`    // машины по ssh сверх своей
@@ -36,14 +34,12 @@ type Config struct {
 	SendAuth bool            `toml:"-"`
 }
 
-// Default — замер раз в 15 с, перегрузка — 70 % занятых замеров за 10 минут, повтор не чаще раза в 30 минут, PC по
-// ssh. 10 минут и 30 — по журналу sar за 19–27.10 (замер раз в 10 минут): load за минуту не ниже 22 — 38 отрезков,
-// из них 14 дольше одного замера, самый долгий — 30 минут; короче 10 минут — всплеск, который очередь graft переждёт.
+// Default — load average читается раз в минуту (за 5 минут он за минуту меняется мало), повтор письма не чаще раза в
+// 30 минут, PC по ssh.
 func Default(home string) Config {
 	return Config{
-		Mode: ModeAlert, Interval: policy.Duration(15 * time.Second), Window: policy.Duration(10 * time.Minute),
-		Share: 0.7, Repeat: policy.Duration(30 * time.Minute), Notify: 0.25, Hosts: []string{"pc"},
-		Workers: home + "/.local/state/worker",
+		Mode: ModeAlert, Interval: policy.Duration(time.Minute), Repeat: policy.Duration(30 * time.Minute), Notify: 0.25,
+		Hosts: []string{"pc"}, Workers: home + "/.local/state/worker",
 	}
 }
 
@@ -52,41 +48,26 @@ func (c *Config) Validate(home string) error {
 	if c.Mode != ModeOff && c.Mode != ModeLog && c.Mode != ModeAlert {
 		return fmt.Errorf("cpu.mode = %q: off, log или alert", c.Mode)
 	}
-	if c.Interval.D() < 5*time.Second || c.Window.D() < 2*c.Interval.D() {
-		return errors.New("cpu.interval >= 5s и cpu.window >= двух интервалов")
+	if c.Interval.D() < 10*time.Second || c.Repeat.D() < c.Interval.D() {
+		return errors.New("cpu.interval >= 10s и cpu.repeat >= cpu.interval")
 	}
-	if c.Share <= 0 || c.Share > 1 || c.Notify < 0 || c.Notify > 1 {
-		return errors.New("cpu.share в (0, 1], cpu.notify в [0, 1]")
+	if c.Notify < 0 || c.Notify > 1 {
+		return errors.New("cpu.notify в [0, 1]")
 	}
 	c.Workers = policy.ExpandHome(c.Workers, home)
 	return nil
 }
 
-// point — замер в окне: готовые потоки по владельцам и по их процессам.
-type point struct {
-	at      time.Time
-	busy    bool
-	running int
-	threads int
-	by      map[Owner]int
-	comms   map[Owner]map[string]int
+// snap — снимок готовых потоков в перегрузку: по владельцам и по их процессам.
+type snap struct {
+	by    map[Owner]int
+	comms map[Owner]map[string]int
 }
 
-// Host — окно замеров одной машины и её перегрузка.
-type Host struct {
-	Name   string // как машину называть в письмах: «ноут», «pc»
-	points []point
-	since  time.Time            // начало перегрузки; нуль — машина не перегружена
-	sent   map[string]time.Time // кому и когда писали в эту перегрузку
-	Down   bool                 // прошлый замер не удался: о сбое пишется раз, а не каждый проход
-}
-
-// Add кладёт замер в окно и выбрасывает замеры старше window.
-func (h *Host) Add(s *Sample, owner func(*Task) Owner, window time.Duration) {
-	p := point{at: s.At, busy: s.Busy(), running: s.Verdict.Load.Runnable, threads: s.Verdict.Load.Threads,
-		by: map[Owner]int{}, comms: map[Owner]map[string]int{}}
-	for i := range s.Tasks {
-		t := &s.Tasks[i]
+func newSnap(tasks []Task, owner func(*Task) Owner) snap {
+	p := snap{by: map[Owner]int{}, comms: map[Owner]map[string]int{}}
+	for i := range tasks {
+		t := &tasks[i]
 		o := owner(t)
 		p.by[o] += t.N
 		if p.comms[o] == nil {
@@ -94,15 +75,25 @@ func (h *Host) Add(s *Sample, owner func(*Task) Owner, window time.Duration) {
 		}
 		p.comms[o][t.Comm] += t.N
 	}
-	h.points = append(h.points, p)
-	cut := 0
-	for cut < len(h.points) && s.At.Sub(h.points[cut].at) > window {
-		cut++
-	}
-	h.points = h.points[cut:]
+	return p
 }
 
-// Load — готовые задачи владельца в среднем по занятым замерам окна.
+// Host — перегрузка одной машины: с какого замера длится, снимки готовых потоков за неё и кому уже писали.
+type Host struct {
+	Name  string // как машину называть в письмах: «ноут», «pc»
+	snaps []snap
+	since time.Time            // начало перегрузки; нуль — машина не перегружена
+	sent  map[string]time.Time // кому и когда писали о машине: переживает конец перегрузки, иначе перегрузка у порога
+	// (кончилась — снова началась) сбрасывала бы repeat и слала письма каждый замер (ревью 5572a22, 27.10)
+	told map[string]bool // кому писали в эту перегрузку
+	Down bool            // прошлый замер не удался: о сбое пишется раз, а не каждый проход
+}
+
+// endShare — перегрузка кончается, когда load average за 5 минут ниже этой доли потоков, а не просто ниже потоков:
+// у порога она не дробится на десяток коротких.
+const endShare = 0.9
+
+// Load — готовые задачи владельца в среднем по снимкам перегрузки.
 type Load struct {
 	Owner Owner
 	Avg   float64
@@ -115,37 +106,53 @@ type Comm struct {
 	Avg  float64
 }
 
-// Verdict — перегрузка машины по окну.
+// Verdict — перегрузка машины на момент замера.
 type Verdict struct {
-	Over    bool      // перегружена: окно полное, занятых замеров не меньше доли share
+	Over    bool      // перегружена: load average за 5 минут не меньше потоков
 	Started bool      // перегрузка началась в этот замер
 	Ended   time.Time // перегрузка кончилась в этот замер: когда началась
-	Since   time.Time // начало перегрузки (первый занятый замер окна)
-	Busy    int       // занятых замеров в окне
-	Total   int
-	Running float64 // готовых к работе задач в среднем по занятым замерам
+	Since   time.Time // начало перегрузки
+	Avg5    float64   // load average за 5 минут
 	Threads int
+	Snaps   int    // снимков готовых потоков за перегрузку
 	Loads   []Load // по владельцам, больше — раньше
 }
 
-// Judge — перегрузка по окну на момент now. Окно неполное (замеры идут меньше 90 % window) — не перегружена.
-func (h *Host) Judge(now time.Time, window time.Duration, share float64) Verdict {
-	var v Verdict
-	v.Total = len(h.points)
-	full := v.Total > 0 && now.Sub(h.points[0].at) >= window*9/10
+// Judge — перегрузка по замеру s. В перегрузку кладёт снимок готовых потоков s.Tasks с владельцами owner; доли
+// владельцев — в среднем по снимкам всей перегрузки. Кончилась — снимки и отметки писем забываются.
+func (h *Host) Judge(s *Sample, owner func(*Task) Owner) Verdict {
+	v := Verdict{Over: s.Over(), Avg5: s.Load.Avg5, Threads: s.Threads}
+	if !h.since.IsZero() && s.Load.Avg5 >= endShare*float64(s.Threads) {
+		v.Over = true
+	}
+	switch {
+	case v.Over && h.since.IsZero():
+		h.since, h.told, v.Started = s.At, map[string]bool{}, true
+	case !v.Over && !h.since.IsZero():
+		v.Ended, h.since, h.told, h.snaps = h.since, time.Time{}, nil, nil
+	}
+	if !v.Over {
+		return v
+	}
+	v.Since = h.since
+	h.snaps = append(h.snaps, newSnap(s.Tasks, owner))
+	v.Snaps, v.Loads = len(h.snaps), loads(h.snaps)
+	return v
+}
+
+// Owners — готовые потоки одного снимка по владельцам, без суждения о перегрузке: для проб.
+func Owners(tasks []Task, owner func(*Task) Owner) []Load {
+	return loads([]snap{newSnap(tasks, owner)})
+}
+
+// loads — готовые потоки владельцев в среднем по снимкам, больше — раньше.
+func loads(snaps []snap) []Load {
+	if len(snaps) == 0 {
+		return nil
+	}
 	sum := map[Owner]int{}
 	comms := map[Owner]map[string]int{}
-	for i := range h.points {
-		p := &h.points[i]
-		if !p.busy {
-			continue
-		}
-		if v.Busy == 0 {
-			v.Since = p.at
-		}
-		v.Busy++
-		v.Running += float64(p.running)
-		v.Threads = p.threads
+	for _, p := range snaps {
 		for o, n := range p.by {
 			sum[o] += n
 			if comms[o] == nil {
@@ -156,29 +163,18 @@ func (h *Host) Judge(now time.Time, window time.Duration, share float64) Verdict
 			}
 		}
 	}
-	if v.Busy > 0 {
-		v.Running /= float64(v.Busy)
-		for o, n := range sum {
-			l := Load{Owner: o, Avg: float64(n) / float64(v.Busy)}
-			for c, k := range comms[o] {
-				l.Comms = append(l.Comms, Comm{Name: c, Avg: float64(k) / float64(v.Busy)})
-			}
-			slices.SortFunc(l.Comms, func(a, b Comm) int { return cmp.Or(cmp.Compare(b.Avg, a.Avg), cmp.Compare(a.Name, b.Name)) })
-			v.Loads = append(v.Loads, l)
+	n := float64(len(snaps))
+	var out []Load
+	for o, k := range sum {
+		l := Load{Owner: o, Avg: float64(k) / n}
+		for c, m := range comms[o] {
+			l.Comms = append(l.Comms, Comm{Name: c, Avg: float64(m) / n})
 		}
-		slices.SortFunc(v.Loads, func(a, b Load) int { return cmp.Or(cmp.Compare(b.Avg, a.Avg), ownerCmp(a.Owner, b.Owner)) })
+		slices.SortFunc(l.Comms, func(a, b Comm) int { return cmp.Or(cmp.Compare(b.Avg, a.Avg), cmp.Compare(a.Name, b.Name)) })
+		out = append(out, l)
 	}
-	v.Over = full && float64(v.Busy) >= share*float64(v.Total)
-	switch {
-	case v.Over && h.since.IsZero():
-		h.since, h.sent, v.Started = v.Since, map[string]time.Time{}, true
-	case !v.Over && !h.since.IsZero():
-		v.Ended, h.since, h.sent = h.since, time.Time{}, nil
-	}
-	if v.Over {
-		v.Since = h.since
-	}
-	return v
+	slices.SortFunc(out, func(a, b Load) int { return cmp.Or(cmp.Compare(b.Avg, a.Avg), ownerCmp(a.Owner, b.Owner)) })
+	return out
 }
 
 func ownerCmp(a, b Owner) int {
@@ -213,12 +209,13 @@ func (v *Verdict) Masters() (ms []Master, total float64) {
 	return ms, total
 }
 
-// Recipients — кому писать: мастера с долей готовых задач не меньше notify и самый большой.
+// Recipients — кому писать: мастера с долей готовых задач не меньше notify. Перегрузку дают система и прочее —
+// мастеру с потоком из двадцати не пишется «посмотри, почему твои задачи дают столько», только сводка лиду.
 func (v *Verdict) Recipients(notify float64) []Master {
 	ms, total := v.Masters()
 	var out []Master
-	for i, m := range ms {
-		if i == 0 || (total > 0 && m.Avg/total >= notify) {
+	for _, m := range ms {
+		if total > 0 && m.Avg/total >= notify {
 			out = append(out, m)
 		}
 	}
@@ -226,20 +223,21 @@ func (v *Verdict) Recipients(notify float64) []Master {
 }
 
 // Seen — адресату to в эту перегрузку уже писали.
-func (h *Host) Seen(to string) bool {
-	_, ok := h.sent[to]
-	return ok
-}
+func (h *Host) Seen(to string) bool { return h.told[to] }
 
-// Due — письмо адресату to сейчас: в эту перегрузку ему не писали дольше repeat. Отмечает письмо.
+// Due — письмо адресату to сейчас: машина перегружена и о ней ему не писали дольше repeat. Отмечает письмо. Ключ
+// to — адресат и вид письма: сводка лиду и письмо ему же как мастеру считаются порознь.
 func (h *Host) Due(to string, now time.Time, repeat time.Duration) bool {
-	if h.sent == nil {
+	if h.since.IsZero() {
 		return false
 	}
 	if last, ok := h.sent[to]; ok && now.Sub(last) < repeat {
 		return false
 	}
-	h.sent[to] = now
+	if h.sent == nil {
+		h.sent = map[string]time.Time{}
+	}
+	h.sent[to], h.told[to] = now, true
 	return true
 }
 
@@ -250,8 +248,8 @@ func MasterMessage(host string, v *Verdict, m *Master, now time.Time, first bool
 	if !first {
 		state = "всё ещё перегружен"
 	}
-	fmt.Fprintf(&b, "aguard: %s %s %s — готовых к работе задач в среднем %s при %d потоках. Твоих из них %s: %s.",
-		host, state, bgtask.Span(now.Sub(v.Since)), num(v.Running), v.Threads, num(m.Avg), parts(m.Parts))
+	fmt.Fprintf(&b, "aguard: %s %s %s — load average за 5 минут %s при %d потоках. Готовых к работе задач твоих в среднем %s: %s.",
+		host, state, bgtask.Span(now.Sub(v.Since)), dec(v.Avg5), v.Threads, num(m.Avg), parts(m.Parts))
 	b.WriteString(" Ничего не останавливаю и не понижаю: посмотри, почему твои задачи дают столько, и не добавляй новых")
 	if host == HostLocal {
 		b.WriteString("; тяжёлое — на PC (`worker run --pc`, `worker pc --`)")
@@ -282,8 +280,8 @@ func LeadMessage(host string, v *Verdict, to []string, now time.Time) string {
 	if len(to) > 0 {
 		sent = strings.Join(to, ", ")
 	}
-	return fmt.Sprintf("aguard: %s перегружен %s — готовых к работе задач в среднем %s при %d потоках (по процессам %s). Чьи: %s. Написал: %s.",
-		host, bgtask.Span(now.Sub(v.Since)), num(v.Running), v.Threads, num(total), strings.Join(who, ", "), sent)
+	return fmt.Sprintf("aguard: %s перегружен %s — load average за 5 минут %s при %d потоках. Готовых к работе задач в среднем %s по %d снимкам, чьи: %s. Написал: %s.",
+		host, bgtask.Span(now.Sub(v.Since)), dec(v.Avg5), v.Threads, num(total), v.Snaps, strings.Join(who, ", "), sent)
 }
 
 // HostLocal — своя машина в письмах.
@@ -319,3 +317,6 @@ func parts(ls []Load) string {
 }
 
 func num(x float64) string { return fmt.Sprint(int(math.Round(x))) }
+
+// dec — load average с одним знаком: 23.4.
+func dec(x float64) string { return fmt.Sprintf("%.1f", x) }
