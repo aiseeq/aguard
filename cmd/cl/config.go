@@ -60,7 +60,7 @@ type restartConfig struct {
 	ResetMode string `json:"reset_mode"`
 	// ResetNames — в act сбрасывать только сессии с подходящим именем, для пилота; пусто — все.
 	ResetNames []string `json:"reset_names"`
-	// PtyNames — сессии с подходящим именем cl запускает под своим pty (console.go); пусто — ни одной, для пилота.
+	// PtyNames — сессии с подходящим именем cl запускает под своим pty (console.go); пусто — ни одной; с 27.10 у нас ["*"] (пилот 27.10 17:00 CET, выкатка на work-admin 18:08 CET).
 	PtyNames []string `json:"pty_names"`
 	// TypeMode — сжатие и сброс сессии под pty набором /compact и /clear в живой сессии: log — «набрал бы» в журнал
 	// (действует прежний путь через перезапуск), act — набрать вместо перезапуска, off — молчать.

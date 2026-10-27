@@ -8,7 +8,9 @@
     "compact_mode": "log",
     "compact_names": [],
     "reset_mode": "log",
-    "reset_names": []
+    "reset_names": [],
+    "pty_names": ["*"],
+    "type_mode": "log"
   },
   "roles": [
     {
