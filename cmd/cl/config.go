@@ -37,6 +37,10 @@ type config struct {
 	Roles []role `json:"roles"`
 	// ResumeText — добавка к строке роли, когда есть свежий файл возобновления; {path} — путь к нему.
 	ResumeText string `json:"resume_text"`
+	// ResumePrompt — добавка к системному промпту каждой роли: куда класть файл возобновления, чтобы cl отдал его
+	// следующей беседе; {name} — имя сессии, {dir} — restart.resume_dir. Путь знал только скилл work-supervisor, и
+	// мастер, которого пользователь просил напрямую, клал файл в scratchpad (shop-master 27.10 14:21 CET, задание лида).
+	ResumePrompt string `json:"resume_prompt"`
 }
 
 // restartConfig — как cl перезапускает сессию на новую версию Claude Code; когда можно — решает aguard (его
@@ -175,13 +179,19 @@ func (c config) roleLine(name, why, resume, event string) string {
 	return strings.Join(parts, " ")
 }
 
-// systemPrompt — Prompt роли сессии name; роли или текста нет — пусто.
+// systemPrompt — Prompt роли сессии name и ResumePrompt; роли нет — пусто.
 func (c config) systemPrompt(name string) string {
 	r, ok := c.roleFor(name)
 	if !ok {
 		return ""
 	}
-	return strings.ReplaceAll(r.Prompt, "{name}", name)
+	var parts []string
+	for _, text := range []string{r.Prompt, c.ResumePrompt} {
+		if text != "" {
+			parts = append(parts, strings.NewReplacer("{name}", name, "{dir}", c.Restart.ResumeDir).Replace(text))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // usedDir — куда cl убирает отданный файл возобновления, в той же папке-дате: файл разовый, и следующий подъём,
@@ -201,7 +211,8 @@ func takeResume(file string) (string, error) {
 	return used, nil
 }
 
-// freshResume — файл возобновления <имя>.md в последней папке-дате ~/.claude/restart, не старше maxAge. Нет папки,
+// freshResume — самый свежий файл возобновления <имя>.md в папках-датах ~/.claude/restart, не старше maxAge: не только
+// в последней папке — сессия могла взять дату со своих часов, а папку следующего дня уже завела другая. Нет папки,
 // файла или он старый — пусто без ошибки.
 func freshResume(dir, name string, maxAge time.Duration, now time.Time) (string, error) {
 	if name == "" {
@@ -214,25 +225,22 @@ func freshResume(dir, name string, maxAge time.Duration, now time.Time) (string,
 	if err != nil {
 		return "", fmt.Errorf("файлы возобновления: %w", err)
 	}
-	latest := ""
+	found, newest := "", time.Time{}
 	for _, e := range entries {
-		if e.IsDir() && e.Name() > latest {
-			latest = e.Name()
+		if !e.IsDir() {
+			continue
+		}
+		file := filepath.Join(dir, e.Name(), name+".md")
+		info, err := os.Stat(file)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("файл возобновления: %w", err)
+		}
+		if now.Sub(info.ModTime()) <= maxAge && info.ModTime().After(newest) {
+			found, newest = file, info.ModTime()
 		}
 	}
-	if latest == "" {
-		return "", nil
-	}
-	file := filepath.Join(dir, latest, name+".md")
-	info, err := os.Stat(file)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("файл возобновления: %w", err)
-	}
-	if now.Sub(info.ModTime()) > maxAge {
-		return "", nil
-	}
-	return file, nil
+	return found, nil
 }

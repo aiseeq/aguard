@@ -72,6 +72,18 @@ func TestRoleLine(t *testing.T) {
 	if got := c.roleLine("lead-2", "старт", "", eventStart); got != "" {
 		t.Errorf("второй сессии в ~ роли лида нет: %q", got)
 	}
+
+	c.Restart.ResumeDir = "/r"
+	c.ResumePrompt = "Возобновление — {dir}/<дата>/{name}.md."
+	if got := c.systemPrompt("lead"); got != "Ты lead. Возобновление — /r/<дата>/lead.md." {
+		t.Errorf("путь возобновления после промпта роли: %q", got)
+	}
+	if got := c.systemPrompt("sc2go-master"); got != "Возобновление — /r/<дата>/sc2go-master.md." {
+		t.Errorf("путь возобновления и у роли без промпта: %q", got)
+	}
+	if got := c.systemPrompt("lead-2"); got != "" {
+		t.Errorf("сессии без роли — ничего: %q", got)
+	}
 }
 
 func TestLoadConfig(t *testing.T) {
@@ -114,8 +126,8 @@ func TestRepoConfig(t *testing.T) {
 		t.Errorf("мастер: %q", line)
 	}
 	for _, name := range []string{"lead", "work-admin", "git-admin", "demu-master"} {
-		if p := cfg.systemPrompt(name); !strings.Contains(p, name) {
-			t.Errorf("промпт %s: %q", name, p)
+		if p := cfg.systemPrompt(name); !strings.Contains(p, "/home/u/.claude/restart/<") || !strings.Contains(p, "/"+name+".md") {
+			t.Errorf("промпт %s без пути возобновления: %q", name, p)
 		}
 	}
 }
@@ -140,6 +152,24 @@ func TestFreshResume(t *testing.T) {
 	}
 	if got, err := freshResume(dir, "git-admin", 24*time.Hour, now); err != nil || got != "" {
 		t.Errorf("без файла: %q", got)
+	}
+
+	// Файл не в последней папке-дате тоже находится; из двух — свежий.
+	older := filepath.Join(dir, "2026-10-22", "lead.md")
+	if err := os.WriteFile(older, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := freshResume(dir, "lead", 24*time.Hour, now); err != nil || got != older {
+		t.Errorf("свежий из двух папок: %q", got)
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := freshResume(dir, "lead", 24*time.Hour, now); err != nil || got != older {
+		t.Errorf("файл в непоследней папке: %q", got)
 	}
 }
 
