@@ -71,6 +71,43 @@ func TestRunRereadsOpen(t *testing.T) {
 	}
 }
 
+// Файл больше бюджета читается кусками по остатку бюджета, хотя хвост помельче идёт первым каждый проход (открытое
+// ожидание перечитывается до MaxOpen): раньше он не читался никогда. Кусок не рвёт ожидание: каждое — ровно один раз.
+func TestRunChunksBig(t *testing.T) {
+	projects := t.TempDir()
+	small := filepath.Join(projects, "p", "small.jsonl")
+	big := filepath.Join(projects, "p", "big.jsonl")
+	appendLines(t, small, call(0, "s1", "sleep 5", false), result(1, "s1", ""))
+	const n = 40
+	for i := range n {
+		id := fmt.Sprintf("b%d", i)
+		appendLines(t, big, call(2*i, id, fmt.Sprintf("sleep %d", 60+i), false), result(2*i+1, id, ""), call(2*i+1, id+"l", "ls", false), result(2*i+1, id+"l", "a"))
+	}
+	info, err := os.Stat(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Pass{Projects: projects, Workers: t.TempDir(), Backfill: 7 * 24 * time.Hour, Budget: info.Size() / 5, MaxOpen: 6 * time.Hour}
+	st := &State{Files: map[string]*File{}}
+	got := 0
+	for pass := range 10 {
+		ws, err := p.Run(st, stamp.Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got += len(ws)
+		if s := st.Files["claude/p/big.jsonl"]; s.Offset == info.Size() {
+			break
+		}
+		if pass == 9 {
+			t.Fatalf("большой файл не дочитан: %+v из %d, ожиданий %d", st.Files["claude/p/big.jsonl"], info.Size(), got)
+		}
+	}
+	if got != n {
+		t.Errorf("ожиданий %d, нужно %d", got, n)
+	}
+}
+
 // Открытое дольше MaxOpen закрывается с исходом none, смещение уходит в конец.
 func TestRunFlushesStale(t *testing.T) {
 	projects := t.TempDir()

@@ -120,8 +120,10 @@ func (st *State) Save(path string) error {
 type Pass struct {
 	Projects, Workers string
 	Backfill          time.Duration
-	Budget            int64 // байт за проход; первый файл прохода читается целиком
-	MaxOpen           time.Duration
+	// Budget — байт за проход. Файл, не влезший в остаток, читается куском до остатка: больше бюджета не читался
+	// бы никогда — первым в проходе его не ставят хвосты помельче (llmark 210 МБ 22.10, 27.10 14:47 CET).
+	Budget  int64
+	MaxOpen time.Duration
 	// Name — имя сессии Claude по её папке (names.For); пусто — без имени.
 	Name func(cwd string) string
 }
@@ -157,15 +159,14 @@ func (p *Pass) Run(st *State, now time.Time) ([]Wait, error) {
 	var errs []error
 	var used int64
 	for _, f := range files {
-		n := pending(f)
-		if n <= 0 {
+		if pending(f) <= 0 {
 			continue
 		}
-		if used > 0 && used+n > p.Budget {
+		if used >= p.Budget {
 			break
 		}
+		ws, n, err := p.read(f, st.Files[f.Key], now, p.Budget-used)
 		used += n
-		ws, err := p.read(f, st.Files[f.Key], now)
 		out = append(out, ws...)
 		errs = append(errs, err)
 	}
@@ -187,6 +188,12 @@ type chunk struct {
 	last   time.Time
 	bad    int
 	badErr error // первая битая строка
+}
+
+// open — есть незаконченное ожидание: кусок на нём не обрывается.
+func (c *chunk) open() bool {
+	_, ok := c.rec.Open()
+	return ok
 }
 
 // line — начало и время строки n (с 1) куска.
@@ -235,11 +242,13 @@ func (c *chunk) add(raw []byte, pos int64) {
 	}
 }
 
-// read — законченные ожидания из [s.Offset, конец последней целой строки) файла f.
-func (p *Pass) read(f Source, s *File, now time.Time) ([]Wait, error) {
+// read — законченные ожидания из [s.Offset, конец последней целой строки) файла f и сколько байт прочитано. Дальше
+// limit байт — только пока ожидание открыто: кусок кончается на строке без открытых, и следующий кусок
+// продолжает с неё же.
+func (p *Pass) read(f Source, s *File, now time.Time, limit int64) ([]Wait, int64, error) {
 	fh, err := os.Open(f.Path)
 	if err != nil {
-		return nil, fmt.Errorf("транскрипт: %w", err)
+		return nil, 0, fmt.Errorf("транскрипт: %w", err)
 	}
 	defer fh.Close()
 	if f.size < s.Offset { // файл переписан короче: заново с начала
@@ -248,8 +257,8 @@ func (p *Pass) read(f Source, s *File, now time.Time) ([]Wait, error) {
 	c := &chunk{src: f, s: s, rec: waits.New(), parser: transcript.NewParser(), nameOf: p.Name, seen: map[string]int64{}}
 	maps.Copy(c.seen, s.Seen)
 	r := bufio.NewReaderSize(io.NewSectionReader(fh, s.Offset, f.size-s.Offset), 1<<20)
-	pos := s.Offset
-	for {
+	from, pos := s.Offset, s.Offset
+	for pos-from < limit || c.open() {
 		raw, err := r.ReadSlice('\n')
 		if errors.Is(err, bufio.ErrBufferFull) {
 			raw, err = readLong(r, raw)
@@ -258,7 +267,7 @@ func (p *Pass) read(f Source, s *File, now time.Time) ([]Wait, error) {
 			break
 		}
 		if err != nil {
-			return c.out, fmt.Errorf("транскрипт %s: %w", f.Key, err)
+			return c.out, pos - from, fmt.Errorf("транскрипт %s: %w", f.Key, err)
 		}
 		c.add(raw[:len(raw)-1], pos)
 		pos += int64(len(raw))
@@ -281,9 +290,9 @@ func (p *Pass) read(f Source, s *File, now time.Time) ([]Wait, error) {
 		}
 	}
 	if c.bad > 0 {
-		return c.out, fmt.Errorf("транскрипт %s: строк не JSON %d (%w)", f.Key, c.bad, c.badErr)
+		return c.out, pos - from, fmt.Errorf("транскрипт %s: строк не JSON %d (%w)", f.Key, c.bad, c.badErr)
 	}
-	return c.out, nil
+	return c.out, pos - from, nil
 }
 
 // readLong дочитывает строку длиннее буфера: записи с выводом инструментов бывают в десятки мегабайт.
