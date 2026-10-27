@@ -96,6 +96,7 @@
 - 25.10 11:35 CET: установлена и включена `aguard.service` (user, `deploy/install.sh`). `procguard.service` и `tmpguard.service` работают рядом, пока журналы aguard не сойдутся с ними; aguard `tmp` до этого в observe, чтобы сводки не уходили дважды.
 - 25.10 12:13 CET: `aguard.service` обновлена, добавлен наблюдатель `waits`.
 - 25.10 12:21 CET: `aguard.service` обновлена, добавлены учёт срабатываний и `aguard report`.
+- 27.10 23:14 CET: `aguard.service` обновлена, добавлен наблюдатель `cpu` (5572a22); замер PC идёт с ноута по ssh, на PC служб не ставили.
 
 ## Порядок работ
 1. procguard и tmpguard под одной крышей, один конфиг.
