@@ -29,7 +29,7 @@ const (
 // fiemapHead — struct fiemap: Length заполняется для ядра, флаги запроса и резерв — нули.
 type fiemapHead struct {
 	Start  uint64
-	Length uint64 //nolint:unused-field // читает ядро: сколько файла отдать
+	Length uint64 // читает ядро: сколько файла отдать
 	_      uint32
 	Mapped uint32
 	Count  uint32
