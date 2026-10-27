@@ -185,6 +185,7 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 	factor := a.tmpFactor(cfg)
 	groups := cfg.Over(items, factor)
 	sums, deferred := cfg.Plan(now, groups, live, st, factor)
+	st.Forget(items)
 	a.log.Info(fmt.Sprintf("aguard tmp %s: %s, сводок %d (записей %d), отложено записей %d",
 		cfg.Mode, policy.OverText(items, groups, factor), len(sums), policy.Count(sums), policy.Count(deferred)))
 

@@ -129,7 +129,8 @@ func (c *Config) adminFor(cwd string) string {
 
 // Plan раскладывает записи владельцев сверх порога по адресатам с учётом
 // эскалации и обновляет счётчики в st. Вызывающий сохраняет st после
-// успешной доставки (в observe — сразу: имитация).
+// успешной доставки (в observe — сразу: имитация). Убранные записи забывает
+// Forget, не Plan: запись ниже порога (давление памяти спало) не убрана.
 //
 // send — сводки этого прохода. deferred — строки, которые верхняя ступень
 // уже получала и получит повтором не раньше top_repeat; счётчики их не
@@ -140,12 +141,10 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 		st.Alerts = map[string]*AlertState{}
 	}
 	sendB, deferB := newSummaries(factor), newSummaries(factor)
-	keep := map[string]bool{}
 	for _, g := range groups {
 		for i := range g.Items {
 			it := &g.Items[i]
 			key := EntryKey(it)
-			keep[key] = true
 			steps, cname, calive := c.ladder(it, live)
 			if len(steps) == 0 {
 				continue // некому писать: ни создателя, ни лида
@@ -169,12 +168,24 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 			as.LastSent = now
 		}
 	}
-	for k := range st.Alerts { // убранные записи забываем
+	return sendB.list(), deferB.list()
+}
+
+// Forget забывает эскалацию записей, которых больше нет в /tmp (items — все
+// живые записи прохода, не только сверх порога). Раньше забывалась и запись,
+// просто не прошедшая порог: 27.10 02:41–02:56 давление памяти то включало
+// множитель ×0.5, то снимало, и те же 4 записи уходили лиду и git-admin
+// каждым проходом под давлением как новые, мимо top_repeat.
+func (st *UserState) Forget(items []Item) {
+	keep := make(map[string]bool, len(items))
+	for i := range items {
+		keep[EntryKey(&items[i])] = true
+	}
+	for k := range st.Alerts {
 		if !keep[k] {
 			delete(st.Alerts, k)
 		}
 	}
-	return sendB.list(), deferB.list()
 }
 
 // summaries — сводки по адресатам в порядке появления.

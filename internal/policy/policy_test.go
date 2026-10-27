@@ -216,8 +216,15 @@ func TestPlanEscalation(t *testing.T) {
 	if sums, _ := c.Plan(now.Add(31*time.Minute), groups, live, st, 1); len(sums) != 1 || sums[0].Target.Name != sLead {
 		t.Errorf("через 30 мин лиду повтор: %v", targets(sums))
 	}
-	// запись убрали — состояние забыто
+	// запись ниже порога (давление спало), но не убрана — счётчики живы:
+	// под давлением снова не новая, лиду — по top_repeat
 	c.Plan(now, nil, live, st, 1)
+	st.Forget(c.Items([]record.Entry{entry("/tmp/claude-tmp/big", gib, time.Hour, sessionOwner(shop, "go"))}, me))
+	if sums, _ := c.Plan(now.Add(5*time.Minute), groups, live, st, 1); len(sums) != 0 {
+		t.Errorf("запись ниже порога забыта, повтор: %v", targets(sums))
+	}
+	// запись убрали — состояние забыто
+	st.Forget(nil)
 	if len(st.Alerts) != 0 {
 		t.Errorf("состояние убранной записи не забыто: %v", st.Alerts)
 	}
