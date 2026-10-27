@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/cllog"
 )
 
 // Version — версия формата Summary для sleepstats.
@@ -31,6 +33,39 @@ type Report struct {
 	// Outcomes — по «решение/исход»: сколько и сколько токенов контекста.
 	Outcomes map[string]Tally `json:"outcomes"`
 	Bad      int              `json:"bad"` // нечитаемые строки журнала
+	// Done — что cl сделал на деле по своему журналу: по «вид/итог» (cllog.Kind*, cllog.Result*).
+	Done map[string]Tally `json:"done"`
+	// Sessions — по имени сессии: решения aguard (одно на запрос, в момент входа в окно) и что cl сделал на деле.
+	Sessions map[string]*Session `json:"sessions"`
+}
+
+// Session — решения aguard и сделанное cl по одной сессии.
+type Session struct {
+	Decisions map[string]int   `json:"decisions"`
+	Done      map[string]Tally `json:"done"`
+}
+
+// session — запись сессии name, при надобности новая.
+func (r *Report) session(name string) *Session {
+	s := r.Sessions[name]
+	if s == nil {
+		s = &Session{Decisions: map[string]int{}, Done: map[string]Tally{}}
+		r.Sessions[name] = s
+	}
+	return s
+}
+
+// AddDone добавляет сделанное cl.
+func (r *Report) AddDone(actions []cllog.Action) {
+	for _, a := range actions {
+		key := a.Kind + "/" + a.Result
+		for _, m := range []map[string]Tally{r.Done, r.session(a.Name).Done} {
+			t := m[key]
+			t.Count++
+			t.Tokens += a.Tokens
+			m[key] = t
+		}
+	}
 }
 
 // Tally — число записей, сумма контекста в них и оценка запись кэша заново (rewrite_micro_usd записей) в миллионных
@@ -53,11 +88,12 @@ func dollars(micro int64) float64 { return float64(micro) / 1e6 }
 // Collect — сводка по записям, которые read отдаёт в fn.
 func Collect(read func(fn func(*Record)) (int, error)) (*Report, error) {
 	r := &Report{Decisions: map[string]int{}, Held: map[string]Tally{}, Against: map[string]int{}, ResetAgainst: map[string]int{},
-		Outcomes: map[string]Tally{}}
+		Outcomes: map[string]Tally{}, Done: map[string]Tally{}, Sessions: map[string]*Session{}}
 	bad, err := read(func(rec *Record) {
 		switch rec.Kind {
 		case KindWould, KindWouldNot, KindWouldReset, KindWouldNotReset:
 			r.Decisions[rec.Kind]++
+			r.session(rec.Name).Decisions[rec.Kind]++
 			t := r.Held[rec.Kind]
 			t.add(rec)
 			r.Held[rec.Kind] = t
@@ -98,6 +134,54 @@ func (r *Report) Print(w io.Writer) error {
 	if r.Bad > 0 {
 		fmt.Fprintf(&b, "нечитаемых строк: %d\n", r.Bad)
 	}
+	fmt.Fprintf(&b, "cl сделал: %s\n", doneList(r.Done, true))
+	for _, name := range slices.Sorted(maps.Keys(r.Sessions)) {
+		s := r.Sessions[name]
+		if len(s.Done) == 0 && s.Decisions[KindWould]+s.Decisions[KindWouldReset] == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "  %s: aguard сжал бы %d, сбросил бы %d, не стал бы сжимать %d; cl: %s\n", name, s.Decisions[KindWould],
+			s.Decisions[KindWouldReset], s.Decisions[KindWouldNot], doneList(s.Done, false))
+	}
 	_, err := io.WriteString(w, b.String())
 	return err
+}
+
+// doneText — «вид/итог» сделанного словами.
+var doneText = map[string]string{
+	cllog.KindReset + "/" + cllog.ResultDone:          "сбросил",
+	cllog.KindReset + "/" + cllog.ResultFailed:        "сброс не состоялся",
+	cllog.KindCompact + "/" + cllog.ResultDone:        "сжал",
+	cllog.KindCompact + "/" + cllog.ResultFailed:      "не сжалось",
+	cllog.KindCompact + "/" + cllog.ResultStopped:     "сжатие прервано сигналом",
+	cllog.KindCompact + "/" + cllog.ResultNone:        "сжатие без итога",
+	cllog.KindTypeCompact + "/" + cllog.ResultDone:    "набрал /compact",
+	cllog.KindTypeCompact + "/" + cllog.ResultSkipped: "не набрал /compact: человек вводил",
+	cllog.KindTypeCompact + "/" + cllog.ResultFailed:  "набор /compact не удался",
+	cllog.KindTypeCompact + "/" + cllog.ResultNone:    "набор /compact без итога",
+	cllog.KindTypeClear + "/" + cllog.ResultDone:      "набрал /clear",
+	cllog.KindTypeClear + "/" + cllog.ResultSkipped:   "не набрал /clear: человек вводил",
+	cllog.KindTypeClear + "/" + cllog.ResultFailed:    "набор /clear не удался",
+	cllog.KindTypeClear + "/" + cllog.ResultNone:      "набор /clear без итога",
+}
+
+// doneList — сделанное через запятую; tokens — и контекст, который был у бесед.
+func doneList(done map[string]Tally, tokens bool) string {
+	if len(done) == 0 {
+		return "ничего"
+	}
+	parts := make([]string, 0, len(done))
+	for _, key := range slices.Sorted(maps.Keys(done)) {
+		text := doneText[key]
+		if text == "" {
+			text = key
+		}
+		t := done[key]
+		if tokens {
+			parts = append(parts, fmt.Sprintf("%s %d (контекст %d тыс.)", text, t.Count, t.Tokens/1000))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s %d", text, t.Count))
+		}
+	}
+	return strings.Join(parts, ", ")
 }

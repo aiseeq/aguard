@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/cllog"
 	"github.com/aiseeq/aguard/internal/names"
 )
 
@@ -80,7 +81,7 @@ func defaultConfig(home string) config {
 	return config{Restart: restartConfig{
 		Mode:         modeLog,
 		CheckSeconds: 60,
-		Journal:      filepath.Join(home, ".local", "state", "cl", "restart.log"),
+		Journal:      cllog.Path(home),
 		ResumeDir:    filepath.Join(home, ".claude", "restart"),
 		ResumeHours:  24,
 		CompactMode:  modeLog,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/cllog"
 	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/akit/session"
 )
@@ -154,7 +156,11 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 	for {
 		select {
 		case err := <-done:
-			journal(cfg.Restart.Journal, time.Now(), compactLine(out, time.Since(start), err, stop, output.String()))
+			stopped := ""
+			if stop != 0 {
+				stopped = stop.String()
+			}
+			journal(cfg.Restart.Journal, time.Now(), cllog.CompactResult(out.name, out.sessionID, time.Since(start), err, stopped, output.String()))
 			return stop, nil
 		case sig := <-sigs:
 			if s, ok := sig.(syscall.Signal); ok && (s == syscall.SIGTERM || s == syscall.SIGHUP) {
@@ -169,22 +175,6 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 			}
 		}
 	}
-}
-
-// compactLine — строка журнала об исходе сжатия: вывод claude — последние 300 байт одной строкой.
-func compactLine(out outcome, took time.Duration, err error, stop syscall.Signal, output string) string {
-	head := fmt.Sprintf("%s: /compact --resume %s за %v: ", out.name, out.sessionID, took.Round(time.Second))
-	switch {
-	case stop != 0:
-		return head + fmt.Sprintf("остановлено сигналом %v, выхожу", stop)
-	case err == nil:
-		return head + "сжал, поднимаю"
-	}
-	tail := strings.Join(strings.Fields(output), " ")
-	if len(tail) > 300 {
-		tail = "…" + tail[len(tail)-300:]
-	}
-	return head + fmt.Sprintf("не сжалось (%v: %s) — поднимаю без сжатия", err, tail)
 }
 
 // withRoleLine добавляет первой репликой строку роли из конфига; роли нет или конфиг не прочитался — аргументы как
@@ -307,7 +297,7 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 			}
 			if err := signalChild(cmd, syscall.SIGTERM); err != nil {
 				out.restart = false
-				journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: %v — перезапуск отменён", out.name, pid, err))
+				journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: %s", out.name, pid, cllog.Cancelled(err)))
 			}
 		}
 	}
@@ -388,10 +378,10 @@ func (l launcher) wantCompact(cfg config, pid int, a restart.Answer, last string
 	return l.wantIdle(pid, a, last, idleAction{
 		mode: cfg.Restart.CompactMode, names: "compact_names", pilot: cfg.Restart.CompactNames, key: a.CompactKey,
 		would: fmt.Sprintf("сжал бы%%s: контекст %d тыс., кэш жив, ничего не идёт", a.Tokens/1000), none: "не сжимаю",
-		doing:    fmt.Sprintf("сжимаю: контекст %d тыс.; SIGTERM, /compact, поднимаю --resume %s", a.Tokens/1000, a.SessionID),
+		doing:    cllog.Compact(a.Tokens, a.SessionID),
 		out:      outcome{compact: true, version: a.Running},
-		typeMode: cfg.Restart.TypeMode, typed: "/compact",
-		typing: fmt.Sprintf("сжимаю: контекст %d тыс.; набираю /compact в живой сессии", a.Tokens/1000),
+		typeMode: cfg.Restart.TypeMode, typed: cllog.TypedCompact,
+		typing: cllog.Typing(a.Tokens, cllog.TypedCompact),
 	})
 }
 
@@ -402,10 +392,10 @@ func (l launcher) wantReset(cfg config, pid int, a restart.Answer, last string) 
 	return l.wantIdle(pid, a, last, idleAction{
 		mode: cfg.Restart.ResetMode, names: "reset_names", pilot: cfg.Restart.ResetNames, key: a.ResetKey,
 		would: fmt.Sprintf("сбросил бы%%s: контекст %d тыс., работа закрыта, простаивает", a.Tokens/1000), none: "не сбрасываю",
-		doing:    fmt.Sprintf("сбрасываю: контекст %d тыс.; SIGTERM, поднимаю новую беседу вместо %s", a.Tokens/1000, a.SessionID),
+		doing:    cllog.Reset(a.Tokens, a.SessionID),
 		out:      outcome{reset: true, version: a.Running},
-		typeMode: cfg.Restart.TypeMode, typed: "/clear",
-		typing: fmt.Sprintf("сбрасываю: контекст %d тыс.; набираю /clear в живой сессии", a.Tokens/1000),
+		typeMode: cfg.Restart.TypeMode, typed: cllog.TypedClear,
+		typing: cllog.Typing(a.Tokens, cllog.TypedClear),
 	})
 }
 
@@ -439,14 +429,14 @@ func (l launcher) wantIdle(pid int, a restart.Answer, last string, x idleAction)
 func (l launcher) typeInto(cfg config, now time.Time, pid int, out outcome) {
 	head := fmt.Sprintf("%s pid=%d: ", out.name, pid)
 	if quiet := l.console.idle(now); quiet < humanQuiet {
-		journal(cfg.Restart.Journal, now, head+fmt.Sprintf("человек вводил %v назад — не набираю", quiet.Round(time.Second)))
+		journal(cfg.Restart.Journal, now, head+cllog.HumanTyping(quiet))
 		return
 	}
 	if err := l.console.typeLine(out.typed); err != nil {
-		journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("набор %s: %v", out.typed, err))
+		journal(cfg.Restart.Journal, time.Now(), head+cllog.TypeFailed(out.typed, err))
 		return
 	}
-	journal(cfg.Restart.Journal, time.Now(), head+fmt.Sprintf("набрал %s в беседе %s", out.typed, out.sessionID))
+	journal(cfg.Restart.Journal, time.Now(), head+cllog.Typed(out.typed, out.sessionID))
 }
 
 // onceLine — line, если ключ не тот, что в прошлый раз; иначе пусто.
@@ -499,7 +489,7 @@ func journal(file string, now time.Time, line string) {
 		return
 	}
 	defer f.Close()
-	if _, err := fmt.Fprintf(f, "%s %s\n", now.Format("2006-01-02T15:04:05-07:00"), line); err != nil {
+	if _, err := io.WriteString(f, cllog.Line(now, line)); err != nil {
 		fmt.Fprintln(os.Stderr, "cl: журнал:", err)
 	}
 }

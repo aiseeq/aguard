@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/activity"
+	"github.com/aiseeq/aguard/internal/cllog"
 	"github.com/aiseeq/aguard/internal/compact"
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/restart"
@@ -57,16 +58,22 @@ func (a *app) compactCmd(args []string) error {
 	return nil
 }
 
-// compactReport — сводка журнала за [from, to).
+// compactReport — сводка журнала за [from, to) и что cl сделал за то же время по своему журналу.
 func (a *app) compactReport(from, to time.Time) (*compact.Report, error) {
 	st := compact.NewStore(a.dir("compact"))
-	return compact.Collect(func(fn func(*compact.Record)) (int, error) {
+	r, err := compact.Collect(func(fn func(*compact.Record)) (int, error) {
 		return st.Read(from, func(r *compact.Record) {
 			if r.At.Before(to) {
 				fn(r)
 			}
 		})
 	})
+	if err != nil {
+		return r, err
+	}
+	done, _, err := cllog.Read(cllog.Path(a.home), from, to)
+	r.AddDone(done)
+	return r, err
 }
 
 // compactSummary — сводки за сутки, неделю и месяц до at в JSON.

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/cllog"
 	"github.com/aiseeq/aguard/internal/restart"
 )
 
@@ -146,8 +147,9 @@ func TestReport(t *testing.T) {
 		{Kind: KindWould}, {Kind: KindWouldNot, Against: []string{"screen", "draft"}}, {Kind: KindWouldNot, Against: []string{"draft"}},
 		{Kind: KindOutcome, Decision: KindWould, Outcome: OutcomeCacheExpired, Tokens: 150_000},
 		{Kind: KindOutcome, Decision: KindWould, Outcome: OutcomeCacheExpired, Tokens: 250_000},
-		{Kind: KindWouldReset, Tokens: 235_000, RewriteMicroUSD: 1_880_000}, {Kind: KindWouldNotReset, Against: []string{"tree"}},
+		{Kind: KindWouldReset, Tokens: 235_000, RewriteMicroUSD: 1_880_000, Name: "ledger-master"}, {Kind: KindWouldNotReset, Against: []string{"tree"}},
 	}
+	recs[0].Name = "shop-master"
 	r, err := Collect(func(fn func(*Record)) (int, error) {
 		for i := range recs {
 			fn(&recs[i])
@@ -161,11 +163,28 @@ func TestReport(t *testing.T) {
 		r.Held[KindWouldReset] != (Tally{1, 235_000, 1_880_000}) || r.ResetAgainst["tree"] != 1 || r.Against["tree"] != 0 {
 		t.Errorf("сводка: %+v", r)
 	}
+	r.AddDone([]cllog.Action{
+		{Name: "ledger-master", Kind: cllog.KindReset, Result: cllog.ResultDone, Tokens: 238_000},
+		{Name: "graft-master", Kind: cllog.KindCompact, Result: cllog.ResultDone, Tokens: 120_000},
+		{Name: "graft-master", Kind: cllog.KindCompact, Result: cllog.ResultDone, Tokens: 130_000},
+	})
+	if r.Done["compact/done"] != (Tally{Count: 2, Tokens: 250_000}) || r.Sessions["ledger-master"].Decisions[KindWouldReset] != 1 ||
+		r.Sessions["graft-master"].Done["compact/done"].Count != 2 {
+		t.Errorf("сделано cl: %+v", r)
+	}
 	var b bytes.Buffer
 	if err := r.Print(&b); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(b.String(), "исход would/cache_expired: 2, контекст 400 тыс. токенов") {
-		t.Errorf("печать:\n%s", b.String())
+	for _, want := range []string{
+		"исход would/cache_expired: 2, контекст 400 тыс. токенов",
+		"cl сделал: сжал 2 (контекст 250 тыс.), сбросил 1 (контекст 238 тыс.)\n",
+		"  ledger-master: aguard сжал бы 0, сбросил бы 1, не стал бы сжимать 0; cl: сбросил 1\n",
+		"  graft-master: aguard сжал бы 0, сбросил бы 0, не стал бы сжимать 0; cl: сжал 2\n",
+		"  shop-master: aguard сжал бы 1, сбросил бы 0, не стал бы сжимать 0; cl: ничего\n",
+	} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("нет %q в печати:\n%s", want, b.String())
+		}
 	}
 }
