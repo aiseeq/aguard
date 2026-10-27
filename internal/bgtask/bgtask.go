@@ -1,10 +1,14 @@
 // Package bgtask — забытые фоновые задачи Bash сессий Claude Code. Задача — процессы, чей stdout — файл её вывода
 // (claude-tmp/<проект>/<беседа>/tasks/<id>.output). Забытой считается обычная команда, которую Claude Code сам увёл
-// в фон по таймауту (агент ждал её минуты), если она идёт дольше Age и вывод не меняется дольше Quiet. Задачи,
-// запущенные фоном нарочно (run_in_background: ожидания прогонов, Сон, evals, бенчмарк), не трогаются: их вывод
-// молчит часами по замыслу. Замер 20–27.10 (задание лида 27.10): из 10 таких уведённых по таймауту задач дольше
-// часа все 10 — зависшие или забытые (медленный grep -o по jsonl, ssh с sudo, циклы pgrep -f), из 31 нарочно
-// фоновой дольше часа почти все — намеренные ожидания с молчащим выводом.
+// в фон по таймауту (агент ждал её минуты), если она идёт дольше Age и вывод не меняется дольше Quiet. Замер
+// 20–27.10 (задание лида 27.10): из 10 таких уведённых по таймауту задач дольше часа все 10 — зависшие или забытые
+// (медленный grep -o по jsonl, ssh с sudo, циклы pgrep -f).
+//
+// Нарочно фоновая задача (run_in_background) — по команде: ожидание (цикл со sleep, wfor, worker wait, sleep)
+// дольше Age нарушает правило «срок ожидания — не дальше часа» (пользователь 27.10 15:00 CET в shop: «у каждого
+// ожидания должно быть время когда оно кончается вне зависимости от того, дождались или нет, а то оно будет вечно
+// висеть и не давать рестартнуть консоль»), и владельцу — письмо; прогон (Сон evals, серии llmark, тесты, бенчмарк)
+// кончается сам и не трогается. Замер 20–27.10: из 38 нарочно фоновых дольше часа ожиданий 26, прогонов 12.
 package bgtask
 
 import (
@@ -26,6 +30,7 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/akit/proc"
+	"github.com/aiseeq/akit/transcript/waits"
 )
 
 // Режимы: ModeOff — выключено, ModeLog — только журнал «написал бы», ModeAlert — письмо сессии-владельцу.
@@ -266,9 +271,21 @@ func eachLine(file string, want []byte, fn func([]byte) bool) error {
 	}
 }
 
-// Message — письмо сессии-владельцу, одной строкой.
+// Message — письмо сессии-владельцу об уведённой по таймауту задаче, одной строкой.
 func Message(t *Task, o *Origin, now time.Time) string {
-	what := "фоновая задача " + t.ID
+	return fmt.Sprintf("aguard: фоновая задача %s идёт %s, вывод не меняется %s; это обычная команда, которую Claude Code "+
+		"увёл в фон по таймауту. Нужна ли? Если нет — TaskStop %s.", title(t, o), Span(now.Sub(t.Start)), Span(now.Sub(t.Written)), t.ID)
+}
+
+// WaitMessage — письмо владельцу нарочно фонового ожидания дольше часа, одной строкой.
+func WaitMessage(t *Task, o *Origin, now time.Time) string {
+	return fmt.Sprintf("aguard: фоновое ожидание %s идёт %s, срок по правилу — час: проверь, нужен ли новый срок, "+
+		"или сними — TaskStop %s.", title(t, o), Span(now.Sub(t.Start)), t.ID)
+}
+
+// title — id задачи, её описание или начало команды и суб-агент.
+func title(t *Task, o *Origin) string {
+	what := t.ID
 	label := o.Description
 	if label == "" {
 		label = short(o.Command)
@@ -279,8 +296,46 @@ func Message(t *Task, o *Origin, now time.Time) string {
 	if o.Agent != "" {
 		what += " суб-агента " + o.Agent
 	}
-	return fmt.Sprintf("aguard: %s идёт %s, вывод не меняется %s; это обычная команда, которую Claude Code увёл в фон "+
-		"по таймауту. Нужна ли? Если нет — TaskStop %s.", what, Span(now.Sub(t.Start)), Span(now.Sub(t.Written)), t.ID)
+	return what
+}
+
+// scriptRun — запуск скрипта: путь .sh от корня или от ~, командой или аргументом bash/sh.
+var scriptRun = regexp.MustCompile(`(?:^|[\s;&|(])(?:(?:bash|sh)\s+)?((?:~|/)[^\s;&|<>'"()]+\.sh)\b`)
+
+// maxScript — скрипт больше не разбирается: ожидания в scratchpad — десятки строк.
+const maxScript = 256 << 10
+
+// WaitHow — способ ожидания команды задачи (akit transcript/waits); не узнан, а команда запускает скрипт .sh — по
+// тексту скрипта: «bash scratchpad/series.sh» снаружи не видно. Не ожидание — пусто; скрипта уже нет — не ожидание
+// по нему.
+func WaitHow(cmd, home string) (string, error) {
+	if how := waits.CommandHow(cmd); how != "" {
+		return how, nil
+	}
+	for _, m := range scriptRun.FindAllStringSubmatch(cmd, -1) {
+		path := m[1]
+		if rest, ok := strings.CutPrefix(path, "~/"); ok {
+			path = filepath.Join(home, rest)
+		}
+		info, err := os.Stat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("скрипт задачи: %w", err)
+		}
+		if !info.Mode().IsRegular() || info.Size() > maxScript {
+			continue
+		}
+		text, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("скрипт задачи: %w", err)
+		}
+		if how := waits.CommandHow(string(text)); how != "" {
+			return how, nil
+		}
+	}
+	return "", nil
 }
 
 // Span — длительность словами: «1 ч 05 мин», «42 мин».
@@ -303,7 +358,8 @@ func short(s string) string {
 // Seen — решение по задаче: по разу на задачу, пока она жива.
 type Seen struct {
 	At   time.Time `json:"at"`
-	Auto bool      `json:"auto"` // уведена в фон по таймауту: письмо (или «написал бы» в log)
+	Auto bool      `json:"auto"`           // уведена в фон по таймауту: письмо (или «написал бы» в log)
+	Wait string    `json:"wait,omitempty"` // нарочно фоновое ожидание (способ): письмо о сроке
 }
 
 // State — решённые задачи по id; хранится в state.json папки наблюдателя.

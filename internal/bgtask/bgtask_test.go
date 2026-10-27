@@ -105,6 +105,39 @@ func TestMessage(t *testing.T) {
 	if strings.Contains(got, "\n") {
 		t.Error("письмо — одной строкой")
 	}
+	got = WaitMessage(task, &Origin{Command: "until grep -q DONE out.txt; do sleep 60; done"}, now)
+	want = "aguard: фоновое ожидание b7xi68io0 «until grep -q DONE out.txt; do sleep 60; done» идёт 4 ч 30 мин, срок по " +
+		"правилу — час: проверь, нужен ли новый срок, или сними — TaskStop b7xi68io0."
+	if got != want {
+		t.Errorf("\n got %s\nwant %s", got, want)
+	}
+}
+
+// Ожидание или прогон — по команде, а запуск скрипта — по его тексту (примеры — из замера 20–27.10).
+func TestWaitHow(t *testing.T) {
+	home := t.TempDir()
+	write := func(name, text string) {
+		if err := os.WriteFile(filepath.Join(home, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("series.sh", "while pgrep -f 'farm lane' >/dev/null; do\n  sleep 60\ndone\necho done\n")
+	write("base-full.sh", "cd ~/sc2/demu && graft test\n")
+	for cmd, want := range map[string]string{
+		"until grep -q DONE /x/out.txt; do sleep 20; done; date":                       "loop",
+		"worker wait 1023-1636-move-late --timeout 60m":                                "script",
+		"bash ~/series.sh > /x/series.log 2>&1":                                        "loop",
+		"bash ~/wait-series.sh":                                                        "script",
+		"bash " + filepath.Join(home, "series.sh"):                                     "loop",
+		"bash ~/base-full.sh 3146e1b > /x/base.log":                                    "",
+		"bash ~/missing.sh":                                                            "",
+		"cat /proc/loadavg && ~/.claude/improve/run.sh step evals > /x/evals.log 2>&1": "",
+		"cd ~/work/portal && graft test-unit > /x/unit.log":                        "",
+	} {
+		if got, err := WaitHow(cmd, home); err != nil || got != want {
+			t.Errorf("%s: %q %v, нужно %q", cmd, got, err, want)
+		}
+	}
 }
 
 // Состояние хранит только живые задачи.

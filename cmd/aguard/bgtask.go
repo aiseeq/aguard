@@ -1,6 +1,7 @@
 // Наблюдатель bgtask: забытые фоновые задачи Bash. Обычная команда, которую Claude Code увёл в фон по таймауту, идёт
-// дольше age, и вывод не меняется дольше quiet — письмо сессии-владельцу одной строкой, по разу на задачу. Снимать
-// задачу решает владелец (TaskStop), aguard её не трогает.
+// дольше age, и вывод не меняется дольше quiet — письмо сессии-владельцу одной строкой, по разу на задачу; нарочно
+// фоновое ожидание идёт дольше age — письмо о сроке, тоже по разу. Снимать задачу решает владелец (TaskStop), aguard
+// её не трогает.
 package main
 
 import (
@@ -57,12 +58,13 @@ func (a *app) bgtaskRound(cfg *bgtask.Config, dry bool) error {
 	}
 	for i := range tasks {
 		t := &tasks[i]
+		old := now.Sub(t.Start) >= cfg.Age.D()
 		stale := t.Stale(now, cfg.Age.D(), cfg.Quiet.D())
 		if dry {
 			fmt.Fprintf(a.out, "%s pids=%v сессия=%d идёт %s, вывод молчит %s, застыла=%v %s\n", t.ID, t.Pids, t.Holder,
 				bgtask.Span(now.Sub(t.Start)), bgtask.Span(now.Sub(t.Written)), stale, t.Output)
 		}
-		if _, seen := st[t.ID]; !stale || (seen && !dry) {
+		if _, seen := st[t.ID]; !old || (seen && !dry) {
 			continue
 		}
 		o, err := bgtask.FindOrigin(session.ProjectsDir(a.home), t)
@@ -70,15 +72,23 @@ func (a *app) bgtaskRound(cfg *bgtask.Config, dry bool) error {
 			a.warn("bgtask", "транскрипт задачи "+t.ID, "err", err)
 			continue
 		}
+		wait := ""
+		if o.Found && !o.Auto {
+			if wait, err = bgtask.WaitHow(o.Command, a.home); err != nil {
+				a.warn("bgtask", "команда задачи "+t.ID, "err", err)
+				continue
+			}
+		}
 		if dry {
-			fmt.Fprintf(a.out, "  вызов найден=%v по таймауту=%v суб-агент=%q «%s»\n", o.Found, o.Auto, o.Agent, o.Description)
+			fmt.Fprintf(a.out, "  вызов найден=%v по таймауту=%v ожидание=%q суб-агент=%q «%s»\n", o.Found, o.Auto, wait, o.Agent, o.Description)
 			continue
 		}
-		if !o.Found { // вызова в транскрипте (ещё) нет: решить в следующий проход
+		// вызова в транскрипте (ещё) нет — решить в следующий проход; уведённая по таймауту и прогон ждут молчания вывода
+		if !o.Found || (wait == "" && !stale) {
 			continue
 		}
-		st[t.ID] = bgtask.Seen{At: now, Auto: o.Auto}
-		a.bgtaskNotify(cfg, t, &o, now)
+		st[t.ID] = bgtask.Seen{At: now, Auto: o.Auto, Wait: wait}
+		a.bgtaskNotify(cfg, t, &o, wait, now)
 	}
 	if dry {
 		return nil
@@ -86,16 +96,21 @@ func (a *app) bgtaskRound(cfg *bgtask.Config, dry bool) error {
 	return st.Save(statePath, tasks)
 }
 
-// bgtaskNotify — письмо владельцу уведённой по таймауту задачи (в log — только журнал); нарочно фоновая — запись.
-func (a *app) bgtaskNotify(cfg *bgtask.Config, t *bgtask.Task, o *bgtask.Origin, now time.Time) {
-	quiet := int64(now.Sub(t.Written).Minutes())
-	if !o.Auto {
-		a.log.Info("aguard bgtask: застывшая задача запущена фоном нарочно — не пишу", "task", t.ID,
+// bgtaskNotify — письмо владельцу уведённой по таймауту задачи или нарочно фонового ожидания (в log — только
+// журнал); нарочно фоновый прогон — запись. В учёте значение — минуты молчания вывода, у ожидания — минуты хода.
+func (a *app) bgtaskNotify(cfg *bgtask.Config, t *bgtask.Task, o *bgtask.Origin, wait string, now time.Time) {
+	value, prefix, msg := int64(now.Sub(t.Written).Minutes()), "", ""
+	switch {
+	case o.Auto:
+		msg = bgtask.Message(t, o, now)
+	case wait != "":
+		value, prefix, msg = int64(now.Sub(t.Start).Minutes()), "wait_", bgtask.WaitMessage(t, o, now)
+	default:
+		a.log.Info("aguard bgtask: застывшая задача — нарочно фоновый прогон, не пишу", "task", t.ID,
 			"description", o.Description, "age", bgtask.Span(now.Sub(t.Start)), "quiet", bgtask.Span(now.Sub(t.Written)))
-		a.note("bgtask", "intended", t.ID, "", quiet, "min")
+		a.note("bgtask", "intended", t.ID, "", value, "min")
 		return
 	}
-	msg := bgtask.Message(t, o, now)
 	in, err := a.reg.Get(t.Holder)
 	switch {
 	case err != nil || in == nil || in.SocketPath == "":
@@ -103,16 +118,16 @@ func (a *app) bgtaskNotify(cfg *bgtask.Config, t *bgtask.Task, o *bgtask.Origin,
 		return
 	case cfg.Mode != bgtask.ModeAlert:
 		a.log.Info("aguard bgtask: написал бы", "session", in.Name, "msg", msg)
-		a.note("bgtask", "would_send", t.ID, in.Name, quiet, "min")
+		a.note("bgtask", prefix+"would_send", t.ID, in.Name, value, "min")
 		return
 	}
 	if err := a.bgtaskSend(cfg, in, msg); err != nil {
 		a.warn("bgtask", "письмо о задаче "+t.ID, "session", in.Name, "err", err)
-		a.note("bgtask", "send_failed", t.ID, in.Name, quiet, "min")
+		a.note("bgtask", prefix+"send_failed", t.ID, in.Name, value, "min")
 		return
 	}
 	a.log.Info("aguard bgtask: написал", "session", in.Name, "msg", msg)
-	a.note("bgtask", "sent", t.ID, in.Name, quiet, "min")
+	a.note("bgtask", prefix+"sent", t.ID, in.Name, value, "min")
 }
 
 func (a *app) bgtaskSend(cfg *bgtask.Config, in *session.Info, msg string) error {
