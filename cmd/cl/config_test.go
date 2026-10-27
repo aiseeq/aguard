@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/aiseeq/aguard/internal/restart"
 )
 
 func TestRestartArgs(t *testing.T) {
@@ -43,9 +41,8 @@ func testConfig() config {
 			{Names: []string{"lead"}, Text: "Ты лид ({why}).", OnStart: startAlways},
 			{Names: []string{"*-master"}, Text: "Мастер ({why}).", OnStart: startResume},
 		},
-		ResumeText:  "Файл: {path}.",
-		RestartNote: "Служебная строка.",
-		ResetNote:   "Беседа новая.",
+		ResumeText: "Файл: {path}.",
+		ResetNote:  "Беседа новая.",
 	}
 }
 
@@ -54,8 +51,8 @@ func TestRoleLine(t *testing.T) {
 	if got := c.roleLine("lead", "старт", "", eventStart); got != "Ты лид (старт)." {
 		t.Errorf("лид при старте: %q", got)
 	}
-	if got := c.roleLine("lead", "перезапуск", "/r/lead.md", eventRestart); got != "Ты лид (перезапуск). Файл: /r/lead.md. Служебная строка." {
-		t.Errorf("лид после перезапуска: %q", got)
+	if got := c.roleLine("lead", "сброс", "/r/lead.md", eventReset); got != "Ты лид (сброс). Файл: /r/lead.md. Беседа новая." {
+		t.Errorf("лид после сброса: %q", got)
 	}
 	if got := c.roleLine("sc2go-master", "старт", "", eventStart); got != "" {
 		t.Errorf("мастер без файла при старте молчит: %q", got)
@@ -63,9 +60,7 @@ func TestRoleLine(t *testing.T) {
 	if got := c.roleLine("sc2go-master", "старт", "/r/m.md", eventStart); got != "Мастер (старт). Файл: /r/m.md." {
 		t.Errorf("мастер с файлом при старте: %q", got)
 	}
-	if got := c.roleLine("sc2go-master", "перезапуск", "", eventRestart); got != "Мастер (перезапуск). Служебная строка." {
-		t.Errorf("мастер после перезапуска: %q", got)
-	}
+
 	if got := c.roleLine("sc2go-master", "сброс", "", eventReset); got != "Мастер (сброс). Беседа новая." {
 		t.Errorf("мастер после сброса (без файла — всё равно строка роли): %q", got)
 	}
@@ -110,7 +105,7 @@ func TestRepoConfig(t *testing.T) {
 	if line := cfg.roleLine("lead", "старт cl на Claude Code 2.1.310", "", eventStart); !strings.Contains(line, "Ты лид") {
 		t.Errorf("лид: %q", line)
 	}
-	if line := cfg.roleLine("demu-master", "перезапуск cl на Claude Code 2.1.310", "", eventRestart); !strings.Contains(line, "продолжай по своей роли") {
+	if line := cfg.roleLine("demu-master", "сброс", "", eventReset); !strings.Contains(line, "продолжай по своей роли") {
 		t.Errorf("мастер: %q", line)
 	}
 }
@@ -140,33 +135,10 @@ func TestFreshResume(t *testing.T) {
 
 func TestWhyText(t *testing.T) {
 	at := time.Date(2026, 10, 27, 2, 48, 11, 0, time.Local)
-	for _, c := range []struct{ event, from, want string }{
-		{eventStart, "", "старт cl на Claude Code 2.1.311"},
-		{eventRestart, "2.1.310", "cl перезапустил консоль в 02:48 для обновления Claude Code 2.1.310 → 2.1.311"},
-		{eventCompact, "", "cl перезапустил консоль в 02:48, чтобы сжать беседу; Claude Code 2.1.311"},
-		{eventReset, "", "cl начал новую беседу в 02:48 вместо простаивавшей; Claude Code 2.1.311"},
-	} {
-		if got := whyText(c.event, c.from, "2.1.311", at); got != c.want {
-			t.Errorf("%s: %q, ждали %q", c.event, got, c.want)
-		}
+	if got := whyText(eventStart, "2.1.311", at); got != "старт cl на Claude Code 2.1.311" {
+		t.Errorf("старт: %q", got)
 	}
-	if got := whyText(eventRestart, "2.1.310", "2.1.311", at.UTC()); !strings.Contains(got, " в 02:48 ") {
-		t.Errorf("время не местное: %q", got)
-	}
-}
-
-func TestCronsLine(t *testing.T) {
-	why := "cl перезапустил консоль в 02:48 для обновления Claude Code 2.1.310 → 2.1.311"
-	if got := cronsLine(why, false, nil, "Служебная."); got != "" {
-		t.Errorf("без таймеров — голый --resume, без реплики: %q", got)
-	}
-	jobs := []restart.CronJob{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл sleep)", Recurring: true}, {ID: "j2", Cron: "5 10 27 10 *", Prompt: "замер"}}
-	want := why + "; таймеры CronCreate этой сессии при перезапуске пропали — поставь заново те, что ещё нужны: " +
-		"47 1 * * * «Сон (скилл sleep)» (повторяющийся); 5 10 27 10 * «замер» (разовый). Служебная."
-	if got := cronsLine(why, true, jobs, "Служебная."); got != want {
-		t.Errorf("с таймерами:\n%q\nждали\n%q", got, want)
-	}
-	if got := cronsLine(why, true, nil, ""); got != why+"; таймеры CronCreate этой сессии при перезапуске пропали — поставь заново те, что ещё нужны." {
-		t.Errorf("таймеры без списка: %q", got)
+	if got := whyText(eventReset, "2.1.311", at.UTC()); got != "cl начал новую беседу в 02:48 вместо простаивавшей; Claude Code 2.1.311" {
+		t.Errorf("сброс (время местное): %q", got)
 	}
 }

@@ -36,9 +36,7 @@ type config struct {
 	Roles []role `json:"roles"`
 	// ResumeText — добавка к строке роли, когда есть свежий файл возобновления; {path} — путь к нему.
 	ResumeText string `json:"resume_text"`
-	// RestartNote — добавка к реплике о таймерах после перезапуска и сжатия cl (cronsLine): беседа сохранена, строка не
-	// ответ пользователя.
-	RestartNote string `json:"restart_note"`
+
 	// ResetNote — добавка к строке роли после сброса cl: беседа новая, прошлая работа закрыта.
 	ResetNote string `json:"reset_note"`
 }
@@ -154,8 +152,8 @@ func (c config) roleFor(name string) (role, bool) {
 	return role{}, false
 }
 
-// roleLine — первая реплика сессии: строка роли, файл возобновления, после перезапуска, сжатия и сброса — пометка cl
-// (event — что случилось: eventStart, eventRestart…). Пусто — молчать.
+// roleLine — первая реплика сессии при старте и после сброса (event — eventStart или eventReset): строка роли, файл
+// возобновления, после сброса — пометка cl. Пусто — молчать.
 func (c config) roleLine(name, why, resume, event string) string {
 	r, ok := c.roleFor(name)
 	if !ok || r.Text == "" {
@@ -168,12 +166,8 @@ func (c config) roleLine(name, why, resume, event string) string {
 	if resume != "" && c.ResumeText != "" {
 		parts = append(parts, strings.ReplaceAll(c.ResumeText, "{path}", resume))
 	}
-	note := c.RestartNote
-	if event == eventReset {
-		note = c.ResetNote
-	}
-	if event != eventStart && note != "" {
-		parts = append(parts, note)
+	if event == eventReset && c.ResetNote != "" {
+		parts = append(parts, c.ResetNote)
 	}
 	return strings.Join(parts, " ")
 }

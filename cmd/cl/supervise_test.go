@@ -26,7 +26,7 @@ func TestSuperviseRestart(t *testing.T) {
 	d := w.dir
 	write(t, filepath.Join(d, "config.json"), `{"restart":{"mode":"act","check_seconds":10,`+
 		`"journal":"`+filepath.Join(d, "restart.log")+`","resume_dir":"`+filepath.Join(d, "restart")+`"},`+
-		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"always"}],"restart_note":"Служебная."}`)
+		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"always"}]}`)
 	// Нет перезапуска — sleep выходит сам через 25 с, и тест падает на отсутствии второго запуска, а не висит.
 	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
 		`if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; exit 3; fi
@@ -34,8 +34,7 @@ printf '%s\n' "$@" > "$D/run1"
 exec sleep 25`)
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
 	socket := fakeAguard(t, `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",`+
-		`"running":"2.1.309","installed":"2.1.310","crons":true,`+
-		`"cron_jobs":[{"id":"j1","cron":"47 1 * * *","prompt":"Сон (скилл sleep)","recurring":true}]}`)
+		`"running":"2.1.309","installed":"2.1.310","crons":true}`) // таймеры есть — реплики всё равно нет: --resume их вернёт
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"), name: "x-master",
 		aguard: socket}
 
@@ -53,8 +52,7 @@ exec sleep 25`)
 	}
 	second := append(append(slices.Clone(scope), unit+"-r1", "--", w.claude),
 		"--dangerously-skip-permissions", "--allowedTools=Grep,Glob", "-n", "x-master", "--model", "opus", "--effort=high",
-		"--resume", "s1", "cl перезапустил консоль в ЧЧ:ММ для обновления Claude Code 2.1.309 → 2.1.310; таймеры CronCreate этой "+
-			"сессии при перезапуске пропали — поставь заново те, что ещё нужны: 47 1 * * * «Сон (скилл sleep)» (повторяющийся). Служебная.")
+		"--resume", "s1")
 	if _, err := os.Stat(filepath.Join(d, "run2")); err != nil {
 		t.Fatalf("второго запуска нет: %v; журнал:\n%s", err, strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n"))
 	}
@@ -218,8 +216,7 @@ func TestWantCompact(t *testing.T) {
 	if out, line, _ := l.wantCompact(cfg, 7, restart.Answer{Compact: true}, ""); out.restart || !strings.Contains(line, "не сжимаю") {
 		t.Errorf("без беседы: %+v %q", out, line)
 	}
-	a.Crons = true
-	if out, _, _ := l.wantCompact(cfg, 7, a, ""); !out.restart || !out.compact || !out.crons || out.sessionID != "s1" {
+	if out, _, _ := l.wantCompact(cfg, 7, a, ""); !out.restart || !out.compact || out.sessionID != "s1" {
 		t.Errorf("act: %+v", out)
 	}
 	cfg.Restart.CompactMode = modeOff

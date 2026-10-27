@@ -37,19 +37,15 @@ type launcher struct {
 // outcome — чем кончился один запуск claude.
 type outcome struct {
 	err error
-	// restart — сессия вышла по сигналу перезапуска от cl; sessionID, name, version — что поднять снова; from — версия
-	// до перезапуска, at — когда cl решил: оба — в {why} строки роли.
+	// restart — сессия вышла по сигналу перезапуска от cl; sessionID, name, version — что поднять снова; at — когда cl
+	// решил (в {why} строки роли после сброса).
 	restart   bool
 	sessionID string
 	name      string
 	version   string
-	from      string
 	at        time.Time
-	cronJobs  []restart.CronJob
-	// compact — перед подъёмом сжать беседу (`claude -p --resume <сессия> /compact`); crons — у сессии были таймеры:
-	// подъём после перезапуска и сжатия с репликой о них (cronsLine), иначе без реплики.
+	// compact — перед подъёмом сжать беседу (`claude -p --resume <сессия> /compact`).
 	compact bool
-	crons   bool
 	// reset — поднять не прежнюю беседу, а новую: строка роли и файл возобновления.
 	reset bool
 	// typed — не перезапускать, а набрать эту команду в живой сессии под pty (restart.type_mode act).
@@ -61,10 +57,9 @@ const humanQuiet = time.Minute
 
 // Что случилось с сессией перед запуском claude: от этого зависит {why} строки роли.
 const (
-	eventStart   = "старт"
-	eventRestart = "перезапуск"
-	eventCompact = "сжатие"
-	eventReset   = "сброс"
+	eventStart = "старт"
+
+	eventReset = "сброс"
 )
 
 // compactTimeout — срок на `claude -p … /compact`: сжатие большой беседы идёт минуты, дольше — зависло.
@@ -114,9 +109,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 			args = l.withRoleLine(append(append(sessionFlags(l.home), "-n", out.name), keep...), out.name, eventReset, out)
 			continue
 		}
-		event := eventRestart
 		if out.compact {
-			event = eventCompact
 			sig, err := l.compactSession(sigs, strconv.Itoa(os.Getpid())+"-c"+strconv.Itoa(n+1), keep, out)
 			if err != nil {
 				cfg, cfgErr := loadConfig(l.configFile, l.home)
@@ -127,8 +120,11 @@ func (l launcher) supervise(pre, userArgs []string) int {
 			}
 		}
 		args = append(append(sessionFlags(l.home), "-n", out.name), keep...)
+		// Без реплики: беседа поднята целиком, а таймеры CronCreate --resume возвращает сам (замер лида 27.10 09:58 CET
+		// на 2.1.311; changelog 2.1.110). Реплика — лишний ход на всём контексте и непонятная строка в консоли
+		// (пользователь 27.10 09:50 CET: «если консоль работает, не надо её рестартить. А если не работает, то не о чем
+		// напоминать»).
 		args = append(args, "--resume", out.sessionID)
-		args = l.withRoleLine(args, out.name, event, out)
 	}
 }
 
@@ -213,14 +209,12 @@ func (l launcher) roleLine(name, event string, out outcome) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	why := whyText(event, out.from, version, out.at)
-	if event == eventRestart || event == eventCompact {
-		return cronsLine(why, out.crons, out.cronJobs, cfg.RestartNote), nil
-	}
+	why := whyText(event, version, out.at)
 	resume, err := freshResume(cfg.Restart.ResumeDir, name, time.Duration(max(cfg.Restart.ResumeHours, 1))*time.Hour, time.Now())
 	if err != nil {
 		return "", err
 	}
+
 	line := cfg.roleLine(name, why, resume, event)
 	if resume == "" || !strings.Contains(line, resume) {
 		return line, nil
@@ -232,37 +226,12 @@ func (l launcher) roleLine(name, event string, out outcome) (string, error) {
 	return strings.ReplaceAll(line, resume, used), nil
 }
 
-// cronsLine — реплика после перезапуска и сжатия: только сессии с таймерами CronCreate, они жили лишь в процессе claude
-// и пропали с ним. Беседа поднята целиком, остальным напоминать нечего, а реплика — лишний ход на всём контексте
-// (пользователь 27.10 09:50 CET: «если консоль работает, не надо её рестартить. А если не работает, то не о чем
-// напоминать. Ну, только таймер - исключение»). Пусто — голый --resume. Файл возобновления — для настоящего старта.
-func cronsLine(why string, crons bool, jobs []restart.CronJob, note string) string {
-	if !crons {
-		return ""
-	}
-	line := why + "; таймеры CronCreate этой сессии при перезапуске пропали — поставь заново те, что ещё нужны"
-	if len(jobs) > 0 {
-		list := make([]string, len(jobs))
-		for i, j := range jobs {
-			list[i] = j.String()
-		}
-		line += ": " + strings.Join(list, "; ")
-	}
-	return strings.TrimSpace(line + ". " + note)
-}
-
-// whyText — {why} строки роли. Старт — «старт cl на Claude Code 2.1.310». Перезапуск, сжатие и сброс — что cl сделал,
-// когда и зачем: история на экране после --resume та же, и строка без времени и причины выглядела сбоем (пользователь
-// 27.10 09:39 CET в консоли мастера проекта, задание лида). Время местное, без пояса: строку читает человек в своей консоли.
-func whyText(event, from, version string, at time.Time) string {
-	clock := at.Local().Format("15:04")
-	switch event {
-	case eventRestart:
-		return fmt.Sprintf("cl перезапустил консоль в %s для обновления Claude Code %s → %s", clock, restart.OrDash(from), version)
-	case eventCompact:
-		return fmt.Sprintf("cl перезапустил консоль в %s, чтобы сжать беседу; Claude Code %s", clock, version)
-	case eventReset:
-		return fmt.Sprintf("cl начал новую беседу в %s вместо простаивавшей; Claude Code %s", clock, version)
+// whyText — {why} строки роли. Старт — «старт cl на Claude Code 2.1.310». Сброс — что cl сделал и когда: строка без
+// времени и причины выглядела сбоем (пользователь 27.10 09:39 CET, задание лида). Время местное, без пояса: строку
+// читает человек в своей консоли.
+func whyText(event, version string, at time.Time) string {
+	if event == eventReset {
+		return fmt.Sprintf("cl начал новую беседу в %s вместо простаивавшей; Claude Code %s", at.Local().Format("15:04"), version)
 	}
 	return eventStart + " cl на Claude Code " + version
 }
@@ -369,7 +338,7 @@ func (l launcher) next(cfg config, now time.Time, pid int, a restart.Answer, ask
 	last.verdict = journalOnce(cfg, last.verdict, a.Key, journalLine(cfg.Restart.Mode, name, pid, a))
 	if a.Restart && cfg.Restart.Mode == modeAct && a.SessionID != "" {
 		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: SIGTERM, поднимаю --resume %s на %s", name, pid, a.SessionID, a.Installed))
-		return outcome{restart: true, sessionID: a.SessionID, name: name, version: a.Installed, from: a.Running, at: now, crons: a.Crons, cronJobs: a.CronJobs}, last
+		return outcome{restart: true, sessionID: a.SessionID, name: name, version: a.Installed, at: now}, last
 	}
 	steps := []struct {
 		on   bool
@@ -419,7 +388,7 @@ func (l launcher) wantCompact(cfg config, pid int, a restart.Answer, last string
 		mode: cfg.Restart.CompactMode, names: "compact_names", pilot: cfg.Restart.CompactNames, key: a.CompactKey,
 		would: fmt.Sprintf("сжал бы%%s: контекст %d тыс., кэш жив, ничего не идёт", a.Tokens/1000), none: "не сжимаю",
 		doing:    fmt.Sprintf("сжимаю: контекст %d тыс.; SIGTERM, /compact, поднимаю --resume %s", a.Tokens/1000, a.SessionID),
-		out:      outcome{compact: true, crons: a.Crons, cronJobs: a.CronJobs, version: a.Running},
+		out:      outcome{compact: true, version: a.Running},
 		typeMode: cfg.Restart.TypeMode, typed: "/compact",
 		typing: fmt.Sprintf("сжимаю: контекст %d тыс.; набираю /compact в живой сессии", a.Tokens/1000),
 	})

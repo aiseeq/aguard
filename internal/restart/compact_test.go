@@ -35,7 +35,7 @@ func TestDecideCompact(t *testing.T) {
 		"tty":    func(f *facts) { f.TTYQuiet = time.Minute },
 		"screen": func(f *facts) { f.Prompt = screen.Draft },
 		"tasks":  func(f *facts) { f.Transcript.Tasks = []string{"Agent «ревью» a1"} },
-		"crons":  func(f *facts) { f.Transcript.Crons = []CronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
+		"crons":  func(f *facts) { f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
 		"wakeup": func(f *facts) { f.Transcript.Wakeups = []string{"ScheduleWakeup до 19:00"} },
 	}
 	for code, spoil := range cases {
@@ -50,7 +50,7 @@ func TestDecideCompact(t *testing.T) {
 		t.Errorf("аргументы пропали бы: %+v", v)
 	}
 	f := compactFacts(now)
-	f.Transcript.Crons = []CronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}}
+	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}}
 	if v := decideCompact(f, &c, allowance{role: leadRole}, now); !v.Compact {
 		t.Errorf("таймеры лида восстановимы: %+v", v)
 	}
@@ -109,7 +109,7 @@ func TestDecideReset(t *testing.T) {
 		"early":  func(f *facts) { f.Transcript.Context.Request = now.Add(-59 * time.Minute) },
 		"hint":   func(f *facts) { f.ClearHint = false },
 		"screen": func(f *facts) { f.Prompt = screen.Draft },
-		"crons":  func(f *facts) { f.Transcript.Crons = []CronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
+		"crons":  func(f *facts) { f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
 		"tasks":  func(f *facts) { f.Transcript.Tasks = []string{"Agent «ревью» a1"} },
 	}
 	for code, spoil := range cases {

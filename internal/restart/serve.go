@@ -42,10 +42,8 @@ type Answer struct {
 	Name      string `json:"name"`
 	Running   string `json:"running"`
 	Installed string `json:"installed"`
-	// Crons — у сессии живые таймеры CronCreate, CronJobs — они сами: подъём после перезапуска и сжатия — со строкой
-	// cl, которая их перечисляет, чтобы сессия поставила их заново (таймеры живут только в процессе claude).
-	Crons    bool      `json:"crons"`
-	CronJobs []CronJob `json:"cron_jobs,omitempty"`
+	// Crons — у сессии живые таймеры CronCreate.
+	Crons bool `json:"crons"`
 	// Compact — сжать беседу сейчас: cl останавливает claude, `claude -p --resume <сессия> /compact`, поднимает
 	// снова. CompactAgainst — почему нет, CompactKey — решение без чисел, Tokens — контекст последнего ответа.
 	Compact        bool     `json:"compact"`
@@ -115,8 +113,7 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	return Answer{
 		V: Version, Verdict: v, Key: v.Key(), Mode: cfg.Mode,
 		SessionID: f.SessionID, Name: name, Running: f.Running, Installed: f.Installed, Crons: len(f.Transcript.Crons) > 0,
-		CronJobs: f.Transcript.Crons,
-		Compact:  cv.Compact, CompactAgainst: cv.Against, CompactKey: cv.Key(), Tokens: cv.Tokens,
+		Compact: cv.Compact, CompactAgainst: cv.Against, CompactKey: cv.Key(), Tokens: cv.Tokens,
 		Reset: cv.Reset.Reset, ResetAgainst: cv.Reset.Against, ResetKey: cv.Reset.Key(),
 	}
 }
