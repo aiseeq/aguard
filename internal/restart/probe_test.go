@@ -27,7 +27,7 @@ func TestReadHookState(t *testing.T) {
 		t.Errorf("нет записи — пустое состояние: %+v %v", rec, err)
 	}
 	write(t, filepath.Join(dir, "s1"), "paused\n")
-	write(t, filepath.Join(dir, "s1.tasks"), "{}")
+	write(t, filepath.Join(dir, "s1.tasks"), `{"tasks":[{"id":"b1","type":"shell","description":"x"}],"crons":0}`)
 	rec, err := readHookState(p, "s1")
 	if err != nil || rec.state != "paused" || !rec.tasks || rec.written.IsZero() {
 		t.Errorf("readHookState = %+v %v", rec, err)
@@ -208,5 +208,38 @@ func appendTo(t *testing.T, file, s string) {
 	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// .tasks chooks: монитор артефакта — не задача, а объяснение паузы; таймеры по chooks — тоже; прочие задачи держат.
+func TestReadHookTasks(t *testing.T) {
+	dir := t.TempDir()
+	p := paths{hookStates: dir}
+	write(t, filepath.Join(dir, "s1"), "paused")
+	artifact := `{"id":"sxtctgkwu","type":"monitor","description":"live updates for artifact https://claude.ai/artifact/HPY6 (auto-armed on publish)","since":"2026-10-27T05:01:26+01:00"}`
+	shell := `{"id":"b7xi68io0","type":"shell","description":"Grep transcript for user quote","since":"2026-10-27T04:03:35+01:00"}`
+	for name, c := range map[string]struct {
+		file         string
+		tasks, waits bool
+	}{
+		"нет файла":         {"", false, false},
+		"монитор артефакта": {`{"tasks":[` + artifact + `],"crons":0}`, false, true},
+		"монитор и команда": {`{"tasks":[` + artifact + `,` + shell + `],"crons":0}`, true, true},
+		"только таймеры":    {`{"tasks":[],"crons":0,"schedules":2}`, false, true},
+	} {
+		tasksFile := filepath.Join(dir, "s1.tasks")
+		if c.file != "" {
+			write(t, tasksFile, c.file)
+		} else if err := os.Remove(tasksFile); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		rec, err := readHookState(p, "s1")
+		if err != nil || rec.tasks != c.tasks || rec.waits != c.waits {
+			t.Errorf("%s: %+v %v", name, rec, err)
+		}
+	}
+	write(t, filepath.Join(dir, "s1.tasks"), "{")
+	if rec, err := readHookState(p, "s1"); err == nil || !rec.tasks {
+		t.Errorf("нечитаемый .tasks — ошибка и сомнение в пользу задач: %+v %v", rec, err)
 	}
 }

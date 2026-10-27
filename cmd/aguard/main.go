@@ -27,6 +27,7 @@
 //     aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время]
 //     aguard disk tick [-dry-run] | retro [-days 7] | traces [-all] | report [-since 168h]
 //     aguard said tick [-dry-run] | report [-since 168h]  разметка реплик, расход по суткам
+//     aguard bgtask tick [-dry-run]                     забытые фоновые задачи: письмо владельцу
 //     aguard report [-json] [-at время]                 срабатывания и сбои за сутки, неделю, месяц
 package main
 
@@ -108,6 +109,8 @@ func main() {
 		err = a.diskCmd(ctx, os.Args[2:])
 	case "said":
 		err = a.saidCmd(ctx, os.Args[2:])
+	case "bgtask":
+		err = a.bgtaskCmd(os.Args[2:])
 	case "report":
 		err = a.reportCmd(os.Args[2:])
 	default:
@@ -131,6 +134,7 @@ func usage() {
   aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время RFC3339]
   aguard disk tick [-dry-run] | retro [-days 7] | traces [-all] | report [-since 168h]
   aguard said tick [-dry-run] | report [-since 168h]
+  aguard bgtask tick [-dry-run]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }
@@ -175,7 +179,7 @@ type watcher struct {
 // проход; не прочитался — проход пропускается (по неизвестным правилам ничего
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "compact", "disk", "said", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "compact", "disk", "said", "bgtask", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -214,6 +218,8 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Disk.Interval.D() }},
 		{"said", func(ctx context.Context, c *config.Config) error { return a.saidRound(ctx, &c.Said, false) },
 			func(c *config.Config) time.Duration { return c.Said.Interval.D() }},
+		{"bgtask", func(_ context.Context, c *config.Config) error { return a.bgtaskRound(&c.Bgtask, false) },
+			func(c *config.Config) time.Duration { return c.Bgtask.Interval.D() }},
 	}
 }
 

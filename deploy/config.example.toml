@@ -160,6 +160,15 @@ owner = "lead"
 cleanup = "moment-frame.sh убирает после кейса"
 lifetime = "24h"
 
+# Забытые фоновые задачи Bash: команда, которую Claude Code увёл в фон по таймауту, идёт дольше age и вывод молчит
+# дольше quiet — письмо сессии-владельцу (по разу на задачу). Нарочно фоновые (run_in_background) не трогаются. Задачу
+# снимает владелец, aguard не убивает.
+[bgtask]
+mode = "alert"         # off | log (только журнал) | alert
+interval = "5m"
+age = "60m"
+quiet = "60m"
+
 [said]                 # указатель сказанного: реплики пользователя -> Luna -> ~/.claude/said.tsv
 mode = "log"           # off | log (разметка и расход только в журнал) | write (и в said.tsv)
 interval = "1m"

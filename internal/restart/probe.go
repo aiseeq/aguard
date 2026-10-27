@@ -1,6 +1,7 @@
 package restart
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -26,8 +27,12 @@ type facts struct {
 	// человеку), paused (ждёт фоновые задачи или таймеры), working, error (ход оборвала ошибка API); пусто — записи
 	// нет.
 	HookState string
-	// HookTasks — на последнем Stop Claude Code перечислил фоновые задачи (файл <сессия>.tasks chooks).
+	// HookTasks — на последнем Stop Claude Code перечислил фоновые задачи (файл <сессия>.tasks chooks), кроме монитора
+	// артефакта: его Claude Code ставит сам при публикации Artifact, срока у него нет, он только ловит комментарии на
+	// странице, и после подъёма его можно поставить заново (лид 27.10: держал довод против перезапуска лида с 05:01).
 	HookTasks bool
+	// HookWaits — paused объяснён без задач: таймеры и расписания по chooks или монитор артефакта.
+	HookWaits bool
 	// Quiet — сколько времени не менялись транскрипт, состояние chooks и статус в реестре.
 	Quiet time.Duration
 	// TTYQuiet — сколько времени в терминал сессии не приходил ввод (atime pts: клавиатура, фокус окна).
@@ -143,7 +148,7 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 	if err != nil {
 		fail(err)
 	}
-	f.HookState, f.HookTasks, latest = hook.state, hook.tasks, later(latest, hook.written)
+	f.HookState, f.HookTasks, f.HookWaits, latest = hook.state, hook.tasks, hook.waits, later(latest, hook.written)
 	transcript, err := transcriptFile(p, s.SessionID)
 	if err != nil {
 		fail(err)
@@ -174,8 +179,25 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 // hookRecord — запись chooks о сессии.
 type hookRecord struct {
 	state   string    // done, idle, waiting, paused, working, error; пусто — записи нет
-	tasks   bool      // есть <сессия>.tasks: на последнем Stop Claude Code перечислил фоновые задачи
+	tasks   bool      // в <сессия>.tasks есть фоновые задачи, кроме мониторов артефактов
+	waits   bool      // в <сессия>.tasks таймеры, расписания или мониторы артефактов
 	written time.Time // время записи состояния
+}
+
+// hookBackground — <сессия>.tasks chooks (chooks internal/core/background.go, Background).
+type hookBackground struct {
+	Tasks []struct {
+		Type        string `json:"type"`
+		Description string `json:"description"`
+	} `json:"tasks"`
+	Crons     int `json:"crons"`
+	Schedules int `json:"schedules"`
+}
+
+// artifactMonitor — монитор комментариев Artifact, который Claude Code ставит сам при публикации.
+func artifactMonitor(typ, description string) bool {
+	return typ == "monitor" && strings.HasPrefix(description, "live updates for artifact ") &&
+		strings.HasSuffix(description, "(auto-armed on publish)")
 }
 
 // readHookState читает состояние chooks; записи нет — пустое состояние без ошибки (решение его не примет).
@@ -193,12 +215,25 @@ func readHookState(p paths, sessionID string) (hookRecord, error) {
 		return hookRecord{}, fmt.Errorf("состояние chooks: %w", err)
 	}
 	rec := hookRecord{state: strings.TrimSpace(string(data)), written: info.ModTime()}
-	_, err = os.Stat(file + ".tasks")
+	data, err = os.ReadFile(file + ".tasks")
 	switch {
-	case err == nil:
-		rec.tasks = true
-	case !errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, fs.ErrNotExist):
+		return rec, nil
+	case err != nil:
 		return rec, fmt.Errorf("задачи chooks: %w", err)
+	}
+	var bg hookBackground
+	if err := json.Unmarshal(data, &bg); err != nil {
+		rec.tasks = true // не прочиталось — сомнение в пользу задач
+		return rec, fmt.Errorf("задачи chooks %s: %w", file+".tasks", err)
+	}
+	rec.waits = bg.Crons+bg.Schedules > 0
+	for _, t := range bg.Tasks {
+		if artifactMonitor(t.Type, t.Description) {
+			rec.waits = true
+			continue
+		}
+		rec.tasks = true
 	}
 	return rec, nil
 }

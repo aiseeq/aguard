@@ -1,6 +1,6 @@
 // Package config — единый конфиг aguard (~/.config/aguard/config.toml):
 // общие поля (лид, админы пространств) и разделы наблюдателей [orphans], [tmp],
-// [memory], [restart], [waits], [compact], [disk], [said]. Перечитывается каждый проход.
+// [memory], [restart], [waits], [compact], [disk], [said], [bgtask]. Перечитывается каждый проход.
 package config
 
 import (
@@ -14,6 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/aiseeq/aguard/internal/bgtask"
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/orphans"
@@ -36,8 +37,9 @@ type Config struct {
 	Waits   waits.Config    `toml:"waits"`   // отказы и ожидания агентов по транскриптам
 	// Compact — своё сжатие сессий в простое, пока кэш подсказки жив.
 	Compact restart.CompactConfig `toml:"compact"`
-	Disk    disk.Config           `toml:"disk"` // рост папок кэшей и состояний, остатки временного
-	Said    said.Config           `toml:"said"` // указатель сказанного пользователем
+	Disk    disk.Config           `toml:"disk"`   // рост папок кэшей и состояний, остатки временного
+	Said    said.Config           `toml:"said"`   // указатель сказанного пользователем
+	Bgtask  bgtask.Config         `toml:"bgtask"` // забытые фоновые задачи Bash: письмо владельцу
 }
 
 // Path — путь конфига в домашней папке.
@@ -59,6 +61,7 @@ func Default(home string) Config {
 		Compact: restart.DefaultCompact(),
 		Disk:    disk.Default(),
 		Said:    said.Default(),
+		Bgtask:  bgtask.Default(),
 	}
 }
 
@@ -100,6 +103,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Admins = admins
 	c.Orphans.Lead, c.Orphans.SendAuth, c.Orphans.Admins = c.Lead, c.SendAuth, maps.Clone(admins)
 	c.Tmp.Lead, c.Tmp.SendAuth, c.Tmp.Escalation.Admins = c.Lead, c.SendAuth, maps.Clone(admins)
+	c.Bgtask.SendAuth = c.SendAuth
 	if err := c.Orphans.Compile(home); err != nil {
 		return fmt.Errorf("orphans: %w", err)
 	}
@@ -119,6 +123,9 @@ func (c *Config) finish(home string, uid int) error {
 		return err
 	}
 	if err := c.Said.Validate(home); err != nil {
+		return err
+	}
+	if err := c.Bgtask.Validate(); err != nil {
 		return err
 	}
 	return c.Compact.Validate()

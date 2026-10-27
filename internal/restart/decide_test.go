@@ -103,6 +103,10 @@ func TestDecideCrons(t *testing.T) {
 	if v := decide(f, allowance{idle: 10 * time.Minute}); v.Restart || !slices.Contains(codes(v), "hook-paused") {
 		t.Errorf("paused без таймеров и задач — непонятно чего ждёт: %+v", v)
 	}
+	f.HookWaits = true // пауза — из-за монитора артефакта или таймеров по chooks
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart {
+		t.Errorf("пауза объяснена монитором артефакта: %+v", v)
+	}
 }
 
 func TestVerdictKeyIgnoresNumbers(t *testing.T) {

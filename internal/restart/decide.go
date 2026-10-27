@@ -142,9 +142,10 @@ func workChecks(f facts, against againstFunc) {
 // сжимать и сбрасывать можно, работают суб-агенты — только сжимать, ждёт ответа — «сброс должен быть запрещён»).
 // done и idle — ход закончен без фоновых задач и таймеров (по списку Claude Code на Stop), idle — человек после
 // этого открыл вкладку. waiting — вопрос человеку (минутное напоминание с chooks ae7ceb3 его не ставит): против,
-// как working и error. paused — Stop при фоновых задачах или таймерах: годится, только если задач нет (файла .tasks
-// нет), а таймеры по транскрипту есть и все восстановимы ролью; живые фоновые команды, мониторы и суб-агенты
-// перезапуск cl (сжатие и сброс — тоже перезапуск) убил бы.
+// как working и error. paused — Stop при фоновых задачах или таймерах: годится, только если задач в .tasks нет
+// (монитор артефакта не в счёт — см. HookTasks), а пауза объяснена таймерами (по транскрипту или по .tasks) или
+// монитором артефакта; живые фоновые команды, мониторы и суб-агенты перезапуск cl (сжатие и сброс — тоже
+// перезапуск) убил бы.
 func hookChecks(f facts, against againstFunc) {
 	switch f.HookState {
 	case "done", "idle":
@@ -152,7 +153,7 @@ func hookChecks(f facts, against againstFunc) {
 		if f.HookTasks {
 			against("hook-tasks", "chooks: на последнем Stop были фоновые задачи")
 		}
-		if !f.HookTasks && len(f.Transcript.Crons) == 0 {
+		if !f.HookTasks && !f.HookWaits && len(f.Transcript.Crons) == 0 {
 			against("hook-paused", "chooks: paused, а таймеров в транскрипте нет — непонятно, чего ждёт")
 		}
 	default:
