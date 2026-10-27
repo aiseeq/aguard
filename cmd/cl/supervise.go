@@ -363,6 +363,8 @@ type idleAction struct {
 	typeMode string
 	typed    string
 	typing   string
+	// noReset — к строкам о сжатии: почему не сброс (cllog.NoReset).
+	noReset string
 }
 
 // typedNote — добавка к строке журнала сессии под pty в type_mode log: что cl набрал бы вместо перезапуска.
@@ -381,7 +383,8 @@ func (l launcher) wantCompact(cfg config, pid int, a restart.Answer, last string
 		doing:    cllog.Compact(a.Tokens, a.SessionID),
 		out:      outcome{compact: true, version: a.Running},
 		typeMode: cfg.Restart.TypeMode, typed: cllog.TypedCompact,
-		typing: cllog.Typing(a.Tokens, cllog.TypedCompact),
+		typing:  cllog.Typing(a.Tokens, cllog.TypedCompact),
+		noReset: cllog.NoReset(restart.Texts(a.ResetAgainst)),
 	})
 }
 
@@ -416,13 +419,13 @@ func (l launcher) wantIdle(pid int, a restart.Answer, last string, x idleAction)
 		if x.mode == modeAct {
 			why = " (не в " + x.names + ")"
 		}
-		return outcome{}, onceLine(key, last, head+fmt.Sprintf(x.would, why)+note), key
+		return outcome{}, onceLine(key, last, head+fmt.Sprintf(x.would, why)+x.noReset+note), key
 	case l.console != nil && x.typeMode == modeAct:
-		return outcome{typed: x.typed, name: name, sessionID: a.SessionID}, head + x.typing, key
+		return outcome{typed: x.typed, name: name, sessionID: a.SessionID}, head + x.typing + x.noReset, key
 	}
 	out := x.out
 	out.restart, out.sessionID, out.name = true, a.SessionID, name
-	return out, head + x.doing + note, key
+	return out, head + x.doing + x.noReset + note, key
 }
 
 // typeInto набирает out.typed в живой сессии под pty; человек вводил меньше humanQuiet назад — не набирает.
@@ -470,11 +473,7 @@ func journalLine(mode, name string, pid int, a restart.Answer) string {
 	if mode == modeAct {
 		word = "не перезапускаю"
 	}
-	texts := make([]string, len(a.Against))
-	for i, r := range a.Against {
-		texts[i] = r.Text
-	}
-	return head + word + ": " + strings.Join(texts, "; ")
+	return head + word + ": " + strings.Join(restart.Texts(a.Against), "; ")
 }
 
 // journal дописывает строку с местным временем; сбой журнала — в stderr, работе сессии он не мешает.

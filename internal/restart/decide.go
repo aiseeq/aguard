@@ -14,6 +14,15 @@ type Reason struct {
 	Text string `json:"text"`
 }
 
+// Texts — тексты доводов по порядку.
+func Texts(rs []Reason) []string {
+	texts := make([]string, len(rs))
+	for i, r := range rs {
+		texts[i] = r.Text
+	}
+	return texts
+}
+
 // Verdict — решение о перезапуске сессии и его доводы.
 type Verdict struct {
 	Restart bool `json:"restart"`

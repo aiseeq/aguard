@@ -2,6 +2,7 @@ package restart
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -241,5 +242,23 @@ func TestReadHookTasks(t *testing.T) {
 	write(t, filepath.Join(dir, "s1.tasks"), "{")
 	if rec, err := readHookState(p, "s1"); err == nil || !rec.tasks {
 		t.Errorf("нечитаемый .tasks — ошибка и сомнение в пользу задач: %+v %v", rec, err)
+	}
+}
+
+// Папка не в репозитории — чистая: 27.10 «git status» в ~/git падал с кодом 128, и ошибка шла доводом против сброса.
+func TestGitStatus(t *testing.T) {
+	if got, err := gitStatus(t.TempDir()); err != nil || got != nil {
+		t.Fatalf("не репозиторий: %v %v", got, err)
+	}
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	write(t, filepath.Join(dir, "a"), "x")
+	if got, err := gitStatus(dir); err != nil || !slices.Equal(got, []string{"?? a"}) {
+		t.Fatalf("грязное дерево: %v %v", got, err)
+	}
+	if _, err := gitStatus(filepath.Join(dir, "нет")); err == nil {
+		t.Error("нет папки — ошибка")
 	}
 }

@@ -20,12 +20,12 @@ func TestParse(t *testing.T) {
 	}
 	line("sc2go-master pid=5 2.1.309→2.1.310 log: не стал бы: Claude Code: busy")
 	line("ledger-master pid=10 act: " + Reset(238_400, "s-reset"))
-	line("shop-master pid=11 act: " + Compact(150_000, "s-ok") + "; под pty набрал бы /compact")
+	line("shop-master pid=11 act: " + Compact(150_000, "s-ok") + NoReset([]string{"рабочее дерево: 2 изменений"}) + "; под pty набрал бы /compact")
 	line("graft-master pid=12 act: " + Compact(120_000, "s-fail"))
 	line(CompactResult("shop-master", "s-ok", 41*time.Second, nil, "", ""))
 	line(CompactResult("graft-master", "s-fail", 3*time.Second, errors.New("exit status 1"), "", "API Error"))
 	line("x-master pid=13 act: " + Compact(130_000, "s-lost")) // cl умер посреди сжатия
-	line("aguard-master pid=14 act: " + Typing(110_000, TypedCompact))
+	line("aguard-master pid=14 act: " + Typing(110_000, TypedCompact) + NoReset([]string{"идёт фоновая задача"}))
 	line("aguard-master pid=14: " + Typed(TypedCompact, "s-typed"))
 	line("lead pid=15 act: " + Typing(200_000, TypedClear))
 	line("lead pid=15: " + HumanTyping(10*time.Second))

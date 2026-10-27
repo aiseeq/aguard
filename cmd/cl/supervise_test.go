@@ -200,9 +200,10 @@ func TestWantReset(t *testing.T) {
 func TestWantCompact(t *testing.T) {
 	cfg := defaultConfig(t.TempDir())
 	l := launcher{name: "x-master"}
-	a := restart.Answer{SessionID: "s1", Name: "x-master", Compact: true, CompactKey: "true", Tokens: 120_000}
+	a := restart.Answer{SessionID: "s1", Name: "x-master", Compact: true, CompactKey: "true", Tokens: 120_000,
+		ResetAgainst: []restart.Reason{{Code: "tree", Text: "рабочее дерево: 2 изменений"}}}
 	out, line, key := l.wantCompact(cfg, 7, a, "")
-	if out.restart || !strings.Contains(line, "log: сжал бы: контекст 120 тыс.") {
+	if out.restart || !strings.Contains(line, "log: сжал бы: контекст 120 тыс.") || !strings.Contains(line, "; сброс нельзя: рабочее дерево: 2 изменений") {
 		t.Errorf("log: %+v %q", out, line)
 	}
 	if _, line, _ := l.wantCompact(cfg, 7, a, key); line != "" {

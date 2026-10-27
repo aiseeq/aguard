@@ -37,6 +37,15 @@ func Compact(tokens int64, sessionID string) string {
 	return fmt.Sprintf("сжимаю: контекст %d тыс.; SIGTERM, /compact, поднимаю --resume %s", tokens/1000, sessionID)
 }
 
+// NoReset — хвост строки о сжатии: почему не сброс (сброс там, где можно, — вместо сжатия; пользователь 27.10 10:48
+// CET «Компакт это компромисс»), доводы aguard против сброса; доводов нет — пусто.
+func NoReset(against []string) string {
+	if len(against) == 0 {
+		return ""
+	}
+	return "; сброс нельзя: " + strings.Join(against, "; ")
+}
+
 // Reset — сброс: SIGTERM и новая беседа.
 func Reset(tokens int64, sessionID string) string {
 	return fmt.Sprintf("сбрасываю: контекст %d тыс.; SIGTERM, поднимаю новую беседу вместо %s", tokens/1000, sessionID)
@@ -125,7 +134,7 @@ var (
 	reStart     = regexp.MustCompile(`^(.+?) pid=(\d+) act: (?:сжимаю|сбрасываю): контекст (\d+) тыс\.; (.*)$`)
 	reCompact   = regexp.MustCompile(`^SIGTERM, /compact, поднимаю --resume ([^\s;]+)`)
 	reReset     = regexp.MustCompile(`^SIGTERM, поднимаю новую беседу вместо (\S+)`)
-	reTyping    = regexp.MustCompile(`^набираю (\S+) в живой сессии$`)
+	reTyping    = regexp.MustCompile(`^набираю (\S+) в живой сессии(?:;|$)`)
 	rePid       = regexp.MustCompile(`^(.+?) pid=(\d+): (.*)$`)
 	reTyped     = regexp.MustCompile(`^набрал \S+ в беседе (\S+)$`)
 	reHuman     = regexp.MustCompile(`^человек вводил .* — не набираю$`)

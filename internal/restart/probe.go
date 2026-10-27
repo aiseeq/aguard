@@ -1,6 +1,7 @@
 package restart
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -76,9 +77,16 @@ func pathsFor(home string, cfg *Config) paths {
 	}
 }
 
-// gitStatus — строки `git status --porcelain` папки: изменённые и новые файлы; пусто — дерево чистое.
+// gitStatus — строки `git status --porcelain` папки: изменённые и новые файлы; пусто — дерево чистое. Папка не в
+// репозитории — тоже пусто: незакоммиченного нет (папки админов ~/git, ~/work и лида ~ — не репозитории; до 27.10
+// ошибка git держала сброс git-admin: шесть отказов «tree» за день, вместо сброса cl сжал беседу в 12:27 CET).
 func gitStatus(dir string) ([]string, error) {
-	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain")
+	cmd.Env = append(os.Environ(), "LC_ALL=C") // notRepo читает сообщение git по-английски
+	out, err := cmd.Output()
+	if ee, ok := errors.AsType[*exec.ExitError](err); ok && notRepo(ee.Stderr) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("git status %s: %w", dir, err)
 	}
@@ -89,6 +97,11 @@ func gitStatus(dir string) ([]string, error) {
 		}
 	}
 	return dirty, nil
+}
+
+// notRepo — git сказал, что папка не в репозитории.
+func notRepo(stderr []byte) bool {
+	return bytes.Contains(stderr, []byte("not a git repository"))
 }
 
 // readSession — запись реестра Claude Code в папке dir о процессе pid; записи нет — ошибка.
