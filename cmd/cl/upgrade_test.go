@@ -1,11 +1,21 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 func TestTakeUpgrade(t *testing.T) {
@@ -58,5 +68,143 @@ func TestSuperviseUpgraded(t *testing.T) {
 	want := append(append(scope, "--unit=agent-x-master-"+strconv.Itoa(os.Getpid())+"-r3", "--", w.claude), "-n", "x-master", "--resume", "s1")
 	if got := readLines(t, filepath.Join(d, "run")); !slices.Equal(got, want) {
 		t.Errorf("\n got %q\nwant %q", got, want)
+	}
+}
+
+// claudeUnderPty — «claude» под своим pty в консоли c: отвечает на каждую строку ввода.
+func claudeUnderPty(t *testing.T, c *console) (*exec.Cmd, func()) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", `while read -r x; do echo "got:$x"; done`)
+	finish, err := c.start(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	return cmd, finish
+}
+
+func fdFlags(t *testing.T, f *os.File) int {
+	t.Helper()
+	var flags int
+	var ferr error
+	conn, err := f.SyscallConn()
+	if err == nil {
+		err = conn.Control(func(fd uintptr) { flags, ferr = unix.FcntlInt(fd, unix.F_GETFD, 0) })
+	}
+	if err = errors.Join(err, ferr); err != nil {
+		t.Fatal(err)
+	}
+	return flags
+}
+
+// Бинарник заменён, человек молчит: exec нового cl с pid живого claude и master его pty без close-on-exec, терминал
+// в обычном режиме. exec не вышел — всё как было: ввод снова доходит до claude, терминал сырой, строка в журнал.
+func TestLiveUpgrade(t *testing.T) {
+	human, tty, shown := outerTerminal(t)
+	before, err := term.GetState(int(tty.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := openConsole(tty, tty, nil)
+	cmd, _ := claudeUnderPty(t, c)
+	d := t.TempDir()
+	gone := filepath.Join(d, "exe")
+	symlink(t, "/home/u/bin/cl (deleted)", gone)
+	cfg := defaultConfig(d)
+	cfg.Restart.Journal = filepath.Join(d, "restart.log")
+	now := time.Now()
+	c.typed.Store(now.Add(-2 * humanQuiet).UnixNano())
+	var got upgrade
+	execs := 0
+	l := launcher{name: "x-master", console: c, selfExe: gone, exec: func(path string, _, env []string) error {
+		execs++
+		for _, kv := range env {
+			if s, ok := strings.CutPrefix(kv, upgradeEnv+"="); ok {
+				if err := json.Unmarshal([]byte(s), &got); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		if fdFlags(t, c.master)&unix.FD_CLOEXEC != 0 {
+			t.Error("master закрылся бы на exec")
+		}
+		if st, err := term.GetState(int(tty.Fd())); err != nil || !reflect.DeepEqual(st, before) {
+			t.Errorf("новый cl получил бы терминал сырым: %v", err)
+		}
+		return errors.New("exec не вышел")
+	}}
+	if l.liveUpgrade(cfg, now, cmd.Process.Pid, 3, []string{"--resume", "s1"}) {
+		t.Error("имени нет в live_upgrade_names — не пробовать")
+	}
+	cfg.Restart.LiveUpgradeNames = []string{"x-*"}
+	if l.liveUpgrade(cfg, now.Add(-humanQuiet-time.Minute), cmd.Process.Pid, 3, nil) || execs != 0 {
+		t.Error("человек вводил меньше минуты назад — не пробовать")
+	}
+	if !l.liveUpgrade(cfg, now, cmd.Process.Pid, 3, []string{"--resume", "s1"}) || execs != 1 {
+		t.Fatalf("exec: %d", execs)
+	}
+	if got.Pid != cmd.Process.Pid || got.Master == 0 || got.N != 3 || got.Typed != c.typed.Load() || got.Name != "x-master" {
+		t.Errorf("состояние: %+v", got)
+	}
+	if fdFlags(t, c.master)&unix.FD_CLOEXEC == 0 {
+		t.Error("exec не вышел — close-on-exec вернуть")
+	}
+	if st, err := term.GetState(int(tty.Fd())); err != nil || reflect.DeepEqual(st, before) {
+		t.Errorf("exec не вышел — терминал снова сырой: %v", err)
+	}
+	if _, err := human.WriteString("after\r"); err != nil {
+		t.Fatal(err)
+	}
+	shown.wait(t, "got:after")
+	if data, err := os.ReadFile(cfg.Restart.Journal); err != nil || !strings.Contains(string(data), "exec не вышел — дальше прежний cl") {
+		t.Errorf("журнал: %q %v", data, err)
+	}
+}
+
+// Новый cl принимает живой claude от прежнего: ввод человека — в его pty, выход claude — как у своего, на finish
+// терминал в прежнем режиме.
+func TestAdopt(t *testing.T) {
+	human, tty, shown := outerTerminal(t)
+	before, err := term.GetState(int(tty.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", `while read -r x; do echo "got:$x"; done; echo bye`)
+	master, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	var fd int
+	conn, err := master.SyscallConn()
+	if err == nil {
+		err = conn.Control(func(f uintptr) { fd, err = unix.Dup(int(f)) })
+	}
+	if err = errors.Join(err, master.Close()); err != nil { // у нового cl — только переданный дескриптор
+		t.Fatal(err)
+	}
+	l := launcher{console: openConsole(tty, tty, nil)}
+	typed := time.Now().Add(-time.Hour).UnixNano()
+	proc, finish, err := l.adopt(upgrade{Pid: cmd.Process.Pid, Master: fd, Typed: typed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.console.typed.Load() != typed {
+		t.Error("тишина человека — от прежнего cl")
+	}
+	if _, err := human.WriteString("hello\r"); err != nil {
+		t.Fatal(err)
+	}
+	shown.wait(t, "got:hello")
+	if _, err := human.WriteString("\x04"); err != nil {
+		t.Fatal(err)
+	}
+	if err := wait(proc); err != nil {
+		t.Fatalf("claude: %v", err)
+	}
+	finish()
+	shown.wait(t, "bye")
+	if after, err := term.GetState(int(tty.Fd())); err != nil || !reflect.DeepEqual(after, before) {
+		t.Errorf("терминал не вернулся в прежний режим: %v", err)
 	}
 }

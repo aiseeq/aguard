@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -113,9 +114,19 @@ func (c *console) start(cmd *exec.Cmd) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("pty: %w", err)
 	}
-	raw, err := term.MakeRaw(int(c.in.Fd()))
+	finish, err := c.attach(master)
 	if err != nil { // без сырого режима ввод шёл бы строками с эхом — claude не запускать
-		return nil, errors.Join(fmt.Errorf("сырой режим терминала: %w", err), stopChild(cmd), master.Close())
+		return nil, errors.Join(err, stopChild(cmd), master.Close())
+	}
+	return finish, nil
+}
+
+// attach — терминал cl в сыром режиме, ввод человека — в master, вывод claude из него — в терминал cl: для только что
+// запущенного claude и для живого, которого передал прежний cl (upgrade.go). finish — как у start.
+func (c *console) attach(master *os.File) (func(), error) {
+	raw, err := term.MakeRaw(int(c.in.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("сырой режим терминала: %w", err)
 	}
 	c.mu.Lock()
 	c.master, c.raw = master, raw
@@ -140,6 +151,52 @@ func (c *console) start(cmd *exec.Cmd) (func(), error) {
 			c.report("закрыть pty", err)
 		}
 		c.restore()
+	}, nil
+}
+
+// handOver готовит master живого claude к exec нового cl: снимает close-on-exec и возвращает терминал в обычный режим
+// (новый cl сам переведёт его в сырой и запомнит обычный — иначе на выходе вернул бы сырой). Держит mu до exec: набор
+// cl и запись ввода не начнутся; ввод, который поток уже прочёл, но не записал, пропадёт — поэтому cl зовёт exec, когда
+// человек молчит humanQuiet. typed — последний ввод человека, новый cl считает тишину от него. back — exec не вышел:
+// вернуть как было.
+func (c *console) handOver() (fd int, typed int64, back func(), err error) {
+	c.mu.Lock()
+	if c.master == nil {
+		c.mu.Unlock()
+		return 0, 0, nil, errNoSession
+	}
+	raw := c.raw
+	cloexec := func(flag int) error {
+		conn, err := c.master.SyscallConn()
+		if err != nil {
+			return err
+		}
+		var ferr error
+		if err := conn.Control(func(f uintptr) { fd = int(f); _, ferr = unix.FcntlInt(f, unix.F_SETFD, flag) }); err != nil {
+			return err
+		}
+		return ferr
+	}
+	if err := cloexec(0); err != nil {
+		c.mu.Unlock()
+		return 0, 0, nil, fmt.Errorf("pty claude для нового cl: %w", err)
+	}
+	if raw != nil {
+		if err := term.Restore(int(c.in.Fd()), raw); err != nil {
+			c.mu.Unlock()
+			return 0, 0, nil, errors.Join(fmt.Errorf("вернуть режим терминала: %w", err), cloexec(unix.FD_CLOEXEC))
+		}
+	}
+	return fd, c.typed.Load(), func() {
+		defer c.mu.Unlock()
+		if err := cloexec(unix.FD_CLOEXEC); err != nil {
+			c.report("pty claude: close-on-exec", err)
+		}
+		if raw != nil {
+			if _, err := term.MakeRaw(int(c.in.Fd())); err != nil {
+				c.report("сырой режим терминала", err)
+			}
+		}
 	}, nil
 }
 

@@ -12,7 +12,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // upgradeEnv — переменная окружения, в которой прежний cl передаёт новому, что поднимать.
@@ -28,6 +31,11 @@ type upgrade struct {
 	Name string   `json:"name"`
 	N    int      `json:"n"`
 	Args []string `json:"args"`
+	// Pid — claude запуска N жив (liveUpgrade): не запускать, а ждать его; Master — дескриптор master его pty (0 —
+	// без pty), Typed — последний ввод человека, unix nano.
+	Pid    int   `json:"pid,omitempty"`
+	Master int   `json:"master,omitempty"`
+	Typed  int64 `json:"typed,omitempty"`
 }
 
 // takeUpgrade — состояние от прежнего cl из окружения; переменную убирает, чтобы её не унаследовал claude. ok —
@@ -74,7 +82,11 @@ func (l launcher) reexec(journalFile, path string, u upgrade) error {
 	if err != nil {
 		return fmt.Errorf("состояние cl: %w", err)
 	}
-	journal(journalFile, time.Now(), fmt.Sprintf("%s pid=%d: cl обновлён — перехожу в новый бинарник %s", u.Name, os.Getpid(), path))
+	live := ""
+	if u.Pid > 0 {
+		live = fmt.Sprintf(" на ходу, claude pid=%d остаётся", u.Pid)
+	}
+	journal(journalFile, time.Now(), fmt.Sprintf("%s pid=%d: cl обновлён — перехожу в новый бинарник %s%s", u.Name, os.Getpid(), path, live))
 	if err := l.exec(path, os.Args, append(os.Environ(), upgradeEnv+"="+string(state))); err != nil {
 		return fmt.Errorf("exec %s: %w", path, err)
 	}
@@ -96,4 +108,65 @@ func (l launcher) upgrade(n int, args []string) {
 		return
 	}
 	journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: %v — дальше прежний cl", l.name, errors.Join(err, cfgErr)))
+}
+
+// liveUpgrade — бинарник заменён, а claude запуска n жив: exec в новый cl, не трогая claude (задание лида 27.10
+// 18:5x CET: «exec нового cl с передачей fd мастера pty и состояния… Перезапуск ради нового cl — только если этот путь
+// не выйдет»). Иначе под pty cl не подхватывал себя вовсе: сжатие и сброс набором не перезапускают claude, и старый cl
+// жил до настоящего перезапуска (aguard-master 27.10 18:31 CET: старый cl не слал typed, сброс отклонён таймерами).
+// claude остаётся дочерним (pid тот же), master pty — открытым дескриптором через exec. Под pty — только когда человек
+// молчит humanQuiet: его ввод не пропадёт между двумя cl. tried — exec пробовали и он не вышел: строка в журнал, в этом
+// запуске больше не пробовать.
+func (l launcher) liveUpgrade(cfg config, now time.Time, pid, n int, args []string) (tried bool) {
+	if !matchAny(cfg.Restart.LiveUpgradeNames, l.name) {
+		return false
+	}
+	path, ok, err := replaced(l.selfExe)
+	if !ok && err == nil {
+		return false
+	}
+	if l.console != nil && l.console.idle(now) < humanQuiet {
+		return false
+	}
+	back := func() {}
+	if err == nil {
+		u := upgrade{V: upgradeV, Name: l.name, N: n, Args: args, Pid: pid}
+		if l.console != nil {
+			u.Master, u.Typed, back, err = l.console.handOver()
+		}
+		if err == nil {
+			err = l.reexec(cfg.Restart.Journal, path, u)
+			back()
+		}
+	}
+	if err == nil { // exec вернулся без ошибки — только подмена в тесте
+		return false
+	}
+	journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: %v — дальше прежний cl", l.name, pid, err))
+	return true
+}
+
+// adopt — живой claude от прежнего cl (liveUpgrade): дочерний процесс по pid и его pty в консоль. finish — как у launch.
+func (l launcher) adopt(u upgrade) (*os.Process, func(), error) {
+	proc, err := os.FindProcess(u.Pid)
+	if err != nil {
+		return nil, nil, fmt.Errorf("claude pid=%d от прежнего cl: %w", u.Pid, err)
+	}
+	if u.Master == 0 {
+		return proc, func() {}, nil
+	}
+	master := os.NewFile(uintptr(u.Master), "pty claude")
+	if l.console == nil { // терминал cl больше не терминал — вывод claude некуда девать
+		return nil, nil, errors.Join(fmt.Errorf("pty claude pid=%d от прежнего cl: консоли нет", u.Pid), master.Close())
+	}
+	l.console.typed.Store(u.Typed)
+	finish, err := l.console.attach(master)
+	if err != nil {
+		return nil, nil, errors.Join(err, master.Close())
+	}
+	// экран перерисовать: кусок вывода, прочитанный прежним cl, мог не дойти до терминала
+	if err := errors.Join(pty.InheritSize(l.console.in, master), proc.Signal(syscall.SIGWINCH)); err != nil {
+		l.console.report("перерисовать экран", err)
+	}
+	return proc, finish, nil
 }

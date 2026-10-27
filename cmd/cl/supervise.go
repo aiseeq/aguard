@@ -101,16 +101,18 @@ func (l launcher) supervise(pre, userArgs []string) int {
 			l.upgrade(n, args)
 		}
 		l.openPty()
-		unit := strconv.Itoa(os.Getpid())
-		if n > 0 {
-			unit += "-r" + strconv.Itoa(n)
+		var proc *os.Process
+		var finish func()
+		var err error
+		if n == first && l.upgraded != nil && l.upgraded.Pid > 0 {
+			proc, finish, err = l.adopt(*l.upgraded)
+		} else {
+			proc, finish, err = l.start(n, args)
 		}
-		cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, l.name, unit, l.withRolePrompt(args, l.name))[1:]...)
-		finish, err := l.launch(cmd)
 		if err != nil {
-			fail(fmt.Errorf("запуск claude: %w", err))
+			fail(err)
 		}
-		out := l.watch(cmd, sigs, argsProblem)
+		out := l.watch(proc, sigs, argsProblem, n, args)
 		finish()
 		if !out.restart {
 			return exitCode(out.err)
@@ -174,7 +176,7 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 		case sig := <-sigs:
 			if s, ok := sig.(syscall.Signal); ok && (s == syscall.SIGTERM || s == syscall.SIGHUP) {
 				stop = s
-				if err := signalChild(cmd, syscall.SIGTERM); err != nil {
+				if err := signalChild(cmd.Process, syscall.SIGTERM); err != nil {
 					journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: %v", out.name, err))
 				}
 			}
@@ -262,6 +264,20 @@ func whyText(event, version string, at time.Time) string {
 	return eventStart + " cl на Claude Code " + version
 }
 
+// start — запуск n claude с аргументами args в своём scope.
+func (l launcher) start(n int, args []string) (*os.Process, func(), error) {
+	unit := strconv.Itoa(os.Getpid())
+	if n > 0 {
+		unit += "-r" + strconv.Itoa(n)
+	}
+	cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, l.name, unit, l.withRolePrompt(args, l.name))[1:]...)
+	finish, err := l.launch(cmd)
+	if err != nil {
+		return nil, nil, fmt.Errorf("запуск claude: %w", err)
+	}
+	return cmd.Process, finish, nil
+}
+
 // launch запускает claude: под pty cl или прямо на терминале cl. finish — после выхода claude.
 func (l launcher) launch(cmd *exec.Cmd) (finish func(), err error) {
 	if l.console != nil {
@@ -271,9 +287,22 @@ func (l launcher) launch(cmd *exec.Cmd) (finish func(), err error) {
 	return func() {}, cmd.Start()
 }
 
+// wait ждёт выхода claude; код не 0 — *exec.ExitError, как у exec.Cmd.Wait: claude мог запустить прежний cl
+// (liveUpgrade), и exec.Cmd у этого нет.
+func wait(proc *os.Process) error {
+	st, err := proc.Wait()
+	if err != nil {
+		return fmt.Errorf("дождаться claude: %w", err)
+	}
+	if !st.Success() {
+		return &exec.ExitError{ProcessState: st}
+	}
+	return nil
+}
+
 // signalChild шлёт сигнал claude; вышедший процесс — не ошибка (его выход и так придёт в done).
-func signalChild(cmd *exec.Cmd, sig os.Signal) error {
-	if err := cmd.Process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
+func signalChild(proc *os.Process, sig os.Signal) error {
+	if err := proc.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("сигнал %v claude: %w", sig, err)
 	}
 	return nil
@@ -283,10 +312,10 @@ func signalChild(cmd *exec.Cmd, sig os.Signal) error {
 // internal/restart), пишет в журнал смену решения, а в режиме act перезапускает: SIGTERM — мягкий выход Claude Code
 // (беседа дописана, «Resume this session with: claude --resume <id>»). Пока claude рисует экран, cl в терминал не
 // пишет: всё — в журнал.
-func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string) outcome {
+func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem string, n int, args []string) outcome {
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	pid := cmd.Process.Pid
+	go func() { done <- wait(proc) }()
+	pid := proc.Pid
 	cfg, err := loadConfig(l.configFile, l.home)
 	if err != nil {
 		journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: %v — проверка с умолчаниями, режим log", l.name, pid, err))
@@ -294,7 +323,7 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 	ticker := time.NewTicker(cfg.Restart.interval())
 	defer ticker.Stop()
 	var out outcome
-	stopping := false
+	stopping, upgradeTried := false, false
 	var last journalKeys
 	for {
 		select {
@@ -308,7 +337,7 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 			exit := sig == syscall.SIGTERM || sig == syscall.SIGHUP
 			if exit || l.console != nil {
 				stopping = stopping || exit
-				if err := signalChild(cmd, sig); err != nil {
+				if err := signalChild(proc, sig); err != nil {
 					journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: %v", l.name, pid, err))
 				}
 			}
@@ -322,6 +351,7 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 				continue
 			}
 			now := time.Now()
+			upgradeTried = upgradeTried || l.liveUpgrade(cfg, now, pid, n, args)
 			a, askErr := l.ask(pid, argsProblem, l.console != nil && cfg.Restart.TypeMode == modeAct)
 			out, last = l.next(cfg, now, pid, a, askErr, last)
 			if out.typed != "" {
@@ -331,7 +361,7 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 			if !out.restart {
 				continue
 			}
-			if err := signalChild(cmd, syscall.SIGTERM); err != nil {
+			if err := signalChild(proc, syscall.SIGTERM); err != nil {
 				out.restart = false
 				journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: %s", out.name, pid, cllog.Cancelled(err)))
 			}
@@ -341,12 +371,14 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 
 // openPty — консоль под pty cl, если имени сессии она положена (restart.pty_names) и ещё не открыта. Перед каждым
 // подъёмом claude, не только при старте cl: имя, внесённое в pty_names, включается на ближайшем перезапуске, сжатии
-// или сбросе, без перезапуска консоли. Открытая остаётся до выхода cl.
+// или сбросе, без перезапуска консоли. Открытая остаётся до выхода cl. Живой claude под pty от прежнего cl — консоль
+// нужна при любом конфиге: его вывод идёт только через неё.
 func (l *launcher) openPty() {
 	if l.console != nil {
 		return
 	}
-	if cfg, err := loadConfig(l.configFile, l.home); err == nil && matchAny(cfg.Restart.PtyNames, l.name) {
+	adopted := l.upgraded != nil && l.upgraded.Master > 0
+	if cfg, err := loadConfig(l.configFile, l.home); adopted || err == nil && matchAny(cfg.Restart.PtyNames, l.name) {
 		l.console = openConsole(os.Stdin, os.Stdout, func(s string) {
 			journal(cfg.Restart.Journal, time.Now(), l.name+": "+s)
 		})
