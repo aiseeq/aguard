@@ -75,7 +75,7 @@ func TestSuperviseUpgraded(t *testing.T) {
 func claudeUnderPty(t *testing.T, c *console) (*exec.Cmd, func()) {
 	t.Helper()
 	cmd := exec.Command("sh", "-c", `while read -r x; do echo "got:$x"; done`)
-	finish, err := c.start(cmd)
+	finish, err := c.start(cmd, "")
 	if err != nil {
 		t.Fatal(err)
 	}

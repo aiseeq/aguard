@@ -160,7 +160,7 @@ func (l launcher) adopt(u upgrade) (*os.Process, func(), error) {
 		return nil, nil, errors.Join(fmt.Errorf("pty claude pid=%d от прежнего cl: консоли нет", u.Pid), master.Close())
 	}
 	l.console.typed.Store(u.Typed)
-	finish, err := l.console.attach(master)
+	finish, err := l.console.attach(master, nil)
 	if err != nil {
 		return nil, nil, errors.Join(err, master.Close())
 	}

@@ -87,7 +87,7 @@ func TestConsole(t *testing.T) {
 	}
 	// «claude»: читает строки до конца ввода и отвечает на каждую
 	cmd := exec.Command("sh", "-c", `while read -r x; do echo "got:$x"; done; echo bye`)
-	finish, err := c.start(cmd)
+	finish, err := c.start(cmd, "")
 	if err != nil {
 		t.Fatal(err)
 	}

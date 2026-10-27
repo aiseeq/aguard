@@ -42,17 +42,20 @@ type console struct {
 	master  *os.File
 	raw     *term.State
 	typed   atomic.Int64 // последний ввод человека, unix nano
-	winch   chan os.Signal
-	// warn — сбой консоли в журнал cl: claude вышел, а ввод ещё шёл; окно или терминал не вернулись.
-	warn func(string)
+	// keyed — последний ввод, кроме ответов терминала на запросы claude и событий фокуса (trust.go), unix nano.
+	keyed atomic.Int64
+	winch chan os.Signal
+	// note — строка в журнал cl: сбой консоли (claude вышел, а ввод ещё шёл; окно или терминал не вернулись) и
+	// сделанное за человека (окно доверия, trust.go).
+	note func(string)
 }
 
 // openConsole — консоль на терминале cl; ввод не терминал (cl из скрипта) — nil: claude получает терминал напрямую.
-func openConsole(in, out *os.File, warn func(string)) *console {
+func openConsole(in, out *os.File, note func(string)) *console {
 	if !term.IsTerminal(int(in.Fd())) || !term.IsTerminal(int(out.Fd())) {
 		return nil
 	}
-	c := &console{in: in, out: out, winch: make(chan os.Signal, 1), warn: warn}
+	c := &console{in: in, out: out, winch: make(chan os.Signal, 1), note: note}
 	signal.Notify(c.winch, syscall.SIGWINCH)
 	go c.pump()
 	go c.resize()
@@ -66,6 +69,9 @@ func (c *console) pump() {
 		n, err := c.in.Read(buf)
 		if n > 0 {
 			c.typed.Store(time.Now().UnixNano())
+			if !terminalReplies(buf[:n]) {
+				c.keyed.Store(time.Now().UnixNano())
+			}
 			c.mu.Lock()
 			if c.master != nil {
 				if _, werr := c.master.Write(buf[:n]); werr != nil { // claude вышел — ввод некуда девать
@@ -83,10 +89,15 @@ func (c *console) pump() {
 	}
 }
 
-// report — сбой консоли в журнал; журнала нет (тест) — молча: консоль от этого не ломается.
+// report — сбой консоли в журнал.
 func (c *console) report(what string, err error) {
-	if c.warn != nil {
-		c.warn(fmt.Sprintf("pty: %s: %v", what, err))
+	c.say(fmt.Sprintf("pty: %s: %v", what, err))
+}
+
+// say — строка в журнал; журнала нет (тест) — молча: консоль от этого не ломается.
+func (c *console) say(s string) {
+	if c.note != nil {
+		c.note(s)
 	}
 }
 
@@ -104,8 +115,9 @@ func (c *console) resize() {
 }
 
 // start запускает cmd под новым pty и переводит терминал cl в сырой режим. Вернувшаяся функция ждёт остаток вывода,
-// закрывает pty и возвращает терминал — звать после выхода claude.
-func (c *console) start(cmd *exec.Cmd) (func(), error) {
+// закрывает pty и возвращает терминал — звать после выхода claude. trustDir не пусто — окно доверия к этой папке
+// cl подтверждает сам (trust.go).
+func (c *console) start(cmd *exec.Cmd, trustDir string) (func(), error) {
 	size, err := pty.GetsizeFull(c.in)
 	if err != nil {
 		return nil, fmt.Errorf("размер окна: %w", err)
@@ -114,7 +126,12 @@ func (c *console) start(cmd *exec.Cmd) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("pty: %w", err)
 	}
-	finish, err := c.attach(master)
+	var watch io.Writer
+	if trustDir != "" {
+		since := time.Now().UnixNano()
+		watch = newTrustWatch(trustDir, func() { c.confirmTrust(trustDir, since) })
+	}
+	finish, err := c.attach(master, watch)
 	if err != nil { // без сырого режима ввод шёл бы строками с эхом — claude не запускать
 		return nil, errors.Join(err, stopChild(cmd), master.Close())
 	}
@@ -122,8 +139,9 @@ func (c *console) start(cmd *exec.Cmd) (func(), error) {
 }
 
 // attach — терминал cl в сыром режиме, ввод человека — в master, вывод claude из него — в терминал cl: для только что
-// запущенного claude и для живого, которого передал прежний cl (upgrade.go). finish — как у start.
-func (c *console) attach(master *os.File) (func(), error) {
+// запущенного claude и для живого, которого передал прежний cl (upgrade.go). watch не nil — ему копия вывода.
+// finish — как у start.
+func (c *console) attach(master *os.File, watch io.Writer) (func(), error) {
 	raw, err := term.MakeRaw(int(c.in.Fd()))
 	if err != nil {
 		return nil, fmt.Errorf("сырой режим терминала: %w", err)
@@ -134,7 +152,11 @@ func (c *console) attach(master *os.File) (func(), error) {
 	drained := make(chan struct{})
 	go func() {
 		// конец — EIO: claude вышел и закрыл свою сторону; иное — сбой вывода
-		if _, err := io.Copy(c.out, master); err != nil && !gone(err) {
+		out := io.Writer(c.out)
+		if watch != nil {
+			out = io.MultiWriter(c.out, watch)
+		}
+		if _, err := io.Copy(out, master); err != nil && !gone(err) {
 			c.report("вывод claude", err)
 		}
 		close(drained)

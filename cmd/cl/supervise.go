@@ -281,10 +281,19 @@ func (l launcher) start(n int, args []string) (*os.Process, func(), error) {
 // launch запускает claude: под pty cl или прямо на терминале cl. finish — после выхода claude.
 func (l launcher) launch(cmd *exec.Cmd) (finish func(), err error) {
 	if l.console != nil {
-		return l.console.start(cmd)
+		return l.console.start(cmd, l.trustDir())
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return func() {}, cmd.Start()
+}
+
+// trustDir — папка, окно доверия к которой cl подтверждает сам: домашняя, если claude запущен в ней (Claude Code не
+// сохраняет доверие к ней, trust.go); иначе пусто.
+func (l launcher) trustDir() string {
+	if cwd, err := os.Getwd(); err == nil && l.home != "" && filepath.Clean(cwd) == filepath.Clean(l.home) {
+		return l.home
+	}
+	return ""
 }
 
 // wait ждёт выхода claude; код не 0 — *exec.ExitError, как у exec.Cmd.Wait: claude мог запустить прежний cl
