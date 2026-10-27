@@ -126,6 +126,11 @@ func TestDecideReset(t *testing.T) {
 			t.Errorf("%s: %+v", code, v)
 		}
 	}
+	f = resetFacts()
+	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}}
+	if v := decideReset(f, &c, allowance{typed: true}, now); !v.Reset {
+		t.Errorf("crons под pty: /clear набором таймеры не теряет: %+v", v)
+	}
 	if v := decideReset(resetFacts(), &c, allowance{argsProblem: "свой флаг claude --foo"}, now); v.Reset || !slices.Contains(codes(Verdict{Against: v.Against}), "args") {
 		t.Errorf("args: новая беседа потеряла бы аргументы запуска: %+v", v)
 	}

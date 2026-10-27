@@ -78,20 +78,15 @@ const compactTimeout = 10 * time.Minute
 func (l launcher) supervise(pre, userArgs []string) int {
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
-	if cfg, err := loadConfig(l.configFile, l.home); err == nil && matchAny(cfg.Restart.PtyNames, l.name) {
-		l.console = openConsole(os.Stdin, os.Stdout, func(s string) {
-			journal(cfg.Restart.Journal, time.Now(), l.name+": "+s)
-		})
-	}
-	if l.console != nil {
-		defer l.console.restore()
-		defer func() {
-			if r := recover(); r != nil {
-				l.console.restore()
-				panic(r)
-			}
-		}()
-	}
+	defer func() { // консоль открывает openPty, и не обязательно на первом подъёме
+		r := recover()
+		if l.console != nil {
+			l.console.restore()
+		}
+		if r != nil {
+			panic(r)
+		}
+	}()
 	keep, argsProblem := restartArgs(userArgs)
 	args := append(append([]string{}, pre...), userArgs...)
 	first := 0
@@ -105,6 +100,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 		if n > first {
 			l.upgrade(n, args)
 		}
+		l.openPty()
 		unit := strconv.Itoa(os.Getpid())
 		if n > 0 {
 			unit += "-r" + strconv.Itoa(n)
@@ -326,7 +322,7 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 				continue
 			}
 			now := time.Now()
-			a, askErr := l.ask(pid, argsProblem)
+			a, askErr := l.ask(pid, argsProblem, l.console != nil && cfg.Restart.TypeMode == modeAct)
 			out, last = l.next(cfg, now, pid, a, askErr, last)
 			if out.typed != "" {
 				l.typeInto(cfg, now, pid, out)
@@ -343,12 +339,29 @@ func (l launcher) watch(cmd *exec.Cmd, sigs <-chan os.Signal, argsProblem string
 	}
 }
 
-// ask — ответ aguard о сессии pid; сокета нет в настройках — ответа нет.
-func (l launcher) ask(pid int, argsProblem string) (restart.Answer, error) {
+// openPty — консоль под pty cl, если имени сессии она положена (restart.pty_names) и ещё не открыта. Перед каждым
+// подъёмом claude, не только при старте cl: имя, внесённое в pty_names, включается на ближайшем перезапуске, сжатии
+// или сбросе, без перезапуска консоли. Открытая остаётся до выхода cl.
+func (l *launcher) openPty() {
+	if l.console != nil {
+		return
+	}
+	if cfg, err := loadConfig(l.configFile, l.home); err == nil && matchAny(cfg.Restart.PtyNames, l.name) {
+		l.console = openConsole(os.Stdin, os.Stdout, func(s string) {
+			journal(cfg.Restart.Journal, time.Now(), l.name+": "+s)
+		})
+	}
+}
+
+// ask — ответ aguard о сессии pid; typed — сжатие и сброс cl наберёт в живой сессии. Сокета нет в настройках —
+// ответа нет.
+func (l launcher) ask(pid int, argsProblem string, typed bool) (restart.Answer, error) {
 	if l.aguard == "" {
 		return restart.Answer{}, errors.New("aguard не задан")
 	}
-	return askAguard(l.aguard, restart.NewRequest(pid, l.name, argsProblem))
+	req := restart.NewRequest(pid, l.name, argsProblem)
+	req.Typed = typed
+	return askAguard(l.aguard, req)
 }
 
 // journalKeys — ключи последних строк журнала: решения о перезапуске, сжатии и сбросе пишутся один раз на решение.

@@ -167,9 +167,11 @@ type CompactCheck struct {
 	Reset ResetVerdict `json:"reset"`
 }
 
-// Compact — решение о сжатии сессии процесса pid; cfg — раздел [restart] (пути chooks и claude, роли), name —
-// имя сессии у cl, argsProblem — почему перезапуск потерял бы аргументы (знает только cl; пусто — восстановимы).
-func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProblem string, now time.Time) CompactCheck {
+// Compact — решение о сжатии сессии процесса req.Pid; cfg — раздел [restart] (пути chooks и claude, роли),
+// req.ArgsProblem — почему перезапуск потерял бы аргументы (знает только cl; пусто — восстановимы), req.Typed — cl
+// наберёт команду в живой сессии.
+func (j *Judge) Compact(cfg *Config, c *CompactConfig, req Request, now time.Time) CompactCheck {
+	pid, allow := req.Pid, allowance{argsProblem: req.ArgsProblem, typed: req.Typed}
 	ch := j.cache(pid, now)
 	ch.mu.Lock()
 	var f facts
@@ -186,8 +188,8 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProble
 	off := []Reason{{Code: "off", Text: "сжатие выключено в конфиге aguard"}}
 	v, r := CompactVerdict{Against: off}, ResetVerdict{Against: off}
 	if c.Mode != CompactOff {
-		v = decideCompact(f, c, allowance{argsProblem: argsProblem}, now)
-		if r = decideReset(f, c, allowance{argsProblem: argsProblem}, now); r.Reset {
+		v = decideCompact(f, c, allow, now)
+		if r = decideReset(f, c, allow, now); r.Reset {
 			treeCheck(&r, p.tree, f.Cwd)
 		}
 		preferReset(&v, r)

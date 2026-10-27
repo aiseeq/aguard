@@ -25,6 +25,8 @@ type Request struct {
 	Name string `json:"name"`
 	// ArgsProblem — почему перезапуск потерял бы аргументы запуска; пусто — восстановимы. Аргументы знает только cl.
 	ArgsProblem string `json:"args_problem"`
+	// Typed — сжатие и сброс cl наберёт в живой сессии под pty (type_mode act): /clear не теряет таймеры CronCreate.
+	Typed bool `json:"typed,omitempty"`
 }
 
 // NewRequest — вопрос текущей версии протокола о процессе pid.
@@ -109,7 +111,7 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	c.mu.Unlock()
 	name := firstNonEmpty(f.Name, req.Name)
 	v := decide(f, allowance{idle: cfg.Idle.D(), argsProblem: req.ArgsProblem})
-	cv := j.Compact(cfg, cc, req.Pid, name, req.ArgsProblem, now)
+	cv := j.Compact(cfg, cc, Request{Pid: req.Pid, Name: name, ArgsProblem: req.ArgsProblem, Typed: req.Typed}, now)
 	return Answer{
 		V: Version, Verdict: v, Key: v.Key(), Mode: cfg.Mode,
 		SessionID: f.SessionID, Name: name, Running: f.Running, Installed: f.Installed, Crons: len(f.Transcript.Crons) > 0,

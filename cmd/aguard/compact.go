@@ -116,7 +116,7 @@ func (a *app) compactRound(j *restart.Judge, cfg *config.Config, dry bool) error
 		if !a.reg.IsAlive(in.Pid, in.ProcStart) {
 			continue
 		}
-		c := j.Compact(&cfg.Restart, &cfg.Compact, in.Pid, in.Name, "", now)
+		c := j.Compact(&cfg.Restart, &cfg.Compact, restart.Request{Pid: in.Pid, Name: in.Name}, now)
 		if c.SessionKind != "interactive" {
 			continue
 		}
