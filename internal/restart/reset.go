@@ -29,7 +29,7 @@ type ResetVerdict struct {
 // компромисс», вариант 3 лида — 11:12 CET «Да, давай 3»; подсказка Claude Code «/clear to save» больше не решает.
 func decideReset(f facts, c *CompactConfig, p allowance, now time.Time) ResetVerdict {
 	var v ResetVerdict
-	v.Against, v.Candidate = idleChecks(f, c, allowance{argsProblem: p.argsProblem}, idleWindow{c.MinTokens, c.After.D(), 0, "сброс", true}, now)
+	v.Against, v.Candidate = idleChecks(f, c, p, idleWindow{c.MinTokens, c.After.D(), 0, "сброс", true}, now)
 	if len(f.Transcript.Crons) > 0 && !p.typed {
 		v.Against = append(v.Against, Reason{Code: "crons", Text: "таймеры пропали бы: " + cronList(f.Transcript.Crons)})
 	}

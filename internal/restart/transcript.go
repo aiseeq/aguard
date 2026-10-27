@@ -19,8 +19,10 @@ import (
 type transcriptFacts struct {
 	// Pending — вызовы инструментов без результата: инструмент идёт или ждёт ответа человека.
 	Pending []string
-	// Tasks — фоновые команды, мониторы и суб-агенты без уведомления о завершении.
-	Tasks []string
+	// Tasks — фоновые команды, мониторы и суб-агенты без уведомления о завершении; Agents — суб-агенты и workflow
+	// среди них: держат и сброс набором /clear.
+	Tasks  []string
+	Agents []string
 	// Crons — живые таймеры CronCreate: живут только в процессе и пропали бы с ним.
 	Crons []cronJob
 	// Wakeups — ScheduleWakeup, срок которых не наступил.
@@ -149,6 +151,7 @@ type transcriptScan struct {
 	uses    map[string]toolUse
 	pending map[string]string
 	tasks   map[string]string
+	agents  map[string]bool // суб-агенты и workflow среди tasks
 	closed  map[string]bool
 	// expires — срок монитора: после него Claude Code монитор снимает, а уведомление об этом приходит не всегда.
 	expires map[string]time.Time
@@ -175,7 +178,7 @@ func scanTranscript(r io.Reader, since time.Time) (*transcriptScan, error) {
 
 func newScan(since time.Time) *transcriptScan {
 	return &transcriptScan{since: since, uses: map[string]toolUse{}, pending: map[string]string{}, tasks: map[string]string{},
-		closed: map[string]bool{}, expires: map[string]time.Time{}, waiting: map[string]string{}, subs: map[string]*scanCache{},
+		agents: map[string]bool{}, closed: map[string]bool{}, expires: map[string]time.Time{}, waiting: map[string]string{}, subs: map[string]*scanCache{},
 		crons: map[string]cronJob{}, fired: map[string]bool{}}
 }
 
@@ -415,9 +418,10 @@ func (s *transcriptScan) result(b block, raw json.RawMessage) error {
 	label := use.name + " «" + short(firstNonEmpty(use.input.str("description"), use.input.str("prompt"), use.input.str("command"))) + "»"
 	if id := res.str("backgroundTaskId"); id != "" {
 		s.tasks[id] = label
+		s.agents[id] = use.name == "Workflow"
 	}
 	if id := res.str("agentId"); id != "" && res.flag("isAsync") {
-		s.tasks[id] = label
+		s.tasks[id], s.agents[id] = label, true
 	}
 	switch use.name {
 	case "Monitor":
@@ -479,6 +483,11 @@ func (s *transcriptScan) facts(now time.Time) transcriptFacts {
 			f.Tasks = append(f.Tasks, label+" "+id+" ("+err.Error()+")")
 		case !done:
 			f.Tasks = append(f.Tasks, label+" "+id)
+		default:
+			continue
+		}
+		if s.agents[id] {
+			f.Agents = append(f.Agents, label+" "+id)
 		}
 	}
 	f.Requests = slices.Clone(s.requests[max(0, len(s.requests)-requestsKept):])
@@ -495,6 +504,7 @@ func (s *transcriptScan) facts(now time.Time) transcriptFacts {
 	}
 	slices.Sort(f.Pending)
 	slices.Sort(f.Tasks)
+	slices.Sort(f.Agents)
 	slices.SortFunc(f.Crons, func(a, b cronJob) int { return strings.Compare(a.ID, b.ID) })
 	return f
 }

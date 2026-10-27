@@ -94,12 +94,13 @@ func decideCompact(f facts, c *CompactConfig, p allowance, now time.Time) Compac
 }
 
 // idleWindow — когда решать о беседе в простое: контекст от minTokens, последний запрос from…to назад (to 0 — без
-// верхней границы); what — слово для доводов; afterCompaction — действие имеет смысл и после сжатия беседы (сброс).
+// верхней границы); what — слово для доводов; reset — это сброс: он имеет смысл и после сжатия беседы, а набором под
+// pty — /clear, не /compact.
 type idleWindow struct {
-	minTokens       int64
-	from, to        time.Duration
-	what            string
-	afterCompaction bool
+	minTokens int64
+	from, to  time.Duration
+	what      string
+	reset     bool
 }
 
 // idleChecks — доводы против действия над беседой в простое (сжатия или сброса) и в окне ли она: контекст и окно,
@@ -129,15 +130,22 @@ func idleChecks(f facts, c *CompactConfig, p allowance, w idleWindow, now time.T
 	default:
 		in = true
 	}
-	if !w.afterCompaction && !ctx.Compacted.IsZero() && !ctx.Compacted.Before(ctx.Request) {
+	if !w.reset && !ctx.Compacted.IsZero() && !ctx.Compacted.Before(ctx.Request) {
 		against("compacted", "уже сжата (%s) после последнего запроса", OrDash(ctx.Trigger))
 	}
-	sessionChecks(f, against)
+	a := restart
+	switch {
+	case p.typed && w.reset:
+		a = typedClear
+	case p.typed:
+		a = typedCompact
+	}
+	sessionChecks(f, a, against)
 	if f.TTYQuiet < c.TTYQuiet.D() {
 		against("tty", "ввод в терминал %s назад", minutes(f.TTYQuiet))
 	}
 	inputChecks(f, against)
-	workChecks(f, against)
+	workChecks(f, a, against)
 	lossChecks(f, p, against)
 	return list, in
 }

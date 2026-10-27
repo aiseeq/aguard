@@ -78,6 +78,9 @@ func TestScanTranscriptTasks(t *testing.T) {
 	if want := []string{"Agent «ревью» a2", "Monitor «логи» m5"}; !slices.Equal(f.Tasks, want) {
 		t.Errorf("Tasks = %q, want %q", f.Tasks, want)
 	}
+	if want := []string{"Agent «ревью» a2"}; !slices.Equal(f.Agents, want) {
+		t.Errorf("Agents = %q, want %q", f.Agents, want)
+	}
 	if want := []string{"AskUserQuestion t8"}; !slices.Equal(f.Pending, want) {
 		t.Errorf("Pending = %q, want %q", f.Pending, want)
 	}

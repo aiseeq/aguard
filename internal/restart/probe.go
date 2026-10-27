@@ -34,6 +34,8 @@ type facts struct {
 	HookTasks bool
 	// HookWaits — paused объяснён без задач: таймеры и расписания по chooks или монитор артефакта.
 	HookWaits bool
+	// HookAgents — среди задач HookTasks суб-агенты или workflow (типы agentTypes в chooks internal/core/background.go).
+	HookAgents bool
 	// Quiet — сколько времени не менялись транскрипт, состояние chooks и статус в реестре.
 	Quiet time.Duration
 	// TTYQuiet — сколько времени в терминал сессии не приходил ввод (atime pts: клавиатура, фокус окна).
@@ -161,7 +163,8 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 	if err != nil {
 		fail(err)
 	}
-	f.HookState, f.HookTasks, f.HookWaits, latest = hook.state, hook.tasks, hook.waits, later(latest, hook.written)
+	f.HookState, f.HookTasks, f.HookWaits, f.HookAgents = hook.state, hook.tasks, hook.waits, hook.agents
+	latest = later(latest, hook.written)
 	transcript, err := transcriptFile(p, s.SessionID)
 	if err != nil {
 		fail(err)
@@ -193,6 +196,7 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 type hookRecord struct {
 	state   string    // done, idle, waiting, paused, working, error; пусто — записи нет
 	tasks   bool      // в <сессия>.tasks есть фоновые задачи, кроме мониторов артефактов
+	agents  bool      // среди них суб-агенты или workflow
 	waits   bool      // в <сессия>.tasks таймеры, расписания или мониторы артефактов
 	written time.Time // время записи состояния
 }
@@ -247,6 +251,7 @@ func readHookState(p paths, sessionID string) (hookRecord, error) {
 			continue
 		}
 		rec.tasks = true
+		rec.agents = rec.agents || t.Type == "subagent" || t.Type == "workflow"
 	}
 	return rec, nil
 }

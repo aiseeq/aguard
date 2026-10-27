@@ -49,9 +49,25 @@ type allowance struct {
 	idle time.Duration
 	// argsProblem — почему перезапуск потерял бы аргументы запуска; пусто — аргументы восстановимы.
 	argsProblem string
-	// typed — сброс наберут /clear в живой сессии: таймеры останутся (пилот 26.10 18:06 CET, коммит 8870cf3).
+	// typed — сжатие и сброс наберут /compact и /clear в живой сессии: таймеры останутся (пилот 26.10 18:06 CET,
+	// коммит 8870cf3), фоновые задачи и дети процесса — тоже (action).
 	typed bool
 }
+
+// action — что делают с живым claude: от этого зависит, что пропадёт.
+type action int
+
+const (
+	// restart — SIGTERM и подъём (новая версия, сжатие и сброс без pty): умрёт всё запущенное.
+	restart action = iota
+	// typedCompact — /compact набором под pty: процесс тот же, фоновые задачи, суб-агенты и дети живут дальше.
+	typedCompact
+	// typedClear — /clear набором под pty: фоновая команда живёт, и уведомление о её конце приходит в новую беседу
+	// (пользователь 26.10 16:25 CET в chooks-master: /clear при живой задаче bq4yr5j4i, уведомление в новой беседе
+	// 0369ecf0 в 16:53 CET). Суб-агенты держат сброс: «запущены субагенты, они реально работают, я бы такое разрешил
+	// только компактить» (пользователь 26.10 16:33 CET там же).
+	typedClear
+)
 
 // decide — можно ли перезапускать сессию сейчас. Перезапуск — только когда ни один довод против не сработал:
 // версия процесса старее установленной, ход закончен и сессия простояла idle, нет ввода в терминал (и после конца хода), детей-процессов,
@@ -74,7 +90,7 @@ func decide(f facts, p allowance) Verdict {
 		}
 		return v
 	}
-	sessionChecks(f, against)
+	sessionChecks(f, restart, against)
 	if f.Quiet < p.idle {
 		against("quiet", "тихо %s из %s", minutes(f.Quiet), minutes(p.idle))
 	}
@@ -82,7 +98,7 @@ func decide(f facts, p allowance) Verdict {
 		against("tty", "ввод в терминал %s назад", minutes(f.TTYQuiet))
 	}
 	inputChecks(f, against)
-	workChecks(f, against)
+	workChecks(f, restart, against)
 	lossChecks(f, p, against)
 	v.Restart = len(v.Against) == 0
 	return v
@@ -104,15 +120,15 @@ func lossChecks(f facts, p allowance, against againstFunc) {
 // againstFunc — записать довод против.
 type againstFunc func(code, format string, args ...any)
 
-// sessionChecks — интерактивная сессия закончила ход.
-func sessionChecks(f facts, against againstFunc) {
+// sessionChecks — интерактивная сессия закончила ход; a — что с ней сделают.
+func sessionChecks(f facts, a action, against againstFunc) {
 	if f.Kind != "interactive" {
 		against("kind", "сессия не интерактивная: %q", f.Kind)
 	}
 	if f.Status != "idle" {
 		against("status", "Claude Code: %s", OrDash(f.Status))
 	}
-	hookChecks(f, against)
+	hookChecks(f, a, against)
 }
 
 // inputChecks — в поле ввода нет набранного текста: то, что aguard или cl пошлют в сессию, его затёрло бы.
@@ -136,16 +152,20 @@ func inputChecks(f facts, against againstFunc) {
 	}
 }
 
-// workChecks — ничего не идёт: дети процесса, инструменты, фоновые задачи и суб-агенты.
-func workChecks(f facts, against againstFunc) {
-	if len(f.Children) > 0 {
+// workChecks — ничего не идёт, что действие a убило бы: дети процесса, инструменты, фоновые задачи и суб-агенты.
+// Набор под pty процесс не трогает: дети и фоновые задачи живут, против — только суб-агенты у /clear.
+func workChecks(f facts, a action, against againstFunc) {
+	if len(f.Children) > 0 && a == restart {
 		against("children", "дети процесса: %s", strings.Join(f.Children, ", "))
 	}
 	if len(f.Transcript.Pending) > 0 {
 		against("pending", "инструмент без результата: %s", strings.Join(f.Transcript.Pending, ", "))
 	}
-	if len(f.Transcript.Tasks) > 0 {
+	switch {
+	case len(f.Transcript.Tasks) > 0 && a == restart:
 		against("tasks", "фоновые задачи и суб-агенты: %s", strings.Join(f.Transcript.Tasks, ", "))
+	case len(f.Transcript.Agents) > 0 && a == typedClear:
+		against("agents", "суб-агенты работают: %s", strings.Join(f.Transcript.Agents, ", "))
 	}
 }
 
@@ -155,14 +175,17 @@ func workChecks(f facts, against againstFunc) {
 // этого открыл вкладку. waiting — вопрос человеку (минутное напоминание с chooks ae7ceb3 его не ставит): против,
 // как working и error. paused — Stop при фоновых задачах или таймерах: годится, только если задач в .tasks нет
 // (монитор артефакта не в счёт — см. HookTasks), а пауза объяснена таймерами (по транскрипту или по .tasks) или
-// монитором артефакта; живые фоновые команды, мониторы и суб-агенты перезапуск cl (сжатие и сброс — тоже
-// перезапуск) убил бы.
-func hookChecks(f facts, against againstFunc) {
+// монитором артефакта; живые фоновые команды, мониторы и суб-агенты перезапуск cl (сжатие и сброс без pty — тоже
+// перезапуск) убил бы. Набор под pty (a) их не трогает, кроме суб-агентов у /clear.
+func hookChecks(f facts, a action, against againstFunc) {
 	switch f.HookState {
 	case "done", "idle":
 	case "paused":
-		if f.HookTasks {
+		switch {
+		case f.HookTasks && a == restart:
 			against("hook-tasks", "chooks: на последнем Stop были фоновые задачи")
+		case f.HookAgents && a == typedClear:
+			against("hook-agents", "chooks: на последнем Stop работали суб-агенты")
 		}
 		if !f.HookTasks && !f.HookWaits && len(f.Transcript.Crons) == 0 {
 			against("hook-paused", "chooks: paused, а таймеров в транскрипте нет — непонятно, чего ждёт")

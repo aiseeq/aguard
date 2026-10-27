@@ -131,6 +131,32 @@ func TestDecideReset(t *testing.T) {
 	if v := decideReset(f, &c, allowance{typed: true}, now); !v.Reset {
 		t.Errorf("crons под pty: /clear набором таймеры не теряет: %+v", v)
 	}
+	// Под pty процесс не перезапускают: фоновая команда и дети живут и после /clear, суб-агенты держат только сброс.
+	busy := func(agent bool) facts {
+		f := resetFacts()
+		f.Children = []string{"bash 42"}
+		f.Transcript.Tasks = []string{"Bash «замер» b1"}
+		f.HookState, f.HookTasks, f.HookAgents, f.HookWaits = "paused", true, agent, false
+		if agent {
+			f.Transcript.Tasks = append(f.Transcript.Tasks, "Agent «ревью» a1")
+			f.Transcript.Agents = []string{"Agent «ревью» a1"}
+		}
+		return f
+	}
+	if v := decideReset(busy(false), &c, allowance{typed: true}, now); !v.Reset {
+		t.Errorf("фоновая команда под pty: /clear её не убивает: %+v", v)
+	}
+	if v := decideReset(busy(false), &c, allowance{}, now); v.Reset || !slices.Contains(codes(Verdict{Against: v.Against}), "children") ||
+		!slices.Contains(codes(Verdict{Against: v.Against}), "tasks") || !slices.Contains(codes(Verdict{Against: v.Against}), "hook-tasks") {
+		t.Errorf("без pty сброс — перезапуск, задачи умерли бы: %+v", v)
+	}
+	agents := decideReset(busy(true), &c, allowance{typed: true}, now)
+	if got := codes(Verdict{Against: agents.Against}); agents.Reset || !slices.Equal(got, []string{"hook-agents", "agents"}) {
+		t.Errorf("суб-агенты под pty держат сброс: %v", got)
+	}
+	if against, in := idleChecks(busy(true), &c, allowance{typed: true}, idleWindow{c.MinTokens, c.After.D(), 0, "окно", false}, now); len(against) != 0 || !in {
+		t.Errorf("/compact набором под pty суб-агенты не держат: %+v", against)
+	}
 	if v := decideReset(resetFacts(), &c, allowance{argsProblem: "свой флаг claude --foo"}, now); v.Reset || !slices.Contains(codes(Verdict{Against: v.Against}), "args") {
 		t.Errorf("args: новая беседа потеряла бы аргументы запуска: %+v", v)
 	}

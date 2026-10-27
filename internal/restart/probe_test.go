@@ -219,14 +219,16 @@ func TestReadHookTasks(t *testing.T) {
 	write(t, filepath.Join(dir, "s1"), "paused")
 	artifact := `{"id":"sxtctgkwu","type":"monitor","description":"live updates for artifact https://claude.ai/artifact/HPY6 (auto-armed on publish)","since":"2026-10-27T05:01:26+01:00"}`
 	shell := `{"id":"b7xi68io0","type":"shell","description":"Grep transcript for user quote","since":"2026-10-27T04:03:35+01:00"}`
+	agent := `{"id":"a1","type":"subagent","description":"ревью","since":"2026-10-27T04:03:35+01:00"}`
 	for name, c := range map[string]struct {
-		file         string
-		tasks, waits bool
+		file                 string
+		tasks, waits, agents bool
 	}{
-		"нет файла":         {"", false, false},
-		"монитор артефакта": {`{"tasks":[` + artifact + `],"crons":0}`, false, true},
-		"монитор и команда": {`{"tasks":[` + artifact + `,` + shell + `],"crons":0}`, true, true},
-		"только таймеры":    {`{"tasks":[],"crons":0,"schedules":2}`, false, true},
+		"нет файла":         {"", false, false, false},
+		"монитор артефакта": {`{"tasks":[` + artifact + `],"crons":0}`, false, true, false},
+		"монитор и команда": {`{"tasks":[` + artifact + `,` + shell + `],"crons":0}`, true, true, false},
+		"только таймеры":    {`{"tasks":[],"crons":0,"schedules":2}`, false, true, false},
+		"суб-агент":         {`{"tasks":[` + shell + `,` + agent + `],"crons":0}`, true, false, true},
 	} {
 		tasksFile := filepath.Join(dir, "s1.tasks")
 		if c.file != "" {
@@ -235,7 +237,7 @@ func TestReadHookTasks(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec, err := readHookState(p, "s1")
-		if err != nil || rec.tasks != c.tasks || rec.waits != c.waits {
+		if err != nil || rec.tasks != c.tasks || rec.waits != c.waits || rec.agents != c.agents {
 			t.Errorf("%s: %+v %v", name, rec, err)
 		}
 	}
