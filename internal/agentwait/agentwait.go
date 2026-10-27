@@ -45,7 +45,7 @@ type Wait struct {
 type Config struct {
 	Interval   policy.Duration `toml:"interval"`    // как часто читать дописанное
 	Backfill   policy.Duration `toml:"backfill"`    // транскрипты, изменённые за этот срок до первого прохода, читаются с начала
-	BackfillMB int64           `toml:"backfill_mb"` // сколько МБ читать за проход (первый файл прохода — целиком)
+	BackfillMB int64           `toml:"backfill_mb"` // сколько МБ читать за проход (больший файл — кусками)
 	MaxOpen    policy.Duration `toml:"max_open"`    // дольше открытое ожидание закрывается с исходом none
 	Keep       policy.Duration `toml:"keep"`        // сколько хранить дневные файлы
 }
