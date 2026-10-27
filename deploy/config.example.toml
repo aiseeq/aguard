@@ -80,10 +80,6 @@ idle = "10m"
 # claude = "~/.local/bin/claude"
 # hook_states = "/run/user/1000/chooks/sessions"
 
-# Таймеры, которые роль ставит заново сама: их потеря перезапуск не держит.
-[[restart.roles]]
-names = ["lead"]
-restorable_crons = ["Сон (скилл sleep)", "Дайджест (скилл digest)"]
 
 # Отказы и ожидания агентов по транскриптам ~/.claude/projects: таймауты хуков, ошибки API, сжатия контекста.
 [waits]

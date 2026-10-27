@@ -28,6 +28,9 @@ type ResetVerdict struct {
 func decideReset(f facts, c *CompactConfig, p allowance, now time.Time) ResetVerdict {
 	var v ResetVerdict
 	v.Against, v.Candidate = idleChecks(f, c, allowance{argsProblem: p.argsProblem}, idleWindow{c.ResetMinTokens, c.ResetIdle.D(), 0, "сброс"}, now)
+	if len(f.Transcript.Crons) > 0 {
+		v.Against = append(v.Against, Reason{Code: "crons", Text: "таймеры пропали бы: " + cronList(f.Transcript.Crons)})
+	}
 	if len(f.Errors) == 0 && !f.ClearHint {
 		v.Against = append(v.Against, Reason{Code: "hint", Text: "на экране нет подсказки Claude Code «/clear to save»"})
 	}

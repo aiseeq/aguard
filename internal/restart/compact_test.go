@@ -35,7 +35,6 @@ func TestDecideCompact(t *testing.T) {
 		"tty":    func(f *facts) { f.TTYQuiet = time.Minute },
 		"screen": func(f *facts) { f.Prompt = screen.Draft },
 		"tasks":  func(f *facts) { f.Transcript.Tasks = []string{"Agent «ревью» a1"} },
-		"crons":  func(f *facts) { f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
 		"wakeup": func(f *facts) { f.Transcript.Wakeups = []string{"ScheduleWakeup до 19:00"} },
 	}
 	for code, spoil := range cases {
@@ -45,14 +44,15 @@ func TestDecideCompact(t *testing.T) {
 			t.Errorf("%s: %+v", code, v)
 		}
 	}
-	// сжатие — через перезапуск: невосстановимые аргументы держат, таймеры роли — нет
+	// сжатие — через перезапуск: невосстановимые аргументы держат, таймеры — нет (после -p --resume /compact и
+	// --resume они на месте, замер 27.10 10:07 CET)
 	if v := decideCompact(compactFacts(now), &c, allowance{argsProblem: "свой флаг claude --bare"}, now); v.Compact {
 		t.Errorf("аргументы пропали бы: %+v", v)
 	}
 	f := compactFacts(now)
-	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}}
-	if v := decideCompact(f, &c, allowance{role: leadRole}, now); !v.Compact {
-		t.Errorf("таймеры лида восстановимы: %+v", v)
+	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "замер"}}
+	if v := decideCompact(f, &c, allowance{}, now); !v.Compact {
+		t.Errorf("таймеры сжатие не держат: %+v", v)
 	}
 	// версия и порог простоя перезапуска сжатию не мешают
 	f = compactFacts(now)

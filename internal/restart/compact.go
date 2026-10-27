@@ -197,7 +197,7 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, pid int, name, argsProble
 	off := []Reason{{Code: "off", Text: "сжатие выключено в конфиге aguard"}}
 	v, r := CompactVerdict{Against: off}, ResetVerdict{Against: off}
 	if c.Mode != CompactOff {
-		v = decideCompact(f, c, allowance{role: cfg.roleFor(firstNonEmpty(f.Name, name)), argsProblem: argsProblem}, now)
+		v = decideCompact(f, c, allowance{argsProblem: argsProblem}, now)
 		if r = decideReset(f, c, allowance{argsProblem: argsProblem}, now); r.Reset {
 			treeCheck(&r, p.tree, f.Cwd)
 		}

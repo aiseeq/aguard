@@ -23,8 +23,6 @@ func idleFacts() facts {
 	}
 }
 
-var leadRole = Role{Names: []string{"lead"}, RestorableCrons: []string{"Сон (скилл sleep)", "Дайджест (скилл digest)"}}
-
 func codes(v Verdict) []string {
 	var out []string
 	for _, r := range v.Against {
@@ -71,7 +69,6 @@ func TestDecideAgainst(t *testing.T) {
 		"children": func(f *facts) { f.Children = []string{"42 bash"} },
 		"pending":  func(f *facts) { f.Transcript.Pending = []string{"AskUserQuestion t1"} },
 		"tasks":    func(f *facts) { f.Transcript.Tasks = []string{"Agent «ревью» a1"} },
-		"crons":    func(f *facts) { f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
 		"wakeup":   func(f *facts) { f.Transcript.Wakeups = []string{"ScheduleWakeup до 19:00"} },
 	}
 	for code, spoil := range cases {
@@ -90,24 +87,20 @@ func TestDecideAgainst(t *testing.T) {
 	}
 }
 
-func TestDecideLeadCrons(t *testing.T) {
+// Таймеры перезапуск не держат: --resume их возвращает (замер лида 27.10 09:58 CET).
+func TestDecideCrons(t *testing.T) {
 	f := idleFacts()
 	f.Name, f.HookState = "lead", "paused"
-	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)", Recurring: true}, {ID: "j2", Prompt: "Дайджест (скилл digest)", Recurring: true}}
-	if v := decide(f, allowance{idle: 10 * time.Minute, role: leadRole}); !v.Restart {
-		t.Errorf("Сон и Дайджест лид ставит заново: %+v", v)
+	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл dream)", Recurring: true}, {ID: "j3", Prompt: "замер темпа Codex"}}
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart {
+		t.Errorf("таймеры --resume вернёт: %+v", v)
 	}
-	f.Transcript.Crons = append(f.Transcript.Crons, cronJob{ID: "j3", Prompt: "замер темпа Codex"})
-	if v := decide(f, allowance{idle: 10 * time.Minute, role: leadRole}); v.Restart || !slices.Contains(codes(v), "crons") {
-		t.Errorf("чужой таймер лида пропал бы: %+v", v)
-	}
-	f.Transcript.Crons = f.Transcript.Crons[:2]
 	f.HookTasks = true
-	if v := decide(f, allowance{idle: 10 * time.Minute, role: leadRole}); v.Restart {
+	if v := decide(f, allowance{idle: 10 * time.Minute}); v.Restart {
 		t.Error("paused с фоновыми задачами на Stop — не перезапускать")
 	}
 	f.HookTasks, f.Transcript.Crons = false, nil
-	if v := decide(f, allowance{idle: 10 * time.Minute, role: leadRole}); v.Restart || !slices.Contains(codes(v), "hook-paused") {
+	if v := decide(f, allowance{idle: 10 * time.Minute}); v.Restart || !slices.Contains(codes(v), "hook-paused") {
 		t.Errorf("paused без таймеров и задач — непонятно чего ждёт: %+v", v)
 	}
 }

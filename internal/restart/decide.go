@@ -38,7 +38,6 @@ const ttyGranularity = 8 * time.Second
 // allowance — что сессии позволено, кроме общих правил: порог простоя, таймеры роли, аргументы запуска.
 type allowance struct {
 	idle time.Duration
-	role Role
 	// argsProblem — почему перезапуск потерял бы аргументы запуска; пусто — аргументы восстановимы.
 	argsProblem string
 }
@@ -78,11 +77,11 @@ func decide(f facts, p allowance) Verdict {
 	return v
 }
 
-// lossChecks — новый процесс поднимется со всем, что было: таймеры, будильники, аргументы запуска.
+// lossChecks — новый процесс поднимется со всем, что было: будильники, аргументы запуска. Таймеры CronCreate --resume
+// возвращает сам, и после сжатия через -p тоже: замер лида 27.10 09:58 CET (SIGTERM, --resume) и aguard-master
+// 10:07 CET (SIGTERM, сжатие через -p, --resume — CronList показал таймер), Claude Code 2.1.311. Сброс их теряет —
+// там свой довод (decideReset).
 func lossChecks(f facts, p allowance, against againstFunc) {
-	if lost := lostCrons(f.Transcript.Crons, p.role); len(lost) > 0 {
-		against("crons", "таймеры пропали бы: %s", strings.Join(lost, ", "))
-	}
 	if len(f.Transcript.Wakeups) > 0 {
 		against("wakeup", "%s", strings.Join(f.Transcript.Wakeups, ", "))
 	}
@@ -161,15 +160,13 @@ func hookChecks(f facts, against againstFunc) {
 	}
 }
 
-// lostCrons — таймеры, которые роль не ставит заново сама.
-func lostCrons(crons []cronJob, r Role) []string {
-	var lost []string
-	for _, c := range crons {
-		if !r.restorable(c.Prompt) {
-			lost = append(lost, c.ID+" «"+short(c.Prompt)+"»")
-		}
+// cronList — таймеры для довода: id и начало текста.
+func cronList(crons []cronJob) string {
+	list := make([]string, len(crons))
+	for i, c := range crons {
+		list[i] = c.ID + " «" + short(c.Prompt) + "»"
 	}
-	return lost
+	return strings.Join(list, ", ")
 }
 
 func minutes(d time.Duration) string {

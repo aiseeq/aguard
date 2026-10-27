@@ -103,7 +103,7 @@ func TestExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Restart.Mode != restart.ModeLog || len(c.Restart.Roles) == 0 {
+	if c.Restart.Mode != restart.ModeLog {
 		t.Errorf("раздел restart примера: %+v", c.Restart)
 	}
 }

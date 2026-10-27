@@ -108,7 +108,7 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	f := probe(pathsFor(j.Home, cfg), &c.scan, req.Pid, now)
 	c.mu.Unlock()
 	name := firstNonEmpty(f.Name, req.Name)
-	v := decide(f, allowance{idle: cfg.Idle.D(), role: cfg.roleFor(name), argsProblem: req.ArgsProblem})
+	v := decide(f, allowance{idle: cfg.Idle.D(), argsProblem: req.ArgsProblem})
 	cv := j.Compact(cfg, cc, req.Pid, name, req.ArgsProblem, now)
 	return Answer{
 		V: Version, Verdict: v, Key: v.Key(), Mode: cfg.Mode,

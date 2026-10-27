@@ -5,9 +5,7 @@ package restart
 import (
 	"errors"
 	"fmt"
-	"path"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/policy"
@@ -27,16 +25,6 @@ type Config struct {
 	Claude string          `toml:"claude"` // claude из PATH сессий: версию по этой ссылке запустит перезапуск
 	// HookStates — состояния chooks (internal/core/state.go: $XDG_RUNTIME_DIR/chooks/sessions).
 	HookStates string `toml:"hook_states"`
-	// Roles — роли по имени сессии, первая подходящая: какие таймеры роль ставит заново сама.
-	Roles []Role `toml:"roles"`
-}
-
-// Role — что роли позволено терять при перезапуске.
-type Role struct {
-	// Names — шаблоны имени сессии (path.Match: lead, *-master).
-	Names []string `toml:"names"`
-	// RestorableCrons — начала текста таймеров, которые роль ставит заново при старте: их потеря перезапуск не держит.
-	RestorableCrons []string `toml:"restorable_crons"`
 }
 
 // Default — начальные значения: только журнал, без ролей. runtime — $XDG_RUNTIME_DIR.
@@ -64,34 +52,5 @@ func (c *Config) Validate(home string) error {
 	c.Socket = policy.ExpandHome(c.Socket, home)
 	c.Claude = policy.ExpandHome(c.Claude, home)
 	c.HookStates = policy.ExpandHome(c.HookStates, home)
-	for i := range c.Roles {
-		for _, p := range c.Roles[i].Names {
-			if _, err := path.Match(p, ""); err != nil {
-				return fmt.Errorf("restart.roles[%d]: шаблон %q: %w", i, p, err)
-			}
-		}
-	}
 	return nil
-}
-
-// roleFor — первая роль, шаблон которой подходит к имени сессии.
-func (c *Config) roleFor(name string) Role {
-	for i := range c.Roles {
-		for _, pattern := range c.Roles[i].Names {
-			if ok, err := path.Match(pattern, name); err == nil && ok {
-				return c.Roles[i]
-			}
-		}
-	}
-	return Role{}
-}
-
-// restorable — таймер с этим текстом роль ставит заново сама.
-func (r Role) restorable(prompt string) bool {
-	for _, prefix := range r.RestorableCrons {
-		if prefix != "" && strings.HasPrefix(prompt, prefix) {
-			return true
-		}
-	}
-	return false
 }
