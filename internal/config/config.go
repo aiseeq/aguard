@@ -1,6 +1,6 @@
 // Package config — единый конфиг aguard (~/.config/aguard/config.toml):
 // общие поля (лид, админы пространств) и разделы наблюдателей [orphans], [tmp],
-// [memory], [restart], [waits], [agentwaits], [compact], [disk], [said], [bgtask]. Перечитывается каждый проход.
+// [memory], [restart], [waits], [agentwaits], [compact], [disk], [said], [bgtask], [cpu]. Перечитывается каждый проход.
 package config
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/agentwait"
 	"github.com/aiseeq/aguard/internal/bgtask"
+	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/orphans"
@@ -43,6 +44,7 @@ type Config struct {
 	Disk    disk.Config           `toml:"disk"`   // рост папок кэшей и состояний, остатки временного
 	Said    said.Config           `toml:"said"`   // указатель сказанного пользователем
 	Bgtask  bgtask.Config         `toml:"bgtask"` // забытые фоновые задачи Bash: письмо владельцу
+	Cpu     cpuwatch.Config       `toml:"cpu"`    // перегрузка процессора ноута и PC: письмо тем, чья она
 }
 
 // Path — путь конфига в домашней папке.
@@ -66,6 +68,7 @@ func Default(home string) Config {
 		Disk:       disk.Default(),
 		Said:       said.Default(),
 		Bgtask:     bgtask.Default(),
+		Cpu:        cpuwatch.Default(home),
 	}
 }
 
@@ -108,6 +111,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Orphans.Lead, c.Orphans.SendAuth, c.Orphans.Admins = c.Lead, c.SendAuth, maps.Clone(admins)
 	c.Tmp.Lead, c.Tmp.SendAuth, c.Tmp.Escalation.Admins = c.Lead, c.SendAuth, maps.Clone(admins)
 	c.Bgtask.SendAuth = c.SendAuth
+	c.Cpu.Lead, c.Cpu.SendAuth = c.Lead, c.SendAuth
 	if err := c.Orphans.Compile(home); err != nil {
 		return fmt.Errorf("orphans: %w", err)
 	}
@@ -133,6 +137,9 @@ func (c *Config) finish(home string, uid int) error {
 		return err
 	}
 	if err := c.Bgtask.Validate(); err != nil {
+		return err
+	}
+	if err := c.Cpu.Validate(home); err != nil {
 		return err
 	}
 	return c.Compact.Validate()

@@ -18,7 +18,9 @@
 //
 //   - disk — рост папок кэшей и состояний за сутки, остатки временного, быстрое наполнение: журнал, кому сообщил бы;
 //
-//   - said — реплики пользователя лиду, админам и мастерам: правила, решения и обещания — в ~/.claude/said.tsv.
+//   - said — реплики пользователя лиду, админам и мастерам: правила, решения и обещания — в ~/.claude/said.tsv;
+//
+//   - cpu — перегрузка процессора ноута и PC: письмо мастерам, чьих готовых задач больше всего, и сводка лиду.
 //
 //     aguard run                                         демон (user-сервис)
 //     aguard orphans tick [-dry-run] [-min-dead 0s]      один проход сирот
@@ -31,6 +33,7 @@
 //     aguard said tick [-dry-run] | report [-since 168h]  разметка реплик, расход по суткам
 //     aguard bgtask tick [-dry-run]                     забытые фоновые задачи: письмо владельцу
 //     aguard agentwaits tick [-dry-run] | report [-json] [-window week]  ожидания, которые агенты заводят сами
+//     aguard cpu tick [-dry-run]                        замер ноута и PC: готовые задачи по владельцам
 //     aguard report [-json] [-at время]                 срабатывания и сбои за сутки, неделю, месяц
 package main
 
@@ -66,8 +69,9 @@ type app struct {
 	reg      session.Registry
 	uid      int
 	log      *slog.Logger
-	out      io.Writer          // вывод команд для человека и агента (dry-run, report)
-	act      *activity.Recorder // учёт срабатываний; только у демона, у команд nil
+	out      io.Writer           // вывод команд для человека и агента (dry-run, report)
+	act      *activity.Recorder  // учёт срабатываний; только у демона, у команд nil
+	cpu      map[string]*cpuHost // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
 }
 
 func main() {
@@ -116,6 +120,8 @@ func main() {
 		err = a.bgtaskCmd(os.Args[2:])
 	case "agentwaits":
 		err = a.agentwaitsCmd(os.Args[2:])
+	case "cpu":
+		err = a.cpuCmd(ctx, os.Args[2:])
 	case "report":
 		err = a.reportCmd(os.Args[2:])
 	default:
@@ -141,6 +147,7 @@ func usage() {
   aguard said tick [-dry-run] | report [-since 168h]
   aguard bgtask tick [-dry-run]
   aguard agentwaits tick [-dry-run] | report [-json] [-window week]
+  aguard cpu tick [-dry-run]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }
@@ -185,7 +192,7 @@ type watcher struct {
 // проход; не прочитался — проход пропускается (по неизвестным правилам ничего
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -228,6 +235,8 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Said.Interval.D() }},
 		{"bgtask", func(_ context.Context, c *config.Config) error { return a.bgtaskRound(&c.Bgtask, false) },
 			func(c *config.Config) time.Duration { return c.Bgtask.Interval.D() }},
+		{"cpu", func(ctx context.Context, c *config.Config) error { return a.cpuRound(ctx, &c.Cpu) },
+			func(c *config.Config) time.Duration { return c.Cpu.Interval.D() }},
 	}
 }
 

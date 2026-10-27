@@ -13,6 +13,7 @@ import (
 	"github.com/aiseeq/aguard/internal/activity"
 	"github.com/aiseeq/aguard/internal/bgtask"
 	"github.com/aiseeq/aguard/internal/config"
+	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/aguard/internal/said"
@@ -114,6 +115,7 @@ func (a *app) reportSpecs(cfg *config.Config) []activity.Spec {
 		{Name: "disk", Mode: cfg.Disk.Mode, Looped: true},
 		{Name: "said", Mode: cfg.Said.Mode, Looped: cfg.Said.Mode != said.ModeOff},
 		{Name: "bgtask", Mode: cfg.Bgtask.Mode, Looped: cfg.Bgtask.Mode != bgtask.ModeOff},
+		{Name: "cpu", Mode: cfg.Cpu.Mode, Looped: cfg.Cpu.Mode != cpuwatch.ModeOff},
 	}
 }
 

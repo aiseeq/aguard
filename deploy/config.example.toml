@@ -178,6 +178,19 @@ interval = "5m"
 age = "60m"
 quiet = "60m"
 
+# Перегрузка процессора ноута и PC: готовых к работе задач не меньше потоков машины (правило akit pressure) в доле
+# share замеров за window — письмо мастерам, у кого не меньше notify готовых задач (и самому большому), и сводка лиду;
+# пока длится — одному адресату не чаще repeat. Ничего не снимает и не понижает.
+[cpu]
+mode = "alert"         # off | log (только журнал «написал бы») | alert
+interval = "15s"
+window = "10m"
+share = 0.7
+repeat = "30m"
+notify = 0.25
+hosts = ["pc"]         # машины по ssh сверх своей
+workers = "~/.local/state/worker"   # задания worker: unit бойца -> мастер
+
 [said]                 # указатель сказанного: реплики пользователя -> Luna -> ~/.claude/said.tsv
 mode = "log"           # off | log (разметка и расход только в журнал) | write (и в said.tsv)
 interval = "1m"
