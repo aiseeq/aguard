@@ -12,6 +12,8 @@
 //
 //   - waits — отказы и ожидания агентов по транскриптам: таймауты хуков, ошибки API, сжатия;
 //
+//   - agentwaits — ожидания, которые агенты заводят сами: чего ждали, сколько, во сколько вызовов и токенов;
+//
 //   - compact — своё сжатие сессий в простое, пока кэш подсказки жив: пока только журнал «сжал бы» и сверка;
 //
 //   - disk — рост папок кэшей и состояний за сутки, остатки временного, быстрое наполнение: журнал, кому сообщил бы;
@@ -28,6 +30,7 @@
 //     aguard disk tick [-dry-run] | retro [-days 7] | traces [-all] | report [-since 168h]
 //     aguard said tick [-dry-run] | report [-since 168h]  разметка реплик, расход по суткам
 //     aguard bgtask tick [-dry-run]                     забытые фоновые задачи: письмо владельцу
+//     aguard agentwaits tick [-dry-run] | report [-json] [-window week]  ожидания, которые агенты заводят сами
 //     aguard report [-json] [-at время]                 срабатывания и сбои за сутки, неделю, месяц
 package main
 
@@ -111,6 +114,8 @@ func main() {
 		err = a.saidCmd(ctx, os.Args[2:])
 	case "bgtask":
 		err = a.bgtaskCmd(os.Args[2:])
+	case "agentwaits":
+		err = a.agentwaitsCmd(os.Args[2:])
 	case "report":
 		err = a.reportCmd(os.Args[2:])
 	default:
@@ -135,6 +140,7 @@ func usage() {
   aguard disk tick [-dry-run] | retro [-days 7] | traces [-all] | report [-since 168h]
   aguard said tick [-dry-run] | report [-since 168h]
   aguard bgtask tick [-dry-run]
+  aguard agentwaits tick [-dry-run] | report [-json] [-window week]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }
@@ -179,7 +185,7 @@ type watcher struct {
 // проход; не прочитался — проход пропускается (по неизвестным правилам ничего
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "compact", "disk", "said", "bgtask", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -212,6 +218,8 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Memory.Interval.D() }},
 		{"waits", func(_ context.Context, c *config.Config) error { return a.waitsRound(&c.Waits, false) },
 			func(c *config.Config) time.Duration { return c.Waits.Interval.D() }},
+		{"agentwaits", func(_ context.Context, c *config.Config) error { return a.agentwaitsRound(&c.Agentwaits, false) },
+			func(c *config.Config) time.Duration { return c.Agentwaits.Interval.D() }},
 		{"compact", func(_ context.Context, c *config.Config) error { return a.compactRound(judge, c, false) },
 			func(c *config.Config) time.Duration { return c.Compact.Interval.D() }},
 		{"disk", func(ctx context.Context, c *config.Config) error { return a.diskRound(ctx, c) },

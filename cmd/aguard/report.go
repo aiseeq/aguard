@@ -108,6 +108,7 @@ func (a *app) reportSpecs(cfg *config.Config) []activity.Spec {
 		{Name: "tmp", Mode: cfg.Tmp.Mode, Looped: true},
 		{Name: "memory", Looped: true, Extra: a.memoryLines},
 		{Name: "waits", Looped: true, Extra: a.waitsLines},
+		{Name: "agentwaits", Looped: true},
 		{Name: "restart", Mode: cfg.Restart.Mode},
 		{Name: "compact", Mode: cfg.Compact.Mode, Looped: cfg.Compact.Mode != restart.CompactOff},
 		{Name: "disk", Mode: cfg.Disk.Mode, Looped: true},

@@ -1,6 +1,6 @@
 // Package config — единый конфиг aguard (~/.config/aguard/config.toml):
 // общие поля (лид, админы пространств) и разделы наблюдателей [orphans], [tmp],
-// [memory], [restart], [waits], [compact], [disk], [said], [bgtask]. Перечитывается каждый проход.
+// [memory], [restart], [waits], [agentwaits], [compact], [disk], [said], [bgtask]. Перечитывается каждый проход.
 package config
 
 import (
@@ -14,6 +14,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"github.com/aiseeq/aguard/internal/agentwait"
 	"github.com/aiseeq/aguard/internal/bgtask"
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/memwatch"
@@ -35,6 +36,8 @@ type Config struct {
 	Memory  memwatch.Config `toml:"memory"`  // пики памяти сессий
 	Restart restart.Config  `toml:"restart"` // можно ли cl перезапустить сессию
 	Waits   waits.Config    `toml:"waits"`   // отказы и ожидания агентов по транскриптам
+	// Agentwaits — ожидания, которые агенты заводят сами: циклы sleep, wfor, фоновые команды, ответы сессий.
+	Agentwaits agentwait.Config `toml:"agentwaits"`
 	// Compact — своё сжатие сессий в простое, пока кэш подсказки жив.
 	Compact restart.CompactConfig `toml:"compact"`
 	Disk    disk.Config           `toml:"disk"`   // рост папок кэшей и состояний, остатки временного
@@ -53,15 +56,16 @@ func Default(home string) Config {
 			filepath.Join(home, "work"): "work-admin",
 			filepath.Join(home, "git"):  "git-admin",
 		},
-		Orphans: orphans.Default(home),
-		Tmp:     policy.Default(home),
-		Memory:  memwatch.Default(),
-		Restart: restart.Default(home, runtimeDir()),
-		Waits:   waits.Default(),
-		Compact: restart.DefaultCompact(),
-		Disk:    disk.Default(),
-		Said:    said.Default(),
-		Bgtask:  bgtask.Default(),
+		Orphans:    orphans.Default(home),
+		Tmp:        policy.Default(home),
+		Memory:     memwatch.Default(),
+		Restart:    restart.Default(home, runtimeDir()),
+		Waits:      waits.Default(),
+		Agentwaits: agentwait.Default(),
+		Compact:    restart.DefaultCompact(),
+		Disk:       disk.Default(),
+		Said:       said.Default(),
+		Bgtask:     bgtask.Default(),
 	}
 }
 
@@ -118,6 +122,9 @@ func (c *Config) finish(home string, uid int) error {
 	}
 	if err := c.Waits.Validate(); err != nil {
 		return fmt.Errorf("waits: %w", err)
+	}
+	if err := c.Agentwaits.Validate(); err != nil {
+		return fmt.Errorf("agentwaits: %w", err)
 	}
 	if err := c.Disk.Validate(home); err != nil {
 		return err
