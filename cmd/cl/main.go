@@ -37,7 +37,11 @@ func main() {
 	if configFile == "" {
 		configFile = filepath.Join(home, ".config", "cl", "config.json")
 	}
-	l := launcher{claude: claude, home: home, configFile: configFile, registry: session.ForHome(home), aguard: aguardSocket()}
+	l := launcher{claude: claude, home: home, configFile: configFile, registry: session.ForHome(home), aguard: aguardSocket(),
+		selfExe: "/proc/self/exe", exec: syscall.Exec}
+	if l.upgraded, _, err = takeUpgrade(); err != nil { // не разобралось — старт как обычно: новая беседа, но консоль жива
+		fmt.Fprintln(os.Stderr, "cl:", err)
+	}
 	args := os.Args[1:]
 	if len(args) == 1 && args[0] == checkFlag {
 		os.Exit(runCheck(l))
@@ -64,7 +68,9 @@ func main() {
 	}
 	pre := sessionFlags(home)
 	l.name = nameArg(args)
-	if name := names.For(cwd, home, table); name != "" && l.name == "" {
+	if l.upgraded != nil {
+		l.name = l.upgraded.Name
+	} else if name := names.For(cwd, home, table); name != "" && l.name == "" {
 		taken, err := liveNames(filepath.Join(home, ".claude", "sessions"))
 		if err != nil {
 			fail(err)

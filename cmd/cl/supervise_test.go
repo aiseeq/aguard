@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -145,8 +146,20 @@ exec sleep 25`)
 	socket := fakeAguard(t, `{"v":1,"restart":false,"fresh":true,"key":"false,true","session_id":"s1","name":"x-master",`+
 		`"running":"2.1.310","installed":"2.1.310","compact":false,"compact_key":"false,late","tokens":200000,`+
 		`"reset":true,"reset_key":"true"}`)
+	// бинарник cl заменён установкой: перед новой беседой cl переходит в новый; exec не вышел — дальше прежний
+	exe := filepath.Join(d, "exe")
+	symlink(t, "/opt/cl (deleted)", exe)
+	var execed, state string
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"),
-		aguard: socket, name: "x-master"}
+		aguard: socket, name: "x-master", selfExe: exe, exec: func(path string, _, env []string) error {
+			execed = path
+			for _, e := range env {
+				if s, ok := strings.CutPrefix(e, upgradeEnv+"="); ok {
+					state = s
+				}
+			}
+			return errors.New("нет файла")
+		}}
 
 	if code := l.supervise(append(sessionFlags(d), "-n", "x-master"), []string{"--model", "opus"}); code != 4 {
 		t.Errorf("код выхода cl = %d, want 4 (код новой беседы)", code)
@@ -160,8 +173,16 @@ exec sleep 25`)
 	if got := anyClock(readLines(t, filepath.Join(d, "run2"))); !slices.Equal(got, fresh) {
 		t.Errorf("новая беседа:\n%q\nwant\n%q\nжурнал:\n%s", got, fresh, journalText)
 	}
-	if want := "act: сбрасываю: контекст 200 тыс.; SIGTERM, поднимаю новую беседу вместо s1"; !strings.Contains(journalText, want) {
-		t.Errorf("в журнале нет %q:\n%s", want, journalText)
+	for _, want := range []string{"act: сбрасываю: контекст 200 тыс.; SIGTERM, поднимаю новую беседу вместо s1",
+		"x-master pid=" + pid + ": cl обновлён — перехожу в новый бинарник /opt/cl", "exec /opt/cl: нет файла — дальше прежний cl"} {
+		if !strings.Contains(journalText, want) {
+			t.Errorf("в журнале нет %q:\n%s", want, journalText)
+		}
+	}
+	var u upgrade
+	if err := json.Unmarshal([]byte(state), &u); err != nil || execed != "/opt/cl" || u.Name != "x-master" || u.N != 1 ||
+		!slices.Equal(anyClock(u.Args), fresh[slices.Index(fresh, "--append-system-prompt")+2:]) {
+		t.Errorf("exec %q, состояние %+v %v", execed, u, err)
 	}
 	// файл возобновления разовый: отдан новой беседе — убран, следующий подъём его не получит
 	if got, err := freshResume(filepath.Join(d, "restart"), "x-master", 24*time.Hour, time.Now()); err != nil || got != "" {

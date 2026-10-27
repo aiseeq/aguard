@@ -35,6 +35,11 @@ type launcher struct {
 	name string
 	// console — claude под pty cl (restart.pty_names); nil — claude получает терминал cl напрямую.
 	console *console
+	// selfExe — ссылка на свой бинарник (/proc/self/exe), exec — syscall.Exec: подхват нового cl (upgrade.go);
+	// пусто — не подхватывать. upgraded — состояние от прежнего cl: продолжить с его аргументами.
+	selfExe  string
+	exec     func(path string, argv, env []string) error
+	upgraded *upgrade
 }
 
 // outcome — чем кончился один запуск claude.
@@ -89,10 +94,17 @@ func (l launcher) supervise(pre, userArgs []string) int {
 	}
 	keep, argsProblem := restartArgs(userArgs)
 	args := append(append([]string{}, pre...), userArgs...)
-	if bare(userArgs) {
+	first := 0
+	switch {
+	case l.upgraded != nil:
+		args, first = l.upgraded.Args, l.upgraded.N
+	case bare(userArgs):
 		args = l.withRoleLine(args, l.name, eventStart, outcome{})
 	}
-	for n := 0; ; n++ {
+	for n := first; ; n++ {
+		if n > first {
+			l.upgrade(n, args)
+		}
 		unit := strconv.Itoa(os.Getpid())
 		if n > 0 {
 			unit += "-r" + strconv.Itoa(n)
