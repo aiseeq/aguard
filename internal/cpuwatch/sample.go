@@ -1,17 +1,17 @@
 // Package cpuwatch — перегрузка процессора и чья она (задание лида 27.10 по словам пользователя в транскрипте лида
 // 2dc3ff44: «"Почему aguard молчал. Нагрузку на процессор он не отслеживает." - ну здрасьте. А кто кроме него
-// отслеживать то её будет?»). Мера длительной перегрузки — системный load average, своя выборка не строится
-// (пользователь 27.10 23:43:07 CET, 2dc3ff44:3077: «Зачем делать свою копию LA, когда в системе уже есть LA?»;
-// ~/.claude/decisions.md load-measure): перегружена — load average за 5 минут не меньше потоков машины. Окно 5 минут —
-// по sar 19–27.10 (замер раз в 10 минут, порог 22): из 14 отрезков load за минуту длиной от двух замеров load за 5
-// минут ловит 13, за 15 минут — 6.
+// отслеживать то её будет?»). Мера — две системные цифры, своя выборка не строится (пользователь 27.10 23:43:07 CET,
+// 2dc3ff44:3077: «Зачем делать свою копию LA, когда в системе уже есть LA?»; 28.10 00:02:45 CET, 2dc3ff44:3539:
+// «я всегда использовал только эти 2 цифры: моментальный и минутный»; ~/.claude/decisions.md load-measure):
+// перегружена — load average за минуту и готовых к работе задач в момент замера не меньше потоков машины; длительность
+// — сколько замеров подряд это держится.
 //
-// Раз в интервал — load average. В перегрузку — ещё и снимок готовых потоков (состояние R) с процессом, cgroup и
-// окружением. Владелец потока — мастер: сессия по scope cl или CLAUDE_PID, боец worker по своему unit и job.json,
-// ферма llmark по scope farm-*, на PC — ещё и по SSH_CONNECTION до ssh на ноуте. Перегрузка — письмо мастерам, чьих
-// задач больше всего, и сводка лиду; пока длится — не чаще раза в repeat. Ничего не снимает и не понижает
-// (пользователь 22.10 про ферму: «зря ты дал задание ослабить задачи. Надо было разобраться почему такие задачи
-// вызывают тормоза»).
+// Раз в интервал — load average и готовые задачи. В перегрузку — ещё и снимок готовых потоков (состояние R) с
+// процессом, cgroup и окружением. Владелец потока — мастер: сессия по scope cl или CLAUDE_PID, боец worker по своему
+// unit и job.json, ферма llmark по scope farm-*, на PC — ещё и по SSH_CONNECTION до ssh на ноуте. Перегрузка подряд
+// дольше after — письмо мастерам, чьих задач больше всего, и сводка лиду; пока длится — не чаще раза в repeat. Ничего
+// не снимает и не понижает (пользователь 22.10 про ферму: «зря ты дал задание ослабить задачи. Надо было разобраться
+// почему такие задачи вызывают тормоза»).
 package cpuwatch
 
 import (
@@ -40,32 +40,39 @@ type Task struct {
 	SSH    string // SSH_CONNECTION из окружения: «адрес порт адрес порт» клиента и сервера
 }
 
-// Sample — замер машины: load average, потоки машины и, в перегрузку, готовые потоки.
+// Sample — замер машины: load average, готовые к работе задачи в момент замера (procs_running без себя), потоки машины
+// и, в перегрузку, готовые потоки по процессам.
 type Sample struct {
-	At      time.Time
-	Load    pressure.LoadAvg
-	Threads int
-	Tasks   []Task
+	At       time.Time
+	Load     pressure.LoadAvg
+	Runnable int
+	Threads  int
+	Tasks    []Task
 }
 
-// Over — машина перегружена: load average за 5 минут не меньше потоков.
-func (s *Sample) Over() bool { return s.Threads > 0 && s.Load.Avg5 >= float64(s.Threads) }
+// Over — машина перегружена: load average за минуту и готовых к работе задач в момент замера не меньше потоков. Других
+// чисел нагрузки не нужно (пользователь 28.10 00:02:45 CET в сессии лида: «я всегда использовал только эти 2 цифры:
+// моментальный и минутный»).
+func (s *Sample) Over() bool {
+	return s.Threads > 0 && s.Load.Avg1 >= float64(s.Threads) && s.Runnable >= s.Threads
+}
 
-// ReadLoad — load average и число потоков машины procRoot (/proc или папка снятых по ssh файлов).
-func ReadLoad(procRoot string) (pressure.LoadAvg, int, error) {
+// ReadLoad — load average, готовые задачи и потоки машины procRoot (/proc или папка снятых по ssh файлов).
+func (s *Sample) ReadLoad(procRoot string) error {
 	la, err := pressure.ReadLoadAvg(procRoot)
 	if err != nil {
-		return la, 0, fmt.Errorf("load average: %w", err)
+		return fmt.Errorf("load average: %w", err)
 	}
 	stat, err := os.ReadFile(filepath.Join(procRoot, "stat"))
 	if err != nil {
-		return la, 0, fmt.Errorf("потоки машины: %w", err)
+		return fmt.Errorf("готовые задачи и потоки машины: %w", err)
 	}
-	_, threads, err := pressure.ParseStat(string(stat))
+	runnable, threads, err := pressure.ParseStat(string(stat))
 	if err != nil {
-		return la, 0, fmt.Errorf("потоки машины: %w", err)
+		return fmt.Errorf("готовые задачи и потоки машины: %w", err)
 	}
-	return la, threads, nil
+	s.Load, s.Runnable, s.Threads = la, runnable, threads
+	return nil
 }
 
 // ReadTasks — готовые к работе потоки всех процессов procRoot. Процесс, ушедший во время чтения, пропускается;
@@ -213,7 +220,8 @@ var remoteFiles = []string{"stat", "loadavg"}
 const RemoteScript = `for f in stat loadavg; do echo "##$f"; cat /proc/$f; done
 echo '##tasks'
 [ "$1" = tasks ] && grep -l ') R ' /proc/[0-9]*/task/[0-9]*/stat 2>/dev/null | cut -d/ -f3 | sort | uniq -c | while read -r n p; do
-	c=$(cat /proc/$p/comm 2>/dev/null) || continue
+	c=$(tr '\t\n' '  ' </proc/$p/comm 2>/dev/null) || continue
+	c=${c% }
 	g=$(sed -n 's/^0:://p' /proc/$p/cgroup 2>/dev/null)
 	e=$(tr '\0' '\n' </proc/$p/environ 2>/dev/null)
 	cl=$(printf '%s\n' "$e" | sed -n 's/^CLAUDE_PID=//p')

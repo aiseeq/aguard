@@ -43,15 +43,17 @@ type Job struct {
 	Dir     string    `json:"dir"`
 	Task    string    `json:"task"`
 	Master  string    `json:"master"`
+	Unit    string    `json:"unit"` // unit бойца на ноуте без .service; повтор — <unit>-<n>.service
 	Created time.Time `json:"created"`
 }
 
 // Jobs — задания worker по папке состояния; читаются по мере надобности.
 type Jobs struct {
-	Dir  string
-	byID map[string]*Job // nil — задания нет
-	all  []*Job          // все задания папки, прочитанные ByTree
-	read bool
+	Dir   string
+	Units string          // папка cgroup, где systemd держит unit бойцов (app.slice user@): живой unit — папка в ней
+	byID  map[string]*Job // nil — задания нет
+	all   []*Job          // живые задания папки, прочитанные ByTree
+	read  bool
 }
 
 func (j *Jobs) get(id string) (*Job, error) {
@@ -110,36 +112,17 @@ var pcSpot = regexp.MustCompile(`^(?:worker|farm)-(.+)\.[0-9a-f]{16}\.scope$`)
 // unsafeName — то же, что pcguard.Prefix: имя дерева в имени unit.
 var unsafeName = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
-// ByTree — живые задания (боец не кончил), чьё дерево (база dir) в имени scope на PC совпадает с tree. Имя scope
-// знает только базу дерева, а она у разных мастеров бывает одна (tk-triage у sc2go-master и sc2demu-master, w-go126 у
-// четырёх — ревью 5572a22, 27.10): поэтому все живые, а не самое новое.
+// ByTree — живые задания (unit бойца работает на ноуте: `worker pc` идёт из него), чьё дерево (база dir) в имени
+// scope на PC совпадает с tree. Имя scope знает только базу дерева, а она у разных мастеров бывает одна (tk-triage у
+// sc2go-master и sc2demu-master, w-go126 у четырёх — ревью 5572a22, 27.10): поэтому все живые, а не самое новое.
+// Живость — по unit, а не по status.json: в нём бывает фаза «запуск» без конца неделю (1021-0709-sgt-live), а после
+// `worker continue` конец стирается. Сбой чтения задания или папки unit возвращается при первом вызове за проход;
+// задания, что прочитались, идут в ответ и тогда.
 func (j *Jobs) ByTree(tree string) ([]*Job, error) {
+	var err error
 	if !j.read {
-		ents, err := os.ReadDir(j.Dir)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("задания worker: %w", err)
-		}
 		j.read = true
-		var errs []error
-		for _, e := range ents {
-			v, err := j.get(e.Name())
-			if err != nil {
-				errs = append(errs, err)
-			}
-			if v == nil {
-				continue
-			}
-			live, err := jobLive(filepath.Join(j.Dir, e.Name(), "status.json"))
-			if err != nil {
-				errs = append(errs, err)
-			}
-			if live {
-				j.all = append(j.all, v)
-			}
-		}
-		if err := errors.Join(errs...); err != nil {
-			return nil, err
-		}
+		err = j.readLive()
 	}
 	var out []*Job
 	for _, v := range j.all {
@@ -147,26 +130,49 @@ func (j *Jobs) ByTree(tree string) ([]*Job, error) {
 			out = append(out, v)
 		}
 	}
-	return out, nil
+	return out, err
 }
 
-// jobLive — боец задания ещё работает: в status.json нет конца (worker пишет ended, когда боец кончил). Файла ещё
-// нет — задание только заведено, боец поднимается: живое.
-func jobLive(path string) (bool, error) {
-	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return true, nil
-	}
+// readLive — задания папки, чей unit сейчас работает.
+func (j *Jobs) readLive() error {
+	units, err := os.ReadDir(j.Units)
 	if err != nil {
-		return false, fmt.Errorf("состояние задания worker: %w", err)
+		return fmt.Errorf("unit бойцов: %w", err)
 	}
-	var st struct {
-		Ended time.Time `json:"ended"`
+	live := map[string]bool{}
+	for _, u := range units {
+		if name, ok := strings.CutSuffix(u.Name(), ".service"); ok && u.IsDir() {
+			live[name] = true
+		}
 	}
-	if err := json.Unmarshal(b, &st); err != nil {
-		return false, fmt.Errorf("состояние задания worker %s: %w", path, err)
+	ents, err := os.ReadDir(j.Dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("задания worker: %w", err)
 	}
-	return st.Ended.IsZero(), nil
+	var errs []error
+	for _, e := range ents {
+		v, err := j.get(e.Name())
+		if err != nil {
+			errs = append(errs, err)
+		}
+		if v != nil && v.Unit != "" && unitLive(live, v.Unit) {
+			j.all = append(j.all, v)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// unitLive — работает unit бойца или его повтор <unit>-<n>.
+func unitLive(live map[string]bool, unit string) bool {
+	if live[unit] {
+		return true
+	}
+	for name := range live {
+		if n, ok := strings.CutPrefix(name, unit+"-"); ok && isPid(n) {
+			return true
+		}
+	}
+	return false
 }
 
 // Resolver находит владельца потока. Один на проход: кеши заданий живут проход. Сбой поиска (job.json не читается,
@@ -221,7 +227,7 @@ func (r *Resolver) RemoteOwner(t *Task) Owner {
 			return Owner{Master: farmMaster, Kind: KindFarm}
 		}
 		jobs, err := r.Jobs.ByTree(m[1])
-		r.fail(err)
+		r.fail(err) // что прочиталось — в ответе и при сбое
 		masters := map[string]bool{}
 		for _, v := range jobs {
 			masters[v.Master] = true

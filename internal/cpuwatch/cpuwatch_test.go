@@ -73,7 +73,7 @@ func TestReadTasks(t *testing.T) {
 }
 
 func TestParseRemote(t *testing.T) {
-	raw := "##stat\ncpu  1\ncpu0 1\ncpu1 1\nprocs_running 9\n##loadavg\n1.50 2.25 0.75 9/700 4242\n##tasks\n" +
+	raw := "##stat\ncpu  1\ncpu0 1\ncpu1 1\nprocs_running 9\n##loadavg\n2.50 2.25 0.75 9/700 4242\n##tasks\n" +
 		"4\t200\tcompile\t" + userSlice + "/app.slice/farm-x.0123456789abcdef.scope\t\t\n" +
 		"1\t100\tsh\t/user.slice/user-1000.slice/session-9.scope\t\t10.0.0.1 40000 10.0.0.2 22\n##end\n"
 	root := t.TempDir()
@@ -84,15 +84,12 @@ func TestParseRemote(t *testing.T) {
 	if len(tasks) != 2 || tasks[0].Pid != 100 || tasks[0].SSH != "10.0.0.1 40000 10.0.0.2 22" || tasks[1].N != 4 || tasks[1].Comm != "compile" {
 		t.Errorf("задачи: %+v", tasks)
 	}
-	la, threads, err := ReadLoad(root)
-	if err != nil {
+	var s Sample
+	if err := s.ReadLoad(root); err != nil {
 		t.Fatal(err)
 	}
-	if la.Avg5 != 2.25 || threads != 2 {
-		t.Errorf("load average по снятым файлам: %+v при %d потоках", la, threads)
-	}
-	if s := (Sample{Load: la, Threads: threads}); !s.Over() {
-		t.Errorf("2.25 за 5 минут при 2 потоках — перегрузка: %+v", s)
+	if s.Load.Avg1 != 2.5 || s.Load.Avg5 != 2.25 || s.Runnable != 8 || s.Threads != 2 || !s.Over() {
+		t.Errorf("2.5 за минуту и 8 готовых при 2 потоках — перегрузка: %+v", s)
 	}
 	// без аргумента tasks раздел пуст
 	if tasks, err := ParseRemote([]byte(strings.SplitAfter(raw, "##tasks\n")[0]+"##end\n"), t.TempDir()); err != nil || tasks != nil {
@@ -110,22 +107,27 @@ func TestParseRemote(t *testing.T) {
 }
 
 func testJobs(t *testing.T) *Jobs {
-	dir := t.TempDir()
+	dir, units := t.TempDir(), t.TempDir()
+	// живой unit — папка cgroup <unit>.service, повтор — <unit>-<n>.service
+	for _, u := range []string{"worker-1027-2233-r-t04-1", "worker-1027-2330-tk-triage", "worker-1027-2338-tk-triage", "worker-1027-2207-r-t07-1"} {
+		if err := os.MkdirAll(filepath.Join(units, u+".service"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	write(t, filepath.Join(dir, "1027-2233-r-t04", "job.json"),
-		`{"id":"1027-2233-r-t04","dir":"/w/glint/r-t04","task":"r-t04","master":"glint-master","created":"2026-10-27T22:33:25+01:00"}`)
-	write(t, filepath.Join(dir, "1027-2233-r-t04", "status.json"), `{"phase":"работает"}`)
-	// то же дерево у другого мастера, боец кончил — на PC работает не он
+		`{"id":"1027-2233-r-t04","dir":"/w/glint/r-t04","task":"r-t04","master":"glint-master","unit":"worker-1027-2233-r-t04"}`)
+	// то же дерево у другого мастера, unit не работает — на PC работает не он (в status.json фаза без конца — не довод)
 	write(t, filepath.Join(dir, "1027-2300-r-t04", "job.json"),
-		`{"id":"1027-2300-r-t04","dir":"/w/other/r-t04","task":"r-t04","master":"old-master","created":"2026-10-27T23:00:00+01:00"}`)
-	write(t, filepath.Join(dir, "1027-2300-r-t04", "status.json"), `{"phase":"готово","ended":"2026-10-27T23:10:00+01:00"}`)
+		`{"id":"1027-2300-r-t04","dir":"/w/other/r-t04","task":"r-t04","master":"old-master","unit":"worker-1027-2300-r-t04"}`)
+	write(t, filepath.Join(dir, "1027-2300-r-t04", "status.json"), `{"phase":"запуск"}`)
 	// одно дерево у двух мастеров, оба живы — чей поток, не узнать
 	write(t, filepath.Join(dir, "1027-2330-tk-triage", "job.json"),
-		`{"id":"1027-2330-tk-triage","dir":"/w/sc2go/tk-triage","task":"tk-triage","master":"sc2go-master"}`)
+		`{"id":"1027-2330-tk-triage","dir":"/w/sc2go/tk-triage","task":"tk-triage","master":"sc2go-master","unit":"worker-1027-2330-tk-triage"}`)
 	write(t, filepath.Join(dir, "1027-2338-tk-triage", "job.json"),
-		`{"id":"1027-2338-tk-triage","dir":"/w/sc2demu/tk-triage","task":"tk-triage","master":"sc2demu-master"}`)
+		`{"id":"1027-2338-tk-triage","dir":"/w/sc2demu/tk-triage","task":"tk-triage","master":"sc2demu-master","unit":"worker-1027-2338-tk-triage"}`)
 	write(t, filepath.Join(dir, "1027-2207-r-t07-1", "job.json"),
-		`{"id":"1027-2207-r-t07-1","dir":"/w/glint/r-t07","task":"r-t07-1","master":"glint-master","created":"2026-10-27T22:07:00+01:00"}`)
-	return &Jobs{Dir: dir}
+		`{"id":"1027-2207-r-t07-1","dir":"/w/glint/r-t07","task":"r-t07-1","master":"glint-master","unit":"worker-1027-2207-r-t07-1"}`)
+	return &Jobs{Dir: dir, Units: units}
 }
 
 func TestOwner(t *testing.T) {
@@ -191,6 +193,8 @@ func TestRemoteOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &Resolver{Jobs: testJobs(t), ProcRoot: laptop}
+	// битое задание не лишает владельцев остальных: они в ответе, сбой — в Err
+	write(t, filepath.Join(r.Jobs.Dir, "1027-0000-broken", "job.json"), "{")
 	for _, c := range []struct {
 		t    Task
 		want Owner
@@ -208,6 +212,9 @@ func TestRemoteOwner(t *testing.T) {
 			t.Errorf("RemoteOwner(%s, %q) = %+v, хотим %+v", c.t.Cgroup, c.t.SSH, got, c.want)
 		}
 	}
+	if err := r.Err(); err == nil || !strings.Contains(err.Error(), "job.json") {
+		t.Errorf("сбой битого задания не в Err: %v", err)
+	}
 }
 
 var (
@@ -217,9 +224,10 @@ var (
 	desktop     = Owner{Kind: KindOther, Label: "app-konsole.scope"}
 )
 
-// sample — замер: load average за 5 минут при 22 потоках и потоки по владельцам (владелец закодирован в cgroup).
-func sample(at time.Time, avg5 float64, by map[Owner]int) *Sample {
-	s := &Sample{At: at, Load: pressure.LoadAvg{Avg5: avg5}, Threads: 22}
+// sample — замер: load average за минуту и готовые к работе задачи в момент снимка при 22 потоках, потоки по
+// владельцам (владелец закодирован в cgroup).
+func sample(at time.Time, avg1 float64, runnable int, by map[Owner]int) *Sample {
+	s := &Sample{At: at, Load: pressure.LoadAvg{Avg1: avg1}, Runnable: runnable, Threads: 22}
 	for o, n := range by {
 		s.Tasks = append(s.Tasks, Task{N: n, Comm: "go", Cgroup: o.Master + "|" + o.Kind + "|" + o.Label})
 	}
@@ -235,67 +243,92 @@ func TestJudge(t *testing.T) {
 	start := time.Date(2026, 10, 27, 22, 0, 0, 0, time.UTC)
 	var h Host
 	heavy := map[Owner]int{glintWorker: 24, glintSess: 4, leadSess: 2, desktop: 2}
-	if v := h.Judge(sample(start.Add(-time.Minute), 21.9, heavy), byCgroup); v.Over || v.Loads != nil {
-		t.Fatalf("ниже потоков — не перегрузка и владельцы не разбираются: %+v", v)
+	if v := h.Judge(sample(start.Add(-2*time.Minute), 21.9, 30, heavy), byCgroup); v.Over || v.Loads != nil {
+		t.Fatalf("load average за минуту ниже потоков — не перегрузка и владельцы не разбираются: %+v", v)
 	}
-	v := h.Judge(sample(start, 22, heavy), byCgroup)
-	if !v.Over || !v.Started || !v.Since.Equal(start) || v.Avg5 != 22 || v.Threads != 22 || v.Snaps != 1 {
-		t.Fatalf("load average за 5 минут дошёл до потоков — начало перегрузки: %+v", v)
+	// load average запаздывает: нагрузка уже кончилась, готовых сейчас 3 — не перегрузка
+	if v := h.Judge(sample(start.Add(-time.Minute), 30, 3, map[Owner]int{glintSess: 1, desktop: 2}), byCgroup); v.Over {
+		t.Fatalf("готовых сейчас меньше потоков — не перегрузка: %+v", v)
 	}
-	at := start.Add(time.Minute)
-	v = h.Judge(sample(at, 30, map[Owner]int{glintWorker: 32, glintSess: 4}), byCgroup)
-	if !v.Over || v.Started || v.Snaps != 2 {
-		t.Fatalf("перегрузка держится: %+v", v)
+	v := h.Judge(sample(start, 22, 30, heavy), byCgroup)
+	if !v.Over || !v.Started || !v.Since.Equal(start) || v.Avg1 != 22 || v.Runnable != 30 || v.Threads != 22 {
+		t.Fatalf("load average за минуту и готовые сейчас дошли до потоков — начало перегрузки: %+v", v)
+	}
+	if v.Long(start.Add(9*time.Minute), 10*time.Minute) || !v.Long(start, 0) {
+		t.Error("письма — когда перегрузка держится подряд не меньше after")
+	}
+	at := start.Add(10 * time.Minute)
+	v = h.Judge(sample(at, 30, 36, map[Owner]int{glintWorker: 32, glintSess: 4}), byCgroup)
+	if !v.Over || v.Started || !v.Since.Equal(start) || !v.Long(at, 10*time.Minute) {
+		t.Fatalf("перегрузка держится 10 минут подряд: %+v", v)
 	}
 	rc := v.Recipients(0.25)
-	if len(rc) != 1 || rc[0].Name != "glint-master" || rc[0].Avg != 32 {
-		t.Errorf("адресаты (в среднем по двум снимкам): %+v", rc)
+	if len(rc) != 1 || rc[0].Name != "glint-master" || rc[0].N != 36 {
+		t.Fatalf("адресаты — по снимку: %+v", rc)
 	}
-	if !h.Due("glint-master", at, 30*time.Minute) || h.Due("glint-master", at.Add(29*time.Minute), 30*time.Minute) ||
-		!h.Due("glint-master", at.Add(30*time.Minute), 30*time.Minute) || !h.Seen("glint-master") || h.Seen("lead") {
-		t.Error("повтор письма одному адресату — не чаще repeat")
+	if !h.Due("glint-master", at, 30*time.Minute) || !h.First("glint-master") {
+		t.Fatal("первое письмо мастеру в перегрузку")
 	}
-	msg := MasterMessage(HostLocal, &v, &rc[0], at.Add(9*time.Minute), true)
-	for _, part := range []string{"ноут перегружен 10 мин", "load average за 5 минут 30.0 при 22 потоках",
-		"твоих в среднем 32: боец r-t04 — 28 (go 28); сессия — 4 (go 4)", "worker run --pc"} {
+	h.Sent("glint-master", at)
+	h.Sent("сводка:lead", at)
+	if h.Due("glint-master", at.Add(29*time.Minute), 30*time.Minute) || !h.Due("glint-master", at.Add(30*time.Minute), 30*time.Minute) ||
+		h.First("glint-master") || !h.Due("lead", at, 30*time.Minute) {
+		t.Error("повтор письма одному адресату — не чаще repeat, сводка лиду и письмо ему как мастеру — порознь")
+	}
+	if told := h.Told(); !slices.Equal(told, []string{"glint-master"}) {
+		t.Errorf("написал за перегрузку — без служебных ключей: %v", told)
+	}
+	msg := MasterMessage(HostLocal, &v, &rc[0], at, true)
+	for _, part := range []string{"ноут перегружен 10 мин подряд", "load average за минуту 30.0, сейчас готовых к работе задач 36 при 22 потоках",
+		"Твоих сейчас 36: боец r-t04 — 32 (go 32); сессия — 4 (go 4)", "worker run --pc"} {
 		if !strings.Contains(msg, part) {
 			t.Errorf("письмо мастеру без %q: %s", part, msg)
 		}
 	}
-	lead := LeadMessage("pc", &v, []string{"glint-master"}, at)
-	for _, part := range []string{"pc перегружен 1 мин", "в среднем 34 по 2 снимкам", "чьи: glint-master 32, lead 1, прочее 1", "Написал: glint-master."} {
+	if msg := MasterMessage("pc", &v, &rc[0], at, false); !strings.Contains(msg, "pc всё ещё перегружен") || strings.Contains(msg, "worker run --pc") {
+		t.Errorf("повторное письмо о PC: %s", msg)
+	}
+	lead := LeadMessage("pc", &v, h.Told(), at)
+	for _, part := range []string{"pc перегружен 10 мин подряд", "сейчас готовых к работе задач 36 при 22 потоках (по процессам 36)",
+		"Чьи: glint-master 36.", "Написал за перегрузку: glint-master."} {
 		if !strings.Contains(lead, part) {
 			t.Errorf("сводка лиду без %q: %s", part, lead)
 		}
 	}
-	// у порога перегрузка не дробится: ниже потоков, но не ниже 0.9 их — держится
+	// один замер без перегрузки — конец: длительность — подряд
 	at = at.Add(time.Minute)
-	if v = h.Judge(sample(at, 20, heavy), byCgroup); !v.Over || v.Started {
-		t.Errorf("20 при 22 потоках в перегрузку — ещё перегрузка: %+v", v)
-	}
-	at = at.Add(time.Minute)
-	if v = h.Judge(sample(at, 19, nil), byCgroup); v.Over || !v.Ended.Equal(start) {
-		t.Errorf("ниже 0.9 потоков — конец перегрузки, начатой %v: %+v", start, v)
+	if v = h.Judge(sample(at, 25, 3, heavy), byCgroup); v.Over || !v.Ended.Equal(start) || v.Loads != nil {
+		t.Errorf("готовых сейчас 3 — конец перегрузки, начатой %v: %+v", start, v)
 	}
 	if h.Due("glint-master", at, time.Minute) {
 		t.Error("вне перегрузки писем нет")
 	}
-	// новая перегрузка сразу после конца: repeat считается от прошлого письма, а не от её начала
+	// новая перегрузка сразу после конца: длительность с нуля, repeat — от прошлого письма
 	at = at.Add(time.Minute)
-	if v = h.Judge(sample(at, 25, heavy), byCgroup); !v.Started || v.Snaps != 1 {
-		t.Fatalf("новая перегрузка — снимки с нуля: %+v", v)
+	if v = h.Judge(sample(at, 25, 30, heavy), byCgroup); !v.Started || !v.Since.Equal(at) || v.Long(at, 10*time.Minute) {
+		t.Fatalf("новая перегрузка — с этого замера: %+v", v)
 	}
-	if h.Seen("glint-master") || h.Due("glint-master", at, 30*time.Minute) {
-		t.Error("письмо 3 минуты назад в прошлую перегрузку: повтор раньше repeat")
+	if !h.First("glint-master") || len(h.Told()) != 0 || h.Due("glint-master", at, 30*time.Minute) {
+		t.Error("письмо 2 минуты назад в прошлую перегрузку: в этой ещё не писали, но повтор раньше repeat")
 	}
 }
 
-// Перегрузку дают не мастера — мастеру с малой долей не пишется.
+// Мастеру пишется по числу его готовых задач в снимке против потоков машины, а не по доле от всех готовых.
 func TestRecipientsShare(t *testing.T) {
-	var h Host
-	v := h.Judge(sample(time.Now(), 30, map[Owner]int{desktop: 20, glintSess: 1}), byCgroup)
-	if rc := v.Recipients(0.25); len(rc) != 0 {
-		t.Errorf("1 поток из 21 — не письмо мастеру: %+v", rc)
+	for _, c := range []struct {
+		by   map[Owner]int
+		want int
+	}{
+		{map[Owner]int{glintSess: 1, desktop: 2}, 0},  // треть готовых, но одна задача
+		{map[Owner]int{glintSess: 1, desktop: 20}, 0}, // перегрузку дают не мастера
+		{map[Owner]int{glintSess: 5, desktop: 20}, 0}, // 5 < 0.25 × 22
+		{map[Owner]int{glintSess: 6, desktop: 20}, 1},
+	} {
+		var h Host
+		v := h.Judge(sample(time.Now(), 30, 30, c.by), byCgroup)
+		if rc := v.Recipients(0.25); len(rc) != c.want {
+			t.Errorf("%v: адресаты %+v, хотим %d", c.by, rc, c.want)
+		}
 	}
 }
 
@@ -308,6 +341,8 @@ func TestConfig(t *testing.T) {
 		func(c *Config) { c.Mode = "act" },
 		func(c *Config) { c.Interval = 0 },
 		func(c *Config) { c.Repeat = c.Interval / 2 },
+		func(c *Config) { c.Notify = 0 },
+		func(c *Config) { c.After = -1 },
 		func(c *Config) { c.Notify = 2 },
 	} {
 		c := Default("/home/u")
