@@ -6,7 +6,7 @@ require golang.org/x/sys v0.49.0
 
 require github.com/BurntSushi/toml v1.6.0
 
-require github.com/aiseeq/akit v0.8.2-0.20261027120525-5e5a9162658c
+require github.com/aiseeq/akit v0.8.2-0.20261027120816-e19f9e83129c
 
 require (
 	github.com/creack/pty v1.1.24
