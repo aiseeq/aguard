@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/akit/transcript"
+	"github.com/aiseeq/akit/transcript/waits"
 
 	"github.com/aiseeq/aguard/internal/record"
 )
@@ -72,8 +74,9 @@ func List(projects, workers string) ([]Source, error) {
 type File struct {
 	// Offset — откуда читать: конец прочитанного или начало строки незаконченного ожидания.
 	Offset int64 `json:"offset"`
-	// Done — до куда прочитано: ожидания, кончившиеся раньше, уже записаны и при перечитывании не повторяются.
-	Done int64 `json:"done"`
+	// Seen — записанные ожидания, начатые не раньше Offset: id первого вызова → начало. Перечитывание с Offset отдаёт
+	// их снова, по Seen они не повторяются.
+	Seen map[string]int64 `json:"seen,omitempty"`
 }
 
 // State — смещения по транскриптам. Started — первый проход был: новые файлы читаются с начала.
@@ -127,9 +130,6 @@ type Pass struct {
 // сессий не ждут, пока дочитается неделя старых. Ошибки отдельных файлов возвращаются вместе с ожиданиями;
 // смещение такого файла не двигается.
 func (p *Pass) Run(st *State, now time.Time) ([]Wait, error) {
-	if NewClaude == nil || NewCodex == nil {
-		return nil, errors.New("распознавателя ожиданий нет")
-	}
 	files, err := List(p.Projects, p.Workers)
 	if err != nil {
 		return nil, err
@@ -140,7 +140,7 @@ func (p *Pass) Run(st *State, now time.Time) ([]Wait, error) {
 		if st.Files[f.Key] == nil {
 			s := &File{}
 			if !st.Started && now.Sub(f.mtime) > p.Backfill {
-				s.Offset, s.Done = f.size, f.size
+				s.Offset = f.size
 			}
 			st.Files[f.Key] = s
 		}
@@ -176,7 +176,8 @@ func (p *Pass) Run(st *State, now time.Time) ([]Wait, error) {
 type chunk struct {
 	src    Source
 	s      *File
-	rec    Recognizer
+	rec    *waits.Recognizer
+	seen   map[string]int64 // ожидания этого прохода и прошлых, начатые после смещения: id первого вызова → начало
 	parser *transcript.Parser
 	nameOf func(cwd string) string
 	starts []int64
@@ -191,17 +192,25 @@ type chunk struct {
 // line — начало и время строки n (с 1) куска.
 func (c *chunk) line(n int) (int64, time.Time) { return c.starts[n-1], c.times[n-1] }
 
-// keep — законченные ожидания, кроме записанных в прошлый проход.
-func (c *chunk) keep(found []Found) {
+// keep — законченные ожидания, кроме записанных в прошлый проход (перечитанный кусок отдаёт их снова).
+func (c *chunk) keep(found []waits.Wait) {
 	for i := range found {
 		w := &found[i]
-		if w.EndLine > 0 {
-			if end, _ := c.line(w.EndLine); end < c.s.Done {
-				continue
-			}
+		key := waitKey(w)
+		if _, dup := c.seen[key]; dup {
+			continue
 		}
+		c.seen[key], _ = c.line(w.Line)
 		c.out = append(c.out, c.src.wait(w, c.name))
 	}
+}
+
+// waitKey — ожидание в файле: id первого вызова, без вызова — начало и способ.
+func waitKey(w *waits.Wait) string {
+	if len(w.CallIDs) > 0 {
+		return w.CallIDs[0]
+	}
+	return w.How + " " + w.Start.Format(time.RFC3339Nano)
 }
 
 // add — строка raw (без перевода строки) с началом в pos.
@@ -234,12 +243,10 @@ func (p *Pass) read(f Source, s *File, now time.Time) ([]Wait, error) {
 	}
 	defer fh.Close()
 	if f.size < s.Offset { // файл переписан короче: заново с начала
-		s.Offset, s.Done = 0, 0
+		s.Offset, s.Seen = 0, nil
 	}
-	c := &chunk{src: f, s: s, rec: NewClaude(), parser: transcript.NewParser(), nameOf: p.Name}
-	if f.Runner == RunnerCodex {
-		c.rec = NewCodex()
-	}
+	c := &chunk{src: f, s: s, rec: waits.New(), parser: transcript.NewParser(), nameOf: p.Name, seen: map[string]int64{}}
+	maps.Copy(c.seen, s.Seen)
 	r := bufio.NewReaderSize(io.NewSectionReader(fh, s.Offset, f.size-s.Offset), 1<<20)
 	pos := s.Offset
 	for {
@@ -261,10 +268,18 @@ func (p *Pass) read(f Source, s *File, now time.Time) ([]Wait, error) {
 		if start, at := c.line(n); at.IsZero() || now.Sub(at) < p.MaxOpen {
 			next = start
 		} else {
-			c.keep(c.rec.Flush())
+			c.keep(c.rec.Close())
 		}
 	}
-	s.Offset, s.Done = next, pos
+	s.Offset, s.Seen = next, nil
+	for k, start := range c.seen { // перечитываться будет только с next: раньше начатые не вернутся
+		if start >= next {
+			if s.Seen == nil {
+				s.Seen = map[string]int64{}
+			}
+			s.Seen[k] = start
+		}
+	}
 	if c.bad > 0 {
 		return c.out, fmt.Errorf("транскрипт %s: строк не JSON %d (%w)", f.Key, c.bad, c.badErr)
 	}
@@ -284,7 +299,7 @@ func readLong(r *bufio.Reader, head []byte) ([]byte, error) {
 }
 
 // wait — найденное с источником.
-func (f Source) wait(w *Found, name string) Wait {
+func (f Source) wait(w *waits.Wait, name string) Wait {
 	if f.Runner == RunnerCodex {
 		name = f.Project
 	}

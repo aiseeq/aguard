@@ -8,84 +8,22 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/aiseeq/akit/transcript"
 )
-
-// fake — распознаватель для проверки обвязки: «sleep …» ждёт до своего вывода, «bg …» — до уведомления.
-type fake struct {
-	open map[string]Found // id вызова → начатое
-	bg   *Found
-}
-
-func newFake() Recognizer { return &fake{open: map[string]Found{}} }
-
-func (f *fake) Add(ev transcript.Event) []Found {
-	switch {
-	case ev.Role == transcript.Cmd && strings.HasPrefix(ev.Text, "sleep"):
-		f.open[ev.CallID] = Found{Start: ev.Time, How: "sleep", Class: "other", Command: ev.Text, Calls: 1, Line: ev.Line}
-	case ev.Role == transcript.Cmd && strings.HasPrefix(ev.Text, "bg"):
-		f.bg = &Found{Start: ev.Time, How: "background", Class: "test", Command: ev.Text, Calls: 1, Line: ev.Line}
-	case ev.Role == transcript.Out:
-		if w, ok := f.open[ev.CallID]; ok {
-			delete(f.open, ev.CallID)
-			w.End, w.EndLine, w.Outcome = ev.Time, ev.Line, "done"
-			return []Found{w}
-		}
-	case f.bg != nil && strings.Contains(ev.Text, "task-notification"):
-		w := *f.bg
-		f.bg = nil
-		w.End, w.EndLine, w.Outcome = ev.Time, ev.Line, "done"
-		return []Found{w}
-	}
-	return nil
-}
-
-func (f *fake) Open() (int, bool) {
-	line := 0
-	if f.bg != nil {
-		line = f.bg.Line
-	}
-	for _, w := range f.open {
-		if line == 0 || w.Line < line {
-			line = w.Line
-		}
-	}
-	return line, line > 0
-}
-
-func (f *fake) Flush() []Found {
-	var out []Found
-	if f.bg != nil {
-		w := *f.bg
-		w.Outcome = "none"
-		out = append(out, w)
-		f.bg = nil
-	}
-	return out
-}
-
-func useFake(t *testing.T) {
-	t.Helper()
-	c, x := NewClaude, NewCodex
-	NewClaude, NewCodex = newFake, newFake
-	t.Cleanup(func() { NewClaude, NewCodex = c, x })
-}
 
 var stamp = time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
 
 func at(min int) string { return stamp.Add(time.Duration(min) * time.Minute).Format(time.RFC3339) }
 
-func call(min int, id, command string) string {
-	return fmt.Sprintf(`{"type":"assistant","timestamp":%q,"cwd":"/home/alice/git/aguard","message":{"role":"assistant","content":[{"type":"tool_use","id":%q,"name":"Bash","input":{"command":%q}}]}}`, at(min), id, command)
+func call(min int, id, command string, bg bool) string {
+	return fmt.Sprintf(`{"type":"assistant","timestamp":%q,"cwd":"/home/alice/git/aguard","message":{"role":"assistant","content":[{"type":"tool_use","id":%q,"name":"Bash","input":{"command":%q,"run_in_background":%v}}]}}`, at(min), id, command, bg)
 }
 
-func result(min int, id string) string {
-	return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"ok"}]}}`, at(min), id)
+func result(min int, id, text string) string {
+	return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":%q}]}}`, at(min), id, text)
 }
 
-func notification(min int) string {
-	return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"<task-notification><task-id>b1</task-id><status>completed</status></task-notification>"}}`, at(min))
+func notification(min int, id string) string {
+	return fmt.Sprintf(`{"type":"user","origin":{"kind":"task-notification"},"timestamp":%q,"message":{"role":"user","content":"<task-notification><task-id>b1</task-id><tool-use-id>%s</tool-use-id><status>completed</status><summary>Background command completed (exit code 0)</summary></task-notification>"}}`, at(min), id)
 }
 
 func appendLines(t *testing.T, path string, lines ...string) {
@@ -105,10 +43,10 @@ func appendLines(t *testing.T, path string, lines ...string) {
 
 // Незаконченное ожидание держит смещение: файл перечитывается с его начала, а законченные раньше не повторяются.
 func TestRunRereadsOpen(t *testing.T) {
-	useFake(t)
 	projects := t.TempDir()
 	file := filepath.Join(projects, "-home-alice-git-aguard", "s1.jsonl")
-	appendLines(t, file, call(0, "t1", "bg go test ./..."), call(1, "t2", "sleep 30"), result(2, "t2"))
+	appendLines(t, file, call(0, "t1", "go test ./...", true), result(0, "t1", "Command running in background with ID: b1."),
+		call(1, "t2", "sleep 30", false), result(2, "t2", ""), call(3, "t3", "ls", false), result(3, "t3", "a"))
 	p := &Pass{Projects: projects, Workers: t.TempDir(), Backfill: time.Hour, Budget: 1 << 20, MaxOpen: 6 * time.Hour,
 		Name: func(cwd string) string { return filepath.Base(cwd) + "-master" }}
 	st := &State{Files: map[string]*File{}}
@@ -117,25 +55,27 @@ func TestRunRereadsOpen(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].How != "sleep" || got[0].Ms != 60_000 || got[0].Name != "aguard-master" || got[0].Session != "s1" {
 		t.Fatalf("первый проход: %+v %v", got, err)
 	}
-	if s := st.Files["claude/-home-alice-git-aguard/s1.jsonl"]; s.Offset != 0 || s.Done == 0 {
-		t.Fatalf("смещение держит начало фоновой: %+v", s)
+	if s := st.Files["claude/-home-alice-git-aguard/s1.jsonl"]; s.Offset != 0 || len(s.Seen) != 1 {
+		t.Fatalf("смещение держит начало фоновой, sleep — в записанных: %+v", s)
 	}
-	appendLines(t, file, notification(10))
+	appendLines(t, file, notification(10, "t1"))
 	got, err = p.Run(st, now.Add(10*time.Minute))
-	if err != nil || len(got) != 1 || got[0].How != "background" || got[0].Ms != 600_000 {
+	if err != nil || len(got) != 1 || got[0].How != "background" || got[0].Class != "test" || got[0].Ms != 600_000 {
 		t.Fatalf("второй проход: %+v %v", got, err)
 	}
 	if got, err = p.Run(st, now.Add(20*time.Minute)); err != nil || len(got) != 0 {
 		t.Fatalf("третий проход пуст: %+v %v", got, err)
 	}
+	if s := st.Files["claude/-home-alice-git-aguard/s1.jsonl"]; s.Seen != nil {
+		t.Errorf("открытых нет — записанные не хранятся: %+v", s)
+	}
 }
 
 // Открытое дольше MaxOpen закрывается с исходом none, смещение уходит в конец.
 func TestRunFlushesStale(t *testing.T) {
-	useFake(t)
 	projects := t.TempDir()
 	file := filepath.Join(projects, "p", "s1", "subagents", "agent-a1.jsonl")
-	appendLines(t, file, call(0, "t1", "bg sleep 99999"))
+	appendLines(t, file, call(0, "t1", "make e2e", true), result(0, "t1", "Command running in background with ID: b1."))
 	p := &Pass{Projects: projects, Workers: t.TempDir(), Backfill: time.Hour, Budget: 1 << 20, MaxOpen: 6 * time.Hour}
 	st := &State{Started: true, Files: map[string]*File{}}
 	got, err := p.Run(st, stamp.Add(7*time.Hour))
@@ -150,10 +90,9 @@ func TestRunFlushesStale(t *testing.T) {
 
 // До первого прохода старые файлы пропускаются, свежие читаются с начала; codex — по папке задачи.
 func TestRunBackfill(t *testing.T) {
-	useFake(t)
 	projects, workers := t.TempDir(), t.TempDir()
 	old := filepath.Join(projects, "p", "old.jsonl")
-	appendLines(t, old, call(0, "t1", "sleep 1"), result(1, "t1"))
+	appendLines(t, old, call(0, "t1", "sleep 10", false), result(1, "t1", ""))
 	ago := time.Now().Add(-30 * 24 * time.Hour)
 	if err := os.Chtimes(old, ago, ago); err != nil {
 		t.Fatal(err)

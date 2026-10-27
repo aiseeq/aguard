@@ -57,12 +57,8 @@ func (a *app) agentwaitsCmd(args []string) error {
 }
 
 // agentwaitsRound — один проход: дописанное в транскриптах, затем сжатие прошлых дней. Смещения сохраняются только
-// после записи ожиданий: сбой записи — те же строки перечитаются в следующий проход. Распознавателя нет — прохода нет.
+// после записи ожиданий: сбой записи — те же строки перечитаются в следующий проход.
 func (a *app) agentwaitsRound(cfg *agentwait.Config, dry bool) error {
-	if agentwait.NewClaude == nil || agentwait.NewCodex == nil {
-		a.log.Debug("aguard agentwaits: распознавателя ожиданий нет, проход пропущен")
-		return nil
-	}
 	now := time.Now()
 	offsets := filepath.Join(a.dir("agentwaits"), "offsets.json")
 	st, err := agentwait.LoadState(offsets)
