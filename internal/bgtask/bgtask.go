@@ -92,7 +92,8 @@ func Find(snap *proc.Snapshot, procRoot string, uid int) ([]Task, error) {
 		if p.UID != uid || p.Session == 0 {
 			continue
 		}
-		link, err := os.Readlink(filepath.Join(procRoot, fmt.Sprint(p.Pid), "fd", "1"))
+		fd := filepath.Join(procRoot, fmt.Sprint(p.Pid), "fd", "1")
+		link, err := os.Readlink(fd)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue // процесс ушёл или stdout закрыт: не задача
 		}
@@ -106,7 +107,11 @@ func Find(snap *proc.Snapshot, procRoot string, uid int) ([]Task, error) {
 		}
 		t := byOutput[link]
 		if t == nil {
-			info, err := os.Stat(link)
+			// через fd процесса: у бойцов фермы /tmp свой (другое пространство имён), путь из ссылки снаружи не открыть
+			info, err := os.Stat(fd)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // процесс ушёл между readlink и stat
+			}
 			if err != nil {
 				errs = append(errs, fmt.Errorf("вывод задачи %s: %w", m[1], err))
 				continue
