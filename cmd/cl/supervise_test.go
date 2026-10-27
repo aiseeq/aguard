@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,7 +34,7 @@ printf '%s\n' "$@" > "$D/run1"
 exec sleep 25`)
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
 	socket := fakeAguard(t, `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",`+
-		`"running":"2.1.309","installed":"2.1.310"}`)
+		`"running":"2.1.309","installed":"2.1.310","crons":true}`)
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"), name: "x-master",
 		aguard: socket}
 
@@ -51,11 +52,11 @@ exec sleep 25`)
 	}
 	second := append(append(slices.Clone(scope), unit+"-r1", "--", w.claude),
 		"--dangerously-skip-permissions", "--allowedTools=Grep,Glob", "-n", "x-master", "--model", "opus", "--effort=high",
-		"--resume", "s1", "Роль (перезапуск cl на Claude Code 2.1.310). Служебная.")
+		"--resume", "s1", "Роль (cl перезапустил консоль в ЧЧ:ММ для обновления Claude Code 2.1.309 → 2.1.310). Служебная.")
 	if _, err := os.Stat(filepath.Join(d, "run2")); err != nil {
 		t.Fatalf("второго запуска нет: %v; журнал:\n%s", err, strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n"))
 	}
-	if got := readLines(t, filepath.Join(d, "run2")); !slices.Equal(got, second) {
+	if got := anyClock(readLines(t, filepath.Join(d, "run2"))); !slices.Equal(got, second) {
 		t.Errorf("перезапуск:\n%q\nwant\n%q", got, second)
 	}
 	if journalText := strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n"); !strings.Contains(journalText, "x-master pid=") ||
@@ -153,10 +154,10 @@ exec sleep 25`)
 	pid := strconv.Itoa(os.Getpid())
 	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice"}
 	fresh := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-r1", "--", w.claude), sessionFlags(d)...),
-		"-n", "x-master", "--model", "opus", "Роль (сброс cl на Claude Code 2.1.310). Файл: "+
+		"-n", "x-master", "--model", "opus", "Роль (cl начал новую беседу в ЧЧ:ММ вместо простаивавшей; Claude Code 2.1.310). Файл: "+
 			filepath.Join(d, "restart", "2026-10-26", "used", "x-master.md")+". Беседа новая.")
 	journalText := strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n")
-	if got := readLines(t, filepath.Join(d, "run2")); !slices.Equal(got, fresh) {
+	if got := anyClock(readLines(t, filepath.Join(d, "run2"))); !slices.Equal(got, fresh) {
 		t.Errorf("новая беседа:\n%q\nwant\n%q\nжурнал:\n%s", got, fresh, journalText)
 	}
 	if want := "act: сбрасываю: контекст 200 тыс.; SIGTERM, поднимаю новую беседу вместо s1"; !strings.Contains(journalText, want) {
@@ -269,4 +270,13 @@ func TestNext(t *testing.T) {
 	if out, _ := l.next(cfg, now, 7, yes, nil, journalKeys{}); out.restart {
 		t.Errorf("log — без перезапуска: %+v", out)
 	}
+}
+
+// anyClock заменяет время в {why} строки роли (часы теста) на «ЧЧ:ММ».
+func anyClock(args []string) []string {
+	clock := regexp.MustCompile(` в \d\d:\d\d `)
+	for i := range args {
+		args[i] = clock.ReplaceAllString(args[i], " в ЧЧ:ММ ")
+	}
+	return args
 }

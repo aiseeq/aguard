@@ -135,3 +135,42 @@ func TestFreshResume(t *testing.T) {
 		t.Errorf("без файла: %q", got)
 	}
 }
+
+func TestWhyText(t *testing.T) {
+	at := time.Date(2026, 10, 27, 2, 48, 11, 0, time.Local)
+	for _, c := range []struct{ event, from, want string }{
+		{eventStart, "", "старт cl на Claude Code 2.1.311"},
+		{eventRestart, "2.1.310", "cl перезапустил консоль в 02:48 для обновления Claude Code 2.1.310 → 2.1.311"},
+		{eventCompact, "", "cl перезапустил консоль в 02:48, чтобы сжать беседу; Claude Code 2.1.311"},
+		{eventReset, "", "cl начал новую беседу в 02:48 вместо простаивавшей; Claude Code 2.1.311"},
+	} {
+		if got := whyText(c.event, c.from, "2.1.311", at); got != c.want {
+			t.Errorf("%s: %q, ждали %q", c.event, got, c.want)
+		}
+	}
+	if got := whyText(eventRestart, "2.1.310", "2.1.311", at.UTC()); !strings.Contains(got, " в 02:48 ") {
+		t.Errorf("время не местное: %q", got)
+	}
+}
+
+func TestRoleWanted(t *testing.T) {
+	for _, c := range []struct {
+		event  string
+		crons  bool
+		resume string
+		want   bool
+	}{
+		{eventRestart, false, "", false},
+		{eventCompact, false, "", false},
+		{eventRestart, true, "", true},
+		{eventCompact, true, "", true},
+		{eventRestart, false, "/r/m.md", true},
+		{eventCompact, false, "/r/m.md", true},
+		{eventStart, false, "", true},
+		{eventReset, false, "", true},
+	} {
+		if got := roleWanted(c.event, c.crons, c.resume); got != c.want {
+			t.Errorf("%s crons=%v resume=%q: %v, ждали %v", c.event, c.crons, c.resume, got, c.want)
+		}
+	}
+}

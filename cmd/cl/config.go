@@ -70,7 +70,7 @@ type restartConfig struct {
 type role struct {
 	// Names — шаблоны имени сессии (path.Match: lead, *-master).
 	Names []string `json:"names"`
-	// Text — строка роли; {why} — «перезапуск cl на Claude Code 2.1.310» или «старт cl на Claude Code 2.1.310».
+	// Text — строка роли; {why} — «старт cl на Claude Code 2.1.310» или что cl сделал, когда и зачем (whyText).
 	Text string `json:"text"`
 	// OnStart — always или resume_file; пусто — при обычном старте молчать.
 	OnStart string `json:"on_start"`

@@ -37,13 +37,16 @@ type launcher struct {
 // outcome — чем кончился один запуск claude.
 type outcome struct {
 	err error
-	// restart — сессия вышла по сигналу перезапуска от cl; sessionID, name, version — что поднять снова.
+	// restart — сессия вышла по сигналу перезапуска от cl; sessionID, name, version — что поднять снова; from — версия
+	// до перезапуска, at — когда cl решил: оба — в {why} строки роли.
 	restart   bool
 	sessionID string
 	name      string
 	version   string
+	from      string
+	at        time.Time
 	// compact — перед подъёмом сжать беседу (`claude -p --resume <сессия> /compact`); crons — у сессии были таймеры:
-	// подъём со строкой роли, чтобы роль поставила их заново.
+	// подъём после перезапуска и сжатия со строкой роли, чтобы роль поставила их заново (roleWanted).
 	compact bool
 	crons   bool
 	// reset — поднять не прежнюю беседу, а новую: строка роли и файл возобновления.
@@ -88,7 +91,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 	keep, argsProblem := restartArgs(userArgs)
 	args := append(append([]string{}, pre...), userArgs...)
 	if bare(userArgs) {
-		args = l.withRoleLine(args, l.name, eventStart)
+		args = l.withRoleLine(args, l.name, eventStart, outcome{})
 	}
 	for n := 0; ; n++ {
 		unit := strconv.Itoa(os.Getpid())
@@ -107,7 +110,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 		}
 		l.name = out.name
 		if out.reset {
-			args = l.withRoleLine(append(append(sessionFlags(l.home), "-n", out.name), keep...), out.name, eventReset)
+			args = l.withRoleLine(append(append(sessionFlags(l.home), "-n", out.name), keep...), out.name, eventReset, out)
 			continue
 		}
 		event := eventRestart
@@ -124,9 +127,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 		}
 		args = append(append(sessionFlags(l.home), "-n", out.name), keep...)
 		args = append(args, "--resume", out.sessionID)
-		if !out.compact || out.crons {
-			args = l.withRoleLine(args, out.name, event)
-		}
+		args = l.withRoleLine(args, out.name, event, out)
 	}
 }
 
@@ -191,8 +192,8 @@ func compactLine(out outcome, took time.Duration, err error, stop syscall.Signal
 
 // withRoleLine добавляет первой репликой строку роли из конфига; роли нет или конфиг не прочитался — аргументы как
 // есть (сбой — в stderr: сессия важнее строки роли).
-func (l launcher) withRoleLine(args []string, name, event string) []string {
-	line, err := l.roleLine(name, event)
+func (l launcher) withRoleLine(args []string, name, event string, out outcome) []string {
+	line, err := l.roleLine(name, event, out)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cl: строка роли:", err)
 	}
@@ -202,7 +203,7 @@ func (l launcher) withRoleLine(args []string, name, event string) []string {
 	return append(args, line)
 }
 
-func (l launcher) roleLine(name, event string) (string, error) {
+func (l launcher) roleLine(name, event string, out outcome) (string, error) {
 	cfg, err := loadConfig(l.configFile, l.home)
 	if err != nil {
 		return "", err
@@ -211,10 +212,13 @@ func (l launcher) roleLine(name, event string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	why := event + " cl на Claude Code " + version
+	why := whyText(event, out.from, version, out.at)
 	resume, err := freshResume(cfg.Restart.ResumeDir, name, time.Duration(max(cfg.Restart.ResumeHours, 1))*time.Hour, time.Now())
 	if err != nil {
 		return "", err
+	}
+	if !roleWanted(event, out.crons, resume) {
+		return "", nil
 	}
 	line := cfg.roleLine(name, why, resume, event)
 	if resume == "" || !strings.Contains(line, resume) {
@@ -225,6 +229,30 @@ func (l launcher) roleLine(name, event string) (string, error) {
 		return line, err // не убрался — отдаётся по прежнему пути: строка роли важнее разовости файла
 	}
 	return strings.ReplaceAll(line, resume, used), nil
+}
+
+// roleWanted — нужна ли строка роли после перезапуска и сжатия: только если у сессии были таймеры (роль ставит их
+// заново) или есть свежий файл возобновления. Иначе голый --resume: беседа на месте, ждавшая ответа сессия ждёт
+// дальше, а реплика — лишний ход на всём контексте и непонятная строка в консоли (мастер проекта 27.10 02:48 CET
+// без таймеров и файла; задание лида). Старт и сброс — по on_start роли (config.roleLine).
+func roleWanted(event string, crons bool, resume string) bool {
+	return (event != eventRestart && event != eventCompact) || crons || resume != ""
+}
+
+// whyText — {why} строки роли. Старт — «старт cl на Claude Code 2.1.310». Перезапуск, сжатие и сброс — что cl сделал,
+// когда и зачем: история на экране после --resume та же, и строка без времени и причины выглядела сбоем (пользователь
+// 27.10 09:39 CET в консоли мастера проекта, задание лида). Время местное, без пояса: строку читает человек в своей консоли.
+func whyText(event, from, version string, at time.Time) string {
+	clock := at.Local().Format("15:04")
+	switch event {
+	case eventRestart:
+		return fmt.Sprintf("cl перезапустил консоль в %s для обновления Claude Code %s → %s", clock, restart.OrDash(from), version)
+	case eventCompact:
+		return fmt.Sprintf("cl перезапустил консоль в %s, чтобы сжать беседу; Claude Code %s", clock, version)
+	case eventReset:
+		return fmt.Sprintf("cl начал новую беседу в %s вместо простаивавшей; Claude Code %s", clock, version)
+	}
+	return eventStart + " cl на Claude Code " + version
 }
 
 // launch запускает claude: под pty cl или прямо на терминале cl. finish — после выхода claude.
@@ -329,7 +357,7 @@ func (l launcher) next(cfg config, now time.Time, pid int, a restart.Answer, ask
 	last.verdict = journalOnce(cfg, last.verdict, a.Key, journalLine(cfg.Restart.Mode, name, pid, a))
 	if a.Restart && cfg.Restart.Mode == modeAct && a.SessionID != "" {
 		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: SIGTERM, поднимаю --resume %s на %s", name, pid, a.SessionID, a.Installed))
-		return outcome{restart: true, sessionID: a.SessionID, name: name, version: a.Installed}, last
+		return outcome{restart: true, sessionID: a.SessionID, name: name, version: a.Installed, from: a.Running, at: now, crons: a.Crons}, last
 	}
 	steps := []struct {
 		on   bool
@@ -341,6 +369,7 @@ func (l launcher) next(cfg config, now time.Time, pid int, a restart.Answer, ask
 			continue
 		}
 		out, line, key := s.want(cfg, pid, a, *s.last)
+		out.at = now
 		if line != "" {
 			journal(cfg.Restart.Journal, now, line)
 		}
