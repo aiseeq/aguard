@@ -65,9 +65,16 @@ type Host struct {
 	since time.Time            // начало перегрузки: первый из замеров подряд с перегрузкой; нуль — не перегружена
 	sent  map[string]time.Time // кому и когда писали о машине: переживает конец перегрузки, иначе перегрузка у порога
 	// (кончилась — снова началась) сбрасывала бы repeat и слала письма каждый замер (ревью 5572a22, 27.10)
-	told map[string]bool // кому писали в эту перегрузку
-	Down bool            // прошлый замер не удался: о сбое пишется раз, а не каждый проход
+	told   map[string]bool // кому писали в эту перегрузку
+	last   time.Time       // прошлый удачный замер
+	broken bool            // после него замер не удался
+	Every  time.Duration   // интервал замеров: пропуск дольше двух — серия прервана
+	Down   bool            // прошлый замер не удался: о сбое пишется раз, а не каждый проход
 }
+
+// Break — замер не удался: перегрузка «подряд» прервана, следующая считается с нуля (иначе после получаса без ssh
+// письмо говорило бы «перегружен 31 мин подряд» по двум замерам; проверка тикета cpu-loadavg 28.10).
+func (h *Host) Break() { h.broken = true }
 
 // Load — готовые потоки владельца в снимке.
 type Load struct {
@@ -105,6 +112,10 @@ func (v *Verdict) Long(now time.Time, after time.Duration) bool {
 // кому писали в эту перегрузку; когда писали — помнится (repeat).
 func (h *Host) Judge(s *Sample, owner func(*Task) Owner) Verdict {
 	v := Verdict{Over: s.Over(), Avg1: s.Load.Avg1, Runnable: s.Runnable, Threads: s.Threads}
+	if !h.since.IsZero() && (h.broken || h.Every > 0 && s.At.Sub(h.last) > 2*h.Every) { // пропуск замеров — не подряд
+		v.Ended, h.since, h.told = h.since, time.Time{}, nil
+	}
+	h.broken, h.last = false, s.At
 	switch {
 	case v.Over && h.since.IsZero():
 		h.since, h.told, v.Started = s.At, map[string]bool{}, true
@@ -259,6 +270,9 @@ func LeadMessage(host string, v *Verdict, told []string, now time.Time) string {
 	}
 	for _, k := range slices.Sorted(maps.Keys(byKind)) {
 		who = append(who, k+" "+fmt.Sprint(byKind[k]))
+	}
+	if len(who) == 0 { // готовые кончились между чтением числа и обходом потоков
+		who = []string{"в снимке готовых потоков нет"}
 	}
 	sent := "никому"
 	if len(told) > 0 {

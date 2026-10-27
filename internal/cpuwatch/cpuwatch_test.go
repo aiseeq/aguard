@@ -193,8 +193,10 @@ func TestRemoteOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := &Resolver{Jobs: testJobs(t), ProcRoot: laptop}
-	// битое задание не лишает владельцев остальных: они в ответе, сбой — в Err
+	// битое задание не лишает владельцев остальных: они в ответе, сбой — в Err; файлы worker в папке заданий
+	// (.prune.stamp) — не задания и не сбой
 	write(t, filepath.Join(r.Jobs.Dir, "1027-0000-broken", "job.json"), "{")
+	write(t, filepath.Join(r.Jobs.Dir, ".prune.stamp"), "")
 	for _, c := range []struct {
 		t    Task
 		want Owner
@@ -212,8 +214,8 @@ func TestRemoteOwner(t *testing.T) {
 			t.Errorf("RemoteOwner(%s, %q) = %+v, хотим %+v", c.t.Cgroup, c.t.SSH, got, c.want)
 		}
 	}
-	if err := r.Err(); err == nil || !strings.Contains(err.Error(), "job.json") {
-		t.Errorf("сбой битого задания не в Err: %v", err)
+	if err := r.Err(); err == nil || !strings.Contains(err.Error(), "job.json") || strings.Contains(err.Error(), "stamp") {
+		t.Errorf("в Err — только сбой битого задания: %v", err)
 	}
 }
 
@@ -313,6 +315,26 @@ func TestJudge(t *testing.T) {
 	}
 }
 
+// Подряд — это без пропусков: сбой замера или пауза демона (сон машины) обрывают серию.
+func TestJudgeGap(t *testing.T) {
+	start := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	h := Host{Every: time.Minute}
+	h.Judge(sample(start, 30, 30, nil), byCgroup)
+	h.Break() // ssh упал
+	at := start.Add(time.Minute)
+	if v := h.Judge(sample(at, 30, 30, nil), byCgroup); !v.Ended.Equal(start) || !v.Started || !v.Since.Equal(at) {
+		t.Errorf("сбой замера — новая серия с этого замера: %+v", v)
+	}
+	at = at.Add(30 * time.Minute) // демон не замерял полчаса
+	if v := h.Judge(sample(at, 30, 30, nil), byCgroup); !v.Started || !v.Since.Equal(at) || v.Long(at, 10*time.Minute) {
+		t.Errorf("пропуск дольше двух интервалов — новая серия: %+v", v)
+	}
+	at = at.Add(2 * time.Minute) // замер запоздал, но не дольше двух интервалов
+	if v := h.Judge(sample(at, 30, 30, nil), byCgroup); v.Started || !v.Since.Equal(at.Add(-2*time.Minute)) {
+		t.Errorf("запоздавший замер серию не рвёт: %+v", v)
+	}
+}
+
 // Мастеру пишется по числу его готовых задач в снимке против потоков машины, а не по доле от всех готовых.
 func TestRecipientsShare(t *testing.T) {
 	for _, c := range []struct {
@@ -350,5 +372,15 @@ func TestConfig(t *testing.T) {
 		if c.Validate("/home/u") == nil {
 			t.Errorf("принят неверный раздел %+v", c)
 		}
+	}
+}
+
+// Готовые кончились между чтением числа и обходом потоков: сводка говорит об этом, а не «Чьи: .».
+func TestLeadMessageEmpty(t *testing.T) {
+	var h Host
+	at := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	v := h.Judge(sample(at, 30, 30, nil), byCgroup)
+	if msg := LeadMessage(HostLocal, &v, nil, at); !strings.Contains(msg, "Чьи: в снимке готовых потоков нет.") {
+		t.Errorf("сводка при пустом снимке: %s", msg)
 	}
 }

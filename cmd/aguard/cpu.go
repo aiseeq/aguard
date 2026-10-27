@@ -151,11 +151,13 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 	for _, h := range a.cpuHosts(cfg) {
 		now := time.Now()
 		s, err := a.cpuSample(ctx, h, now, false)
+		h.win.Every = cfg.Interval.D()
 		if err != nil {
 			if !h.win.Down {
 				a.warn("cpu", "замер "+h.win.Name+" не удался, жду", "err", err)
 			}
 			h.win.Down = true
+			h.win.Break()
 			continue
 		}
 		if h.win.Down {

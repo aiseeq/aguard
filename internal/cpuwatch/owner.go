@@ -151,6 +151,9 @@ func (j *Jobs) readLive() error {
 	}
 	var errs []error
 	for _, e := range ents {
+		if !e.IsDir() { // служебные файлы worker (.prune.stamp, .settle.stamp) — не задания
+			continue
+		}
 		v, err := j.get(e.Name())
 		if err != nil {
 			errs = append(errs, err)
