@@ -299,7 +299,7 @@ func TestJudge(t *testing.T) {
 	}
 	// один замер без перегрузки — конец: длительность — подряд
 	at = at.Add(time.Minute)
-	if v = h.Judge(sample(at, 25, 3, heavy), byCgroup); v.Over || !v.Ended.Equal(start) || v.Loads != nil {
+	if v = h.Judge(sample(at, 25, 3, heavy), byCgroup); v.Over || !v.Ended.Equal(start) || v.Lasted != 11*time.Minute || v.Loads != nil {
 		t.Errorf("готовых сейчас 3 — конец перегрузки, начатой %v: %+v", start, v)
 	}
 	if h.Due("glint-master", at, time.Minute) {
@@ -320,14 +320,15 @@ func TestJudgeGap(t *testing.T) {
 	start := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
 	h := Host{Every: time.Minute}
 	h.Judge(sample(start, 30, 30, nil), byCgroup)
+	h.Judge(sample(start.Add(time.Minute), 30, 30, nil), byCgroup)
 	h.Break() // ssh упал
-	at := start.Add(time.Minute)
-	if v := h.Judge(sample(at, 30, 30, nil), byCgroup); !v.Ended.Equal(start) || !v.Started || !v.Since.Equal(at) {
-		t.Errorf("сбой замера — новая серия с этого замера: %+v", v)
+	at := start.Add(2 * time.Minute)
+	if v := h.Judge(sample(at, 30, 30, nil), byCgroup); !v.Ended.Equal(start) || v.Lasted != time.Minute || !v.Started || !v.Since.Equal(at) {
+		t.Errorf("сбой замера — новая серия с этого замера, прошлая длилась до последнего замера: %+v", v)
 	}
 	at = at.Add(30 * time.Minute) // демон не замерял полчаса
-	if v := h.Judge(sample(at, 30, 30, nil), byCgroup); !v.Started || !v.Since.Equal(at) || v.Long(at, 10*time.Minute) {
-		t.Errorf("пропуск дольше двух интервалов — новая серия: %+v", v)
+	if v := h.Judge(sample(at, 30, 30, nil), byCgroup); !v.Started || !v.Since.Equal(at) || v.Long(at, 10*time.Minute) || v.Lasted != 0 {
+		t.Errorf("пропуск дольше двух интервалов — новая серия, длительность прошлой без пропуска: %+v", v)
 	}
 	at = at.Add(2 * time.Minute) // замер запоздал, но не дольше двух интервалов
 	if v := h.Judge(sample(at, 30, 30, nil), byCgroup); v.Started || !v.Since.Equal(at.Add(-2*time.Minute)) {

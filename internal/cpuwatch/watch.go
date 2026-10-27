@@ -93,12 +93,13 @@ type Comm struct {
 // длительность — сколько замеров подряд это держится (лид 28.10 ~00:05 CET по слову пользователя; прежние LA за 5 минут
 // с порогом конца 0.9 потоков запаздывали: нагрузка уже кончилась, а письмо получал тот, кто крутился в момент снимка).
 type Verdict struct {
-	Over     bool      // перегружена в этот замер
-	Started  bool      // перегрузка началась в этот замер
-	Ended    time.Time // перегрузка кончилась в этот замер: когда началась
-	Since    time.Time // начало перегрузки: первый замер из подряд идущих
-	Avg1     float64   // load average за минуту
-	Runnable int       // готовых к работе задач в момент снимка
+	Over     bool          // перегружена в этот замер
+	Started  bool          // перегрузка началась в этот замер
+	Ended    time.Time     // перегрузка кончилась в этот замер: когда началась
+	Lasted   time.Duration // и сколько длилась: до этого замера, а при пропуске — до последнего перед ним
+	Since    time.Time     // начало перегрузки: первый замер из подряд идущих
+	Avg1     float64       // load average за минуту
+	Runnable int           // готовых к работе задач в момент снимка
 	Threads  int
 	Loads    []Load // снимок по владельцам, больше — раньше
 }
@@ -113,14 +114,14 @@ func (v *Verdict) Long(now time.Time, after time.Duration) bool {
 func (h *Host) Judge(s *Sample, owner func(*Task) Owner) Verdict {
 	v := Verdict{Over: s.Over(), Avg1: s.Load.Avg1, Runnable: s.Runnable, Threads: s.Threads}
 	if !h.since.IsZero() && (h.broken || h.Every > 0 && s.At.Sub(h.last) > 2*h.Every) { // пропуск замеров — не подряд
-		v.Ended, h.since, h.told = h.since, time.Time{}, nil
+		v.Ended, v.Lasted, h.since, h.told = h.since, h.last.Sub(h.since), time.Time{}, nil
 	}
 	h.broken, h.last = false, s.At
 	switch {
 	case v.Over && h.since.IsZero():
 		h.since, h.told, v.Started = s.At, map[string]bool{}, true
 	case !v.Over && !h.since.IsZero():
-		v.Ended, h.since, h.told = h.since, time.Time{}, nil
+		v.Ended, v.Lasted, h.since, h.told = h.since, s.At.Sub(h.since), time.Time{}, nil
 	}
 	if !v.Over {
 		return v

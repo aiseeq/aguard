@@ -180,8 +180,8 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 // cpuAct — журнал начала и конца перегрузки и письма по ней.
 func (a *app) cpuAct(cfg *cpuwatch.Config, h *cpuwatch.Host, v *cpuwatch.Verdict, now time.Time) {
 	if !v.Ended.IsZero() {
-		a.log.Info("aguard cpu: перегрузка кончилась", "host", h.Name, "lasted", now.Sub(v.Ended).Round(time.Second).String())
-		a.note("cpu", "overload_end", h.Name, "", int64(now.Sub(v.Ended).Minutes()), "min")
+		a.log.Info("aguard cpu: перегрузка кончилась", "host", h.Name, "lasted", v.Lasted.Round(time.Second).String())
+		a.note("cpu", "overload_end", h.Name, "", int64(v.Lasted.Minutes()), "min")
 	}
 	if !v.Over {
 		return
