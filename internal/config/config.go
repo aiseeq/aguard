@@ -118,6 +118,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Tmp.Lead, c.Tmp.SendAuth, c.Tmp.Escalation.Admins = c.Lead, c.SendAuth, maps.Clone(admins)
 	c.Bgtask.SendAuth = c.SendAuth
 	c.Cpu.Lead, c.Cpu.SendAuth = c.Lead, c.SendAuth
+	c.Disk.Lead, c.Disk.SendAuth = c.Lead, c.SendAuth
 	c.Remote.Lead, c.Remote.SendAuth = c.Lead, c.SendAuth
 	c.Night.Lead, c.Night.SendAuth = c.Lead, c.SendAuth
 	if err := c.Orphans.Compile(home); err != nil {

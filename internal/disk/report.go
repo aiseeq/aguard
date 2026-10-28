@@ -12,10 +12,7 @@ import (
 
 // Line — строка сигнала: что хозяин получил бы. home сворачивается в ~.
 func (r *Record) Line(home string) string {
-	path := r.Path
-	if rest, ok := strings.CutPrefix(path, home+"/"); ok {
-		path = "~/" + rest
-	}
+	path := short(r.Path, home)
 	at := r.At.Local().Format("02.01 15:04")
 	var what string
 	switch r.Kind {

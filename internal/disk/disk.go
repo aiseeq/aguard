@@ -44,7 +44,21 @@ type Config struct {
 	// Track — снимки tmpguard-track по ~/.cache и ~/.local/state (служба tmpguard-track-home): кто создал запись.
 	// Первый свежий из списка; нет ни одного — создатель неизвестен.
 	Track []string `toml:"track"`
+	// FreeMin — нижняя граница свободного места на /home: ниже — письмо лиду и FreeTell раз в сутки, пока не поднимется
+	// (задание git-admin 28.10: go-build растёт до полки 300–500 ГБ, по сигналу — go clean -cache). Свой режим FreeMode:
+	// mode наблюдателя — log, а этот сигнал шлётся.
+	FreeMin  policy.Size `toml:"free_min"`
+	FreeMode string      `toml:"free_mode"` // off | log | alert
+	FreeTell []string    `toml:"free_tell"` // кому сверх лида
+	Lead     string      `toml:"-"`
+	SendAuth bool        `toml:"-"`
 }
+
+// Режимы сигнала о свободном месте.
+const (
+	FreeOff   = "off"
+	FreeAlert = "alert"
+)
 
 // ModeLog — только журнал.
 const ModeLog = "log"
@@ -65,6 +79,7 @@ func Default() Config {
 		Keep:     policy.Duration(60 * 24 * time.Hour),
 		TraceMin: 1 << 30,
 		Track:    []string{"/run/tmpguard-home/state.json", "/var/lib/tmpguard-home/state.json"},
+		FreeMin:  150 << 30, FreeMode: FreeAlert, FreeTell: []string{"git-admin"},
 	}
 }
 
@@ -78,6 +93,12 @@ func (c *Config) Validate(home string) error {
 	}
 	if c.Grow <= 0 || c.Fast <= 0 || c.StaleMin <= 0 || c.TraceMin <= 0 || c.Stale.D() < time.Hour || c.Keep.D() < 24*time.Hour {
 		return errors.New("disk: grow, fast, stale_min, trace_min > 0, stale >= 1h, keep >= 24h")
+	}
+	if c.FreeMode != FreeOff && c.FreeMode != ModeLog && c.FreeMode != FreeAlert {
+		return fmt.Errorf("disk.free_mode = %q: off, log или alert", c.FreeMode)
+	}
+	if c.FreeMin <= 0 {
+		return errors.New("disk.free_min > 0")
 	}
 
 	expand := func(ps []string) {

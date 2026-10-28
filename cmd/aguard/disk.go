@@ -52,6 +52,12 @@ func (a *app) diskCmd(ctx context.Context, args []string) error {
 		all := fl.Bool("all", false, "кроме находок — каждый след")
 		parse(fl, rest)
 		return a.diskTracesNow(ctx, &cfg, *all)
+	case "free-test":
+		fl := flag.NewFlagSet("disk free-test", flag.ContinueOnError)
+		minFree := fl.String("min", "", "порог вместо free_min (например, 2T — выше нынешнего свободного)")
+		to := fl.String("to", "", "кому вместо лида и free_tell; пусто — только напечатать")
+		parse(fl, rest)
+		return a.diskFreeTest(&cfg.Disk, *minFree, *to)
 	case "report":
 		fl := flag.NewFlagSet("disk report", flag.ContinueOnError)
 		since := fl.Duration("since", 7*24*time.Hour, "за какой срок")
@@ -122,6 +128,9 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	st, err := disk.Load(statePath)
 	if err != nil {
 		return err
+	}
+	if cfg.Disk.FreeMode != disk.FreeOff && st.LowFree(&cfg.Disk, now, free) {
+		a.diskLowFree(&cfg.Disk, st.LowFreeMessage(&cfg.Disk, free, a.home), free)
 	}
 	owners := a.diskOwners(cfg)
 	measure := func(entries []string) map[string]disk.Usage { return cfg.Disk.MeasureAll(ctx, entries) }
@@ -365,4 +374,60 @@ func (a *app) diskTracesNow(ctx context.Context, cfg *config.Config, all bool) e
 func lastLine(b []byte) string {
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
 	return lines[len(lines)-1]
+}
+
+// diskLowFree — письмо «свободно меньше free_min» лиду и free_tell; в log — только журнал «написал бы».
+func (a *app) diskLowFree(cfg *disk.Config, msg string, free int64) {
+	alive, err := a.reg.Alive()
+	if err != nil {
+		a.warn("disk", "реестр сессий", "err", err)
+	}
+	for _, to := range append([]string{cfg.Lead}, cfg.FreeTell...) {
+		gb := free >> 30
+		if cfg.FreeMode != disk.FreeAlert {
+			a.log.Info("aguard disk: написал бы", "session", to, "msg", msg)
+			a.note("disk", "free_would_send", "", to, gb, "GiB")
+			continue
+		}
+		if err := a.sendAlive(alive, to, cfg.SendAuth, msg); err != nil {
+			a.warn("disk", "письмо о свободном месте", "session", to, "err", err)
+			a.note("disk", "free_send_failed", "", to, gb, "GiB")
+			continue
+		}
+		a.log.Info("aguard disk: написал", "session", to, "msg", msg)
+		a.note("disk", "free_sent", "", to, gb, "GiB")
+	}
+}
+
+// diskFreeTest — проверка сигнала о свободном месте на пороге min: текст по нынешнему состоянию и, с to, письмо этой
+// сессии тем же путём (состояние наблюдателя не меняется).
+func (a *app) diskFreeTest(cfg *disk.Config, minFree, to string) error {
+	if minFree != "" {
+		n, err := policy.ParseSize(minFree)
+		if err != nil {
+			return fmt.Errorf("-min: %w", err)
+		}
+		cfg.FreeMin = policy.Size(n)
+	}
+	free, err := disk.Free(a.home)
+	if err != nil {
+		return err
+	}
+	st, err := disk.Load(filepath.Join(a.dir("disk"), "state.json"))
+	if err != nil {
+		return err
+	}
+	st.FreeLow = time.Time{}
+	if !st.LowFree(cfg, time.Now(), free) {
+		fmt.Fprintf(a.out, "свободно %s не меньше порога %s — письма не было бы\n", policy.HumanBytes(free), policy.HumanBytes(int64(cfg.FreeMin)))
+		return nil
+	}
+	msg := st.LowFreeMessage(cfg, free, a.home)
+	fmt.Fprintln(a.out, msg)
+	if to == "" {
+		return nil
+	}
+	cfg.Lead, cfg.FreeTell, cfg.FreeMode = to, nil, disk.FreeAlert
+	a.diskLowFree(cfg, msg, free)
+	return nil
 }

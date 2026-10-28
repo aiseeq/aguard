@@ -11,9 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/daily"
+	"github.com/aiseeq/aguard/internal/policy"
 )
 
 // Виды записей журнала.
@@ -65,8 +67,45 @@ type State struct {
 	Sizes    map[string][]Point   `json:"sizes"`
 	Free     []Point              `json:"free"`
 	LastWalk time.Time            `json:"last_walk"`
-	Told     map[string]time.Time `json:"told"`             // вид и путь -> когда записан
-	Traces   map[string]Trace     `json:"traces,omitempty"` // учтённые следы, путь -> последний замер
+	Told     map[string]time.Time `json:"told"`              // вид и путь -> когда записан
+	Traces   map[string]Trace     `json:"traces,omitempty"`  // учтённые следы, путь -> последний замер
+	FreeLow  time.Time            `json:"free_low,omitzero"` // последнее письмо «свободно меньше free_min»; ноль — место выше
+}
+
+// LowFree — пора ли письмо «свободно меньше free_min»: ниже порога — сразу и дальше раз в сутки; поднялось — отметка
+// снимается, следующее падение — снова сразу.
+func (s *State) LowFree(c *Config, now time.Time, free int64) bool {
+	if free >= int64(c.FreeMin) {
+		s.FreeLow = time.Time{}
+		return false
+	}
+	if !s.FreeLow.IsZero() && now.Sub(s.FreeLow) < repeatDaily {
+		return false
+	}
+	s.FreeLow = now
+	return true
+}
+
+// LowFreeMessage — письмо о свободном месте: сколько, порог и самые большие записи по последнему обходу.
+func (s *State) LowFreeMessage(c *Config, free int64, home string) string {
+	type big struct {
+		path  string
+		bytes int64
+	}
+	var top []big
+	for path, pts := range s.Sizes {
+		if len(pts) > 0 {
+			top = append(top, big{path, pts[len(pts)-1].Bytes})
+		}
+	}
+	slices.SortFunc(top, func(a, b big) int { return cmp.Compare(b.bytes, a.bytes) })
+	parts := make([]string, 0, 3)
+	for _, b := range top[:min(3, len(top))] {
+		parts = append(parts, short(b.path, home)+" "+policy.HumanBytes(b.bytes))
+	}
+	return fmt.Sprintf("aguard disk: на /home свободно %s — меньше порога %s (free_min). Самые большие записи по последнему "+
+		"обходу: %s. Повтор — раз в сутки, пока место не поднимется выше порога.",
+		policy.HumanBytes(free), policy.HumanBytes(int64(c.FreeMin)), strings.Join(parts, ", "))
 }
 
 // Load читает состояние; нет файла — пустое.

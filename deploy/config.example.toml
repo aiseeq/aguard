@@ -130,6 +130,10 @@ keep = "1440h"         # 60 дней
 trace_min = "1G"       # scratchpad умершей сессии и копии транскриптов — следы от этого; находка по классу — от него
 # снимки tmpguard-track-home: кто создал след; первый свежий из списка
 track = ["/run/tmpguard-home/state.json", "/var/lib/tmpguard-home/state.json"]
+# На /home свободно меньше free_min — письмо лиду и free_tell сразу и раз в сутки, пока не поднимется (не зависит от mode).
+free_min = "150G"
+free_mode = "alert"    # off | log (только журнал «написал бы») | alert
+free_tell = ["git-admin"]
 
 [disk.owners]          # папка -> сессия-хозяин; остальных хозяин ищется по сессиям и таблице имён cl, иначе — лид
 "~/.cache/farm-hard" = "llmark-master"

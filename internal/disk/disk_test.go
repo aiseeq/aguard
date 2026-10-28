@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -263,5 +264,43 @@ func TestMeasureCanceled(t *testing.T) {
 	}
 	if u := measure(ctx, dir, map[inode]bool{}, new(fiemapBuf), true); !errors.Is(u.Err, context.Canceled) || u.Files != 0 {
 		t.Errorf("обход после отмены: %+v", u)
+	}
+}
+
+// TestLowFree — ниже free_min письмо сразу, дальше раз в сутки; место поднялось — следующее падение снова сразу.
+func TestLowFree(t *testing.T) {
+	c := Default()
+	c.FreeMin = 150 << 30
+	s := &State{Sizes: map[string][]Point{
+		"/h/.cache/go-build": {{Bytes: 300 << 30}}, "/h/.cache/glint": {{Bytes: 5 << 30}},
+		"/h/.local/state/x": {{Bytes: 1 << 30}}, "/h/.cache/small": {{Bytes: 1 << 20}},
+	}}
+	at := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	low, high := int64(140<<30), int64(160<<30)
+	steps := []struct {
+		after time.Duration
+		free  int64
+		want  bool
+	}{
+		{0, high, false},
+		{time.Hour, low, true},
+		{2 * time.Hour, low, false},
+		{25 * time.Hour, low, true},
+		{26 * time.Hour, high, false},
+		{27 * time.Hour, low, true},
+	}
+	for _, st := range steps {
+		if got := s.LowFree(&c, at.Add(st.after), st.free); got != st.want {
+			t.Fatalf("через %s свободно %d ГиБ: письмо %v, ждал %v", st.after, st.free>>30, got, st.want)
+		}
+	}
+	msg := s.LowFreeMessage(&c, low, "/h")
+	for _, want := range []string{"свободно 140", "порога 150", "~/.cache/go-build 300", "~/.cache/glint 5", "~/.local/state/x 1"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("в письме нет %q: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "small") {
+		t.Fatalf("в письме больше трёх записей: %s", msg)
 	}
 }
