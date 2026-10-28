@@ -11,12 +11,9 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/bgtask"
-	"github.com/aiseeq/akit/deliver"
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
 )
-
-const bgtaskFrom = "aguard"
 
 func (a *app) bgtaskCmd(args []string) error {
 	cmd, rest := sub(args)
@@ -121,25 +118,11 @@ func (a *app) bgtaskNotify(cfg *bgtask.Config, t *bgtask.Task, o *bgtask.Origin,
 		a.note("bgtask", prefix+"would_send", t.ID, in.Name, value, "min")
 		return
 	}
-	if err := a.bgtaskSend(cfg, in, msg); err != nil {
+	if err := a.sendSocket(in.Pid, in.Name, in.SocketPath, cfg.SendAuth, msg); err != nil {
 		a.warn("bgtask", "письмо о задаче "+t.ID, "session", in.Name, "err", err)
 		a.note("bgtask", prefix+"send_failed", t.ID, in.Name, value, "min")
 		return
 	}
 	a.log.Info("aguard bgtask: написал", "session", in.Name, "msg", msg)
 	a.note("bgtask", prefix+"sent", t.ID, in.Name, value, "min")
-}
-
-func (a *app) bgtaskSend(cfg *bgtask.Config, in *session.Info, msg string) error {
-	token := ""
-	if cfg.SendAuth {
-		var err error
-		if token, err = a.reg.Token(in.Pid); err != nil {
-			return fmt.Errorf("токен %s: %w", in.Name, err)
-		}
-	}
-	if err := deliver.Send(bgtaskFrom, in.SocketPath, token, msg); err != nil {
-		return fmt.Errorf("сокет %s: %w", in.Name, err)
-	}
-	return nil
 }

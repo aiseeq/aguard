@@ -19,7 +19,6 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/report"
-	"github.com/aiseeq/akit/deliver"
 	"github.com/aiseeq/akit/pressure"
 	"github.com/aiseeq/akit/session"
 )
@@ -433,14 +432,7 @@ func testLine(it *policy.Item) policy.Line {
 
 // tmpSend доставляет текст в сокет сессии; токен — только если включён send_auth.
 func (a *app) tmpSend(cfg *policy.Config, t policy.Target, msg string) error {
-	token := ""
-	if cfg.SendAuth {
-		var err error
-		if token, err = a.reg.Token(t.Pid); err != nil {
-			return fmt.Errorf("токен %s: %w", t.Key(), err)
-		}
-	}
-	return deliver.Send("aguard", t.Socket, token, msg)
+	return a.sendSocket(t.Pid, t.Key(), t.Socket, cfg.SendAuth, msg)
 }
 
 // printDry печатает то, что ушло бы в этот проход, и отложенное: строки,

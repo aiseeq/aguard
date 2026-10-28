@@ -17,16 +17,14 @@ import (
 
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
-	"github.com/aiseeq/akit/deliver"
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
 )
 
 const (
-	orphansFrom = "aguard"
-	stampForm   = "2006-01-02 15:04:05 MST"
-	shortForm   = "02.01 15:04"
-	maxArgs     = 160
+	stampForm = "2006-01-02 15:04:05 MST"
+	shortForm = "02.01 15:04"
+	maxArgs   = 160
 )
 
 func (a *app) orphansCmd(ctx context.Context, args []string) error {
@@ -148,7 +146,7 @@ func (a *app) orphansAct(ctx context.Context, cfg *orphans.Config, trees []orpha
 	}
 	sort.Strings(names)
 	for _, to := range names {
-		if err := a.orphansSend(cfg, alive[to], a.orphansMessage(cfg, byTo[to])); err != nil {
+		if err := a.sendSocket(alive[to].Pid, alive[to].Name, alive[to].SocketPath, cfg.SendAuth, a.orphansMessage(cfg, byTo[to])); err != nil {
 			a.log.Warn("aguard orphans: сводка не доставлена", "to", to, "err", err)
 			a.note("orphans", "send_failed", "", to, int64(len(byTo[to])), "trees")
 			continue
@@ -191,20 +189,6 @@ func recipientText(to, note string) string {
 	default:
 		return to
 	}
-}
-
-func (a *app) orphansSend(cfg *orphans.Config, in session.Info, msg string) error {
-	token := ""
-	if cfg.SendAuth {
-		var err error
-		if token, err = a.reg.Token(in.Pid); err != nil {
-			return fmt.Errorf("токен %s: %w", in.Name, err)
-		}
-	}
-	if err := deliver.Send(orphansFrom, in.SocketPath, token, msg); err != nil {
-		return fmt.Errorf("сокет %s: %w", in.Name, err)
-	}
-	return nil
 }
 
 func (a *app) orphansMessage(cfg *orphans.Config, lines []string) string {

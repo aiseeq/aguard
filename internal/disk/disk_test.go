@@ -204,6 +204,9 @@ func TestMeasureReflink(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir, err := os.MkdirTemp(cache, "aguard-test-")
+	if errors.Is(err, os.ErrNotExist) { // песочница без кэша пользователя (go test на PC через graft)
+		t.Skipf("кэша пользователя нет: %v", err)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
