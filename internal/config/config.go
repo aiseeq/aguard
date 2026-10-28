@@ -19,6 +19,7 @@ import (
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/memwatch"
+	"github.com/aiseeq/aguard/internal/night"
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/restart"
@@ -45,6 +46,7 @@ type Config struct {
 	Said    said.Config           `toml:"said"`   // указатель сказанного пользователем
 	Bgtask  bgtask.Config         `toml:"bgtask"` // забытые фоновые задачи Bash: письмо владельцу
 	Cpu     cpuwatch.Config       `toml:"cpu"`    // перегрузка процессора ноута и PC: письмо тем, чья она
+	Night   night.Config          `toml:"night"`  // Сон, Дайджест и окна доверия
 }
 
 // Path — путь конфига в домашней папке.
@@ -69,6 +71,7 @@ func Default(home string) Config {
 		Said:       said.Default(),
 		Bgtask:     bgtask.Default(),
 		Cpu:        cpuwatch.Default(home),
+		Night:      night.Default(home),
 	}
 }
 
@@ -112,6 +115,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Tmp.Lead, c.Tmp.SendAuth, c.Tmp.Escalation.Admins = c.Lead, c.SendAuth, maps.Clone(admins)
 	c.Bgtask.SendAuth = c.SendAuth
 	c.Cpu.Lead, c.Cpu.SendAuth = c.Lead, c.SendAuth
+	c.Night.Lead, c.Night.SendAuth = c.Lead, c.SendAuth
 	if err := c.Orphans.Compile(home); err != nil {
 		return fmt.Errorf("orphans: %w", err)
 	}
@@ -140,6 +144,9 @@ func (c *Config) finish(home string, uid int) error {
 		return err
 	}
 	if err := c.Cpu.Validate(home); err != nil {
+		return err
+	}
+	if err := c.Night.Validate(home); err != nil {
 		return err
 	}
 	return c.Compact.Validate()

@@ -81,6 +81,105 @@ func TypeFailed(typed string, err error) string {
 	return fmt.Sprintf("набор %s: %v", typed, err)
 }
 
+// Начала строк cl об окне доверия: по ним их находит TrustEvents. trustLeft — окно осталось (TrustWriteFailed; до
+// 28.10 10:30 CET — и «человек у терминала … — не подтверждаю / Enter не нажимаю»), trustDone — cl его подтвердил.
+const (
+	trustLeft = "окно доверия к "
+	trustDone = "подтвердил доверие к "
+)
+
+// TrustWriteFailed — ввод в pty окна доверия не удался.
+func TrustWriteFailed(dir string, err error) string {
+	return fmt.Sprintf(trustLeft+"%s: %v", dir, err)
+}
+
+// TrustConfirmed — cl подтвердил доверие к домашней папке.
+func TrustConfirmed(dir string) string {
+	return fmt.Sprintf(trustDone+"%s: Claude Code не сохраняет доверие к домашней папке", dir)
+}
+
+// TrustEvent — окно доверия при подъёме сессии (подтверждённое cl или оставшееся) и более поздний подъём той же
+// сессии: подтверждение тоже может не дойти, проверяется итог.
+type TrustEvent struct {
+	At        time.Time
+	Name      string
+	Dir       string
+	Confirmed bool
+	Recovered time.Time
+	PID       int // pid cl; 0 — строка без него (до 28.10 11:30 CET)
+}
+
+// reUp — строка решения cl о живой сессии с прочитанными версиями («lead pid=2077626 2.1.312→2.1.312 act: …»): cl
+// пишет её, только когда claude прошёл окно и записался в реестр (28.10: lead стоял на окне с 00:38:38, такая строка —
+// в 09:34:38). «нет записи→нет записи» — реестр не прочитан, подъёмом не считается; строки «pid=N: …» (SIGTERM, переход
+// в новый бинарник) пишет cl, а не поднявшийся claude.
+var reUp = regexp.MustCompile(`^(.+?) pid=\d+ [0-9—][^ ]*→`)
+
+// TrustEvents находит окна доверия; более поздняя строка решения о той же сессии (reUp) — она поднялась.
+func TrustEvents(r io.Reader) ([]TrustEvent, int, error) {
+	type entry struct {
+		at    time.Time
+		text  string
+		trust string // имя сессии, если строка — окно доверия
+	}
+	var lines []entry
+	var events []TrustEvent
+	var at []int // строка каждого события в lines
+	bad := 0
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		stamp, text, ok := strings.Cut(sc.Text(), " ")
+		when, err := time.Parse(TimeFormat, stamp)
+		if !ok || err != nil {
+			bad++
+			continue
+		}
+		lines = append(lines, entry{at: when, text: text})
+		name, body, ok := strings.Cut(text, ": ")
+		rest, left := strings.CutPrefix(body, trustLeft)
+		done, confirmed := strings.CutPrefix(body, trustDone)
+		if !ok || !left && !confirmed {
+			continue
+		}
+		if confirmed {
+			rest = done
+		}
+		dir, _, _ := strings.Cut(rest, ": ")
+		if dir == "" {
+			continue
+		}
+		pid := 0
+		if n, p, ok := strings.Cut(name, " pid="); ok {
+			if pid, err = strconv.Atoi(p); err != nil {
+				bad++
+				continue
+			}
+			name = n
+		}
+		lines[len(lines)-1].trust = name
+		at = append(at, len(lines)-1)
+		events = append(events, TrustEvent{At: when, Name: name, Dir: dir, Confirmed: confirmed, PID: pid})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, bad, fmt.Errorf("журнал cl: %w", err)
+	}
+	// подъём — до следующего окна той же сессии: строка решения после него — уже о следующем подъёме (28.10 проба:
+	// окно 10:04:35 без подъёма, окно 10:36:10, строка решения 10:37:08)
+	for i := range events {
+		for _, line := range lines[at[i]+1:] {
+			if line.trust == events[i].Name {
+				break
+			}
+			if m := reUp.FindStringSubmatch(line.text); m != nil && m[1] == events[i].Name {
+				events[i].Recovered = line.at
+				break
+			}
+		}
+	}
+	return events, bad, nil
+}
+
 // Cancelled — SIGTERM не дошёл, перезапуск (и сжатие или сброс с ним) не состоялся.
 func Cancelled(err error) string {
 	return fmt.Sprintf("%v — перезапуск отменён", err)

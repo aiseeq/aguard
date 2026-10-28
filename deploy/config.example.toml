@@ -191,6 +191,19 @@ notify = 0.25          # мастеру — если его готовых за�
 hosts = ["pc"]         # машины по ssh сверх своей
 workers = "~/.local/state/worker"   # задания worker: unit бойца -> мастер
 
+# Сторож старта Сна и Дайджеста, а также зависшего окна доверия после перезапуска cl.
+# mode = log — только пишет «написал бы»; alert — письмо лиду и сообщение в Telegram.
+[night]
+mode = "alert"         # off | log | alert
+interval = "1m"
+dream_by = "03:00"
+dream_marker = "~/.claude/improve/runs/{date}/started"
+digest_by = "07:00"
+digest_marker = "~/.local/state/digest/started"
+trust_wait = "5m"
+telegram_chat = "c4378460291"
+telegram_cmd = "tgctl"
+
 [said]                 # указатель сказанного: реплики пользователя -> Luna -> ~/.claude/said.tsv
 mode = "log"           # off | log (разметка и расход только в журнал) | write (и в said.tsv)
 interval = "1m"

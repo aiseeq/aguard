@@ -389,7 +389,8 @@ func (l *launcher) openPty() {
 	adopted := l.upgraded != nil && l.upgraded.Master > 0
 	if cfg, err := loadConfig(l.configFile, l.home); adopted || err == nil && matchAny(cfg.Restart.PtyNames, l.name) {
 		l.console = openConsole(os.Stdin, os.Stdout, func(s string) {
-			journal(cfg.Restart.Journal, time.Now(), l.name+": "+s)
+			// pid cl — aguard night отличает окно, на котором claude стоит, от закрытой консоли
+			journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: %s", l.name, os.Getpid(), s))
 		})
 	}
 }

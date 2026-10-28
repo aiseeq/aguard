@@ -232,12 +232,22 @@ func (a *app) cpuSend(cfg *cpuwatch.Config, alive map[string]session.Info, to, m
 		a.note("cpu", "would_send", "", to, value, "runnable")
 		return nil
 	}
+	if err := a.sendAlive(alive, to, cfg.SendAuth, msg); err != nil {
+		return err
+	}
+	a.log.Info("aguard cpu: написал", "session", to, "msg", msg)
+	a.note("cpu", "sent", "", to, value, "runnable")
+	return nil
+}
+
+// sendAlive — письмо живой сессии to через её сокет; auth — с токеном peer первой строкой.
+func (a *app) sendAlive(alive map[string]session.Info, to string, auth bool, msg string) error {
 	in, ok := alive[to]
 	if !ok || in.SocketPath == "" {
 		return fmt.Errorf("сессии %s нет", to)
 	}
 	token := ""
-	if cfg.SendAuth {
+	if auth {
 		var err error
 		if token, err = a.reg.Token(in.Pid); err != nil {
 			return fmt.Errorf("токен %s: %w", to, err)
@@ -246,8 +256,6 @@ func (a *app) cpuSend(cfg *cpuwatch.Config, alive map[string]session.Info, to, m
 	if err := deliver.Send("aguard", in.SocketPath, token, msg); err != nil {
 		return fmt.Errorf("сокет %s: %w", to, err)
 	}
-	a.log.Info("aguard cpu: написал", "session", to, "msg", msg)
-	a.note("cpu", "sent", "", to, value, "runnable")
 	return nil
 }
 

@@ -42,11 +42,8 @@ type console struct {
 	master  *os.File
 	raw     *term.State
 	typed   atomic.Int64 // последний ввод человека, unix nano
-	// keyed — последний ввод, кроме ответов терминала на запросы claude и событий фокуса (trust.go), unix nano.
-	keyed atomic.Int64
-	// keyedBy — что сдвинуло keyed (inputShape): в журнал cl, когда окно доверия осталось человеку.
-	keyedBy atomic.Pointer[string]
-	winch   chan os.Signal
+
+	winch chan os.Signal
 	// note — строка в журнал cl: сбой консоли (claude вышел, а ввод ещё шёл; окно или терминал не вернулись) и
 	// сделанное за человека (окно доверия, trust.go).
 	note func(string)
@@ -71,11 +68,7 @@ func (c *console) pump() {
 		n, err := c.in.Read(buf)
 		if n > 0 {
 			c.typed.Store(time.Now().UnixNano())
-			if !terminalReplies(buf[:n]) {
-				by := inputShape(buf[:n])
-				c.keyedBy.Store(&by)
-				c.keyed.Store(time.Now().UnixNano())
-			}
+
 			c.mu.Lock()
 			if c.master != nil {
 				if _, werr := c.master.Write(buf[:n]); werr != nil { // claude вышел — ввод некуда девать
@@ -132,8 +125,7 @@ func (c *console) start(cmd *exec.Cmd, trustDir string) (func(), error) {
 	}
 	var watch io.Writer
 	if trustDir != "" {
-		since := time.Now().UnixNano()
-		watch = newTrustWatch(trustDir, func() { c.confirmTrust(trustDir, since) })
+		watch = newTrustWatch(trustDir, func() { c.confirmTrust(trustDir) })
 	}
 	finish, err := c.attach(master, watch)
 	if err != nil { // без сырого режима ввод шёл бы строками с эхом — claude не запускать

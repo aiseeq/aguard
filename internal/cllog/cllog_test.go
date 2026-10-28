@@ -74,3 +74,43 @@ func TestRead(t *testing.T) {
 		t.Errorf("окно: %+v %v", got, err)
 	}
 }
+
+func TestTrustEvents(t *testing.T) {
+	const log = `2026-10-28T00:38:37+01:00 lead pid=707112 2.1.311→2.1.312 act: перезапускаю: простаивает, ничего не идёт
+2026-10-28T00:38:38+01:00 lead: окно доверия к /home/alice: человек у терминала — не подтверждаю
+2026-10-28T00:39:00+01:00 other pid=1 act: версия свежая
+2026-10-28T00:39:30+01:00 lead pid=3739580 нет записи→нет записи act: не перезапускаю: не прочитал: реестр сессий: нет записи о процессе 3739580
+2026-10-28T00:39:40+01:00 lead pid=666971: cl обновлён — перехожу в новый бинарник /home/alice/bin/cl
+2026-10-28T00:40:00+01:00 x: окно доверия к /home/x: человек у терминала (ввод клавиши) — не подтверждаю
+2026-10-28T00:41:00+01:00 y: окно доверия к /home/y: человек у терминала (ввод клавиши) — выбрал «да», Enter не нажимаю
+2026-10-28T00:41:30+01:00 w: окно доверия к /home/w: write: broken pipe
+2026-10-28T00:42:00+01:00 z: подтвердил доверие к /home/z: Claude Code не сохраняет доверие к домашней папке
+2026-10-28T03:22:18+01:00 glint-master pid=1291562 2.1.311→2.1.312 act: перезапускаю
+2026-10-28T09:34:38+01:00 lead pid=2077626 2.1.312→2.1.312 act: версия свежая
+2026-10-28T10:04:35+01:00 p: подтвердил доверие к /home/alice: Claude Code не сохраняет доверие к домашней папке
+2026-10-28T10:36:10+01:00 p: подтвердил доверие к /home/alice: Claude Code не сохраняет доверие к домашней папке
+2026-10-28T10:37:08+01:00 p pid=177304 2.1.311→2.1.312 act: не перезапускаю: тихо 0 мин из 10 мин
+2026-10-28T11:30:00+01:00 p pid=4242: подтвердил доверие к /home/alice: Claude Code не сохраняет доверие к домашней папке
+2026-10-28T11:31:00+01:00 p pid=177305 2.1.312→2.1.312 act: версия свежая
+`
+	events, bad, err := TrustEvents(strings.NewReader(log))
+	if err != nil || bad != 0 || len(events) != 8 {
+		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
+	}
+	if events[0].Name != "lead" || events[0].Dir != "/home/alice" || events[0].At.Format("15:04:05") != "00:38:38" || events[0].Recovered.Format("15:04:05") != "09:34:38" {
+		t.Errorf("событие лида: %+v", events[0])
+	}
+	if !events[1].Recovered.IsZero() || !events[2].Recovered.IsZero() || events[3].Name != "w" || events[3].Dir != "/home/w" || !events[3].Recovered.IsZero() {
+		t.Errorf("восстановление: %+v", events)
+	}
+	if events[4].Name != "z" || events[4].Dir != "/home/z" || !events[4].Confirmed || events[0].Confirmed || !events[4].Recovered.IsZero() {
+		t.Errorf("подтверждённое окно: %+v", events[4])
+	}
+	// строка решения 10:37:08 — о подъёме после окна 10:36:10, не 10:04:35
+	if !events[5].Recovered.IsZero() || events[6].Recovered.Format("15:04:05") != "10:37:08" {
+		t.Errorf("подъём между окнами одной сессии: %+v %+v", events[5], events[6])
+	}
+	if e := events[7]; e.Name != "p" || e.PID != 4242 || e.Recovered.Format("15:04:05") != "11:31:00" || events[6].PID != 0 {
+		t.Errorf("окно с pid cl: %+v", e)
+	}
+}

@@ -1,0 +1,310 @@
+// Ночной сторож: сигнализирует, если Сон, Дайджест или подъём после окна доверия не состоялись.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"html"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/aiseeq/aguard/internal/cllog"
+	"github.com/aiseeq/aguard/internal/night"
+	"github.com/aiseeq/akit/session"
+)
+
+// nightSent — сигнал: когда и по каким каналам (lead, telegram) уже дошёл.
+type nightSent struct {
+	At       time.Time            `json:"at"`
+	Channels map[string]time.Time `json:"channels"`
+}
+
+// nightState — отправленное по ключу сигнала (night.Signal.Key).
+type nightState map[string]nightSent
+
+// nightFailure — канал, по которому сигнал не дошёл в этот проход.
+type nightFailure struct {
+	Key, Channel string
+	Err          error
+}
+
+// dispatchNight шлёт каждый сигнал по каждому ещё не дошедшему каналу; дошедший канал не повторяется, неудачный —
+// в следующий проход.
+func dispatchNight(state nightState, signals []night.Signal, now time.Time, send func(string, string) error) (nightState, []nightFailure) {
+	var failed []nightFailure
+	for _, s := range signals {
+		rec := state[s.Key]
+		if rec.Channels == nil {
+			rec.Channels = map[string]time.Time{}
+		}
+		for _, channel := range []string{"lead", "telegram"} {
+			if _, ok := rec.Channels[channel]; ok {
+				continue
+			}
+			if err := send(channel, s.Text); err != nil {
+				failed = append(failed, nightFailure{s.Key, channel, err})
+				continue
+			}
+			rec.Channels[channel] = now
+		}
+		if len(rec.Channels) > 0 {
+			rec.At = now
+			state[s.Key] = rec
+		}
+	}
+	return state, failed
+}
+
+// nightCmd — `aguard night tick [-dry-run]`.
+func (a *app) nightCmd(ctx context.Context, args []string) error {
+	cmd, rest := sub(args)
+	cfg, err := a.config()
+	if err != nil {
+		return err
+	}
+	if cmd != "tick" {
+		usage()
+		return nil
+	}
+	fl := flag.NewFlagSet("night tick", flag.ContinueOnError)
+	dry := fl.Bool("dry-run", false, "показать сигналы, не отправлять и не сохранять")
+	parse(fl, rest)
+	return a.nightRound(ctx, &cfg.Night, *dry)
+}
+
+// nightRound — один проход: факты, сигналы, доставка, состояние; dry и mode=log — только журнал «написал бы».
+func (a *app) nightRound(_ context.Context, cfg *night.Config, dry bool) error {
+	if cfg.Mode == night.ModeOff {
+		return nil
+	}
+	now := time.Now().In(time.Local)
+	facts := a.nightFacts(cfg, now)
+	signals := night.Check(now, *cfg, facts)
+	if dry {
+		fmt.Fprintf(a.out, "Сон %s: маркер %s; Дайджест %s: дата %s в %s; окон доверия за сутки %d\n", cfg.DreamBy,
+			map[bool]string{true: "есть", false: "нет"}[facts.DreamMarker], cfg.DigestBy,
+			map[bool]string{true: "есть", false: "нет"}[strings.Contains(facts.DigestText, now.Format("2006-01-02"))],
+			cfg.DigestMarker, recentTrust(facts.TrustEvents, now))
+		for _, e := range facts.TrustEvents {
+			if now.Sub(e.At) <= 24*time.Hour {
+				fmt.Fprintf(a.out, "  %s %s %s подтверждено=%v поднялась=%s\n", e.At.Format("15:04:05"), e.Name, e.Dir, e.Confirmed,
+					map[bool]string{true: "нет", false: e.Recovered.Format("15:04:05")}[e.Recovered.IsZero()])
+			}
+		}
+		for _, s := range signals {
+			fmt.Fprintf(a.out, "  → %s: %s\n", s.Key, s.Text)
+		}
+	}
+	if dry {
+		return nil
+	}
+	if cfg.Mode == night.ModeLog { // учёт «написал бы» — только в памяти: переход на alert шлёт сегодняшнее по-настоящему
+		if a.nightLogged == nil {
+			a.nightLogged = map[string]bool{}
+		}
+		for _, s := range signals {
+			if !a.nightLogged[s.Key] {
+				a.nightLogged[s.Key] = true
+				a.log.Info("aguard night: написал бы", "key", s.Key, "msg", s.Text)
+				a.nightNote("would_send", s.Key, "", 0, "")
+			}
+		}
+		return nil
+	}
+	statePath := filepath.Join(a.dir("night"), "state.json")
+	state := a.nightSent
+	if state == nil {
+		var err error
+		if state, err = loadNightState(statePath); err != nil {
+			return err
+		}
+		a.nightSent = state
+	}
+	for k, sent := range state {
+		if now.Sub(sent.At) > 7*24*time.Hour {
+			delete(state, k)
+		}
+	}
+	alive, regErr := a.reg.Alive()
+	if regErr != nil {
+		a.log.Warn("aguard night: реестр сессий", "err", regErr)
+		a.nightNote("registry_failed", "", "", 0, "")
+	}
+	// состояние в памяти демона: сбой записи state.json не повторяет дошедшее каждую минуту
+	state, failures := dispatchNight(state, signals, now, func(channel, msg string) error {
+		var err error
+		if channel == "lead" {
+			if regErr != nil {
+				return fmt.Errorf("реестр сессий: %w", regErr)
+			}
+			err = a.nightEmail(cfg, alive, msg)
+		} else {
+			err = nightTelegram(cfg, msg)
+		}
+		a.nightChannelNote(cfg, channel, err)
+		return err
+	})
+	for _, f := range failures {
+		a.log.Warn("aguard night: канал доставки", "channel", f.Channel, "key", f.Key, "err", f.Err)
+	}
+	if err := saveNightState(statePath, state); err != nil {
+		return err
+	}
+	return nil
+}
+
+// recentTrust — окон доверия за последние сутки.
+func recentTrust(events []cllog.TrustEvent, now time.Time) int {
+	n := 0
+	for _, e := range events {
+		if now.Sub(e.At) <= 24*time.Hour {
+			n++
+		}
+	}
+	return n
+}
+
+// nightFacts — маркеры Сна и Дайджеста и окна доверия из журнала cl; сбой чтения — в журнал aguard.
+func (a *app) nightFacts(cfg *night.Config, now time.Time) night.Facts {
+	facts := night.Facts{}
+	marker := night.DreamPath(*cfg, now)
+	_, err := os.Stat(marker)
+	facts.DreamMarker = err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		a.log.Warn("aguard night: маркер Сна", "path", marker, "err", err)
+	}
+	if b, err := os.ReadFile(cfg.DigestMarker); err == nil {
+		facts.DigestText = string(b)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		a.log.Warn("aguard night: маркер Дайджеста", "path", cfg.DigestMarker, "err", err)
+	}
+	f, err := os.Open(cllog.Path(a.home))
+	if err == nil {
+		facts.TrustEvents, _, err = cllog.TrustEvents(f)
+		if closeErr := f.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+		facts.TrustEvents = openTrust(facts.TrustEvents, clRunning)
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		a.log.Warn("aguard night: журнал cl", "err", err)
+	}
+	return facts
+}
+
+// openTrust — окна, чей cl ещё жив: консоль закрыли — claude не стоит на окне (ревью 28.10: 3 закрытые пробы
+// trustprobe 27.10 считались бы «не поднялась»). Строка без pid cl — проверить нечем, остаётся.
+func openTrust(events []cllog.TrustEvent, running func(int) bool) []cllog.TrustEvent {
+	var out []cllog.TrustEvent
+	for _, e := range events {
+		if e.PID == 0 || running(e.PID) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// clRunning — процесс pid есть и это cl (pid не занят чужим процессом).
+func clRunning(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	return err == nil && strings.TrimSpace(string(b)) == "cl"
+}
+
+// nightChannelNote — учёт доставки по каналу.
+func (a *app) nightChannelNote(cfg *night.Config, channel string, err error) {
+	if a.act == nil {
+		return
+	}
+	switch channel {
+	case "lead":
+		if err == nil {
+			a.note("night", "email_sent", "", cfg.Lead, 0, "")
+		} else {
+			a.note("night", "email_failed", "", cfg.Lead, 0, "")
+		}
+	case "telegram":
+		if err == nil {
+			a.note("night", "telegram_sent", "", cfg.TelegramChat, 0, "")
+		} else {
+			a.note("night", "telegram_failed", "", cfg.TelegramChat, 0, "")
+		}
+	}
+}
+
+// nightNote — учёт срабатывания; учёта нет (тест) — ничего.
+func (a *app) nightNote(kind, what, target string, value int64, unit string) {
+	if a.act != nil {
+		a.note("night", kind, what, target, value, unit)
+	}
+}
+
+// nightEmail — письмо лиду.
+func (a *app) nightEmail(cfg *night.Config, alive map[string]session.Info, msg string) error {
+	if err := a.sendAlive(alive, cfg.Lead, cfg.SendAuth, msg); err != nil {
+		return err
+	}
+	a.log.Info("aguard night: написал", "session", cfg.Lead, "msg", msg)
+	return nil
+}
+
+// nightTelegramTimeout — сколько ждать tgctl: зависший не держит проход наблюдателя, неудача — повтор в следующий.
+const nightTelegramTimeout = time.Minute
+
+// nightTelegram — строка в группу Дайджеста: лид сам может стоять на окне доверия, и письмо ему некому прочесть.
+func nightTelegram(cfg *night.Config, msg string) error {
+	dir, err := os.MkdirTemp("", "aguard-night-")
+	if err != nil {
+		return fmt.Errorf("временная папка Telegram: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	file := filepath.Join(dir, "message.html")
+	if err := os.WriteFile(file, []byte(html.EscapeString(msg)), 0o600); err != nil {
+		return fmt.Errorf("файл Telegram: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), nightTelegramTimeout)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, cfg.TelegramCmd, "sendhtml", cfg.TelegramChat, file).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %w: %s", cfg.TelegramCmd, err, out)
+	}
+	return nil
+}
+
+// loadNightState читает состояние; файла нет — пустое.
+func loadNightState(path string) (nightState, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nightState{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("состояние night: чтение: %w", err)
+	}
+	var state nightState
+	if err := json.Unmarshal(b, &state); err != nil {
+		return nil, fmt.Errorf("состояние night: %w", err)
+	}
+	if state == nil {
+		state = nightState{}
+	}
+	return state, nil
+}
+
+// saveNightState пишет состояние.
+func saveNightState(path string, state nightState) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("состояние night: папка: %w", err)
+	}
+	b, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("состояние night: кодирование: %w", err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+		return fmt.Errorf("состояние night: %w", err)
+	}
+	return nil
+}

@@ -62,16 +62,18 @@ import (
 const procRoot = "/proc"
 
 type app struct {
-	home     string
-	cfgPath  string
-	stateDir string // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
-	projects string
-	reg      session.Registry
-	uid      int
-	log      *slog.Logger
-	out      io.Writer           // вывод команд для человека и агента (dry-run, report)
-	act      *activity.Recorder  // учёт срабатываний; только у демона, у команд nil
-	cpu      map[string]*cpuHost // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
+	home        string
+	cfgPath     string
+	stateDir    string          // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
+	nightSent   nightState      // отправленное ночным сторожем; nil — ещё не прочитано из state.json
+	nightLogged map[string]bool // mode=log: ключи, о которых уже написал «написал бы»
+	projects    string
+	reg         session.Registry
+	uid         int
+	log         *slog.Logger
+	out         io.Writer           // вывод команд для человека и агента (dry-run, report)
+	act         *activity.Recorder  // учёт срабатываний; только у демона, у команд nil
+	cpu         map[string]*cpuHost // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
 }
 
 func main() {
@@ -122,6 +124,8 @@ func main() {
 		err = a.agentwaitsCmd(os.Args[2:])
 	case "cpu":
 		err = a.cpuCmd(ctx, os.Args[2:])
+	case "night":
+		err = a.nightCmd(ctx, os.Args[2:])
 	case "report":
 		err = a.reportCmd(os.Args[2:])
 	default:
@@ -148,6 +152,7 @@ func usage() {
   aguard bgtask tick [-dry-run]
   aguard agentwaits tick [-dry-run] | report [-json] [-window week]
   aguard cpu tick [-dry-run]
+  aguard night tick [-dry-run]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }
@@ -192,7 +197,7 @@ type watcher struct {
 // проход; не прочитался — проход пропускается (по неизвестным правилам ничего
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "night", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -237,6 +242,8 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Bgtask.Interval.D() }},
 		{"cpu", func(ctx context.Context, c *config.Config) error { return a.cpuRound(ctx, &c.Cpu) },
 			func(c *config.Config) time.Duration { return c.Cpu.Interval.D() }},
+		{"night", func(ctx context.Context, c *config.Config) error { return a.nightRound(ctx, &c.Night, false) },
+			func(c *config.Config) time.Duration { return c.Night.Interval.D() }},
 	}
 }
 

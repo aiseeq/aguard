@@ -1,0 +1,111 @@
+// Package night проверяет, что Сон, Дайджест и поднятие после окна доверия начались вовремя.
+package night
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/aiseeq/aguard/internal/bgtask"
+	"github.com/aiseeq/aguard/internal/cllog"
+	"github.com/aiseeq/aguard/internal/policy"
+)
+
+// Config — раздел [night] конфига aguard.
+type Config struct {
+	Mode         string          `toml:"mode"`
+	Interval     policy.Duration `toml:"interval"`
+	DreamBy      string          `toml:"dream_by"`
+	DreamMarker  string          `toml:"dream_marker"`
+	DigestBy     string          `toml:"digest_by"`
+	DigestMarker string          `toml:"digest_marker"`
+	TrustWait    policy.Duration `toml:"trust_wait"`
+	TelegramChat string          `toml:"telegram_chat"`
+	TelegramCmd  string          `toml:"telegram_cmd"`
+	Lead         string          `toml:"-"`
+	SendAuth     bool            `toml:"-"`
+}
+
+const (
+	ModeOff   = bgtask.ModeOff
+	ModeLog   = bgtask.ModeLog
+	ModeAlert = bgtask.ModeAlert
+)
+
+// Default returns ночной сторож по умолчанию.
+func Default(home string) Config {
+	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "03:00",
+		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DigestBy: "07:00",
+		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute),
+		TelegramChat: "c4378460291", TelegramCmd: "tgctl"}
+}
+
+// Validate проверяет настройки и раскрывает домашнюю папку в путях.
+func (c *Config) Validate(home string) error {
+	if c.Mode != ModeOff && c.Mode != ModeLog && c.Mode != ModeAlert {
+		return fmt.Errorf("night.mode = %q: off, log или alert", c.Mode)
+	}
+	if c.Interval.D() < 10*time.Second || c.TrustWait.D() < 0 {
+		return fmt.Errorf("night.interval >= 10s, night.trust_wait >= 0")
+	}
+	if !validClock(c.DreamBy) || !validClock(c.DigestBy) {
+		return fmt.Errorf("night.dream_by и night.digest_by должны быть ЧЧ:ММ")
+	}
+	c.DreamMarker = policy.ExpandHome(c.DreamMarker, home)
+	c.DigestMarker = policy.ExpandHome(c.DigestMarker, home)
+	if c.TelegramCmd == "" || c.TelegramChat == "" {
+		return fmt.Errorf("night.telegram_cmd и night.telegram_chat обязательны")
+	}
+	return nil
+}
+
+func validClock(s string) bool { _, err := time.Parse("15:04", s); return err == nil }
+
+// Facts — уже прочитанные наблюдателем данные, пригодные для чистой проверки.
+type Facts struct {
+	DreamMarker bool
+	DigestText  string
+	TrustEvents []cllog.TrustEvent
+}
+
+// Signal — срабатывание с ключом дедупликации и текстом для человека.
+type Signal struct{ Key, Text string }
+
+// Check возвращает события, срок которых наступил для местной даты now.
+func Check(now time.Time, cfg Config, facts Facts) []Signal {
+	date := now.Format("2006-01-02")
+	var out []Signal
+	if due(now, cfg.DreamBy) && !facts.DreamMarker {
+		out = append(out, Signal{"dream:" + date, fmt.Sprintf("Сон не стартовал к %s: нет %s. Лид жив? (окно доверия, лимит, упавшая консоль)", cfg.DreamBy, DreamPath(cfg, now))})
+	}
+	if due(now, cfg.DigestBy) && !strings.Contains(facts.DigestText, date) {
+		out = append(out, Signal{"digest:" + date, fmt.Sprintf("Дайджест не стартовал к %s: нет сегодняшней даты в %s. Лид жив? (окно доверия, лимит, упавшая консоль)", cfg.DigestBy, cfg.DigestMarker)})
+	}
+	for _, e := range facts.TrustEvents {
+		if now.Sub(e.At) > 24*time.Hour || now.Sub(e.At) < cfg.TrustWait.D() || !e.Recovered.IsZero() {
+			continue
+		}
+		key := "trust:" + e.Name + ":" + e.At.Format(time.RFC3339)
+		text := fmt.Sprintf("%s стоит на окне доверия к %s с %s — подтвердить в его консоли: стрелка вниз, Enter", e.Name, e.Dir, e.At.Format("15:04"))
+		if e.Confirmed {
+			text = fmt.Sprintf("%s не поднялась за %s после окна доверия к %s: cl подтвердил его в %s — посмотреть её консоль", e.Name, cfg.TrustWait.D(), e.Dir, e.At.Format("15:04"))
+		}
+		out = append(out, Signal{key, text})
+	}
+	return out
+}
+
+// DreamPath — маркер старта Сна за местную дату now.
+func DreamPath(cfg Config, now time.Time) string {
+	return strings.ReplaceAll(cfg.DreamMarker, "{date}", now.Format("2006-01-02"))
+}
+
+// due — местное время now не раньше clock (ЧЧ:ММ, проверено Validate) того же дня.
+func due(now time.Time, clock string) bool {
+	t, err := time.Parse("15:04", clock)
+	if err != nil {
+		panic(fmt.Sprintf("night: время %q прошло Validate: %v", clock, err))
+	}
+	return now.Hour()*60+now.Minute() >= t.Hour()*60+t.Minute()
+}

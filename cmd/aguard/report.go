@@ -116,6 +116,7 @@ func (a *app) reportSpecs(cfg *config.Config) []activity.Spec {
 		{Name: "said", Mode: cfg.Said.Mode, Looped: cfg.Said.Mode != said.ModeOff},
 		{Name: "bgtask", Mode: cfg.Bgtask.Mode, Looped: cfg.Bgtask.Mode != bgtask.ModeOff},
 		{Name: "cpu", Mode: cfg.Cpu.Mode, Looped: cfg.Cpu.Mode != cpuwatch.ModeOff},
+		{Name: "night", Mode: cfg.Night.Mode, Looped: cfg.Night.Mode != "off"},
 	}
 }
 
