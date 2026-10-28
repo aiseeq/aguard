@@ -68,14 +68,30 @@ func TestTerminalReplies(t *testing.T) {
 		"\x1b[?5u":                         true, // флаги клавиатуры kitty
 		"\x1b]11;rgb:0000/0000/0000\x1b\\": true,
 		"\x1b[12;40R":                      true,
-		"\x1b[I":                           true,  // фокус
-		"\x1b[B":                           false, // стрелка — человек
-		"\x1b[97u":                         false, // клавиша в протоколе kitty
-		"x":                                false,
-		"\x1b[?1;2;4cx":                    false,
+		"\x1b[I":                           true, // фокус
+		// замер 28.10 09:37 CET: Konsole 26.08.1 на подъёме claude 2.1.312
+		"\x1bP>|Konsole 26.08.1\x1b\\\x1b[?0u\x1b[?62;1;4c": true,
+		"\x1b_Gi=31;OK\x1b\\\x1b[6;28;13t\x1b[?62;1;4c":     true,
+		"\x1b[B":        false, // стрелка — человек
+		"\x1b[97u":      false, // клавиша в протоколе kitty
+		"x":             false,
+		"\x1b[?1;2;4cx": false,
 	} {
 		if got := terminalReplies([]byte(in)); got != want {
 			t.Errorf("%q: %v, хотим %v", in, got, want)
+		}
+	}
+}
+
+func TestInputShape(t *testing.T) {
+	for in, want := range map[string]string{
+		"\x1b[?1;2;4c\x1b[99;1z": `"\x1b[99;1z"`,
+		"\x1b[?1;2;4cx":          "клавиши",
+		"пароль\r":               "клавиши",
+		"":                       "клавиши",
+	} {
+		if got := inputShape([]byte(in)); got != want {
+			t.Errorf("%q: %s, хотим %s", in, got, want)
 		}
 	}
 }
@@ -120,7 +136,7 @@ func TestConfirmTrust(t *testing.T) {
 			finish()
 			want := "подтвердил доверие к /home/alice"
 			if human {
-				want = "человек у терминала — не подтверждаю"
+				want = "человек у терминала (ввод клавиши) — не подтверждаю"
 			}
 			noted := func() bool {
 				mu.Lock()

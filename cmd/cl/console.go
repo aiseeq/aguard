@@ -44,7 +44,9 @@ type console struct {
 	typed   atomic.Int64 // последний ввод человека, unix nano
 	// keyed — последний ввод, кроме ответов терминала на запросы claude и событий фокуса (trust.go), unix nano.
 	keyed atomic.Int64
-	winch chan os.Signal
+	// keyedBy — что сдвинуло keyed (inputShape): в журнал cl, когда окно доверия осталось человеку.
+	keyedBy atomic.Pointer[string]
+	winch   chan os.Signal
 	// note — строка в журнал cl: сбой консоли (claude вышел, а ввод ещё шёл; окно или терминал не вернулись) и
 	// сделанное за человека (окно доверия, trust.go).
 	note func(string)
@@ -70,6 +72,8 @@ func (c *console) pump() {
 		if n > 0 {
 			c.typed.Store(time.Now().UnixNano())
 			if !terminalReplies(buf[:n]) {
+				by := inputShape(buf[:n])
+				c.keyedBy.Store(&by)
 				c.keyed.Store(time.Now().UnixNano())
 			}
 			c.mu.Lock()
