@@ -14,6 +14,7 @@ import (
 	"github.com/aiseeq/aguard/internal/bgtask"
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/cpuwatch"
+	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/aguard/internal/said"
@@ -116,6 +117,7 @@ func (a *app) reportSpecs(cfg *config.Config) []activity.Spec {
 		{Name: "said", Mode: cfg.Said.Mode, Looped: cfg.Said.Mode != said.ModeOff},
 		{Name: "bgtask", Mode: cfg.Bgtask.Mode, Looped: cfg.Bgtask.Mode != bgtask.ModeOff},
 		{Name: "cpu", Mode: cfg.Cpu.Mode, Looped: cfg.Cpu.Mode != cpuwatch.ModeOff},
+		{Name: "io", Mode: cfg.IO.Mode, Looped: cfg.IO.Mode != iowatch.ModeOff},
 		{Name: "remote", Mode: cfg.Remote.Mode, Looped: cfg.Remote.Mode != "off"},
 		{Name: "night", Mode: cfg.Night.Mode, Looped: cfg.Night.Mode != "off"},
 	}

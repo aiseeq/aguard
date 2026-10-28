@@ -127,6 +127,8 @@ func main() {
 		err = a.agentwaitsCmd(os.Args[2:])
 	case "cpu":
 		err = a.cpuCmd(ctx, os.Args[2:])
+	case "io":
+		err = a.ioCmd(ctx, os.Args[2:])
 	case "remote":
 		err = a.remoteCmd(os.Args[2:])
 	case "night":
@@ -157,6 +159,7 @@ func usage() {
   aguard bgtask tick [-dry-run]
   aguard agentwaits tick [-dry-run] | report [-json] [-window week]
   aguard cpu tick [-dry-run]
+  aguard io record [-for 30s] [-dir папка] | dump | at время [-window 2m] [-dir папка] | freezes [-since 24h] [-min 50ms] [-dir папка]
   aguard night tick [-dry-run]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
@@ -202,7 +205,10 @@ type watcher struct {
 // проход; не прочитался — проход пропускается (по неизвестным правилам ничего
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "remote", "night", "activity"} {
+	usr1 := make(chan os.Signal, 1) // ручной снимок io: подписка до всего, иначе SIGUSR1 убил бы демон
+	signal.Notify(usr1, syscall.SIGUSR1)
+	defer signal.Stop(usr1)
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "remote", "night", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -215,6 +221,7 @@ func (a *app) run(ctx context.Context) error {
 	a.note("aguard", activity.KindStart, "", "", 0, "")
 	var wg sync.WaitGroup
 	wg.Go(func() { a.restartServe(ctx, judge) })
+	wg.Go(func() { a.ioLoop(ctx, usr1) })
 	for _, w := range ws {
 		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей семь, список задан в watchers
 	}
