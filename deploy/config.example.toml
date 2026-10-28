@@ -191,6 +191,22 @@ notify = 0.25          # мастеру — если его готовых за�
 hosts = ["pc"]         # машины по ssh сверх своей
 workers = "~/.local/state/worker"   # задания worker: unit бойца -> мастер
 
+# Диск, своп и PSI: быстрые замеры идут в кольцевой буфер памяти; на диск попадают только снимки фризов.
+[io]
+mode = "alert"       # off | log | alert
+step = "100ms"
+detail = "1s"
+ring = "5m"
+trigger = 0.5
+calm = "30s"
+keep = "720h"
+analyze_min = "300ms"
+analyze_every = "15m"
+analyze_timeout = "10m"
+device = "nvme0n1"
+await_trigger = "20ms"
+analyze = ["worker", "ask", "--model", "luna", "--class", "разбор-данных", "--msg", "{prompt}"]
+
 # Сломанный путь graft на PC: событие из jsonl, письмо мастеру-владельцу и сводка лиду при нескольких мастерах.
 # Старый файл при первом проходе только отмечается; новые строки читаются с сохранённого смещения.
 [remote]

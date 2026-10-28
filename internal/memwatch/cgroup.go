@@ -6,7 +6,6 @@
 package memwatch
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aiseeq/aguard/internal/cgroupstats"
 	"github.com/aiseeq/akit/proc"
 )
 
@@ -66,23 +66,7 @@ func readKeyed(path string) (map[string]int64, error) {
 }
 
 func parseKeyed(r io.Reader) (map[string]int64, error) {
-	out := map[string]int64{}
-	sc := bufio.NewScanner(r)
-	for sc.Scan() {
-		k, v, ok := strings.Cut(sc.Text(), " ")
-		if !ok {
-			continue
-		}
-		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("cgroup: %q: %w", sc.Text(), err)
-		}
-		out[k] = n
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("cgroup: %w", err)
-	}
-	return out, nil
+	return cgroupstats.ParseKeyed(r, nil)
 }
 
 // procsUnder — pid всех процессов группы и её подгрупп.
