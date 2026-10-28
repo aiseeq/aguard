@@ -48,6 +48,10 @@ type facts struct {
 	// Prompt — поле ввода по экрану терминала; PromptErr — почему экран не прочитался.
 	Prompt    screen.Prompt
 	PromptErr string
+	// Suggestion — текст в поле не набран, а это серая подсказка Claude Code (prompt suggestion): по тексту экрана
+	// её не отличить, но после отправки последней реплики typed поле пусто, а ввода в терминал с тех пор не было
+	// (atime pts раньше реплики). Реплика queued не в счёт: её Enter раньше записи, набранное между ними не видно.
+	Suggestion bool
 
 	// Errors — что не прочиталось; любое — сомнение, не перезапускать.
 	Errors []string
@@ -190,6 +194,8 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 	if f.Prompt, err = p.prompt(pid); err != nil {
 		f.PromptErr = err.Error()
 	}
+	c := f.Transcript.Context
+	f.Suggestion = f.Prompt == screen.Draft && c.Human == "typed" && f.TTYQuiet > now.Sub(c.HumanAt)
 }
 
 // hookRecord — запись chooks о сессии.

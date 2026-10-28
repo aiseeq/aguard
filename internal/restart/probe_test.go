@@ -264,3 +264,36 @@ func TestGitStatus(t *testing.T) {
 		t.Error("нет папки — ошибка")
 	}
 }
+
+// Серая подсказка Claude Code: в поле текст, но ввода в терминал после отправки последней реплики typed не было —
+// набрать его было нечем. Ввод после реплики, реплика queued или от сессии — набранный текст, держит экран.
+func TestProbeSuggestion(t *testing.T) {
+	now := time.Now()
+	human := func(src, kind string) string {
+		return `{"type":"user","timestamp":"` + now.Add(-15*time.Minute).UTC().Format(time.RFC3339Nano) + `","promptSource":"` + src +
+			`","origin":{"kind":"` + kind + `"},"message":{"role":"user","content":"сделай"}}`
+	}
+	for name, c := range map[string]struct {
+		rec    string
+		ttyAgo time.Duration
+		want   bool
+	}{
+		"ввода после реплики нет":       {human("typed", "human"), 20 * time.Minute, true},
+		"ввод после реплики":            {human("typed", "human"), 12 * time.Minute, false},
+		"реплика набрана во время хода": {human("queued", "human"), 20 * time.Minute, false},
+		"реплика от сессии":             {human("system", "peer"), 20 * time.Minute, false},
+	} {
+		w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: c.ttyAgo}, c.rec)
+		w.p.prompt = func(int) (screen.Prompt, error) { return screen.Draft, nil }
+		w.link(t, 4242)
+		f := probe(w.p, &scanCache{}, 4242, now)
+		if len(f.Errors) > 0 || f.Suggestion != c.want {
+			t.Errorf("%s: Suggestion %v, want %v (errors %q)", name, f.Suggestion, c.want, f.Errors)
+			continue
+		}
+		v := decide(f, allowance{idle: time.Minute})
+		if held := slices.Contains(codes(v), "screen"); held == c.want {
+			t.Errorf("%s: довод screen %v: %+v", name, held, v)
+		}
+	}
+}

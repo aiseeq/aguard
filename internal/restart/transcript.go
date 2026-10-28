@@ -60,6 +60,10 @@ type contextFacts struct {
 	Reply    string
 	Prompt   string
 	PromptAt time.Time
+	// Human — последняя реплика человека из терминала (promptSource, origin.kind=human): typed — отправлена Enter в
+	// простое, запись в момент отправки; queued — набрана во время хода, запись позже Enter. HumanAt — её время.
+	Human   string
+	HumanAt time.Time
 }
 
 // textLimit — сколько знаков текста ответа и реплики держать для журнала.
@@ -341,6 +345,13 @@ func (s *transcriptScan) prompt(rec object, at time.Time) error {
 	}
 	if strings.TrimSpace(text.String()) != "" {
 		s.context.Prompt, s.context.PromptAt = head(text.String(), textLimit), at
+	}
+	origin, err := parseObject(rec["origin"])
+	if err != nil {
+		return err
+	}
+	if src := rec.str("promptSource"); origin.str("kind") == "human" && src != "" {
+		s.context.Human, s.context.HumanAt = src, at
 	}
 	return nil
 }

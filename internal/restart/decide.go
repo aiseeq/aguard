@@ -145,6 +145,8 @@ func inputChecks(f facts, against againstFunc) {
 	switch {
 	case f.PromptErr != "":
 		against("screen", "экран терминала: %s", f.PromptErr)
+	case f.Prompt == screen.Draft && f.Suggestion:
+		// подсказка Claude Code: набранного нет, /compact и /clear её заменяют
 	case f.Prompt == screen.Draft:
 		against("screen", "в поле ввода набранный текст")
 	case f.Prompt != screen.Empty:
