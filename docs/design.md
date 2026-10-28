@@ -99,6 +99,7 @@
 - 27.10 23:14 CET: `aguard.service` обновлена, добавлен наблюдатель `cpu` (5572a22); замер PC идёт с ноута по ssh, на PC служб не ставили.
 - 27.10 23:55 CET: `aguard.service` обновлена, `cpu` меряет системный load average за 5 минут (2e86d5b).
 - 28.10 00:16 CET: `aguard.service` обновлена, `cpu` — load average за минуту и готовые задачи в момент замера, письма после 10 минут подряд (d5817d5).
+- 28.10 03:03 CET: `aguard.service` обновлена через `graft install` (81bf25c): aguard и cl ставит шаг graft `{install}`, `deploy/install.sh` убран; tmpguard-track — `graft install-track` (sudo), не переставлялся.
 
 ## Порядок работ
 1. procguard и tmpguard под одной крышей, один конфиг.
