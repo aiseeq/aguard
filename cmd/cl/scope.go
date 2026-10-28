@@ -12,13 +12,14 @@ const agentsSlice = "agents.slice"
 
 // scopeArgv — запуск claude в своём scope слайса агентов: systemd-run --scope регистрирует scope и делает exec
 // команды в том же процессе, так что терминал, сигналы и код выхода — как у голого claude. Имя scope —
-// agent-<имя сессии>-<id> (id — pid cl, у перезапусков с -r<n>), оно видно в /proc/<pid>/cgroup.
+// agent-<имя сессии>-<id> (id — pid cl, у перезапусков с -r<n>), оно видно в /proc/<pid>/cgroup. IOAccounting
+// включает io.stat у scope — без него в agents.slice нет контроллера io и aguard io не видит запись сессий.
 func scopeArgv(systemdRun, claude, name, id string, args []string) []string {
 	if name == "" {
 		name = "claude"
 	}
 	unit := "agent-" + unitSafe(name) + "-" + unitSafe(id)
-	argv := []string{systemdRun, "--user", "--scope", "--quiet", "--collect", "--slice=" + agentsSlice, "--unit=" + unit, "--", claude}
+	argv := []string{systemdRun, "--user", "--scope", "--quiet", "--collect", "--slice=" + agentsSlice, "--property=IOAccounting=yes", "--unit=" + unit, "--", claude}
 	return append(argv, args...)
 }
 

@@ -64,7 +64,7 @@ func TestSuperviseUpgraded(t *testing.T) {
 	if code := l.supervise(nil, nil); code != 0 {
 		t.Errorf("код %d", code)
 	}
-	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice"}
+	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice", "--property=IOAccounting=yes"}
 	want := append(append(scope, "--unit=agent-x-master-"+strconv.Itoa(os.Getpid())+"-r3", "--", w.claude), "-n", "x-master", "--resume", "s1")
 	if got := readLines(t, filepath.Join(d, "run")); !slices.Equal(got, want) {
 		t.Errorf("\n got %q\nwant %q", got, want)

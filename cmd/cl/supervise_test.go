@@ -44,7 +44,7 @@ exec sleep 25`)
 		t.Errorf("код выхода cl = %d, want 3 (код второго запуска)", code)
 	}
 	unit := "--unit=agent-x-master-" + strconv.Itoa(os.Getpid())
-	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice"}
+	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice", "--property=IOAccounting=yes"}
 	// Свои аргументы — строки роли при старте нет (bare).
 	first := append(append(slices.Clone(scope), unit, "--", w.claude),
 		"--dangerously-skip-permissions", "--allowedTools=Grep,Glob", "-n", "x-master", "--model", "opus", "--effort=high")
@@ -104,7 +104,7 @@ exec sleep 25`)
 		t.Errorf("код выхода cl = %d, want 3 (код подъёма)", code)
 	}
 	pid := strconv.Itoa(os.Getpid())
-	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice"}
+	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice", "--property=IOAccounting=yes"}
 	own := sessionFlags(d)
 	compact := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-c1", "--", w.claude), own...),
 		"--model", "opus", "-p", "--resume", "s1", "/compact")
@@ -165,7 +165,7 @@ exec sleep 25`)
 		t.Errorf("код выхода cl = %d, want 4 (код новой беседы)", code)
 	}
 	pid := strconv.Itoa(os.Getpid())
-	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice"}
+	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice", "--property=IOAccounting=yes"}
 	fresh := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-r1", "--", w.claude, "--append-system-prompt", "Ты x-master."), sessionFlags(d)...),
 		"-n", "x-master", "--model", "opus", "Роль (cl начал новую беседу в ЧЧ:ММ вместо простаивавшей; Claude Code 2.1.310). Файл: "+
 			filepath.Join(d, "restart", "2026-10-26", "used", "x-master.md")+".")
