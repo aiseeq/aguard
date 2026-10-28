@@ -36,11 +36,11 @@ tasks:
       - sh: for unit in tmpguard-track tmpguard-track-home; do sudo install -m 0644 "deploy/$unit.service" "/etc/systemd/system/$unit.service"; done
       - sh: sudo systemctl daemon-reload && sudo systemctl enable tmpguard-track.service tmpguard-track-home.service && sudo systemctl restart tmpguard-track.service tmpguard-track-home.service
 
-# Гейт: go vet (graft сам, первым шагом), gofmt, тесты и glint без находок.
+# Гейт: go vet (graft сам, первым шагом), gofmt, тесты и glint без находок high.
 gate:
   - sh: 'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }'
   - task: test
-  # glint падает кодом выхода на любой находке: fail_on: low в .glint.yaml.
+  # glint падает кодом выхода на находке high (умолчание fail_on); остальные проверяет tk done.
   - sh: GOWORK=off ~/bin/glint check .
 
 version:
