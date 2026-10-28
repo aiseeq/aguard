@@ -21,8 +21,6 @@ type Config struct {
 	DigestBy     string          `toml:"digest_by"`
 	DigestMarker string          `toml:"digest_marker"`
 	TrustWait    policy.Duration `toml:"trust_wait"`
-	TelegramChat string          `toml:"telegram_chat"`
-	TelegramCmd  string          `toml:"telegram_cmd"`
 	Lead         string          `toml:"-"`
 	SendAuth     bool            `toml:"-"`
 }
@@ -37,8 +35,7 @@ const (
 func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "03:00",
 		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DigestBy: "07:00",
-		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute),
-		TelegramChat: "c4378460291", TelegramCmd: "tgctl"}
+		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute)}
 }
 
 // Validate проверяет настройки и раскрывает домашнюю папку в путях.
@@ -54,9 +51,6 @@ func (c *Config) Validate(home string) error {
 	}
 	c.DreamMarker = policy.ExpandHome(c.DreamMarker, home)
 	c.DigestMarker = policy.ExpandHome(c.DigestMarker, home)
-	if c.TelegramCmd == "" || c.TelegramChat == "" {
-		return fmt.Errorf("night.telegram_cmd и night.telegram_chat обязательны")
-	}
 	return nil
 }
 

@@ -7,9 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"html"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,7 +17,8 @@ import (
 	"github.com/aiseeq/akit/session"
 )
 
-// nightSent — сигнал: когда и по каким каналам (lead, telegram) уже дошёл.
+// nightSent — сигнал: когда и по каким каналам уже дошёл. Канал один — письмо лиду; Telegram снят 28.10 (пользователь
+// на сигналы в группе Дайджеста: «не надо так»).
 type nightSent struct {
 	At       time.Time            `json:"at"`
 	Channels map[string]time.Time `json:"channels"`
@@ -43,7 +42,7 @@ func dispatchNight(state nightState, signals []night.Signal, now time.Time, send
 		if rec.Channels == nil {
 			rec.Channels = map[string]time.Time{}
 		}
-		for _, channel := range []string{"lead", "telegram"} {
+		for _, channel := range []string{"lead"} {
 			if _, ok := rec.Channels[channel]; ok {
 				continue
 			}
@@ -138,16 +137,13 @@ func (a *app) nightRound(_ context.Context, cfg *night.Config, dry bool) error {
 	}
 	// состояние в памяти демона: сбой записи state.json не повторяет дошедшее каждую минуту
 	state, failures := dispatchNight(state, signals, now, func(channel, msg string) error {
-		var err error
-		if channel == "lead" {
-			if regErr != nil {
-				return fmt.Errorf("реестр сессий: %w", regErr)
-			}
-			err = a.nightEmail(cfg, alive, msg)
-		} else {
-			err = nightTelegram(cfg, msg)
+		if regErr != nil {
+			return fmt.Errorf("реестр сессий: %w", regErr)
 		}
-		a.nightChannelNote(cfg, channel, err)
+		err := a.nightEmail(cfg, alive, msg)
+		if a.act != nil {
+			a.note("night", map[bool]string{true: "email_sent", false: "email_failed"}[err == nil], "", cfg.Lead, 0, "")
+		}
 		return err
 	})
 	for _, f := range failures {
@@ -216,27 +212,6 @@ func clRunning(pid int) bool {
 	return err == nil && strings.TrimSpace(string(b)) == "cl"
 }
 
-// nightChannelNote — учёт доставки по каналу.
-func (a *app) nightChannelNote(cfg *night.Config, channel string, err error) {
-	if a.act == nil {
-		return
-	}
-	switch channel {
-	case "lead":
-		if err == nil {
-			a.note("night", "email_sent", "", cfg.Lead, 0, "")
-		} else {
-			a.note("night", "email_failed", "", cfg.Lead, 0, "")
-		}
-	case "telegram":
-		if err == nil {
-			a.note("night", "telegram_sent", "", cfg.TelegramChat, 0, "")
-		} else {
-			a.note("night", "telegram_failed", "", cfg.TelegramChat, 0, "")
-		}
-	}
-}
-
 // nightNote — учёт срабатывания; учёта нет (тест) — ничего.
 func (a *app) nightNote(kind, what, target string, value int64, unit string) {
 	if a.act != nil {
@@ -250,28 +225,6 @@ func (a *app) nightEmail(cfg *night.Config, alive map[string]session.Info, msg s
 		return err
 	}
 	a.log.Info("aguard night: написал", "session", cfg.Lead, "msg", msg)
-	return nil
-}
-
-// nightTelegramTimeout — сколько ждать tgctl: зависший не держит проход наблюдателя, неудача — повтор в следующий.
-const nightTelegramTimeout = time.Minute
-
-// nightTelegram — строка в группу Дайджеста: лид сам может стоять на окне доверия, и письмо ему некому прочесть.
-func nightTelegram(cfg *night.Config, msg string) error {
-	dir, err := os.MkdirTemp("", "aguard-night-")
-	if err != nil {
-		return fmt.Errorf("временная папка Telegram: %w", err)
-	}
-	defer os.RemoveAll(dir)
-	file := filepath.Join(dir, "message.html")
-	if err := os.WriteFile(file, []byte(html.EscapeString(msg)), 0o600); err != nil {
-		return fmt.Errorf("файл Telegram: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), nightTelegramTimeout)
-	defer cancel()
-	if out, err := exec.CommandContext(ctx, cfg.TelegramCmd, "sendhtml", cfg.TelegramChat, file).CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %w: %s", cfg.TelegramCmd, err, out)
-	}
 	return nil
 }
 
