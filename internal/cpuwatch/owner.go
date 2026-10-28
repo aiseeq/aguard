@@ -71,6 +71,9 @@ func (j *Jobs) get(id string) (*Job, error) {
 	return v, nil
 }
 
+// ByID — задание по id (имя его папки, env WORKER_JOB бойца); нет — nil.
+func (j *Jobs) ByID(id string) (*Job, error) { return j.get(id) }
+
 // readJob — задание из job.json; файла нет (папка не задания или задание убрано) — nil.
 func readJob(path string) (*Job, error) {
 	b, err := os.ReadFile(path)

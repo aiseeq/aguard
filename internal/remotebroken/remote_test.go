@@ -1,0 +1,199 @@
+package remotebroken
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+const sample = `{"at":"2026-10-28T14:16:03+01:00","project":"/home/alice/git/graft","task":"exec","host":"pc","reason":"ssh: connect to host fedora-pc.local port 1: No route to host","pid":1772652,"ppid":1772642,"cwd":"/home/alice/git/graft","claude_pid":"1254137","worker":""}`
+
+func TestParseExample(t *testing.T) {
+	e, err := Parse([]byte(sample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Host != "pc" || e.Task != "exec" || e.ClaudePID != "1254137" || e.At.Hour() != 14 {
+		t.Fatalf("неверная запись: %+v", e)
+	}
+}
+
+func TestReadNewSeedsAndReadsAppends(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "remote.jsonl")
+	if err := os.WriteFile(file, []byte(sample+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var s State
+	got, err := ReadNew(file, &s, nil)
+	if err != nil || len(got) != 0 || !s.Seeded {
+		t.Fatalf("первый проход: %v, %d, %+v", err, len(got), s)
+	}
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString(sample + "\n")
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = ReadNew(file, &s, nil)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("дополнение: %v, %d", err, len(got))
+	}
+}
+
+func TestReadNewMissingFileThenFirstEvent(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "remote.jsonl")
+	var s State
+	if got, err := ReadNew(file, &s, nil); err != nil || len(got) != 0 || !s.Seeded {
+		t.Fatalf("пустой проход: err=%v events=%d state=%+v", err, len(got), s)
+	}
+	if err := os.WriteFile(file, []byte(sample+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadNew(file, &s, nil)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("первая запись после создания файла: err=%v events=%d", err, len(got))
+	}
+}
+
+func TestReadNewTruncationAndBadLine(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "remote.jsonl")
+	if err := os.WriteFile(file, []byte(sample+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := State{Seeded: true, Offset: 10000}
+	if err := os.WriteFile(file, []byte("{bad}\n"+sample+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	warnings := 0
+	got, err := ReadNew(file, &s, func(error) { warnings++ })
+	if err != nil || len(got) != 1 || warnings != 1 {
+		t.Fatalf("обрезка и битая строка: err=%v got=%d warn=%d", err, len(got), warnings)
+	}
+}
+
+func TestOwnerWorkerSessionAndLead(t *testing.T) {
+	e, _ := Parse([]byte(sample))
+	e.Worker = "job-1"
+	owner, err := Owner(e, func(string) (string, error) { return "worker-master", nil }, func(int) (string, error) {
+		t.Fatal("сессия не должна запрашиваться")
+		return "", nil
+	}, "lead")
+	if err != nil || owner != "worker-master" {
+		t.Fatalf("worker: %q %v", owner, err)
+	}
+	e.Worker = ""
+	owner, err = Owner(e, nil, func(pid int) (string, error) {
+		if pid != 1254137 {
+			t.Fatalf("pid=%d", pid)
+		}
+		return "claude-master", nil
+	}, "lead")
+	if err != nil || owner != "claude-master" {
+		t.Fatalf("session: %q %v", owner, err)
+	}
+	owner, err = Owner(e, nil, func(int) (string, error) { return "", nil }, "lead")
+	if err != nil || owner != "lead" {
+		t.Fatalf("lead: %q %v", owner, err)
+	}
+}
+
+func TestRepeatWindowAndSummary(t *testing.T) {
+	e, _ := Parse([]byte(sample))
+	now := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	s := State{}
+	first := s.Apply([]Event{e}, []string{"master-a"}, "lead", now, time.Hour)
+	if len(first) != 1 || first[0].To != "master-a" {
+		t.Fatalf("первое письмо: %+v", first)
+	}
+	e.At = e.At.Add(time.Minute)
+	if got := s.Apply([]Event{e}, []string{"master-a"}, "lead", now.Add(time.Minute), time.Hour); len(got) != 0 {
+		t.Fatalf("ранний повтор: %+v", got)
+	}
+	e.At = e.At.Add(time.Minute)
+	got := s.Apply([]Event{e}, []string{"master-a"}, "lead", now.Add(time.Hour), time.Hour)
+	if len(got) != 1 || !strings.Contains(got[0].Message, "До этого ещё 1 раз") {
+		t.Fatalf("счётчик повторов: %+v", got)
+	}
+
+	e2 := e
+	e2.Project = "/other/project"
+	e2.At = e.At.Add(time.Minute)
+	got = s.Apply([]Event{e, e2}, []string{"master-a", "master-b"}, "lead", now.Add(2*time.Hour), time.Hour)
+	found := false
+	for _, n := range got {
+		if n.Summary && n.To == "lead" && strings.Contains(n.Message, "PC: путь сломан у 2 мастеров") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("нет сводки лиду: %+v", got)
+	}
+}
+
+func TestSummaryWindow(t *testing.T) {
+	e, _ := Parse([]byte(sample))
+	at := e.At
+	ev := func(project string, d time.Duration) Event {
+		x := e
+		x.Project, x.At = project, at.Add(d)
+		return x
+	}
+	s := State{}
+	// мастера с разницей больше окна — не одна поломка, сводки нет
+	s.Apply([]Event{ev("/a", 0)}, []string{"master-a"}, "lead", at, time.Hour)
+	for _, n := range s.Apply([]Event{ev("/b", 2*time.Hour)}, []string{"master-b"}, "lead", at.Add(2*time.Hour), time.Hour) {
+		if n.Summary {
+			t.Fatalf("сводка по мастерам из разных окон: %+v", n)
+		}
+	}
+	// второй мастер в окне — сводка с первым временем и причиной окна
+	got := s.Apply([]Event{ev("/c", 2*time.Hour+time.Minute)}, []string{"master-c"}, "lead", at.Add(2*time.Hour+time.Minute), time.Hour)
+	var sum []Notice
+	for _, n := range got {
+		if n.Summary {
+			sum = append(sum, n)
+		}
+	}
+	first := at.Add(2 * time.Hour).Local().Format("15:04")
+	if len(sum) != 1 || !strings.Contains(sum[0].Message, "у 2 мастеров (master-b, master-c)") ||
+		!strings.Contains(sum[0].Message, "первая в "+first) || !strings.Contains(sum[0].Message, "No route to host") {
+		t.Fatalf("сводка окна: %+v", sum)
+	}
+	// после сводки и окна — новое окно, а не продолжение старого
+	got = s.Apply([]Event{ev("/d", 4*time.Hour)}, []string{"master-d"}, "lead", at.Add(4*time.Hour), time.Hour)
+	for _, n := range got {
+		if n.Summary {
+			t.Fatalf("сводка по одному мастеру нового окна: %+v", n)
+		}
+	}
+}
+
+func TestMessageCount(t *testing.T) {
+	e, _ := Parse([]byte(sample))
+	if m := Message(e); strings.Contains(m, "раз") {
+		t.Fatalf("одиночное письмо со счётчиком: %s", m)
+	}
+}
+
+func TestReadNewWaitsForLineEnd(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "remote.jsonl")
+	s := State{Seeded: true}
+	half := len(sample) / 2
+	if err := os.WriteFile(file, []byte(sample[:half]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadNew(file, &s, func(err error) { t.Fatalf("недописанная строка — ошибка: %v", err) }); err != nil || len(got) != 0 || s.Offset != 0 {
+		t.Fatalf("недописанная строка: %v, %d, %d", err, len(got), s.Offset)
+	}
+	if err := os.WriteFile(file, []byte(sample+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadNew(file, &s, nil); err != nil || len(got) != 1 {
+		t.Fatalf("дописанная строка: %v, %d", err, len(got))
+	}
+}
