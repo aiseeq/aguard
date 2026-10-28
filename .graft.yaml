@@ -1,6 +1,6 @@
 # Коммит aguard — graft: graft commit -m "…" — гейт, git add -A, проверки, коммит, push.
 schema: 1
-graft: '>=2.37.0'
+graft: '>=2.45.0'
 # go fix -diff ./... идёт после go vet с его окружением: модернизаторы тулчейна не оставляют правок.
 go_fix:
   enabled: true
@@ -11,6 +11,30 @@ tasks:
     tests: go
     run:
       - go test -p {threads} -json {args} ./...
+  build:
+    desc: aguard, cl и tmpguard-track в bin/
+    run:
+      - go build -o bin/ ./cmd/...
+  # Запущенные консоли держат старый cl, новые получат новый. Конфиги кладутся, только если их ещё нет.
+  install:
+    desc: aguard в ~/.local/bin с user-службой, cl в ~/bin
+    deps: [build]
+    run:
+      - {install: bin/aguard, to: ~/.local/bin}
+      - {install: bin/cl}
+      - sh: install -D -m 0644 deploy/aguard.service ~/.config/systemd/user/aguard.service
+      - sh: install -D -m 0644 cmd/cl/agents.slice ~/.config/systemd/user/agents.slice
+      - sh: '[ -f ~/.config/aguard/config.toml ] || install -D -m 0644 deploy/config.example.toml ~/.config/aguard/config.toml'
+      - sh: '[ -f ~/.config/cl/config.json ] || install -D -m 0644 cmd/cl/config.json ~/.config/cl/config.json'
+      - sh: systemctl --user daemon-reload && systemctl --user enable aguard.service && systemctl --user restart aguard.service
+  # Root-службы (fanotify и proc connector требуют root): шаг {install} пишет от пользователя, сюда — sudo.
+  install-track:
+    desc: tmpguard-track в /usr/local/sbin и его system-службы (sudo)
+    deps: [build]
+    run:
+      - sh: sudo install -m 0755 bin/tmpguard-track /usr/local/sbin/tmpguard-track
+      - sh: for unit in tmpguard-track tmpguard-track-home; do sudo install -m 0644 "deploy/$unit.service" "/etc/systemd/system/$unit.service"; done
+      - sh: sudo systemctl daemon-reload && sudo systemctl enable tmpguard-track.service tmpguard-track-home.service && sudo systemctl restart tmpguard-track.service tmpguard-track-home.service
 
 # Гейт: go vet (graft сам, первым шагом), gofmt, тесты и glint без находок.
 gate:

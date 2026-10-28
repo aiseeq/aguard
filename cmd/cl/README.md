@@ -154,6 +154,6 @@ Consumed … over 1.5s wall clock»; 24.10 у всех пяти консолей
 
 ## Установка
 
-Вместе с aguard: `deploy/install.sh` в корне репо собирает `~/bin/cl` через `~/bin/cl.new` и `mv` (запущенные
+Вместе с aguard: `graft install` в корне репо ставит закоммиченный `~/bin/cl` атомарной заменой (запущенные
 консоли держат старый файл и не задеваются, новые получат новую версию), кладёт `cmd/cl/config.json` в
 `~/.config/cl/` (если файла ещё нет) и `cmd/cl/agents.slice` в `~/.config/systemd/user/`.

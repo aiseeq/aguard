@@ -7,7 +7,7 @@ import (
 )
 
 // Слайс агентов: вес процессора и диска ниже, чем у приложений пользователя (100), — машина отдаёт ресурсы
-// пользователю, а не агентам. Файл слайса — agents.slice рядом, ставится в ~/.config/systemd/user (deploy/install.sh).
+// пользователю, а не агентам. Файл слайса — agents.slice рядом, ставится в ~/.config/systemd/user (graft install).
 const agentsSlice = "agents.slice"
 
 // scopeArgv — запуск claude в своём scope слайса агентов: systemd-run --scope регистрирует scope и делает exec
