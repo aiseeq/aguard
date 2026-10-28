@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/daily"
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 // Виды записей журнала.
@@ -67,23 +68,68 @@ type State struct {
 	Sizes    map[string][]Point   `json:"sizes"`
 	Free     []Point              `json:"free"`
 	LastWalk time.Time            `json:"last_walk"`
-	Told     map[string]time.Time `json:"told"`              // вид и путь -> когда записан
-	Traces   map[string]Trace     `json:"traces,omitempty"`  // учтённые следы, путь -> последний замер
-	FreeLow  time.Time            `json:"free_low,omitzero"` // последнее письмо «свободно меньше free_min»; ноль — место выше
+	Told     map[string]time.Time `json:"told"`             // вид и путь -> когда записан
+	Traces   map[string]Trace     `json:"traces,omitempty"` // учтённые следы, путь -> последний замер
 }
 
-// LowFree — пора ли письмо «свободно меньше free_min»: ниже порога — сразу и дальше раз в сутки; поднялось — отметка
-// снимается, следующее падение — снова сразу.
-func (s *State) LowFree(c *Config, now time.Time, free int64) bool {
+// freeRetry — письмо о свободном месте не дошло (адресата нет среди живых сессий) — повтор через столько.
+const freeRetry = time.Hour
+
+// FreeTold — сигнал «свободно меньше free_min»: адресат -> когда ему пора следующее письмо. Свой файл (free.json),
+// сохраняется сразу после писем: обход записей бывает брошен остановкой демона, а письмо уже ушло.
+type FreeTold map[string]time.Time
+
+// LoadFreeTold — отметки сигнала; файла нет — пусто.
+func LoadFreeTold(path string) (FreeTold, error) {
+	t := FreeTold{}
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return t, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("сигнал о свободном месте: %w", err)
+	}
+	if err := json.Unmarshal(b, &t); err != nil {
+		return nil, fmt.Errorf("сигнал о свободном месте %s: %w", path, err)
+	}
+	return t, nil
+}
+
+// Save пишет отметки атомарно.
+func (t FreeTold) Save(path string) error {
+	b, err := json.Marshal(t)
+	if err != nil {
+		return fmt.Errorf("сигнал о свободном месте: %w", err)
+	}
+	if err := record.WriteFileAtomic(path, b, 0o600); err != nil {
+		return fmt.Errorf("сигнал о свободном месте: %w", err)
+	}
+	return nil
+}
+
+// Due — кому из to пора письмо: ниже free_min — сразу, дальше раз в сутки; место поднялось — отметки снимаются, следующее
+// падение — снова сразу.
+func (t FreeTold) Due(c *Config, now time.Time, free int64, to []string) []string {
 	if free >= int64(c.FreeMin) {
-		s.FreeLow = time.Time{}
-		return false
+		clear(t)
+		return nil
 	}
-	if !s.FreeLow.IsZero() && now.Sub(s.FreeLow) < repeatDaily {
-		return false
+	var due []string
+	for _, n := range to {
+		if next, ok := t[n]; (!ok || !now.Before(next)) && !slices.Contains(due, n) {
+			due = append(due, n)
+		}
 	}
-	s.FreeLow = now
-	return true
+	return due
+}
+
+// Mark — письмо to ушло (sent) — следующее через сутки; не ушло — повтор через freeRetry.
+func (t FreeTold) Mark(to string, now time.Time, sent bool) {
+	if sent {
+		t[to] = now.Add(repeatDaily)
+	} else {
+		t[to] = now.Add(freeRetry)
+	}
 }
 
 // LowFreeMessage — письмо о свободном месте: сколько, порог и самые большие записи по последнему обходу.
@@ -103,9 +149,12 @@ func (s *State) LowFreeMessage(c *Config, free int64, home string) string {
 	for _, b := range top[:min(3, len(top))] {
 		parts = append(parts, short(b.path, home)+" "+policy.HumanBytes(b.bytes))
 	}
-	return fmt.Sprintf("aguard disk: на /home свободно %s — меньше порога %s (free_min). Самые большие записи по последнему "+
-		"обходу: %s. Повтор — раз в сутки, пока место не поднимется выше порога.",
-		policy.HumanBytes(free), policy.HumanBytes(int64(c.FreeMin)), strings.Join(parts, ", "))
+	biggest := "обхода записей ещё не было"
+	if len(parts) > 0 {
+		biggest = "самые большие записи по последнему обходу: " + strings.Join(parts, ", ")
+	}
+	return fmt.Sprintf("aguard disk: на /home свободно %s — меньше порога %s (free_min); %s. Повтор — раз в сутки, пока "+
+		"место не поднимется выше порога.", policy.HumanBytes(free), policy.HumanBytes(int64(c.FreeMin)), biggest)
 }
 
 // Load читает состояние; нет файла — пустое.

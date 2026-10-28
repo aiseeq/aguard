@@ -267,34 +267,57 @@ func TestMeasureCanceled(t *testing.T) {
 	}
 }
 
-// TestLowFree — ниже free_min письмо сразу, дальше раз в сутки; место поднялось — следующее падение снова сразу.
-func TestLowFree(t *testing.T) {
+// TestFreeTold — ниже free_min письмо сразу, дальше раз в сутки; не дошло — повтор через час только этому адресату;
+// место поднялось — следующее падение снова сразу; отметки переживают перезапуск (файл).
+func TestFreeTold(t *testing.T) {
+	c := Default()
+	c.FreeMin = 150 << 30
+	at := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	low, high := int64(140<<30), int64(160<<30)
+	to := []string{"lead", "git-admin", "lead"}
+	path := filepath.Join(t.TempDir(), "free.json")
+	steps := []struct {
+		after time.Duration
+		free  int64
+		want  []string
+		sent  map[string]bool // нет в карте — дошло
+	}{
+		{0, high, nil, nil},
+		{time.Hour, low, []string{"lead", "git-admin"}, map[string]bool{"git-admin": false}},
+		{90 * time.Minute, low, nil, nil},
+		{2 * time.Hour, low, []string{"git-admin"}, nil},
+		{25 * time.Hour, low, []string{"lead"}, nil},
+		{26 * time.Hour, high, nil, nil},
+		{27 * time.Hour, low, []string{"lead", "git-admin"}, nil},
+	}
+	for _, st := range steps {
+		told, err := LoadFreeTold(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := at.Add(st.after)
+		got := told.Due(&c, now, st.free, to)
+		if !slices.Equal(got, st.want) {
+			t.Fatalf("через %s свободно %d ГиБ: адресаты %v, ждал %v", st.after, st.free>>30, got, st.want)
+		}
+		for _, n := range got {
+			sent, ok := st.sent[n]
+			told.Mark(n, now, sent || !ok)
+		}
+		if err := told.Save(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLowFreeMessage(t *testing.T) {
 	c := Default()
 	c.FreeMin = 150 << 30
 	s := &State{Sizes: map[string][]Point{
 		"/h/.cache/go-build": {{Bytes: 300 << 30}}, "/h/.cache/glint": {{Bytes: 5 << 30}},
 		"/h/.local/state/x": {{Bytes: 1 << 30}}, "/h/.cache/small": {{Bytes: 1 << 20}},
 	}}
-	at := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
-	low, high := int64(140<<30), int64(160<<30)
-	steps := []struct {
-		after time.Duration
-		free  int64
-		want  bool
-	}{
-		{0, high, false},
-		{time.Hour, low, true},
-		{2 * time.Hour, low, false},
-		{25 * time.Hour, low, true},
-		{26 * time.Hour, high, false},
-		{27 * time.Hour, low, true},
-	}
-	for _, st := range steps {
-		if got := s.LowFree(&c, at.Add(st.after), st.free); got != st.want {
-			t.Fatalf("через %s свободно %d ГиБ: письмо %v, ждал %v", st.after, st.free>>30, got, st.want)
-		}
-	}
-	msg := s.LowFreeMessage(&c, low, "/h")
+	msg := s.LowFreeMessage(&c, 140<<30, "/h")
 	for _, want := range []string{"свободно 140", "порога 150", "~/.cache/go-build 300", "~/.cache/glint 5", "~/.local/state/x 1"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("в письме нет %q: %s", want, msg)
@@ -302,5 +325,8 @@ func TestLowFree(t *testing.T) {
 	}
 	if strings.Contains(msg, "small") {
 		t.Fatalf("в письме больше трёх записей: %s", msg)
+	}
+	if msg := (&State{}).LowFreeMessage(&c, 140<<30, "/h"); !strings.Contains(msg, "обхода записей ещё не было") {
+		t.Fatalf("письмо без обхода: %s", msg)
 	}
 }

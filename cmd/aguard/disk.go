@@ -129,8 +129,10 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Disk.FreeMode != disk.FreeOff && st.LowFree(&cfg.Disk, now, free) {
-		a.diskLowFree(&cfg.Disk, st.LowFreeMessage(&cfg.Disk, free, a.home), free)
+	if cfg.Disk.FreeMode != disk.FreeOff {
+		if err := a.diskFree(&cfg.Disk, st, now, free); err != nil {
+			a.warn("disk", "сигнал о свободном месте", "err", err)
+		}
 	}
 	owners := a.diskOwners(cfg)
 	measure := func(entries []string) map[string]disk.Usage { return cfg.Disk.MeasureAll(ctx, entries) }
@@ -376,27 +378,46 @@ func lastLine(b []byte) string {
 	return lines[len(lines)-1]
 }
 
-// diskLowFree — письмо «свободно меньше free_min» лиду и free_tell; в log — только журнал «написал бы».
-func (a *app) diskLowFree(cfg *disk.Config, msg string, free int64) {
+// diskFree — сигнал «свободно меньше free_min»: кому пора — письмо, отметки — сразу в free.json.
+func (a *app) diskFree(cfg *disk.Config, st *disk.State, now time.Time, free int64) error {
+	path := filepath.Join(a.dir("disk"), "free.json")
+	told, err := disk.LoadFreeTold(path)
+	if err != nil {
+		return err
+	}
+	due := told.Due(cfg, now, free, append([]string{cfg.Lead}, cfg.FreeTell...))
+	if len(due) > 0 {
+		msg := st.LowFreeMessage(cfg, free, a.home)
+		for _, to := range due {
+			err := a.diskLowFree(cfg, to, msg, free)
+			if err != nil {
+				a.warn("disk", "письмо о свободном месте", "session", to, "err", err)
+			}
+			told.Mark(to, now, err == nil)
+		}
+	}
+	return told.Save(path)
+}
+
+// diskLowFree — письмо «свободно меньше free_min» сессии to; в log — только журнал «написал бы». Ошибка — письмо не ушло.
+func (a *app) diskLowFree(cfg *disk.Config, to, msg string, free int64) error {
+	gb := free >> 30
+	if cfg.FreeMode != disk.FreeAlert {
+		a.log.Info("aguard disk: написал бы", "session", to, "msg", msg)
+		a.note("disk", "free_would_send", "", to, gb, "GiB")
+		return nil
+	}
 	alive, err := a.reg.Alive()
 	if err != nil {
 		a.warn("disk", "реестр сессий", "err", err)
 	}
-	for _, to := range append([]string{cfg.Lead}, cfg.FreeTell...) {
-		gb := free >> 30
-		if cfg.FreeMode != disk.FreeAlert {
-			a.log.Info("aguard disk: написал бы", "session", to, "msg", msg)
-			a.note("disk", "free_would_send", "", to, gb, "GiB")
-			continue
-		}
-		if err := a.sendAlive(alive, to, cfg.SendAuth, msg); err != nil {
-			a.warn("disk", "письмо о свободном месте", "session", to, "err", err)
-			a.note("disk", "free_send_failed", "", to, gb, "GiB")
-			continue
-		}
-		a.log.Info("aguard disk: написал", "session", to, "msg", msg)
-		a.note("disk", "free_sent", "", to, gb, "GiB")
+	if err := a.sendAlive(alive, to, cfg.SendAuth, msg); err != nil {
+		a.note("disk", "free_send_failed", "", to, gb, "GiB")
+		return err
 	}
+	a.log.Info("aguard disk: написал", "session", to, "msg", msg)
+	a.note("disk", "free_sent", "", to, gb, "GiB")
+	return nil
 }
 
 // diskFreeTest — проверка сигнала о свободном месте на пороге min: текст по нынешнему состоянию и, с to, письмо этой
@@ -417,8 +438,7 @@ func (a *app) diskFreeTest(cfg *disk.Config, minFree, to string) error {
 	if err != nil {
 		return err
 	}
-	st.FreeLow = time.Time{}
-	if !st.LowFree(cfg, time.Now(), free) {
+	if len(disk.FreeTold{}.Due(cfg, time.Now(), free, []string{cfg.Lead})) == 0 {
 		fmt.Fprintf(a.out, "свободно %s не меньше порога %s — письма не было бы\n", policy.HumanBytes(free), policy.HumanBytes(int64(cfg.FreeMin)))
 		return nil
 	}
@@ -427,7 +447,6 @@ func (a *app) diskFreeTest(cfg *disk.Config, minFree, to string) error {
 	if to == "" {
 		return nil
 	}
-	cfg.Lead, cfg.FreeTell, cfg.FreeMode = to, nil, disk.FreeAlert
-	a.diskLowFree(cfg, msg, free)
-	return nil
+	cfg.FreeMode = disk.FreeAlert
+	return a.diskLowFree(cfg, to, msg, free)
 }

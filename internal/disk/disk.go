@@ -54,6 +54,9 @@ type Config struct {
 	SendAuth bool        `toml:"-"`
 }
 
+// defaultFreeMin — 150 ГБ: стоп-линия свободного места на /home (backlog.md, go-build до полки 300–500 ГБ).
+const defaultFreeMin = 150 << 30
+
 // Режимы сигнала о свободном месте.
 const (
 	FreeOff   = "off"
@@ -79,7 +82,7 @@ func Default() Config {
 		Keep:     policy.Duration(60 * 24 * time.Hour),
 		TraceMin: 1 << 30,
 		Track:    []string{"/run/tmpguard-home/state.json", "/var/lib/tmpguard-home/state.json"},
-		FreeMin:  150 << 30, FreeMode: FreeAlert, FreeTell: []string{"git-admin"},
+		FreeMin:  defaultFreeMin, FreeMode: FreeAlert, FreeTell: []string{"git-admin"},
 	}
 }
 
