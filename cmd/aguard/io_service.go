@@ -232,9 +232,7 @@ func (s *ioService) kept(now time.Time) []iowatch.Case {
 func (s *ioService) save() {
 	cases := slices.Clone(s.kept(time.Now()))
 	go func() {
-		if err := iowatch.SaveCases(s.path, cases); err != nil {
-			s.post(s.ctx, func() { s.warn(time.Now(), "save", "сводки случаев", err) })
-		}
+		s.postWarn(s.ctx, time.Now(), "save", "сводки случаев", iowatch.SaveCases(s.path, cases))
 	}()
 }
 
@@ -263,8 +261,9 @@ func (s *ioService) run(cfg iowatch.Config) (err error) {
 		if s.rec == nil {
 			return
 		}
-		for _, c := range s.rec.Close() {
-			s.closed(c)
+		closed := s.rec.Close()
+		for i := range closed {
+			s.closed(closed[i])
 		}
 		s.rec = nil
 	}()
@@ -282,8 +281,9 @@ func (s *ioService) run(cfg iowatch.Config) (err error) {
 }
 
 func (s *ioService) step(st iowatch.Step) {
-	for _, c := range s.rec.Step(st) {
-		s.closed(c)
+	closed := s.rec.Step(st)
+	for i := range closed {
+		s.closed(closed[i])
 	}
 	s.launchAlert(st.At)
 }

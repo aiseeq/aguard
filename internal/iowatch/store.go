@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"time"
 )
 
@@ -19,29 +20,42 @@ func SaveCases(path string, cases []Case) (err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("папка сводок: %w", err)
 	}
-	part := path + ".part"
-	f, err := os.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	err = writeAtomic(path, func(w *bufio.Writer) error {
+		enc := json.NewEncoder(w)
+		for i := range cases {
+			if err := enc.Encode(&cases[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("сводки случаев: %w", err)
+		return fmt.Errorf("сводки случаев %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeAtomic пишет файл через свой временный рядом (path.*.part) и переименование: под именем
+// path он появляется целиком, два писателя друг другу не мешают.
+func writeAtomic(path string, write func(*bufio.Writer) error) error {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.part")
+	if err != nil {
+		return fmt.Errorf("временный файл: %w", err)
 	}
 	buf := bufio.NewWriterSize(f, 64*1024)
-	enc := json.NewEncoder(buf)
-	for i := range cases {
-		if err == nil {
-			err = enc.Encode(&cases[i])
-		}
-	}
+	err = write(buf)
 	if err == nil {
 		err = buf.Flush()
 	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	err = errors.Join(err, f.Close())
+	if err == nil {
+		err = os.Chmod(f.Name(), 0o600)
 	}
 	if err == nil {
-		err = os.Rename(part, path)
+		err = os.Rename(f.Name(), path)
 	}
 	if err != nil {
-		return fmt.Errorf("сводки случаев %s: %w", path, err)
+		return errors.Join(err, os.Remove(f.Name()))
 	}
 	return nil
 }
@@ -74,13 +88,16 @@ func LoadCases(path string) ([]Case, error) {
 func MergeCases(a, b []Case, since time.Time) []Case {
 	out := make([]Case, 0, len(a)+len(b))
 	out = append(append(out, a...), b...)
-	slices.SortStableFunc(out, func(x, y Case) int { return x.Start.Compare(y.Start) })
-	out = slices.CompactFunc(out, func(x, y Case) bool { return x.Start.Equal(y.Start) })
-	keep := 0
-	for keep < len(out) && out[keep].Start.Before(since) {
-		keep++
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
+	n := 0
+	for i := range out {
+		if out[i].Start.Before(since) || n > 0 && out[i].Start.Equal(out[n-1].Start) {
+			continue
+		}
+		out[n] = out[i]
+		n++
 	}
-	return out[keep:]
+	return out[:n]
 }
 
 // Summary — итог случаев за период: для агента и раздела Сна.
@@ -210,7 +227,7 @@ func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary 
 		s.QuietWho = append(s.QuietWho, *q)
 	}
 	s.QuietWho = rankCases(s.QuietWho)
-	slices.SortStableFunc(s.Cases, func(a, b Case) int { return cmp.Compare(b.DurMS, a.DurMS) })
+	sort.SliceStable(s.Cases, func(i, j int) bool { return s.Cases[i].DurMS > s.Cases[j].DurMS })
 	s.Culprits = acc.result()
 	return s
 }

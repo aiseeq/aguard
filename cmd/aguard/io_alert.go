@@ -63,9 +63,9 @@ func ioRecipients(lead, owner string) []string {
 // ioAlertText — текст письма и главный случай.
 func ioAlertText(cases []iowatch.Case, alertMin time.Duration) (string, iowatch.Case) {
 	main := cases[0]
-	for _, c := range cases[1:] {
-		if c.DurMS > main.DurMS {
-			main = c
+	for i := range cases {
+		if cases[i].DurMS > main.DurMS {
+			main = cases[i]
 		}
 	}
 	var b strings.Builder
@@ -73,12 +73,13 @@ func ioAlertText(cases []iowatch.Case, alertMin time.Duration) (string, iowatch.
 	writeIOCase(&b, &main, 3)
 	if len(cases) > 1 {
 		var total int64
-		for _, c := range cases {
-			total += c.DurMS
+		for i := range cases {
+			total += cases[i].DurMS
 		}
 		fmt.Fprintf(&b, "Всего случаев от %s с %s: %d, вместе %s:", ioSeconds(alertMin.Milliseconds()), cases[0].Start.Format("15:04"),
 			len(cases), ioSeconds(total))
-		for _, c := range cases {
+		for i := range cases {
+			c := &cases[i]
 			fmt.Fprintf(&b, " %s %s", c.Start.Format("15:04:05"), ioSeconds(c.DurMS))
 			if c.Culprits != nil && c.Culprits.Main != "" {
 				fmt.Fprintf(&b, " (%s)", iowatch.CgroupName(c.Culprits.Main))

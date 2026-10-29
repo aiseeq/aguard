@@ -1,6 +1,7 @@
 package iowatch
 
 import (
+	"math"
 	"slices"
 	"time"
 )
@@ -206,8 +207,11 @@ func (r *Recorder) Close() []Case {
 		r.waiting = append(r.waiting, r.open.toCase())
 		r.open = nil
 	}
-	return r.ready(time.Unix(1<<62, 0))
+	return r.ready(farFuture)
 }
+
+// farFuture — позже конца любого случая.
+var farFuture = time.Unix(math.MaxInt64>>1, 0)
 
 // Dump — ручной снимок буфера в dir/manual-<at>.jsonl. Файл появляется под этим именем, когда
 // записан целиком; Wait — дождаться этого.

@@ -35,27 +35,14 @@ func writeSnapshot(path string, records []Record) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("создать папку: %w", err)
 	}
-	part := path + ".part"
-	f, err := os.OpenFile(part, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("создать: %w", err)
-	}
-	buf := bufio.NewWriterSize(f, 64*1024)
-	for i := range records {
-		if err == nil {
-			err = WriteRecord(buf, records[i])
+	return writeAtomic(path, func(w *bufio.Writer) error {
+		for i := range records {
+			if err := WriteRecord(w, records[i]); err != nil {
+				return err
+			}
 		}
-	}
-	if err == nil {
-		err = buf.Flush()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(part, path)
-	}
-	return err
+		return nil
+	})
 }
 
 // CleanupSnapshots удаляет снимки старше keep (по времени изменения).
@@ -69,7 +56,7 @@ func CleanupSnapshots(dir string, keep time.Duration, now time.Time) error {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") && !strings.HasSuffix(name, ".jsonl.part") {
+		if entry.IsDir() || !strings.HasSuffix(name, ".jsonl") && !strings.HasSuffix(name, ".part") {
 			continue
 		}
 		info, err := entry.Info()
