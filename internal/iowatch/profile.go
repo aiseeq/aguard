@@ -18,8 +18,8 @@ import (
 )
 
 // Profile — итог завершившейся cgroup-листа по детальным проходам: сколько жила, сколько прочла и
-// записала, пик за проход, простой IO и своп. По профилям вида допуск тяжёлых задач знает, чего ждать
-// от следующей такой же.
+// записала, пик за проход, простой IO и своп, CPU и память. По профилям вида допуск тяжёлых задач
+// знает, чего ждать от следующей такой же.
 type Profile struct {
 	Name         string    `json:"name"` // CgroupName
 	Path         string    `json:"path"`
@@ -31,8 +31,15 @@ type Profile struct {
 	WriteB       int64     `json:"wr_b"`
 	PeakReadBps  int64     `json:"peak_rd_bps"` // наибольшее чтение за проход, байт/с
 	PeakWriteBps int64     `json:"peak_wr_bps"`
-	IOFullMS     int64     `json:"io_full_ms"` // PSI full io самой cgroup
-	SwapIn       int64     `json:"swapin"`     // страниц
+	IOFullMS     int64     `json:"io_full_ms"`     // PSI full io самой cgroup
+	SwapIn       int64     `json:"swapin"`         // страниц
+	CPUMS        int64     `json:"cpu_ms"`         // usage_usec листа за жизнь, мс CPU
+	PeakCPUMilli int64     `json:"peak_cpu_milli"` // наибольшая за проход загрузка, тысячных ядра: 3650 — 3,65 ядра
+	PeakAnonB    int64     `json:"peak_anon_b"`    // наибольший anon из memory.stat за проходы, байт
+	Majflt       int64     `json:"majflt"`         // своего листа
+	// MachineSwapIn — swap-in всей машины за жизнь профиля (быстрые шаги), страниц: не вина задачи,
+	// а что было с машиной, пока она шла.
+	MachineSwapIn int64 `json:"machine_swapin"`
 	// Procs — до profileProcs процессов cgroup с наибольшей записью (имя — comm, как ProcBase), байт:
 	// у бойца так видна приёмка отдельно от codex.
 	Procs []Ranked `json:"procs,omitempty"`
@@ -44,13 +51,17 @@ func (p *Profile) Dur() time.Duration { return time.Duration(p.DurMS) * time.Mil
 const (
 	profileProcs    = 5
 	profileMinBytes = 10 << 20         // профиль сохраняется от стольких байт чтения и записи…
-	profileMinDur   = 60 * time.Second // …или от такой длительности: иначе тысячи мелких scope
+	profileMinDur   = 60 * time.Second // …или от такой длительности…
+	profileMinCPUMS = 60_000           // …или от минуты CPU (glint check, go test): иначе тысячи мелких scope
 )
 
-// cgroupAcc — накопленное по cgroup, пока она жива.
+// cgroupAcc — накопленное по cgroup, пока она жива. swapFrom и swapTo — счётчик swap-in машины
+// (Profiles.swap) у начала первого прохода и у последнего прохода, где cgroup была видна.
 type cgroupAcc struct {
 	first, last                          time.Time
 	rd, wr, peakRd, peakWr, ioFull, swap int64
+	cpuUS, peakCPU, peakAnon, majflt     int64
+	swapFrom, swapTo                     int64
 	procs                                map[string]int64 // comm → запись
 }
 
@@ -58,27 +69,39 @@ type cgroupAcc struct {
 // ненулевыми дельтами), до их конца. Принадлежит горутине замера и, как Series, живёт дольше цикла.
 type Profiles struct {
 	open map[string]*cgroupAcc
+	// swap — swap-in машины по быстрым шагам с начала службы, страниц; passSwap — он же на прошлом
+	// детальном проходе (начало идущего прохода).
+	swap, passSwap int64
 }
 
 func NewProfiles() *Profiles { return &Profiles{open: map[string]*cgroupAcc{}} }
 
-// detail копит проход s длительностью interval: суммы, пики в байт/с, запись процессов из топа.
+// step копит swap-in машины быстрого шага.
+func (p *Profiles) step(s *Step) { p.swap += s.SwapIn }
+
+// detail копит проход s длительностью interval: суммы, пики в байт/с и тысячных ядра, пик anon,
+// запись процессов из топа.
 func (p *Profiles) detail(s *Step, interval time.Duration) {
 	for i := range s.Cgroups {
 		g := &s.Cgroups[i]
 		acc := p.open[g.Path]
 		if acc == nil {
-			acc = &cgroupAcc{first: s.At}
+			acc = &cgroupAcc{first: s.At, swapFrom: p.passSwap}
 			p.open[g.Path] = acc
 		}
-		acc.last = s.At
+		acc.last, acc.swapTo = s.At, p.swap
 		acc.rd += g.ReadBytes
 		acc.wr += g.WriteBytes
 		acc.peakRd = max(acc.peakRd, perSecond(g.ReadBytes, interval))
 		acc.peakWr = max(acc.peakWr, perSecond(g.WriteBytes, interval))
 		acc.ioFull += g.IOFullUS
 		acc.swap += g.SwapIn
+		acc.cpuUS += g.CPUUS
+		acc.peakCPU = max(acc.peakCPU, perSecond(g.CPUUS, interval)/1000) // мкс CPU в секунду → тысячные ядра
+		acc.peakAnon = max(acc.peakAnon, g.AnonB)
+		acc.majflt += g.Majflt
 	}
+	p.passSwap = p.swap
 	for i := range s.Processes {
 		pr := &s.Processes[i]
 		acc := p.open[pr.Cgroup]
@@ -111,7 +134,8 @@ func (p *Profiles) Open() []string {
 }
 
 // End закрывает кончившиеся cgroup (путь → вид) и отдаёт профили, которые стоит хранить: от
-// profileMinBytes обмена или profileMinDur. Начало — начало первого прохода (за interval до него).
+// profileMinBytes обмена, profileMinDur или profileMinCPUMS. Начало — начало первого прохода (за
+// interval до него).
 func (p *Profiles) End(gone map[string]string, interval time.Duration) []Profile {
 	var out []Profile
 	for _, path := range slices.Sorted(maps.Keys(gone)) {
@@ -123,8 +147,9 @@ func (p *Profiles) End(gone map[string]string, interval time.Duration) []Profile
 		start := acc.first.Add(-interval)
 		pr := Profile{Name: CgroupName(path), Path: path, Kind: gone[path], Start: start, End: acc.last,
 			DurMS: acc.last.Sub(start).Milliseconds(), ReadB: acc.rd, WriteB: acc.wr, PeakReadBps: acc.peakRd,
-			PeakWriteBps: acc.peakWr, IOFullMS: acc.ioFull / 1000, SwapIn: acc.swap}
-		if pr.ReadB+pr.WriteB < profileMinBytes && pr.Dur() < profileMinDur {
+			PeakWriteBps: acc.peakWr, IOFullMS: acc.ioFull / 1000, SwapIn: acc.swap, CPUMS: acc.cpuUS / 1000,
+			PeakCPUMilli: acc.peakCPU, PeakAnonB: acc.peakAnon, Majflt: acc.majflt, MachineSwapIn: acc.swapTo - acc.swapFrom}
+		if pr.ReadB+pr.WriteB < profileMinBytes && pr.Dur() < profileMinDur && pr.CPUMS < profileMinCPUMS {
 			continue
 		}
 		if len(acc.procs) > 0 {
@@ -207,12 +232,32 @@ func workerClass(path string) (string, error) {
 
 // ProfileStats — свод профилей одного вида: для допуска одним запросом now.
 type ProfileStats struct {
-	Kind         string    `json:"kind"`
-	Count        int       `json:"count"`
-	PeakWriteBps Quantiles `json:"peak_wr_bps"`
-	WriteB       Quantiles `json:"wr_b"`
-	DurMS        Quantiles `json:"dur_ms"`
-	Last         time.Time `json:"last"` // конец последнего профиля
+	Kind          string    `json:"kind"`
+	Count         int       `json:"count"`
+	PeakWriteBps  Quantiles `json:"peak_wr_bps"`
+	WriteB        Quantiles `json:"wr_b"`
+	DurMS         Quantiles `json:"dur_ms"`
+	CPUMS         Quantiles `json:"cpu_ms"`
+	PeakCPUMilli  Quantiles `json:"peak_cpu_milli"`
+	PeakAnonB     Quantiles `json:"peak_anon_b"`
+	Majflt        Quantiles `json:"majflt"`
+	MachineSwapIn Quantiles `json:"machine_swapin"`
+	Last          time.Time `json:"last"` // конец последнего профиля
+}
+
+// profileStatFields — поля профиля, которые сводятся квантилями, и их место в ProfileStats.
+var profileStatFields = [...]struct {
+	value func(*Profile) int64
+	stat  func(*ProfileStats) *Quantiles
+}{
+	{func(p *Profile) int64 { return p.PeakWriteBps }, func(s *ProfileStats) *Quantiles { return &s.PeakWriteBps }},
+	{func(p *Profile) int64 { return p.WriteB }, func(s *ProfileStats) *Quantiles { return &s.WriteB }},
+	{func(p *Profile) int64 { return p.DurMS }, func(s *ProfileStats) *Quantiles { return &s.DurMS }},
+	{func(p *Profile) int64 { return p.CPUMS }, func(s *ProfileStats) *Quantiles { return &s.CPUMS }},
+	{func(p *Profile) int64 { return p.PeakCPUMilli }, func(s *ProfileStats) *Quantiles { return &s.PeakCPUMilli }},
+	{func(p *Profile) int64 { return p.PeakAnonB }, func(s *ProfileStats) *Quantiles { return &s.PeakAnonB }},
+	{func(p *Profile) int64 { return p.Majflt }, func(s *ProfileStats) *Quantiles { return &s.Majflt }},
+	{func(p *Profile) int64 { return p.MachineSwapIn }, func(s *ProfileStats) *Quantiles { return &s.MachineSwapIn }},
 }
 
 // Quantiles — медиана и 90-й перцентиль (ближайший ранг).
@@ -230,14 +275,18 @@ func SummarizeProfiles(profiles []Profile) map[string]ProfileStats {
 	out := make(map[string]ProfileStats, len(byKind))
 	for kind, list := range byKind {
 		st := ProfileStats{Kind: kind, Count: len(list)}
-		peak, write, dur := make([]int64, len(list)), make([]int64, len(list)), make([]int64, len(list))
-		for i, p := range list {
-			peak[i], write[i], dur[i] = p.PeakWriteBps, p.WriteB, p.DurMS
+		for _, p := range list {
 			if p.End.After(st.Last) {
 				st.Last = p.End
 			}
 		}
-		st.PeakWriteBps, st.WriteB, st.DurMS = quantiles(peak), quantiles(write), quantiles(dur)
+		values := make([]int64, len(list))
+		for _, f := range profileStatFields {
+			for i, p := range list {
+				values[i] = f.value(p)
+			}
+			*f.stat(&st) = quantiles(values)
+		}
 		out[kind] = st
 	}
 	return out

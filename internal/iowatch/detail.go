@@ -7,7 +7,8 @@ import (
 	"time"
 )
 
-// DetailReader — детальная запись раз в detail: Dirty и Writeback, листья cgroup, процессы.
+// DetailReader — детальная запись раз в detail: Dirty, Writeback, MemAvailable и занятый своп,
+// листья cgroup, процессы.
 // Принадлежит одной горутине (медленный проход), с быстрым шагом общих данных нет.
 type DetailReader struct {
 	meminfo   cachedFile
@@ -50,9 +51,11 @@ func (r *DetailReader) Read(now time.Time) (s Step, skipped, err error) {
 	if r.buf, data, err = r.meminfo.read(r.buf); err != nil {
 		return s, nil, err
 	}
-	if s.Dirty, s.Writeback, err = parseMemInfo(data); err != nil {
+	mem, err := parseMemInfo(data)
+	if err != nil {
 		return s, nil, err
 	}
+	s.Dirty, s.Writeback, s.MemAvail, s.SwapUsed = mem.dirty, mem.writeback, mem.available, mem.swapUsed()
 	groups, err := r.cgroups.read(&s)
 	if err != nil {
 		return s, nil, err

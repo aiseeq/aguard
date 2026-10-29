@@ -1,6 +1,7 @@
 package iowatch
 
 import (
+	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -13,12 +14,14 @@ type Live struct {
 	mu               sync.Mutex
 	steps            [liveSteps]liveStep
 	head, count      int
-	dirty, writeback int64
+	last             detailLast
 	open             time.Time // начало идущего случая; ноль — случая нет
 	cases            [liveCases]liveCase
 	casesHead, nCase int
-	writers          [nowWriters]Writer
+	writers          [nowTop]Writer
 	nWriters         int
+	swappers         [nowTop]Swapper
+	nSwappers        int
 	profiles         map[string]ProfileStats
 }
 
@@ -26,14 +29,16 @@ const (
 	// liveSteps — быстрые шаги за окно 30 с при самом частом шаге 50 мс (Validate), с запасом.
 	liveSteps = 640
 	// liveCases — последние закрытые случаи: за 60 с их больше не бывает (случай — от 100 мс, gap между ними).
-	liveCases  = 128
-	nowWriters = 5
+	liveCases = 128
+	// nowTop — сколько cgroup в writers и swappers.
+	nowTop = 5
 )
 
 type liveStep struct {
 	at                                                       int64 // UnixNano
 	ioFull, memFull, stall, rd, wr, wms, wios, flush, swapIn int64 // мкс и счётчики шага
-	inflight                                                 int64
+	cpuSome, majflt                                          int64
+	inflight, runnable                                       int64 // моментальные
 }
 
 type liveCase struct{ start, end time.Time }
@@ -52,7 +57,8 @@ func (l *Live) step(s *Step, stallUS int64, open time.Time, closed liveCase) {
 		l.count++
 	}
 	l.steps[i] = liveStep{at: s.At.UnixNano(), ioFull: s.IOFullUS, memFull: s.MemFullUS, stall: stallUS, rd: s.ReadBytes,
-		wr: s.WriteBytes, wms: s.WMS, wios: s.WIOS, flush: s.FIOS, swapIn: s.SwapIn, inflight: s.InFlight}
+		wr: s.WriteBytes, wms: s.WMS, wios: s.WIOS, flush: s.FIOS, swapIn: s.SwapIn, cpuSome: s.CPUSomeUS, majflt: s.Majflt,
+		inflight: s.InFlight, runnable: s.Runnable}
 	l.open = open
 	if !closed.end.IsZero() {
 		j := (l.casesHead + l.nCase) % liveCases
@@ -65,32 +71,45 @@ func (l *Live) step(s *Step, stallUS int64, open time.Time, closed liveCase) {
 	}
 }
 
-// detail — детальный проход длительностью interval: Dirty, Writeback и до nowWriters cgroup по записи.
+// detail — детальный проход длительностью interval: Dirty, Writeback, память и своп машины, до
+// nowTop cgroup по записи и по swap-in.
 func (l *Live) detail(s *Step, interval time.Duration) {
-	var top [nowWriters]Writer
-	n := 0
-	for i := range s.Cgroups {
-		g := &s.Cgroups[i]
-		if g.WriteBytes == 0 || n == nowWriters && g.WriteBytes <= top[n-1].WriteB {
-			continue
-		}
-		pos := min(n, nowWriters-1)
-		if n < nowWriters {
-			n++
-		}
-		for pos > 0 && top[pos-1].WriteB < g.WriteBytes {
-			top[pos] = top[pos-1]
-			pos--
-		}
-		top[pos] = Writer{Path: g.Path, WriteB: g.WriteBytes}
+	wTop, nw := topCgroups(s.Cgroups, func(g *Cgroup) int64 { return g.WriteBytes })
+	var writers [nowTop]Writer
+	for i, g := range wTop[:nw] {
+		writers[i] = Writer{Name: CgroupName(g.Path), Path: g.Path, WriteBps: perSecond(g.WriteBytes, interval)}
 	}
-	for i := range top[:n] {
-		top[i].Name, top[i].WriteBps = CgroupName(top[i].Path), perSecond(top[i].WriteB, interval)
+	sTop, ns := topCgroups(s.Cgroups, func(g *Cgroup) int64 { return g.SwapIn })
+	var swappers [nowTop]Swapper
+	for i, g := range sTop[:ns] {
+		swappers[i] = Swapper{Name: CgroupName(g.Path), Path: g.Path, SwapInPS: perSecond(g.SwapIn, interval), MajfltPS: perSecond(g.Majflt, interval)}
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.dirty, l.writeback = s.Dirty, s.Writeback
-	l.writers, l.nWriters = top, n
+	l.last = detailLast{dirty: s.Dirty, writeback: s.Writeback, memAvail: s.MemAvail, swapUsed: s.SwapUsed}
+	l.writers, l.nWriters = writers, nw
+	l.swappers, l.nSwappers = swappers, ns
+}
+
+// topCgroups — до nowTop cgroup с наибольшим ненулевым key по убыванию, без аллокаций.
+func topCgroups(cgroups []Cgroup, key func(*Cgroup) int64) (top [nowTop]*Cgroup, n int) {
+	for i := range cgroups {
+		g := &cgroups[i]
+		v := key(g)
+		if v == 0 || n == nowTop && v <= key(top[n-1]) {
+			continue
+		}
+		pos := min(n, nowTop-1)
+		if n < nowTop {
+			n++
+		}
+		for pos > 0 && key(top[pos-1]) < v {
+			top[pos] = top[pos-1]
+			pos--
+		}
+		top[pos] = g
+	}
+	return top, n
 }
 
 // SetProfiles — свод профилей по видам (служба пересчитывает, когда профили меняются).
@@ -105,7 +124,15 @@ type Writer struct {
 	Name     string `json:"name"` // CgroupName
 	Path     string `json:"path"`
 	WriteBps int64  `json:"wr_bps"`
-	WriteB   int64  `json:"-"`
+}
+
+// Swapper — cgroup из последнего детального прохода по swap-in: жертва вытеснения, её страницы
+// возвращаются из свопа (в случае 29.10 22:56 — Chrome).
+type Swapper struct {
+	Name     string `json:"name"` // CgroupName
+	Path     string `json:"path"`
+	SwapInPS int64  `json:"swapin_ps"` // страниц/с
+	MajfltPS int64  `json:"majflt_ps"` // major faults/с
 }
 
 // NowWindow — быстрые шаги за последние N секунд до At.
@@ -120,6 +147,9 @@ type NowWindow struct {
 	InFlightMax int64 `json:"inflight_max"`
 	Flushes     int64 `json:"flushes"`
 	SwapIn      int64 `json:"swapin"` // страниц
+	Majflt      int64 `json:"majflt"`
+	CPUSomeMS   int64 `json:"cpu_some_ms"`  // PSI some cpu окна
+	RunnableMax int64 `json:"runnable_max"` // наибольшее число готовых к работе за окно
 }
 
 // NowOpen — идущий случай фриза.
@@ -139,16 +169,20 @@ type NowCases struct {
 
 // Now — моментальное состояние на последний быстрый шаг. At давний — замер не идёт: клиент сверяет сам.
 type Now struct {
-	At        time.Time     `json:"at"`
-	W1s       NowWindow     `json:"1s"`
-	W5s       NowWindow     `json:"5s"`
-	W30s      NowWindow     `json:"30s"`
-	Dirty     int64         `json:"dirty"`     // байт, последний детальный проход
-	Writeback int64         `json:"writeback"` // байт
-	Open      NowOpen       `json:"open"`
-	Cases     NowCases      `json:"cases"`
-	Writers   []Writer      `json:"writers"`
-	Profile   *ProfileStats `json:"profile,omitempty"` // свод профилей вида из запроса; нет таких — пусто
+	At           time.Time     `json:"at"`
+	W1s          NowWindow     `json:"1s"`
+	W5s          NowWindow     `json:"5s"`
+	W30s         NowWindow     `json:"30s"`
+	NProc        int           `json:"nproc"`         // потоков процессора (runtime.NumCPU)
+	Dirty        int64         `json:"dirty"`         // байт, последний детальный проход
+	Writeback    int64         `json:"writeback"`     // байт
+	MemAvailable int64         `json:"mem_available"` // MemAvailable, байт, последний детальный проход
+	SwapUsed     int64         `json:"swap_used"`     // байт
+	Open         NowOpen       `json:"open"`
+	Cases        NowCases      `json:"cases"`
+	Writers      []Writer      `json:"writers"`
+	Swappers     []Swapper     `json:"swappers"`
+	Profile      *ProfileStats `json:"profile,omitempty"` // свод профилей вида из запроса; нет таких — пусто
 }
 
 // Now — снимок состояния; kind — вид для свода профилей (пусто — без него). ok = false — шагов ещё не было.
@@ -160,9 +194,14 @@ func (l *Live) Now(kind string) (Now, bool) {
 	}
 	last := l.steps[(l.head+l.count-1)%liveSteps].at
 	n := Now{At: time.Unix(0, last), W1s: l.window(last, time.Second), W5s: l.window(last, 5*time.Second),
-		W30s: l.window(last, 30*time.Second), Dirty: l.dirty, Writeback: l.writeback, Writers: slices.Clone(l.writers[:l.nWriters])}
+		W30s: l.window(last, 30*time.Second), NProc: runtime.NumCPU(), Dirty: l.last.dirty, Writeback: l.last.writeback,
+		MemAvailable: l.last.memAvail, SwapUsed: l.last.swapUsed,
+		Writers: slices.Clone(l.writers[:l.nWriters]), Swappers: slices.Clone(l.swappers[:l.nSwappers])}
 	if n.Writers == nil {
 		n.Writers = []Writer{}
+	}
+	if n.Swappers == nil {
+		n.Swappers = []Swapper{}
 	}
 	if !l.open.IsZero() {
 		n.Open = NowOpen{Open: true, MS: n.At.Sub(l.open).Milliseconds()}
@@ -193,7 +232,7 @@ func (l *Live) Now(kind string) (Now, bool) {
 // window — шаги с концом в (last − d, last]; байт/с — по d.
 func (l *Live) window(last int64, d time.Duration) NowWindow {
 	var w NowWindow
-	var stall, ioFull, memFull, rd, wr, wms, wios int64
+	var stall, ioFull, memFull, cpuSome, rd, wr, wms, wios int64
 	from := last - int64(d)
 	for i := l.count - 1; i >= 0; i-- {
 		s := &l.steps[(l.head+i)%liveSteps]
@@ -203,6 +242,7 @@ func (l *Live) window(last int64, d time.Duration) NowWindow {
 		w.Steps++
 		ioFull += s.ioFull
 		memFull += s.memFull
+		cpuSome += s.cpuSome
 		stall += s.stall
 		rd += s.rd
 		wr += s.wr
@@ -210,9 +250,11 @@ func (l *Live) window(last int64, d time.Duration) NowWindow {
 		wios += s.wios
 		w.Flushes += s.flush
 		w.SwapIn += s.swapIn
+		w.Majflt += s.majflt
 		w.InFlightMax = max(w.InFlightMax, s.inflight)
+		w.RunnableMax = max(w.RunnableMax, s.runnable)
 	}
-	w.IOFullMS, w.MemFullMS, w.StallMS = ioFull/1000, memFull/1000, stall/1000
+	w.IOFullMS, w.MemFullMS, w.CPUSomeMS, w.StallMS = ioFull/1000, memFull/1000, cpuSome/1000, stall/1000
 	w.ReadBps, w.WriteBps = perSecond(rd, d), perSecond(wr, d)
 	w.WAwaitMS = AwaitMS(wms, wios)
 	return w

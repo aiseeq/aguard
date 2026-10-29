@@ -5,14 +5,16 @@ import (
 	"time"
 )
 
-// MachineSecond — секунда машины из быстрых шагов: простой и байты — сумма, очередь — пик, ожидание
-// записи — среднее за секунду (WMS/WIOS), Stall — мс шагов с простоем (Stalled); Dirty и Writeback —
-// последние из детального прохода.
+// MachineSecond — секунда машины из быстрых шагов: простой и байты — сумма, очередь и готовые к
+// работе — пик, ожидание записи — среднее за секунду (WMS/WIOS), Stall — мс шагов с простоем
+// (Stalled); Dirty, Writeback, MemAvail и SwapUsed — последние из детального прохода.
 type MachineSecond struct {
 	At          time.Time `json:"at"`
 	IOFullMS    int64     `json:"io_full_ms,omitempty"`
 	IOSomeMS    int64     `json:"io_some_ms,omitempty"`
 	MemFullMS   int64     `json:"mem_full_ms,omitempty"`
+	CPUSomeMS   int64     `json:"cpu_some_ms,omitempty"`
+	RunnableMax int64     `json:"runnable_max,omitempty"`
 	StallMS     int64     `json:"stall_ms,omitempty"`
 	ReadB       int64     `json:"rd_b,omitempty"`
 	WriteB      int64     `json:"wr_b,omitempty"`
@@ -23,14 +25,17 @@ type MachineSecond struct {
 	Writeback   int64     `json:"writeback,omitempty"`
 	SwapIn      int64     `json:"swapin,omitempty"`
 	Majflt      int64     `json:"majflt,omitempty"`
+	MemAvail    int64     `json:"mem_avail,omitempty"` // байт
+	SwapUsed    int64     `json:"swap_used,omitempty"` // байт
 }
 
-// secondRow — секунда ряда в памяти: 72 байта (байты диска — int64, остальное — int32, Dirty и
-// Writeback — КиБ, как в meminfo). Сутки — 86 400 строк, около 6 МБ.
+// secondRow — секунда ряда в памяти: 88 байт (байты диска — int64, остальное — int32, Dirty,
+// Writeback, MemAvail и SwapUsed — КиБ, как в meminfo). Сутки — 86 400 строк, около 7,6 МБ.
 type secondRow struct {
 	at, readB, writeB                                int64 // at — unix-секунды
 	ioFull, ioSome, memFull, stall, wAwait, inflight int32
 	flushes, swapIn, majflt, dirtyKiB, writebackKiB  int32
+	cpuSome, runnable, memAvailKiB, swapUsedKiB      int32
 }
 
 // i32 — значение в int32 с насыщением: ряд не врёт знаком на редком выбросе.
@@ -40,31 +45,37 @@ func (r *secondRow) second() MachineSecond {
 	return MachineSecond{At: time.Unix(r.at, 0), IOFullMS: int64(r.ioFull), IOSomeMS: int64(r.ioSome), MemFullMS: int64(r.memFull),
 		StallMS: int64(r.stall), ReadB: r.readB, WriteB: r.writeB, WAwaitMS: int64(r.wAwait), InFlightMax: int64(r.inflight),
 		Flushes: int64(r.flushes), Dirty: int64(r.dirtyKiB) << 10, Writeback: int64(r.writebackKiB) << 10,
-		SwapIn: int64(r.swapIn), Majflt: int64(r.majflt)}
+		SwapIn: int64(r.swapIn), Majflt: int64(r.majflt), CPUSomeMS: int64(r.cpuSome), RunnableMax: int64(r.runnable),
+		MemAvail: int64(r.memAvailKiB) << 10, SwapUsed: int64(r.swapUsedKiB) << 10}
 }
 
 func rowOf(s *MachineSecond) secondRow {
 	return secondRow{at: s.At.Unix(), readB: s.ReadB, writeB: s.WriteB, ioFull: i32(s.IOFullMS), ioSome: i32(s.IOSomeMS),
 		memFull: i32(s.MemFullMS), stall: i32(s.StallMS), wAwait: i32(s.WAwaitMS), inflight: i32(s.InFlightMax),
 		flushes: i32(s.Flushes), swapIn: i32(s.SwapIn), majflt: i32(s.Majflt), dirtyKiB: i32(s.Dirty >> 10),
-		writebackKiB: i32(s.Writeback >> 10)}
+		writebackKiB: i32(s.Writeback >> 10), cpuSome: i32(s.CPUSomeMS), runnable: i32(s.RunnableMax),
+		memAvailKiB: i32(s.MemAvail >> 10), swapUsedKiB: i32(s.SwapUsed >> 10)}
 }
 
 // secondAcc — идущая секунда: суммы быстрых шагов в их единицах.
 type secondAcc struct {
 	at                                               int64 // unix-секунды; 0 — секунды нет
-	ioFull, ioSome, memFull, stall                   int64 // мкс
+	ioFull, ioSome, memFull, cpuSome, stall          int64 // мкс
 	rd, wr, wms, wios, inflight, flush, swap, majflt int64
+	runnable                                         int64 // пик
 }
+
+// detailLast — последние значения детального прохода: идут в секунды, закрытые после него. Байты.
+type detailLast struct{ dirty, writeback, memAvail, swapUsed int64 }
 
 // Series — посекундный ряд машины за keep: кольцо строк, свёрнутых из быстрых шагов. Принадлежит
 // горутине замера; живёт дольше одного цикла (служба передаёт его новому Recorder).
 type Series struct {
-	rows             []secondRow
-	head, count      int
-	keep             time.Duration
-	cur              secondAcc
-	dirty, writeback int64 // последние из детального прохода
+	rows        []secondRow
+	head, count int
+	keep        time.Duration
+	cur         secondAcc
+	last        detailLast
 }
 
 // NewSeries — ряд на keep секунд; память под кольцо выделяется сразу.
@@ -84,6 +95,8 @@ func (s *Series) step(st *Step, stallUS int64) {
 	c.ioFull += st.IOFullUS
 	c.ioSome += st.IOSomeUS
 	c.memFull += st.MemFullUS
+	c.cpuSome += st.CPUSomeUS
+	c.runnable = max(c.runnable, st.Runnable)
 	c.stall += stallUS
 	c.rd += st.ReadBytes
 	c.wr += st.WriteBytes
@@ -95,15 +108,18 @@ func (s *Series) step(st *Step, stallUS int64) {
 	c.majflt += st.Majflt
 }
 
-// detail — Dirty и Writeback детального прохода: идут в секунды, закрытые после него.
-func (s *Series) detail(dirty, writeback int64) { s.dirty, s.writeback = dirty, writeback }
+// detail — Dirty, Writeback, MemAvail и SwapUsed детального прохода: идут в секунды, закрытые после него.
+func (s *Series) detail(st *Step) {
+	s.last = detailLast{dirty: st.Dirty, writeback: st.Writeback, memAvail: st.MemAvail, swapUsed: st.SwapUsed}
+}
 
 // flush — идущая секунда в кольцо.
 func (s *Series) flush() {
-	c := &s.cur
+	c, d := &s.cur, &s.last
 	s.push(secondRow{at: c.at, readB: c.rd, writeB: c.wr, ioFull: i32(c.ioFull / 1000), ioSome: i32(c.ioSome / 1000),
 		memFull: i32(c.memFull / 1000), stall: i32(c.stall / 1000), wAwait: i32(AwaitMS(c.wms, c.wios)), inflight: i32(c.inflight),
-		flushes: i32(c.flush), swapIn: i32(c.swap), majflt: i32(c.majflt), dirtyKiB: i32(s.dirty >> 10), writebackKiB: i32(s.writeback >> 10)})
+		flushes: i32(c.flush), swapIn: i32(c.swap), majflt: i32(c.majflt), dirtyKiB: i32(d.dirty >> 10), writebackKiB: i32(d.writeback >> 10),
+		cpuSome: i32(c.cpuSome / 1000), runnable: i32(c.runnable), memAvailKiB: i32(d.memAvail >> 10), swapUsedKiB: i32(d.swapUsed >> 10)})
 	s.cur = secondAcc{}
 }
 
@@ -156,7 +172,7 @@ func (s *Series) Resize(keep time.Duration) *Series {
 	for _, row := range s.Rows(time.Time{}) {
 		next.push(row)
 	}
-	next.cur, next.dirty, next.writeback = s.cur, s.dirty, s.writeback
+	next.cur, next.last = s.cur, s.last
 	return next
 }
 

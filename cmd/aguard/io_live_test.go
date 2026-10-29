@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,11 +46,13 @@ func TestIOSocketNowSeriesProfiles(t *testing.T) {
 	for i := range 25 {
 		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
 		if i%10 == 0 {
-			s.rec.Detail(iowatch.Step{At: at, Dirty: 40 << 20, Cgroups: []iowatch.Cgroup{{Path: "/user.slice/run-dd.scope", WriteBytes: 30 << 20}}})
+			s.rec.Detail(iowatch.Step{At: at, Dirty: 40 << 20, MemAvail: 1126 << 20, SwapUsed: 15 << 30, Cgroups: []iowatch.Cgroup{{Path: "/user.slice/run-dd.scope", WriteBytes: 30 << 20},
+				{Path: "/user.slice/app.slice/app-chrome-1.scope", SwapIn: 5000, Majflt: 687}}})
 		}
-		s.rec.Step(iowatch.Step{At: at, WriteBytes: 1 << 20, WIOS: 1, WMS: 3})
+		s.rec.Step(iowatch.Step{At: at, WriteBytes: 1 << 20, WIOS: 1, WMS: 3, CPUSomeUS: 12_000, Runnable: 18, SwapIn: 128})
 	}
-	s.ended = []iowatch.Profile{{Kind: "worker:glint-правило", Name: "worker-a.service", End: time.Now().Add(-time.Hour), WriteB: 20 << 20, PeakWriteBps: 8 << 20, DurMS: 90_000},
+	s.ended = []iowatch.Profile{{Kind: "worker:glint-правило", Name: "worker-a.service", End: time.Now().Add(-time.Hour), WriteB: 20 << 20, PeakWriteBps: 8 << 20, DurMS: 90_000,
+		CPUMS: 330_000, PeakCPUMilli: 3650},
 		{Kind: iowatch.KindAgent, Name: "x-master", End: time.Now().Add(-time.Hour)}}
 	s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
 	go s.serve()
@@ -75,12 +78,18 @@ func TestIOSocketNowSeriesProfiles(t *testing.T) {
 	}
 	if !now.At.Equal(base.Add(2400*time.Millisecond)) || now.W1s.WriteBps != 10<<20 || now.W1s.WAwaitMS != 3 || now.Dirty != 40<<20 ||
 		len(now.Writers) != 1 || now.Writers[0].Name != "run-dd.scope" || now.Writers[0].WriteBps != 30<<20 ||
-		now.Profile == nil || now.Profile.Count != 1 || now.Profile.PeakWriteBps.P50 != 8<<20 {
+		now.Profile == nil || now.Profile.Count != 1 || now.Profile.PeakWriteBps.P50 != 8<<20 || now.Profile.CPUMS.P50 != 330_000 {
 		t.Fatalf("now: %+v", now.Now)
+	}
+	if now.W1s.CPUSomeMS != 120 || now.W1s.RunnableMax != 18 || now.MemAvailable != 1126<<20 || now.SwapUsed != 15<<30 ||
+		len(now.Swappers) != 1 || now.Swappers[0].Name != "chrome" || now.Swappers[0].SwapInPS != 5000 || now.Swappers[0].MajfltPS != 687 {
+		t.Fatalf("now CPU и вытеснение: 1с %+v, swappers %+v", now.W1s, now.Swappers)
 	}
 	out.Reset()
 	if err := a.ioLive(iowatch.Request{Q: iowatch.QueryNow}, false); err != nil || strings.Count(out.String(), "\n") != 2 ||
-		!strings.Contains(out.String(), "пишут: run-dd.scope 30 МБ/с") {
+		!strings.Contains(out.String(), "пишут: run-dd.scope 30 МБ/с") ||
+		!strings.Contains(out.String(), fmt.Sprintf("cpu some 120 мс/с, runnable 18/%d, avail 1,1 ГиБ, swap-in %s МБ/с (chrome); dirty", runtime.NumCPU(),
+			ioDecimal(megabytes(10*128*int64(os.Getpagesize()))))) {
 		t.Fatalf("now текстом (%v):\n%s", err, out)
 	}
 
@@ -95,7 +104,8 @@ func TestIOSocketNowSeriesProfiles(t *testing.T) {
 
 	out.Reset()
 	if err := a.ioLiveSince(iowatch.Request{Q: iowatch.QueryProfiles, Kind: "worker:glint-правило"}, "7d", false); err != nil ||
-		!strings.Contains(out.String(), "worker:glint-правило  worker-a.service  W 20 МБ (пик 8 МБ/с)") || strings.Contains(out.String(), "x-master") {
+		!strings.Contains(out.String(), "worker:glint-правило  worker-a.service  W 20 МБ (пик 8 МБ/с)") || strings.Contains(out.String(), "x-master") ||
+		!strings.Contains(out.String(), "CPU 5,5 мин (пик 3,6 ядра)") {
 		t.Fatalf("profiles текстом (%v):\n%s", err, out)
 	}
 

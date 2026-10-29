@@ -179,6 +179,9 @@ func (r *Recorder) Step(s Step) []Case {
 	if r.series != nil {
 		r.series.step(&s, stallUS)
 	}
+	if r.profiles != nil {
+		r.profiles.step(&s)
+	}
 	if r.live != nil {
 		var open time.Time
 		if r.open != nil {
@@ -189,11 +192,11 @@ func (r *Recorder) Step(s Step) []Case {
 	return r.ready(s.At.Add(-r.cfg.Detail.D() - step))
 }
 
-// Detail кладёт детальную запись в буфер, в ряд (Dirty, Writeback), профили и живое состояние.
+// Detail кладёт детальную запись в буфер, в ряд (Dirty, Writeback, память), профили и живое состояние.
 func (r *Recorder) Detail(s Step) {
 	r.ring.Add(Record{Kind: KindDetail, Step: s})
 	if r.series != nil {
-		r.series.detail(s.Dirty, s.Writeback)
+		r.series.detail(&s)
 	}
 	if r.profiles != nil {
 		r.profiles.detail(&s, r.cfg.Detail.D())

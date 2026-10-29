@@ -17,13 +17,15 @@ const (
 )
 
 // Step — быстрый шаг машины (дельты к прошлому шагу) или детальная запись (Dirty, Writeback,
-// Processes, Cgroups). Нулевые поля в снимок не пишутся.
+// MemAvail, SwapUsed, Processes, Cgroups). Нулевые поля в снимок не пишутся.
 type Step struct {
 	At         time.Time `json:"at"`
 	IOFullUS   int64     `json:"io_full_us,omitempty"`
 	IOSomeUS   int64     `json:"io_some_us,omitempty"`
 	MemFullUS  int64     `json:"mem_full_us,omitempty"`
 	MemSomeUS  int64     `json:"mem_some_us,omitempty"`
+	CPUSomeUS  int64     `json:"cpu_some_us,omitempty"` // PSI some cpu: время, когда кто-то ждал процессор
+	Runnable   int64     `json:"runnable,omitempty"`    // готовые к работе в момент шага (loadavg)
 	SwapIn     int64     `json:"swapin,omitempty"`
 	SwapOut    int64     `json:"swapout,omitempty"`
 	Majflt     int64     `json:"majflt,omitempty"`
@@ -42,6 +44,8 @@ type Step struct {
 	FMS        int64     `json:"f_ms,omitempty"`
 	Dirty      int64     `json:"dirty,omitempty"`
 	Writeback  int64     `json:"writeback,omitempty"`
+	MemAvail   int64     `json:"mem_avail,omitempty"` // MemAvailable, байт
+	SwapUsed   int64     `json:"swap_used,omitempty"` // SwapTotal − SwapFree, байт
 	Processes  []Process `json:"processes,omitempty"`
 	Cgroups    []Cgroup  `json:"cgroups,omitempty"`
 }
@@ -61,7 +65,7 @@ type Process struct {
 	Children bool `json:"kids,omitempty"`
 }
 
-// Cgroup — дельты листа cgroup v2 за детальный интервал.
+// Cgroup — дельты листа cgroup v2 за детальный интервал; AnonB — моментальное.
 type Cgroup struct {
 	Path       string `json:"path"`
 	ReadBytes  int64  `json:"rd_b,omitempty"`
@@ -73,6 +77,8 @@ type Cgroup struct {
 	WriteOps   int64  `json:"wios,omitempty"`
 	IOFullUS   int64  `json:"io_full_us,omitempty"`
 	MemFullUS  int64  `json:"mem_full_us,omitempty"`
+	CPUUS      int64  `json:"cpu_us,omitempty"` // usage_usec из cpu.stat
+	AnonB      int64  `json:"anon,omitempty"`   // anon из memory.stat на момент прохода, байт
 }
 
 // Record — строка снимка: {"k":"s"|"d", поля Step}.

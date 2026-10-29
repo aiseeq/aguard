@@ -11,21 +11,23 @@ import (
 
 // Шаги сворачиваются в секунду по At (как Window.Seconds): шаг ровно на границе — уже следующая
 // секунда; идущая секунда в ряд не попадает. Stall — мс шагов с простоем, WAwait — WMS/WIOS секунды,
-// Dirty и Writeback — последние из детального прохода.
+// CPUSome — сумма, RunnableMax — наибольшее; Dirty, Writeback, MemAvail и SwapUsed — последние из
+// детального прохода.
 func TestSeriesFoldsStepsIntoSeconds(t *testing.T) {
 	r := NewRecorder(Default())
 	series := NewSeries(time.Hour)
 	r.Attach(series, nil, nil)
 	base := time.Date(2026, 10, 29, 21, 0, 0, 0, time.Local)
-	r.Detail(Step{At: base, Dirty: 30 << 20, Writeback: 2 << 20})
+	r.Detail(Step{At: base, Dirty: 30 << 20, Writeback: 2 << 20, MemAvail: 3 << 30, SwapUsed: 1 << 30})
 	for i := 1; i <= 10; i++ { // 21:00:00.1 … 21:00:01.0
-		s := Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond), IOFullUS: 10_000, WriteBytes: 1 << 20, WIOS: 2, WMS: 10, InFlight: int64(i), FIOS: 1}
+		s := Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond), IOFullUS: 10_000, WriteBytes: 1 << 20, WIOS: 2, WMS: 10, InFlight: int64(i), FIOS: 1,
+			CPUSomeUS: 12_000, Runnable: int64(10 + i%4)}
 		if i == 3 || i == 4 {
 			s.IOFullUS = 70_000 // шаги с простоем
 			s.WIOS, s.WMS = 1, 200
 		}
 		if i == 9 {
-			r.Detail(Step{At: s.At, Dirty: 50 << 20, Writeback: 4 << 20})
+			r.Detail(Step{At: s.At, Dirty: 50 << 20, Writeback: 4 << 20, MemAvail: 1100 << 20, SwapUsed: 15 << 30})
 		}
 		r.Step(s)
 	}
@@ -40,15 +42,33 @@ func TestSeriesFoldsStepsIntoSeconds(t *testing.T) {
 	first, second := got[0], got[1]
 	// 21:00:00: шаги .1–.9 (9 шагов), из них 2 с простоем; WIOS 7·2+2·1 = 16, WMS 7·10+2·200 = 470 → 29 мс.
 	if !first.At.Equal(base) || first.IOFullMS != 7*10+2*70 || first.StallMS != 200 || first.WriteB != 9<<20 ||
-		first.WAwaitMS != 470/16 || first.InFlightMax != 9 || first.Flushes != 9 || first.Dirty != 50<<20 || first.Writeback != 4<<20 {
+		first.WAwaitMS != 470/16 || first.InFlightMax != 9 || first.Flushes != 9 || first.Dirty != 50<<20 || first.Writeback != 4<<20 ||
+		first.CPUSomeMS != 9*12 || first.RunnableMax != 13 || first.MemAvail != 1100<<20 || first.SwapUsed != 15<<30 {
 		t.Fatalf("секунда 0: %+v", first)
 	}
 	// 21:00:01: шаг ровно на границе (1.0) — эта секунда; шаг 2.0 закрыл её.
-	if !second.At.Equal(base.Add(time.Second)) || second.IOFullMS != 10 || second.StallMS != 0 || second.InFlightMax != 10 || second.WAwaitMS != 5 {
+	if !second.At.Equal(base.Add(time.Second)) || second.IOFullMS != 10 || second.StallMS != 0 || second.InFlightMax != 10 || second.WAwaitMS != 5 ||
+		second.CPUSomeMS != 12 || second.RunnableMax != 12 {
 		t.Fatalf("секунда 1: %+v", second)
 	}
-	if size := unsafe.Sizeof(secondRow{}); size != 72 {
-		t.Fatalf("строка ряда %d байт, в доке — 72", size)
+	if size := unsafe.Sizeof(secondRow{}); size != 88 {
+		t.Fatalf("строка ряда %d байт, в доке — 88", size)
+	}
+}
+
+// series.jsonl фазы 1 (без CPU и памяти) загружается: новых полей нет — нули.
+func TestLoadSeriesOldLineWithoutCPU(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "series.jsonl")
+	writeFile(t, path, `{"at":"2026-10-29T22:56:30+01:00","io_full_ms":2,"mem_full_ms":2,"wr_b":1048576,"dirty":3145728,"swapin":5349,"majflt":4015}`+"\n")
+	seconds, err := LoadSeries(path, time.Time{})
+	if err != nil || len(seconds) != 1 {
+		t.Fatalf("старая строка: %+v %v", seconds, err)
+	}
+	s := NewSeries(time.Hour)
+	s.Add(seconds[0])
+	got := s.Rows(time.Time{}).Seconds()[0]
+	if got.SwapIn != 5349 || got.Majflt != 4015 || got.Dirty != 3<<20 || got.CPUSomeMS != 0 || got.RunnableMax != 0 || got.MemAvail != 0 || got.SwapUsed != 0 {
+		t.Fatalf("строка в ряду: %+v", got)
 	}
 }
 
@@ -126,6 +146,56 @@ func TestProfileFromPassesKindAndEnd(t *testing.T) {
 	}
 }
 
+// Профиль по CPU и памяти: лист живёт 3 прохода по 1 с, usage_usec растёт на 1, 3 и 2 с — CPU 6000 мс,
+// пик 3000 тысячных ядра; anon — наибольший из трёх; majflt — сумма; swap-in машины — быстрые шаги
+// от начала первого прохода до последнего, где лист был виден.
+func TestProfileCPUAnonAndMachineSwapIn(t *testing.T) {
+	r := NewRecorder(Default())
+	profiles := NewProfiles()
+	r.Attach(nil, profiles, nil)
+	base := time.Date(2026, 10, 29, 22, 56, 0, 0, time.Local)
+	at := base
+	steps := func(n int, swapIn int64) {
+		for range n {
+			at = at.Add(100 * time.Millisecond)
+			r.Step(Step{At: at, SwapIn: swapIn})
+		}
+	}
+	const leaf = "/user.slice/app.slice/glint.service"
+	steps(5, 7)
+	r.Detail(Step{At: at}) // проход без листа: начало его первого прохода
+	for i, cpuS := range []int64{1, 3, 2} {
+		steps(10, 10)
+		anon := []int64{100, 300, 200}[i] << 20
+		r.Detail(Step{At: at, Cgroups: []Cgroup{{Path: leaf, WriteBytes: 4 << 20, CPUUS: cpuS * 1_000_000, AnonB: anon, Majflt: int64(4 + i)}}})
+	}
+	steps(10, 10) // после последнего прохода с листом — не его
+	got := profiles.End(map[string]string{leaf: "service:glint.service"}, time.Second)
+	if len(got) != 1 {
+		t.Fatalf("профили: %+v", got)
+	}
+	p := got[0]
+	if p.CPUMS != 6000 || p.PeakCPUMilli != 3000 || p.PeakAnonB != 300<<20 || p.Majflt != 15 || p.MachineSwapIn != 300 || p.SwapIn != 0 {
+		t.Fatalf("профиль: %+v", p)
+	}
+}
+
+// Профиль сохраняется и по одной минуте CPU, когда обмена мало и жизнь короче минуты: glint check
+// и go test. 59 с CPU при тех же условиях — мелочь.
+func TestProfileSavedByCPUOnly(t *testing.T) {
+	p := NewProfiles()
+	base := time.Date(2026, 10, 29, 22, 56, 0, 0, time.Local)
+	const heavy, light = "/app.slice/go-test.scope", "/app.slice/light.scope"
+	for i := range 3 { // проходы по 10 с: жизнь 30 с
+		p.detail(&Step{At: base.Add(time.Duration(i) * 10 * time.Second), Cgroups: []Cgroup{
+			{Path: heavy, WriteBytes: 4096, CPUUS: 30_000_000}, {Path: light, WriteBytes: 4096, CPUUS: 59_000_000 / 3}}}, 10*time.Second)
+	}
+	got := p.End(map[string]string{heavy: "service:go-test.scope", light: "service:light.scope"}, 10*time.Second)
+	if len(got) != 1 || got[0].Path != heavy || got[0].CPUMS != 90_000 || got[0].PeakCPUMilli != 3000 || got[0].Dur() >= profileMinDur {
+		t.Fatalf("по CPU: %+v", got)
+	}
+}
+
 func TestProfileKindAgentServiceAndWorkerWithoutClass(t *testing.T) {
 	state := t.TempDir()
 	writeFile(t, filepath.Join(state, "noclass", "job.json"), `{"id":"noclass"}`)
@@ -154,10 +224,15 @@ func TestSummarizeProfilesQuantiles(t *testing.T) {
 	for i := range 10 {
 		list = append(list, Profile{Kind: "worker:x", PeakWriteBps: int64(i+1) << 20, WriteB: int64(10-i) << 20, DurMS: int64(i) * 1000, End: base.Add(time.Duration(i) * time.Minute)})
 	}
+	for i := range list {
+		list[i].CPUMS, list[i].PeakCPUMilli, list[i].PeakAnonB, list[i].Majflt, list[i].MachineSwapIn = int64(i)*60_000, int64(i)*1000, int64(i)<<20, int64(i), int64(i)*100
+	}
 	list = append(list, Profile{Kind: KindAgent, WriteB: 7})
 	st := SummarizeProfiles(list)
 	w := st["worker:x"]
 	if w.Count != 10 || w.PeakWriteBps != (Quantiles{5 << 20, 9 << 20}) || w.WriteB != (Quantiles{5 << 20, 9 << 20}) || w.DurMS != (Quantiles{4000, 8000}) ||
+		w.CPUMS != (Quantiles{240_000, 480_000}) || w.PeakCPUMilli != (Quantiles{4000, 8000}) || w.PeakAnonB != (Quantiles{4 << 20, 8 << 20}) ||
+		w.Majflt != (Quantiles{4, 8}) || w.MachineSwapIn != (Quantiles{400, 800}) ||
 		!w.Last.Equal(base.Add(9*time.Minute)) || st[KindAgent].WriteB != (Quantiles{7, 7}) {
 		t.Fatalf("свод: %+v", st)
 	}
@@ -175,7 +250,8 @@ func TestLiveNowWindowsCasesWriters(t *testing.T) {
 	}
 	base := time.Date(2026, 10, 29, 21, 0, 0, 0, time.Local)
 	step := func(i int, idle int64) {
-		r.Step(Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond), IOFullUS: idle, WriteBytes: 1 << 20, ReadBytes: 1 << 19, WIOS: 4, WMS: 40, InFlight: int64(i % 7)})
+		r.Step(Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond), IOFullUS: idle, WriteBytes: 1 << 20, ReadBytes: 1 << 19, WIOS: 4, WMS: 40, InFlight: int64(i % 7),
+			CPUSomeUS: 11_000, Runnable: int64(i % 20), SwapIn: 130, Majflt: 100})
 	}
 	for i := range 600 { // 60 с
 		var idle int64
@@ -190,8 +266,10 @@ func TestLiveNowWindowsCasesWriters(t *testing.T) {
 		step(i, idle)
 	}
 	live.SetProfiles(map[string]ProfileStats{"worker:x": {Kind: "worker:x", Count: 3}})
-	r.Detail(Step{At: base.Add(59 * time.Second), Dirty: 70 << 20, Writeback: 3 << 20,
-		Cgroups: []Cgroup{{Path: "/a.slice/dd.scope", WriteBytes: 50 << 20}, {Path: "/a.slice/b.service", WriteBytes: 2 << 20}, {Path: "/a.slice/r.scope", ReadBytes: 1}}})
+	chrome := "/user.slice/user-1000.slice/user@1000.service/app.slice/app-google\\x2dchrome-1234.scope"
+	r.Detail(Step{At: base.Add(59 * time.Second), Dirty: 70 << 20, Writeback: 3 << 20, MemAvail: 1100 << 20, SwapUsed: 15 << 30,
+		Cgroups: []Cgroup{{Path: "/a.slice/dd.scope", WriteBytes: 50 << 20}, {Path: "/a.slice/b.service", WriteBytes: 2 << 20, SwapIn: 40, Majflt: 30},
+			{Path: "/a.slice/r.scope", ReadBytes: 1}, {Path: chrome, SwapIn: 5000, Majflt: 687}}})
 	n, ok := live.Now("worker:x")
 	if !ok || !n.At.Equal(base.Add(59900*time.Millisecond)) {
 		t.Fatalf("at: %v %v", n.At, ok)
@@ -199,6 +277,18 @@ func TestLiveNowWindowsCasesWriters(t *testing.T) {
 	if n.W1s.Steps != 10 || n.W1s.WriteBps != 10<<20 || n.W1s.ReadBps != 5<<20 || n.W1s.WAwaitMS != 10 || n.W1s.StallMS != 300 ||
 		n.W1s.IOFullMS != 270 || n.W1s.InFlightMax != 6 || n.W30s.Steps != 300 || n.W30s.StallMS != 300+300 {
 		t.Fatalf("окна: 1с %+v, 30с %+v", n.W1s, n.W30s)
+	}
+	// 1 с — шаги 590–599: runnable 10…19; 5 с — 550–599, в них 559 и 579 дают 19.
+	if n.W1s.CPUSomeMS != 110 || n.W1s.RunnableMax != 19 || n.W1s.Majflt != 1000 || n.W1s.SwapIn != 1300 ||
+		n.W5s.CPUSomeMS != 550 || n.W5s.RunnableMax != 19 || n.W30s.CPUSomeMS != 3300 || n.W30s.Majflt != 30_000 {
+		t.Fatalf("CPU и вытеснение в окнах: 1с %+v, 5с %+v, 30с %+v", n.W1s, n.W5s, n.W30s)
+	}
+	if n.NProc < 1 || n.MemAvailable != 1100<<20 || n.SwapUsed != 15<<30 {
+		t.Fatalf("машина: nproc %d, avail %d, swap %d", n.NProc, n.MemAvailable, n.SwapUsed)
+	}
+	if len(n.Swappers) != 2 || n.Swappers[0].Name != "google\\x2dchrome" || n.Swappers[0].SwapInPS != 5000 || n.Swappers[0].MajfltPS != 687 ||
+		n.Swappers[1].Name != "b.service" || n.Swappers[1].MajfltPS != 30 {
+		t.Fatalf("жертвы вытеснения: %+v", n.Swappers)
 	}
 	if !n.Open.Open || n.Open.MS != 300 {
 		t.Fatalf("идущий случай: %+v", n.Open)

@@ -70,7 +70,9 @@ func delta(cur, prev int64) int64 {
 }
 
 // parsePressureTotals — total строк some и full файла PSI (/proc/pressure/*, cgroup *.pressure), мкс.
+// Строки full может не быть (/proc/pressure/cpu до 5.13) — тогда full 0; без total в some — ошибка.
 func parsePressureTotals(data []byte) (some, full int64, err error) {
+	seenSome := false
 	for len(data) > 0 {
 		var line []byte
 		line, data = nextLine(data)
@@ -91,13 +93,35 @@ func parsePressureTotals(data []byte) (some, full int64, err error) {
 				return 0, 0, fmt.Errorf("%s total: %w", kind, err)
 			}
 			if isSome {
-				some = n
+				some, seenSome = n, true
 			} else {
 				full = n
 			}
 		}
 	}
+	if !seenSome {
+		return 0, 0, errors.New("нет строки some с total")
+	}
 	return some, full, nil
+}
+
+// parseLoadavgRunnable — готовые к работе сущности планировщика из /proc/loadavg: четвёртое поле
+// «выполняются/всего» до косой черты (`8/5201` → 8). Читающий поток в числе: ядро считает и его.
+func parseLoadavgRunnable(data []byte) (int64, error) {
+	var field []byte
+	rest := data
+	for range 4 {
+		field, rest = nextField(rest)
+	}
+	running, _, ok := bytes.Cut(field, []byte{'/'})
+	if !ok {
+		return 0, fmt.Errorf("loadavg: нет поля выполняются/всего в %.60q", data)
+	}
+	n, err := parseIntBytes(running)
+	if err != nil {
+		return 0, fmt.Errorf("loadavg выполняются: %w", err)
+	}
+	return n, nil
 }
 
 // parseVMStat — pswpin, pswpout, pgmajfault из /proc/vmstat.
@@ -318,29 +342,42 @@ func parseProcStat(s []byte) (procStat, error) {
 	return st, nil
 }
 
-// parseMemInfo — Dirty и Writeback из /proc/meminfo, байты.
-func parseMemInfo(data []byte) (dirty, writeback int64, err error) {
-	for len(data) > 0 {
+// memInfo — нужное из /proc/meminfo, байты.
+type memInfo struct{ dirty, writeback, available, swapTotal, swapFree int64 }
+
+// swapUsed — занятый своп, байты.
+func (m memInfo) swapUsed() int64 { return m.swapTotal - m.swapFree }
+
+// memInfoKeys — поля meminfo в порядке memInfo; нет любого — ошибка (ядро без них — не наше).
+var memInfoKeys = [...][]byte{[]byte("Dirty:"), []byte("Writeback:"), []byte("MemAvailable:"), []byte("SwapTotal:"), []byte("SwapFree:")}
+
+// parseMemInfo — Dirty, Writeback, MemAvailable, SwapTotal и SwapFree из /proc/meminfo, байты.
+func parseMemInfo(data []byte) (memInfo, error) {
+	var m memInfo
+	dst := [len(memInfoKeys)]*int64{&m.dirty, &m.writeback, &m.available, &m.swapTotal, &m.swapFree}
+	seen := 0
+	for len(data) > 0 && seen < len(memInfoKeys) {
 		var line []byte
 		line, data = nextLine(data)
 		key, rest := nextField(line)
-		var dst *int64
-		switch {
-		case bytes.Equal(key, []byte("Dirty:")):
-			dst = &dirty
-		case bytes.Equal(key, []byte("Writeback:")):
-			dst = &writeback
-		default:
-			continue
+		for i, want := range memInfoKeys {
+			if !bytes.Equal(key, want) {
+				continue
+			}
+			value, _ := nextField(rest)
+			n, err := parseIntBytes(value)
+			if err != nil {
+				return memInfo{}, fmt.Errorf("meminfo %s: %w", key, err)
+			}
+			*dst[i] = n * 1024
+			seen++
+			break
 		}
-		value, _ := nextField(rest)
-		n, err := parseIntBytes(value)
-		if err != nil {
-			return 0, 0, fmt.Errorf("meminfo %s: %w", key, err)
-		}
-		*dst = n * 1024
 	}
-	return dirty, writeback, nil
+	if seen < len(memInfoKeys) {
+		return memInfo{}, fmt.Errorf("meminfo: из %d полей (Dirty, Writeback, MemAvailable, SwapTotal, SwapFree) найдено %d", len(memInfoKeys), seen)
+	}
+	return m, nil
 }
 
 // cachedFile — открытый файл счётчика: ядро пересчитывает содержимое на каждое чтение с нуля,

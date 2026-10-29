@@ -6,29 +6,29 @@ import (
 	"time"
 )
 
-// FastReader — быстрый шаг машины целиком: PSI io и memory, vmstat, строка устройства в diskstats.
-// Принадлежит одной горутине.
+// FastReader — быстрый шаг машины целиком: PSI io, memory и cpu, vmstat, строка устройства в
+// diskstats, готовые к работе из loadavg. Принадлежит одной горутине.
 type FastReader struct {
-	device                          string
-	ioPSI, memPSI, vmstat, diskstat cachedFile
-	buf                             []byte
-	prev                            fastCounters
-	primed                          bool
+	device                                           string
+	ioPSI, memPSI, cpuPSI, vmstat, diskstat, loadavg cachedFile
+	buf                                              []byte
+	prev                                             fastCounters
+	primed                                           bool
 }
 
 type fastCounters struct {
-	ioSome, ioFull, memSome, memFull, swapIn, swapOut, majflt int64
-	disk                                                      diskCounters
+	ioSome, ioFull, memSome, memFull, cpuSome, swapIn, swapOut, majflt int64
+	disk                                                               diskCounters
 }
 
 func NewFastReader(procRoot, device string) *FastReader {
 	path := func(name string) cachedFile { return cachedFile{path: filepath.Join(procRoot, name)} }
-	return &FastReader{device: device, ioPSI: path("pressure/io"), memPSI: path("pressure/memory"),
-		vmstat: path("vmstat"), diskstat: path("diskstats"), buf: make([]byte, 8192)}
+	return &FastReader{device: device, ioPSI: path("pressure/io"), memPSI: path("pressure/memory"), cpuPSI: path("pressure/cpu"),
+		vmstat: path("vmstat"), diskstat: path("diskstats"), loadavg: path("loadavg"), buf: make([]byte, 8192)}
 }
 
 func (r *FastReader) Close() {
-	for _, f := range []*cachedFile{&r.ioPSI, &r.memPSI, &r.vmstat, &r.diskstat} {
+	for _, f := range []*cachedFile{&r.ioPSI, &r.memPSI, &r.cpuPSI, &r.vmstat, &r.diskstat, &r.loadavg} {
 		f.close()
 	}
 }
@@ -50,6 +50,19 @@ func (r *FastReader) Read(now time.Time) (Step, error) {
 	if c.memSome, c.memFull, err = parsePressureTotals(data); err != nil {
 		return Step{}, fmt.Errorf("разобрать %s: %w", r.memPSI.path, err)
 	}
+	if r.buf, data, err = r.cpuPSI.read(r.buf); err != nil {
+		return Step{}, err
+	}
+	if c.cpuSome, _, err = parsePressureTotals(data); err != nil {
+		return Step{}, fmt.Errorf("разобрать %s: %w", r.cpuPSI.path, err)
+	}
+	if r.buf, data, err = r.loadavg.read(r.buf); err != nil {
+		return Step{}, err
+	}
+	runnable, err := parseLoadavgRunnable(data)
+	if err != nil {
+		return Step{}, err
+	}
 	if r.buf, data, err = r.vmstat.read(r.buf); err != nil {
 		return Step{}, err
 	}
@@ -69,8 +82,10 @@ func (r *FastReader) Read(now time.Time) (Step, error) {
 		r.primed = true
 		return s, nil
 	}
+	s.Runnable = runnable // моментальное, не дельта
 	s.IOSomeUS, s.IOFullUS = delta(c.ioSome, p.ioSome), delta(c.ioFull, p.ioFull)
 	s.MemSomeUS, s.MemFullUS = delta(c.memSome, p.memSome), delta(c.memFull, p.memFull)
+	s.CPUSomeUS = delta(c.cpuSome, p.cpuSome)
 	s.SwapIn, s.SwapOut, s.Majflt = delta(c.swapIn, p.swapIn), delta(c.swapOut, p.swapOut), delta(c.majflt, p.majflt)
 	d, pd := c.disk, p.disk
 	s.ReadBytes, s.WriteBytes = delta(d.readBytes, pd.readBytes), delta(d.writeBytes, pd.writeBytes)

@@ -53,9 +53,39 @@ func TestParsePressureVMStatMemInfo(t *testing.T) {
 	if err != nil || in != 5 || out != 6 || maj != 7 {
 		t.Fatalf("vmstat: %d %d %d %v", in, out, maj, err)
 	}
-	dirty, wb, err := parseMemInfo([]byte("MemTotal:  10 kB\nDirty:   2 kB\nWriteback:   3 kB\n"))
-	if err != nil || dirty != 2048 || wb != 3072 {
-		t.Fatalf("meminfo: %d %d %v", dirty, wb, err)
+	mem, err := parseMemInfo([]byte("MemTotal:  10 kB\nMemAvailable:  6 kB\nSwapTotal:  9 kB\nSwapFree:  4 kB\nDirty:   2 kB\nWriteback:   3 kB\n"))
+	if err != nil || mem != (memInfo{dirty: 2048, writeback: 3072, available: 6144, swapTotal: 9216, swapFree: 4096}) || mem.swapUsed() != 5120 {
+		t.Fatalf("meminfo: %+v %v", mem, err)
+	}
+	if _, err := parseMemInfo([]byte("MemTotal:  10 kB\nDirty:   2 kB\nWriteback:   3 kB\n")); err == nil || !strings.Contains(err.Error(), "найдено 2") {
+		t.Fatalf("meminfo без MemAvailable и свопа — ошибка: %v", err)
+	}
+}
+
+// /proc/pressure/cpu: строки full на старых ядрах нет или она нулевая — только some; без some — ошибка.
+func TestParsePressureCPUWithoutFullAndLoadavg(t *testing.T) {
+	for name, data := range map[string]string{
+		"без full":     "some avg10=12.00 avg60=9.00 avg300=8.00 total=37814016426\n",
+		"нулевая full": "some avg10=12.00 avg60=9.00 avg300=8.00 total=37814016426\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+	} {
+		some, full, err := parsePressureTotals([]byte(data))
+		if err != nil || some != 37814016426 || full != 0 {
+			t.Errorf("%s: %d %d %v", name, some, full, err)
+		}
+	}
+	for name, data := range map[string]string{"пусто": "", "только full": "full avg10=0.00 total=5\n", "some без total": "some avg10=1.00\n"} {
+		if _, _, err := parsePressureTotals([]byte(data)); err == nil {
+			t.Errorf("%s: без some нужна ошибка", name)
+		}
+	}
+	n, err := parseLoadavgRunnable([]byte("17.65 16.94 14.02 8/5201 3854786\n"))
+	if err != nil || n != 8 {
+		t.Fatalf("loadavg: %d %v", n, err)
+	}
+	for _, bad := range []string{"17.65 16.94 14.02\n", "1 2 3 x/5 9\n", "1 2 3 85201 9\n"} {
+		if _, err := parseLoadavgRunnable([]byte(bad)); err == nil {
+			t.Errorf("loadavg %q без ошибки", bad)
+		}
 	}
 }
 
@@ -149,26 +179,28 @@ func TestParseSnapshotSkipsBrokenAndUnfinishedLines(t *testing.T) {
 
 func TestDeltaFastCounterReset(t *testing.T) {
 	root := t.TempDir()
-	write := func(ioFull, swapIn, written int) {
+	write := func(ioFull, swapIn, written, cpuSome, runnable int) {
 		writeFile(t, filepath.Join(root, "pressure", "io"), "some avg10=0 total=1\nfull avg10=0 total="+strconv.Itoa(ioFull)+"\n")
 		writeFile(t, filepath.Join(root, "pressure", "memory"), "some avg10=0 total=1\nfull avg10=0 total=1\n")
+		writeFile(t, filepath.Join(root, "pressure", "cpu"), "some avg10=0 total="+strconv.Itoa(cpuSome)+"\n")
+		writeFile(t, filepath.Join(root, "loadavg"), "1.00 2.00 3.00 "+strconv.Itoa(runnable)+"/5201 77\n")
 		writeFile(t, filepath.Join(root, "vmstat"), "pswpin "+strconv.Itoa(swapIn)+"\npswpout 0\npgmajfault 0\n")
 		writeFile(t, filepath.Join(root, "diskstats"), "259 0 nvme0n1 0 0 0 0 0 0 "+strconv.Itoa(written)+" 0 0 0 0\n")
 	}
-	write(1000, 10, 8)
+	write(1000, 10, 8, 500, 3)
 	r := NewFastReader(root, "nvme0n1")
 	defer r.Close()
 	now := time.Now()
 	if s, err := r.Read(now); err != nil || s.IOFullUS != 0 {
 		t.Fatalf("первое чтение — точка отсчёта: %+v %v", s, err)
 	}
-	write(61000, 4, 16)
+	write(61000, 4, 16, 12500, 18)
 	s, err := r.Read(now.Add(100 * time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.IOFullUS != 60000 || s.SwapIn != 0 || s.WriteBytes != 8*512 {
-		t.Fatalf("дельты (своп сброшен): %+v", s)
+	if s.IOFullUS != 60000 || s.SwapIn != 0 || s.WriteBytes != 8*512 || s.CPUSomeUS != 12000 || s.Runnable != 18 {
+		t.Fatalf("дельты (своп сброшен), CPU some — дельта, runnable — моментальное: %+v", s)
 	}
 }
 
@@ -365,6 +397,43 @@ func TestDeltaCgroupNewLeafFullCounters(t *testing.T) {
 	}
 	if len(s.Cgroups) != 1 || s.Cgroups[0].Path != "/user.slice/idle.scope" || s.Cgroups[0].WriteBytes != 200 {
 		t.Fatalf("старый лист с процессами — по дельте: %+v", s.Cgroups)
+	}
+}
+
+// CPU листа — дельта usage_usec из cpu.stat, anon — моментальный из memory.stat. Лист только с
+// anon (спит, CPU и IO нет) в проход не попадает; cpu.stat без usage_usec — ошибка этого листа.
+func TestDeltaCgroupCPUAndAnon(t *testing.T) {
+	root := t.TempDir()
+	leaf := func(rel, usage, anon string) {
+		dir := filepath.Join(root, rel)
+		writeFile(t, filepath.Join(dir, "cgroup.procs"), "1\n")
+		for _, name := range []string{"io.pressure", "memory.pressure"} {
+			writeFile(t, filepath.Join(dir, name), "some avg10=0 total=0\nfull avg10=0 total=0\n")
+		}
+		writeFile(t, filepath.Join(dir, "cpu.stat"), "usage_usec "+usage+"\nuser_usec 1\nsystem_usec 1\n")
+		writeFile(t, filepath.Join(dir, "memory.stat"), "anon "+anon+"\nanon_thp 4096\nfile 1\npgmajfault 0\n")
+	}
+	leaf("glint.service", "1000000", "1048576")
+	leaf("sleep.scope", "500", "2097152")
+	r := newCgroupReader(root, []string{"252:0"})
+	defer r.close()
+	now := time.Now()
+	if skipped, err := r.read(&Step{At: now}); err != nil || skipped != nil {
+		t.Fatal(err, skipped)
+	}
+	leaf("glint.service", "4000000", "3145728")
+	leaf("sleep.scope", "500", "4194304")
+	s := Step{At: now.Add(time.Second)}
+	if skipped, err := r.read(&s); err != nil || skipped != nil {
+		t.Fatal(err, skipped)
+	}
+	if len(s.Cgroups) != 1 || s.Cgroups[0].Path != "/glint.service" || s.Cgroups[0].CPUUS != 3_000_000 || s.Cgroups[0].AnonB != 3<<20 {
+		t.Fatalf("CPU и anon: %+v", s.Cgroups)
+	}
+	writeFile(t, filepath.Join(root, "glint.service", "cpu.stat"), "user_usec 1\n")
+	s = Step{At: now.Add(2 * time.Second)}
+	if skipped, err := r.read(&s); err != nil || skipped == nil || !strings.Contains(skipped.Error(), "usage_usec") {
+		t.Fatalf("cpu.stat без usage_usec: skipped=%v err=%v", skipped, err)
 	}
 }
 
@@ -726,4 +795,62 @@ func benchRecorderStep(b *testing.B, r *Recorder) {
 		r.Step(s)
 		i++
 	}
+}
+
+// Чтение быстрого шага и детального прохода с настоящих /proc и /sys машины: сколько стоит шаг
+// службы (fast), проход целиком (detail) и одни листья cgroup (cgroups). Не Linux или нет диска —
+// пропуск. Машина живая: цифры сравнивать прогонами подряд (benchstat), не с чужой машиной.
+func BenchmarkReadLive(b *testing.B) {
+	roots, device := SystemRoots(), Default().Device
+	if _, err := os.Stat(filepath.Join(roots.Block, device)); err != nil {
+		b.Skipf("нет диска %s: %v", device, err)
+	}
+	b.Run("fast", func(b *testing.B) {
+		r := NewFastReader(roots.Proc, device)
+		defer r.Close()
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := r.Read(time.Now()); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("detail", func(b *testing.B) {
+		r, err := NewDetailReader(roots, device)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer r.Close()
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, _, err := r.Read(time.Now()); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("cgroups", func(b *testing.B) {
+		devices, err := blockDevices(roots.Block, device)
+		if err != nil {
+			b.Fatal(err)
+		}
+		r := newCgroupReader(roots.Cgroup, devices)
+		defer r.close()
+		b.ReportAllocs()
+		leaves, inPass, cpuOnly := 0, 0, 0
+		for b.Loop() {
+			s := Step{At: time.Now()}
+			if _, err := r.read(&s); err != nil {
+				b.Fatal(err)
+			}
+			leaves, inPass, cpuOnly = len(r.leaves), len(s.Cgroups), 0
+			for _, g := range s.Cgroups {
+				if g.ReadBytes|g.WriteBytes|g.ReadOps|g.WriteOps|g.SwapIn|g.SwapOut|g.Majflt|g.IOFullUS|g.MemFullUS == 0 {
+					cpuOnly++ // в проходе только из-за CPU: столько добавила фаза 1б в буфер
+				}
+			}
+		}
+		b.ReportMetric(float64(leaves), "leaves")
+		b.ReportMetric(float64(inPass), "in-pass")
+		b.ReportMetric(float64(cpuOnly), "cpu-only")
+	})
 }

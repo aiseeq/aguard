@@ -18,7 +18,7 @@ import (
 const cgroupLeavesEvery = 10 * time.Second
 
 // cgroupReader — дельты листьев cgroup v2 с процессами: io.stat по диску и dm над ним, memory.stat
-// (своп и majflt), PSI full io и memory.
+// (своп, majflt и моментальный anon), PSI full io и memory, CPU из cpu.stat.
 //
 // Новая cgroup видна со следующего прохода: каждый проход сверяет время изменения внутренних папок
 // дерева (их около двадцати; mkdir и rmdir потомка его меняют) и при расхождении обходит дерево.
@@ -37,11 +37,11 @@ type cgroupReader struct {
 }
 
 type cgroupEntry struct {
-	ioStat, memStat, ioPSI, memPSI cachedFile
-	io                             [][ioFields]int64 // накопительные по устройствам
-	swapIn, swapOut, majflt        int64
-	ioFull, memFull                int64
-	primed                         bool // false — первое чтение только запоминает; новый лист — с нулей
+	ioStat, memStat, ioPSI, memPSI, cpuStat cachedFile
+	io                                      [][ioFields]int64 // накопительные по устройствам
+	swapIn, swapOut, majflt                 int64
+	ioFull, memFull, cpuUS                  int64
+	primed                                  bool // false — первое чтение только запоминает; новый лист — с нулей
 }
 
 func newCgroupReader(root string, devices []string) *cgroupReader {
@@ -57,7 +57,7 @@ func (r *cgroupReader) close() {
 }
 
 func (g *cgroupEntry) close() {
-	for _, f := range []*cachedFile{&g.ioStat, &g.memStat, &g.ioPSI, &g.memPSI} {
+	for _, f := range []*cachedFile{&g.ioStat, &g.memStat, &g.ioPSI, &g.memPSI, &g.cpuStat} {
 		f.close()
 	}
 }
@@ -89,7 +89,8 @@ func (r *cgroupReader) read(s *Step) (skipped, err error) {
 			}
 			continue
 		}
-		if item.ReadBytes|item.WriteBytes|item.ReadOps|item.WriteOps|item.SwapIn|item.SwapOut|item.Majflt|item.IOFullUS|item.MemFullUS != 0 {
+		// AnonB — моментальное, лист в проход не выводит: иначе каждый спящий лист с памятью.
+		if item.ReadBytes|item.WriteBytes|item.ReadOps|item.WriteOps|item.SwapIn|item.SwapOut|item.Majflt|item.IOFullUS|item.MemFullUS|item.CPUUS != 0 {
 			s.Cgroups = append(s.Cgroups, item)
 		}
 	}
@@ -129,7 +130,7 @@ func (r *cgroupReader) refresh(now time.Time) error {
 			}
 			file := func(name string) cachedFile { return cachedFile{path: filepath.Join(base, name)} }
 			r.groups[rel] = &cgroupEntry{ioStat: file("io.stat"), memStat: file("memory.stat"), ioPSI: file("io.pressure"),
-				memPSI: file("memory.pressure"), io: make([][ioFields]int64, len(r.devices)),
+				memPSI: file("memory.pressure"), cpuStat: file("cpu.stat"), io: make([][ioFields]int64, len(r.devices)),
 				primed: r.newEmpty[rel] || created}
 		}
 	}
@@ -171,8 +172,8 @@ func createdAfter(dir string, t time.Time) (bool, error) {
 	return time.Unix(st.Ctim.Unix()).After(t), nil
 }
 
-// readGroup читает четыре файла листа и считает дельты. Нет io.stat или memory.stat (контроллер
-// не включён) — по ним нули.
+// readGroup читает пять файлов листа и считает дельты. Нет io.stat, memory.stat или cpu.stat
+// (контроллер не включён; cpu.stat в cgroup v2 есть всегда, но лист мог пропасть) — по ним нули.
 func (r *cgroupReader) readGroup(rel string, g *cgroupEntry) (Cgroup, error) {
 	item := Cgroup{Path: "/" + rel}
 	var data []byte
@@ -198,21 +199,29 @@ func (r *cgroupReader) readGroup(rel string, g *cgroupEntry) (Cgroup, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return item, fmt.Errorf("io.stat %s: %w", rel, err)
 	}
-	var swapIn, swapOut, majflt int64
+	var mem memStat
 	if r.buf, data, err = g.memStat.read(r.buf); err == nil {
-		swapIn, swapOut, majflt, err = parseMemStatSwap(data)
+		mem, err = parseMemStat(data)
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return item, fmt.Errorf("memory.stat %s: %w", rel, err)
 	}
+	var cpuUS int64
+	if r.buf, data, err = g.cpuStat.read(r.buf); err == nil {
+		cpuUS, err = parseCPUStatUsage(data)
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return item, fmt.Errorf("cpu.stat %s: %w", rel, err)
+	}
+	item.AnonB = mem.anon
 	if g.primed {
 		item.ReadBytes, item.WriteBytes = maxDelta(r.ioScr, g.io, ioReadBytes), maxDelta(r.ioScr, g.io, ioWriteBytes)
 		item.ReadOps, item.WriteOps = maxDelta(r.ioScr, g.io, ioReadOps), maxDelta(r.ioScr, g.io, ioWriteOps)
-		item.SwapIn, item.SwapOut, item.Majflt = delta(swapIn, g.swapIn), delta(swapOut, g.swapOut), delta(majflt, g.majflt)
-		item.IOFullUS, item.MemFullUS = delta(ioFull, g.ioFull), delta(memFull, g.memFull)
+		item.SwapIn, item.SwapOut, item.Majflt = delta(mem.swapIn, g.swapIn), delta(mem.swapOut, g.swapOut), delta(mem.majflt, g.majflt)
+		item.IOFullUS, item.MemFullUS, item.CPUUS = delta(ioFull, g.ioFull), delta(memFull, g.memFull), delta(cpuUS, g.cpuUS)
 	}
 	copy(g.io, r.ioScr)
-	g.swapIn, g.swapOut, g.majflt, g.ioFull, g.memFull, g.primed = swapIn, swapOut, majflt, ioFull, memFull, true
+	g.swapIn, g.swapOut, g.majflt, g.ioFull, g.memFull, g.cpuUS, g.primed = mem.swapIn, mem.swapOut, mem.majflt, ioFull, memFull, cpuUS, true
 	return item, nil
 }
 
@@ -303,17 +312,37 @@ func maxDelta(cur, prev [][ioFields]int64, field int) int64 {
 	return best
 }
 
-// parseMemStatSwap — pswpin, pswpout и pgmajfault из memory.stat.
-func parseMemStatSwap(data []byte) (swapIn, swapOut, majflt int64, err error) {
-	err = cgroupstats.EachKeyed(data, func(key []byte, value int64) {
+// memStat — нужное из memory.stat листа: счётчики свопа и majflt, моментальный anon (байт).
+type memStat struct{ swapIn, swapOut, majflt, anon int64 }
+
+// parseMemStat — pswpin, pswpout, pgmajfault и anon из memory.stat.
+func parseMemStat(data []byte) (memStat, error) {
+	var m memStat
+	err := cgroupstats.EachKeyed(data, func(key []byte, value int64) {
 		switch {
 		case bytes.Equal(key, []byte("pswpin")):
-			swapIn = value
+			m.swapIn = value
 		case bytes.Equal(key, []byte("pswpout")):
-			swapOut = value
+			m.swapOut = value
 		case bytes.Equal(key, []byte("pgmajfault")):
-			majflt = value
+			m.majflt = value
+		case bytes.Equal(key, []byte("anon")):
+			m.anon = value
 		}
 	})
-	return swapIn, swapOut, majflt, err
+	return m, err
+}
+
+// parseCPUStatUsage — usage_usec из cpu.stat листа, мкс; поля нет — ошибка.
+func parseCPUStatUsage(data []byte) (int64, error) {
+	usage, seen := int64(0), false
+	err := cgroupstats.EachKeyed(data, func(key []byte, value int64) {
+		if bytes.Equal(key, []byte("usage_usec")) {
+			usage, seen = value, true
+		}
+	})
+	if err == nil && !seen {
+		err = errors.New("нет usage_usec")
+	}
+	return usage, err
 }

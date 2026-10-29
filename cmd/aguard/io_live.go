@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -74,7 +75,8 @@ func askIO(socket string, req iowatch.Request) (iowatch.Answer, error) {
 	return ans, nil
 }
 
-// writeIONow — две строки: окна 1/5/30 с; dirty, случай, свежие случаи, кто пишет, свод вида.
+// writeIONow — две строки: окна 1/5/30 с; CPU и память за 1 с, dirty, случай, свежие случаи, кто
+// пишет, свод вида.
 func writeIONow(w io.Writer, n *iowatch.Now) {
 	win := func(label string, x iowatch.NowWindow) string {
 		return fmt.Sprintf("%s: full %d мс, простой %d мс, W/R %.0f/%.0f МБ/с, ожид W %d мс, очередь %d", label, x.IOFullMS, x.StallMS,
@@ -89,7 +91,12 @@ func writeIONow(w io.Writer, n *iowatch.Now) {
 	for i, x := range n.Writers {
 		writers[i] = fmt.Sprintf("%s %.0f МБ/с", x.Name, megabytes(x.WriteBps))
 	}
-	line := fmt.Sprintf("dirty %.0f МБ, writeback %.0f МБ; %s; случаев за 60 с: %d (от 200 мс: %d)", megabytes(n.Dirty),
+	cpu := fmt.Sprintf("cpu some %d мс/с, runnable %d/%d, avail %s ГиБ, swap-in %s МБ/с", n.W1s.CPUSomeMS, n.W1s.RunnableMax, n.NProc,
+		ioDecimal(float64(n.MemAvailable)/(1<<30)), ioDecimal(megabytes(n.W1s.SwapIn*int64(os.Getpagesize()))))
+	if len(n.Swappers) > 0 {
+		cpu += " (" + n.Swappers[0].Name + ")"
+	}
+	line := fmt.Sprintf("%s; dirty %.0f МБ, writeback %.0f МБ; %s; случаев за 60 с: %d (от 200 мс: %d)", cpu, megabytes(n.Dirty),
 		megabytes(n.Writeback), open, n.Cases.From100ms60s, n.Cases.From200ms60s)
 	if len(writers) > 0 {
 		line += "; пишут: " + strings.Join(writers, ", ")
@@ -108,9 +115,9 @@ func writeIOSeries(w io.Writer, seconds []iowatch.MachineSecond) {
 	}
 	for i := range seconds {
 		s := &seconds[i]
-		fmt.Fprintf(w, "%s  io full %d мс  mem full %d мс  простой %d мс  R/W %.0f/%.0f МБ  ожид W %d мс  очередь %d  flush %d  dirty %.0f МБ  writeback %.0f МБ  swapin %d\n",
+		fmt.Fprintf(w, "%s  io full %d мс  mem full %d мс  простой %d мс  R/W %.0f/%.0f МБ  ожид W %d мс  очередь %d  flush %d  dirty %.0f МБ  writeback %.0f МБ  swapin %d  cpu some %d мс  runnable %d  avail %.0f МБ\n",
 			s.At.Format("02.01 15:04:05"), s.IOFullMS, s.MemFullMS, s.StallMS, megabytes(s.ReadB), megabytes(s.WriteB), s.WAwaitMS,
-			s.InFlightMax, s.Flushes, megabytes(s.Dirty), megabytes(s.Writeback), s.SwapIn)
+			s.InFlightMax, s.Flushes, megabytes(s.Dirty), megabytes(s.Writeback), s.SwapIn, s.CPUSomeMS, s.RunnableMax, megabytes(s.MemAvail))
 	}
 }
 
@@ -122,9 +129,9 @@ func writeIOProfiles(w io.Writer, profiles []iowatch.Profile) {
 	}
 	for i := range profiles {
 		p := &profiles[i]
-		line := fmt.Sprintf("%s  %s  %s  %s  W %.0f МБ (пик %.0f МБ/с)  R %.0f МБ (пик %.0f МБ/с)  простой IO %d мс  swapin %d",
+		line := fmt.Sprintf("%s  %s  %s  %s  W %.0f МБ (пик %.0f МБ/с)  R %.0f МБ (пик %.0f МБ/с)  простой IO %d мс  swapin %d  CPU %s мин (пик %s ядра)",
 			p.End.Format("02.01 15:04"), ioSeconds(p.DurMS), p.Kind, p.Name, megabytes(p.WriteB), megabytes(p.PeakWriteBps),
-			megabytes(p.ReadB), megabytes(p.PeakReadBps), p.IOFullMS, p.SwapIn)
+			megabytes(p.ReadB), megabytes(p.PeakReadBps), p.IOFullMS, p.SwapIn, ioDecimal(float64(p.CPUMS)/float64(time.Minute.Milliseconds())), ioDecimal(float64(p.PeakCPUMilli)/1000))
 		if len(p.Procs) > 0 {
 			procs := make([]string, len(p.Procs))
 			for j, r := range p.Procs {

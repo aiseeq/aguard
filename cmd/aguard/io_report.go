@@ -58,7 +58,12 @@ func ioSeconds(ms int64) string {
 	if ms < 1000 {
 		return fmt.Sprintf("%d мс", ms)
 	}
-	return strings.Replace(strconv.FormatFloat(float64(ms)/1000, 'f', 1, 64), ".", ",", 1) + " с"
+	return ioDecimal(float64(ms)/1000) + " с"
+}
+
+// ioDecimal — число с десятыми через запятую: «1,1».
+func ioDecimal(x float64) string {
+	return strings.Replace(strconv.FormatFloat(x, 'f', 1, 64), ".", ",", 1)
 }
 
 // ioReport — итог случаев [since, until): из файла службы (live) — сначала служба пишет сводки из
