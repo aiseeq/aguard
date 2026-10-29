@@ -1,17 +1,15 @@
 package restart
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/linesock"
 )
 
 // Version — версия протокола вопроса cl и ответа aguard. Другая версия у cl — то же, что нет ответа: не перезапускать.
@@ -120,79 +118,14 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	}
 }
 
-// ioTimeout — срок на чтение вопроса и запись ответа: cl ждёт около 2 с.
-const ioTimeout = 2 * time.Second
-
-// maxConns — сколько вопросов разбирается сразу; остальные ждут в очереди accept.
-const maxConns = 8
-
-// Listen открывает сокет: папка только для владельца, старый сокет от прошлого запуска удаляется.
-func Listen(socket string) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
-		return nil, fmt.Errorf("папка сокета: %w", err)
-	}
-	if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("старый сокет: %w", err)
-	}
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		return nil, fmt.Errorf("сокет %s: %w", socket, err)
-	}
-	return ln, nil
-}
-
-// Serve отвечает на вопросы до отмены ctx. answer получает разобранный вопрос; ошибки соединений — в журнал.
+// Serve отвечает на вопросы cl до отмены ctx (сокет — linesock.Listen). answer получает разобранный вопрос;
+// ошибки соединений — в журнал.
 func Serve(ctx context.Context, ln net.Listener, answer func(Request) Answer, lg *slog.Logger) error {
-	stop := context.AfterFunc(ctx, func() {
-		if err := ln.Close(); err != nil {
-			lg.Warn("aguard restart: закрытие сокета", "err", err)
+	return linesock.Serve(ctx, ln, func(line []byte) any {
+		var req Request
+		if err := json.Unmarshal(line, &req); err != nil {
+			return Answer{V: Version, Error: "вопрос не JSON: " + err.Error()}
 		}
-	})
-	defer stop()
-	slots := make(chan struct{}, maxConns)
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	for {
-		conn, err := ln.Accept()
-		if ctx.Err() != nil {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("приём вопроса: %w", err)
-		}
-		slots <- struct{}{}
-		wg.Go(func() { // не больше maxConns сразу: слот берётся до запуска
-			defer func() { <-slots }()
-			if err := handle(conn, answer); err != nil {
-				lg.Warn("aguard restart: вопрос cl", "err", err)
-			}
-		})
-	}
-}
-
-// handle — один вопрос и один ответ строкой JSON.
-func handle(conn net.Conn, answer func(Request) Answer) (err error) {
-	defer func() { err = errors.Join(err, conn.Close()) }()
-	if err := conn.SetDeadline(time.Now().Add(ioTimeout)); err != nil {
-		return fmt.Errorf("срок соединения: %w", err)
-	}
-	line, err := bufio.NewReader(conn).ReadBytes('\n')
-	if err != nil {
-		return fmt.Errorf("чтение вопроса: %w", err)
-	}
-	var req Request
-	a := Answer{V: Version}
-	if err := json.Unmarshal(line, &req); err != nil {
-		a.Error = "вопрос не JSON: " + err.Error()
-	} else {
-		a = answer(req)
-	}
-	b, err := json.Marshal(a)
-	if err != nil {
-		return fmt.Errorf("ответ: %w", err)
-	}
-	if _, err := conn.Write(append(b, '\n')); err != nil {
-		return fmt.Errorf("запись ответа: %w", err)
-	}
-	return nil
+		return answer(req)
+	}, lg, "aguard restart")
 }

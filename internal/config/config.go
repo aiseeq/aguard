@@ -75,10 +75,17 @@ func Default(home string) Config {
 		Said:       said.Default(),
 		Bgtask:     bgtask.Default(),
 		Cpu:        cpuwatch.Default(home),
-		IO:         iowatch.Default(),
+		IO:         ioDefault(),
 		Remote:     remotebroken.Default(home),
 		Night:      night.Default(home),
 	}
+}
+
+// ioDefault — раздел [io] по умолчанию с сокетом в $XDG_RUNTIME_DIR.
+func ioDefault() iowatch.Config {
+	c := iowatch.Default()
+	c.Socket = iowatch.DefaultSocket(runtimeDir())
+	return c
 }
 
 // Load читает конфиг поверх значений по умолчанию; нет файла — значения по
@@ -123,6 +130,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Cpu.Lead, c.Cpu.SendAuth = c.Lead, c.SendAuth
 	c.Disk.Lead, c.Disk.SendAuth = c.Lead, c.SendAuth
 	c.IO.Lead, c.IO.SendAuth = c.Lead, c.SendAuth
+	c.IO.Socket = policy.ExpandHome(c.IO.Socket, home)
 	c.Remote.Lead, c.Remote.SendAuth = c.Lead, c.SendAuth
 	c.Night.Lead, c.Night.SendAuth = c.Lead, c.SendAuth
 	if err := c.Orphans.Compile(home); err != nil {

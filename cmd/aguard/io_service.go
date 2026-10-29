@@ -119,6 +119,8 @@ const (
 	ioWarnEvery     = time.Minute      // одно и то же предупреждение — не чаще
 	ioPassEvery     = time.Minute      // цикл 100 мс — не safePass: проход в учёт отмечает сам, не чаще
 	ioNoDeviceEvery = 24 * time.Hour   // нет диска из device — напоминание раз в сутки
+	ioCgroupsEvery  = time.Minute      // кончились ли cgroup профилей (папки нет) — не в цикле 100 мс
+	ioWorkerEvery   = 24 * time.Hour   // нет класса бойца в job.json — напоминание раз в сутки
 )
 
 // errIORestart — изменились параметры замера (mode, step, detail, ring, device): цикл строится заново.
@@ -129,11 +131,21 @@ var errIORestart = errors.New("io: параметры замера измени�
 // файлов и письма идут в своих горутинах и возвращаются через extra: быстрый цикл не ждёт ни диска,
 // ни сокетов.
 type ioService struct {
-	a         *app
-	ctx       context.Context
-	dir       string // ручные снимки
-	path      string // сводки случаев
-	cfg       iowatch.Config
+	a            *app
+	ctx          context.Context
+	dir          string // ручные снимки
+	path         string // сводки случаев
+	seriesPath   string
+	profilesPath string
+	cgroupRoot   string // /sys/fs/cgroup: конец cgroup профиля
+	workerState  string // ~/.local/state/worker: класс бойца из job.json
+	cfg          iowatch.Config
+	// Ряд, накопление профилей и живое состояние — дольше цикла замера: каждый Recorder получает их
+	// через Attach. live читают и соединения сокета (под своим мьютексом).
+	series    *iowatch.Series
+	profiles  *iowatch.Profiles
+	live      *iowatch.Live
+	ended     []iowatch.Profile // профили кончившихся cgroup в сроке profiles_keep
 	rec       *iowatch.Recorder
 	extra     chan func()
 	restart   context.CancelFunc
@@ -148,12 +160,20 @@ type ioService struct {
 }
 
 func newIOService(ctx context.Context, a *app) *ioService {
-	return &ioService{a: a, ctx: ctx, dir: filepath.Join(a.dir("io"), "events"), path: filepath.Join(a.dir("io"), ioCasesFile),
+	state := a.dir("io")
+	return &ioService{a: a, ctx: ctx, dir: filepath.Join(state, "events"), path: filepath.Join(state, ioCasesFile),
+		seriesPath: filepath.Join(state, ioSeriesFile), profilesPath: filepath.Join(state, ioProfilesFile),
+		cgroupRoot: iowatch.SystemRoots().Cgroup, workerState: filepath.Join(a.home, ".local", "state", "worker"),
+		series: iowatch.NewSeries(iowatch.Default().SeriesKeep.D()), profiles: iowatch.NewProfiles(), live: iowatch.NewLive(),
 		extra: make(chan func(), 16), warnAt: map[string]time.Time{}}
 }
 
-// ioCasesFile — копия сводок случаев в папке состояния io.
-const ioCasesFile = "cases.jsonl"
+// Копии в папке состояния io: сводки случаев, посекундный ряд машины, профили cgroup.
+const (
+	ioCasesFile    = "cases.jsonl"
+	ioSeriesFile   = "series.jsonl"
+	ioProfilesFile = "profiles.jsonl"
+)
 
 // ioLoop — наблюдатель io: mode=off — не замеряет совсем; паника или ошибка цикла — warn и перезапуск.
 // usr1 — SIGUSR1, сводки в файл (`aguard io report`), usr2 — SIGUSR2, ручной снимок буфера
@@ -162,6 +182,7 @@ const ioCasesFile = "cases.jsonl"
 func (a *app) ioLoop(ctx context.Context, usr1, usr2 <-chan os.Signal) {
 	s := newIOService(ctx, a)
 	s.load()
+	go s.serve()
 	go func() {
 		for {
 			var f func()
@@ -169,7 +190,7 @@ func (a *app) ioLoop(ctx context.Context, usr1, usr2 <-chan os.Signal) {
 			case <-ctx.Done():
 				return
 			case <-usr1:
-				f = s.save
+				f = func() { s.save(true) }
 			case <-usr2:
 				f = s.dump
 			}
@@ -201,41 +222,97 @@ func (a *app) ioLoop(ctx context.Context, usr1, usr2 <-chan os.Signal) {
 			s.wait(time.Second)
 		}
 	}
-	if err := iowatch.SaveCases(s.path, s.kept(time.Now())); err != nil {
-		a.warn("io", "сводки случаев при остановке", "err", err)
+	s.saveStop(time.Now())
+}
+
+// saveStop — копии сводок, профилей и ряда при остановке, в горутине цикла.
+func (s *ioService) saveStop(now time.Time) {
+	if err := iowatch.SaveCases(s.path, s.kept(now)); err != nil {
+		s.a.warn("io", "сводки случаев при остановке", "err", err)
+	}
+	if err := iowatch.SaveProfiles(s.profilesPath, s.keptProfiles(now)); err != nil {
+		s.a.warn("io", "профили cgroup при остановке", "err", err)
+	}
+	if err := iowatch.SaveSeries(s.seriesPath, s.series.Rows(time.Time{}).Seconds()); err != nil {
+		s.a.warn("io", "ряд машины при остановке", "err", err)
 	}
 }
 
-// load — сводки прошлых запусков; файл не читается — он сохраняется рядом с пометкой, история
-// начинается заново (иначе следующая запись затёрла бы его).
+// load — сводки, ряд и профили прошлых запусков в сроке из конфига (не прочитался — по умолчанию).
 func (s *ioService) load() {
-	cases, err := iowatch.LoadCases(s.path)
-	if err != nil {
-		broken := s.path + ".broken-" + time.Now().Format("20060102T150405")
-		s.a.warn("io", "сводки случаев не прочитаны, файл отложен", "err", err, "path", broken)
-		if err := os.Rename(s.path, broken); err != nil {
-			s.a.warn("io", "отложить файл сводок", "err", err)
-		}
-		return
+	cfg := iowatch.Default()
+	if c, err := s.a.config(); err == nil {
+		cfg = c.IO
 	}
-	s.cases = cases
+	now := time.Now()
+	s.cases = loadIOFile(s, s.path, "сводки случаев", iowatch.LoadCases)
+	seconds := loadIOFile(s, s.seriesPath, "ряд машины", func(path string) ([]iowatch.MachineSecond, error) {
+		return iowatch.LoadSeries(path, now.Add(-cfg.SeriesKeep.D()))
+	})
+	s.series = iowatch.NewSeries(cfg.SeriesKeep.D())
+	for i := range seconds {
+		s.series.Add(seconds[i])
+	}
+	s.ended = loadIOFile(s, s.profilesPath, "профили cgroup", func(path string) ([]iowatch.Profile, error) {
+		return iowatch.LoadProfiles(path, now.Add(-cfg.ProfilesKeep.D()))
+	})
+	s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
 }
 
-// kept — сводки в сроке cases_keep (по прошлому конфигу, если замер не шёл — по умолчанию).
-func (s *ioService) kept(now time.Time) []iowatch.Case {
-	keep := s.cfg.CasesKeep.D()
-	if keep <= 0 {
-		keep = iowatch.Default().CasesKeep.D()
+// loadIOFile — копия прошлого запуска; файл не читается — он сохраняется рядом с пометкой, история
+// начинается заново (иначе следующая запись затёрла бы его).
+func loadIOFile[T any](s *ioService, path, what string, load func(string) ([]T, error)) []T {
+	items, err := load(path)
+	if err == nil {
+		return items
 	}
-	s.cases = iowatch.MergeCases(s.cases, nil, now.Add(-keep))
+	broken := path + ".broken-" + time.Now().Format("20060102T150405")
+	s.a.warn("io", what+" не прочитаны, файл отложен", "err", err, "path", broken)
+	if err := os.Rename(path, broken); err != nil {
+		s.a.warn("io", "отложить файл: "+what, "err", err)
+	}
+	return nil
+}
+
+// keepCfg — сроки по текущему циклу; замер не шёл — по умолчанию.
+func (s *ioService) keepCfg() iowatch.Config {
+	if s.cfg.CasesKeep.D() <= 0 {
+		return iowatch.Default()
+	}
+	return s.cfg
+}
+
+// kept — сводки в сроке cases_keep.
+func (s *ioService) kept(now time.Time) []iowatch.Case {
+	s.cases = iowatch.MergeCases(s.cases, nil, now.Add(-s.keepCfg().CasesKeep.D()))
 	return s.cases
 }
 
-// save — копия сводок в файл своей горутиной; запрос `aguard io report` ждёт обновления файла.
-func (s *ioService) save() {
-	cases := slices.Clone(s.kept(time.Now()))
+// keptProfiles — профили в сроке profiles_keep; свод по видам для now — по ним же.
+func (s *ioService) keptProfiles(now time.Time) []iowatch.Profile {
+	since := now.Add(-s.keepCfg().ProfilesKeep.D())
+	if len(s.ended) > 0 && s.ended[0].End.Before(since) {
+		s.ended = iowatch.FilterProfiles(s.ended, "", since)
+		s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
+	}
+	return s.ended
+}
+
+// save — копия сводок и профилей (withSeries — и ряда: он большой, только при остановке и по SIGUSR1)
+// в файлы своей горутиной; запрос `aguard io report` ждёт обновления файла сводок, он пишется первым.
+func (s *ioService) save(withSeries bool) {
+	now := time.Now()
+	cases, profiles := slices.Clone(s.kept(now)), slices.Clone(s.keptProfiles(now))
+	var rows iowatch.SeriesRows
+	if withSeries {
+		rows = s.series.Rows(time.Time{})
+	}
 	go func() {
 		s.postWarn(s.ctx, time.Now(), "save", "сводки случаев", iowatch.SaveCases(s.path, cases))
+		s.postWarn(s.ctx, time.Now(), "save-profiles", "профили cgroup", iowatch.SaveProfiles(s.profilesPath, profiles))
+		if withSeries {
+			s.postWarn(s.ctx, time.Now(), "save-series", "ряд машины", iowatch.SaveSeries(s.seriesPath, rows.Seconds()))
+		}
 	}()
 }
 
@@ -275,6 +352,8 @@ func (s *ioService) run(cfg iowatch.Config) (err error) {
 	s.gen++
 	s.cfg, s.restart, s.restarted = cfg, cancel, false
 	s.rec = iowatch.NewRecorder(cfg)
+	s.resizeSeries(cfg)
+	s.rec.Attach(s.series, s.profiles, s.live)
 	go s.housekeep(ctx, s.gen, cfg.Keep.D())
 	err = runIOSampling(ctx, cfg, iowatch.SystemRoots(), s, s.extra)
 	if s.restarted {
@@ -319,7 +398,7 @@ func (s *ioService) warnEvery(now time.Time, key string, every time.Duration, wh
 func (s *ioService) housekeep(ctx context.Context, gen int, keep time.Duration) {
 	reload := time.NewTicker(ioReloadEvery)
 	defer reload.Stop()
-	cleanAt, saveAt := time.Time{}, time.Now().Add(ioSaveEvery)
+	cleanAt, saveAt, cgroupsAt := time.Time{}, time.Now().Add(ioSaveEvery), time.Now().Add(ioCgroupsEvery)
 	for {
 		now := time.Now()
 		if now.After(cleanAt) {
@@ -328,7 +407,11 @@ func (s *ioService) housekeep(ctx context.Context, gen int, keep time.Duration) 
 		}
 		if now.After(saveAt) {
 			saveAt = now.Add(ioSaveEvery)
-			s.post(ctx, s.save)
+			s.post(ctx, func() { s.save(false) })
+		}
+		if now.After(cgroupsAt) {
+			cgroupsAt = now.Add(ioCgroupsEvery)
+			s.checkCgroups(ctx, now)
 		}
 		select {
 		case <-ctx.Done():
@@ -375,6 +458,59 @@ func (s *ioService) reconfigure(gen int, next iowatch.Config, err error) {
 	}
 	s.cfg = next
 	s.rec.SetConfig(next)
+	s.resizeSeries(next)
+	s.rec.Attach(s.series, s.profiles, s.live)
+}
+
+// resizeSeries — ряд под series_keep из конфига: строки, которые влезают, сохраняются.
+func (s *ioService) resizeSeries(cfg iowatch.Config) {
+	if s.series.Keep() != cfg.SeriesKeep.D() {
+		s.series = s.series.Resize(cfg.SeriesKeep.D())
+	}
+}
+
+// checkCgroups — из горутины housekeep: какие cgroup профилей кончились (папки нет) и их вид;
+// закрывает их горутина цикла (endProfiles). Пути берутся у неё же.
+func (s *ioService) checkCgroups(ctx context.Context, now time.Time) {
+	paths := make(chan []string, 1)
+	s.post(ctx, func() { paths <- s.profiles.Open() })
+	var open []string
+	select {
+	case open = <-paths:
+	case <-ctx.Done():
+		return
+	}
+	gone := map[string]string{}
+	for _, path := range open {
+		ok, err := iowatch.CgroupGone(s.cgroupRoot, path)
+		if err != nil {
+			s.postWarn(ctx, now, "cgroup-gone", "проверка конца cgroup", err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		gone[path] = iowatch.ProfileKind(path, s.workerState, func(err error) { // вид годен (worker:?), предупреждение — раз в сутки
+			s.post(ctx, func() {
+				s.warnEvery(now, "worker-class", ioWorkerEvery, "класс бойца не найден, вид "+iowatch.KindWorkerUnknown, err)
+			})
+		})
+	}
+	if len(gone) > 0 {
+		s.post(ctx, func() { s.endProfiles(gone, now) })
+	}
+}
+
+// endProfiles — профили кончившихся cgroup в память; свод по видам для now обновляется.
+func (s *ioService) endProfiles(gone map[string]string, now time.Time) {
+	ended := s.profiles.End(gone, s.keepCfg().Detail.D())
+	if len(ended) == 0 {
+		return
+	}
+	s.ended = append(s.ended, ended...)
+	iowatch.SortProfiles(s.ended)
+	s.keptProfiles(now)
+	s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
 }
 
 // closed — случай в сводки; от case_min — строка журнала, от alert_min — в очередь письма.

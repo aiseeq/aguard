@@ -20,7 +20,7 @@ import (
 // Команды наблюдателя io: запись в переднем плане, итог случаев, ручной снимок службы и окно по нему,
 // перевод старых снимков событий в случаи.
 
-// ioCmd — aguard io report | record | dump | at | import.
+// ioCmd — aguard io report | record | dump | at | import | now | series | profiles.
 func (a *app) ioCmd(ctx context.Context, args []string) error {
 	cmd, rest := sub(args)
 	events := filepath.Join(a.dir("io"), "events")
@@ -69,6 +69,25 @@ func (a *app) ioCmd(ctx context.Context, args []string) error {
 		out := fl.String("out", cases, "файл сводок")
 		parse(fl, rest)
 		return a.ioImport(*dir, *out, *out == cases, *remove)
+	case "now":
+		fl := flag.NewFlagSet("io now", flag.ContinueOnError)
+		kind := fl.String("kind", "", "вид задачи: в ответе — свод его профилей (worker:<класс>, agent, service:<unit>)")
+		asJSON := fl.Bool("json", false, "ответ службы JSON как есть")
+		parse(fl, rest)
+		return a.ioLive(iowatch.Request{Q: iowatch.QueryNow, Kind: *kind}, *asJSON)
+	case "series":
+		fl := flag.NewFlagSet("io series", flag.ContinueOnError)
+		since := fl.String("since", "1h", "с какого времени: 30m, 2h, 3d, ЧЧ:ММ, RFC3339")
+		asJSON := fl.Bool("json", false, "ответ службы JSON как есть")
+		parse(fl, rest)
+		return a.ioLiveSince(iowatch.Request{Q: iowatch.QuerySeries}, *since, *asJSON)
+	case "profiles":
+		fl := flag.NewFlagSet("io profiles", flag.ContinueOnError)
+		kind := fl.String("kind", "", "вид: worker:<класс>, agent, service:<unit>; пусто — все")
+		since := fl.String("since", "7d", "конец профиля не раньше: 30m, 2h, 3d, ЧЧ:ММ, RFC3339")
+		asJSON := fl.Bool("json", false, "ответ службы JSON как есть")
+		parse(fl, rest)
+		return a.ioLiveSince(iowatch.Request{Q: iowatch.QueryProfiles, Kind: *kind}, *since, *asJSON)
 	}
 	return fmt.Errorf("aguard io: неизвестная команда %s", cmd)
 }

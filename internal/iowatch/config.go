@@ -6,6 +6,7 @@ package iowatch
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/bgtask"
@@ -34,28 +35,41 @@ type Config struct {
 	CasesKeep  policy.Duration `toml:"cases_keep"`  // срок сводок случаев
 	Keep       policy.Duration `toml:"keep"`        // срок файлов ручных снимков буфера
 	Device     string          `toml:"device"`      // диск в /proc/diskstats и /sys/block
-	Lead       string          `toml:"-"`
-	SendAuth   bool            `toml:"-"`
+	// Посекундный ряд машины и профили завершившихся cgroup — в памяти службы; файлы — их копия при
+	// остановке и по SIGUSR1 (профили — и раз в час, как сводки).
+	SeriesKeep   policy.Duration `toml:"series_keep"`   // срок посекундного ряда в памяти
+	ProfilesKeep policy.Duration `toml:"profiles_keep"` // срок профилей cgroup
+	// Socket — сокет моментального состояния диска (запросы now, series, profiles); смена — с перезапуском
+	// службы. По умолчанию $XDG_RUNTIME_DIR/io-state.sock (DefaultSocket).
+	Socket   string `toml:"socket"`
+	Lead     string `toml:"-"`
+	SendAuth bool   `toml:"-"`
 }
 
 func Default() Config {
 	return Config{
-		Mode:       ModeAlert,
-		Step:       policy.Duration(100 * time.Millisecond),
-		Detail:     policy.Duration(time.Second),
-		Ring:       policy.Duration(5 * time.Minute),
-		Trigger:    .5,
-		Gap:        policy.Duration(300 * time.Millisecond),
-		CaseMin:    policy.Duration(500 * time.Millisecond),
-		Context:    policy.Duration(5 * time.Second),
-		AlertMin:   policy.Duration(2 * time.Second),
-		AlertEvery: policy.Duration(15 * time.Minute),
-		QuietBytes: 1 << 20,
-		CasesKeep:  policy.Duration(14 * 24 * time.Hour),
-		Keep:       policy.Duration(7 * 24 * time.Hour),
-		Device:     "nvme0n1",
+		Mode:         ModeAlert,
+		Step:         policy.Duration(100 * time.Millisecond),
+		Detail:       policy.Duration(time.Second),
+		Ring:         policy.Duration(5 * time.Minute),
+		Trigger:      .5,
+		Gap:          policy.Duration(300 * time.Millisecond),
+		CaseMin:      policy.Duration(500 * time.Millisecond),
+		Context:      policy.Duration(5 * time.Second),
+		AlertMin:     policy.Duration(2 * time.Second),
+		AlertEvery:   policy.Duration(15 * time.Minute),
+		QuietBytes:   1 << 20,
+		CasesKeep:    policy.Duration(14 * 24 * time.Hour),
+		Keep:         policy.Duration(7 * 24 * time.Hour),
+		Device:       "nvme0n1",
+		SeriesKeep:   policy.Duration(24 * time.Hour),
+		ProfilesKeep: policy.Duration(30 * 24 * time.Hour),
 	}
 }
+
+// DefaultSocket — сокет моментального состояния в папке runtime ($XDG_RUNTIME_DIR). Имя без aguard:
+// клиент (akit) знает нейтральный контракт «источник моментального состояния диска», а не службу.
+func DefaultSocket(runtime string) string { return filepath.Join(runtime, "io-state.sock") }
 
 func (c *Config) Validate() error {
 	if c.Mode != ModeOff && c.Mode != ModeLog && c.Mode != ModeAlert {
@@ -76,6 +90,17 @@ func (c *Config) Validate() error {
 	}
 	if c.Device == "" {
 		return errors.New("device не должен быть пустым")
+	}
+	return c.validateLive()
+}
+
+// validateLive — ряд, профили и сокет моментального состояния.
+func (c *Config) validateLive() error {
+	if c.SeriesKeep.D() < time.Minute || c.SeriesKeep.D() > 7*24*time.Hour || c.ProfilesKeep.D() <= 0 {
+		return errors.New("series_keep от 1m до 168h (ряд держится в памяти), profiles_keep положителен")
+	}
+	if c.Socket == "" {
+		return errors.New("socket не должен быть пустым")
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/activity"
+	"github.com/aiseeq/aguard/internal/linesock"
 	"github.com/aiseeq/aguard/internal/restart"
 )
 
@@ -54,7 +55,7 @@ func (a *app) restartServe(ctx context.Context, j *restart.Judge) {
 		a.note("restart", activity.KindConfigSkipped, "сокет не открыт", "", 0, "")
 		return
 	}
-	ln, err := restart.Listen(cfg.Restart.Socket)
+	ln, err := linesock.Listen(cfg.Restart.Socket)
 	if err != nil {
 		a.log.Error("aguard restart: сокет не открыт", "err", err)
 		a.note("restart", "socket_failed", "", "", 0, "")

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/linesock"
 )
 
 func ask(t *testing.T, socket, line string) Answer {
@@ -35,7 +37,7 @@ func ask(t *testing.T, socket, line string) Answer {
 
 func TestServe(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "aguard", "aguard.sock")
-	ln, err := Listen(socket)
+	ln, err := linesock.Listen(socket)
 	if err != nil {
 		t.Fatal(err)
 	}

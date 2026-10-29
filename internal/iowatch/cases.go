@@ -131,6 +131,10 @@ type Recorder struct {
 	ring    *Ring
 	open    *openCase
 	waiting []Case // закрыты, ждут детальной записи за свой конец
+	// Ряд, профили и живое состояние службы (Attach); у `aguard io record` и import их нет.
+	series   *Series
+	profiles *Profiles
+	live     *Live
 }
 
 func NewRecorder(cfg Config) *Recorder {
@@ -140,30 +144,64 @@ func NewRecorder(cfg Config) *Recorder {
 // SetConfig меняет пороги на ходу; размер буфера — с новым Recorder.
 func (r *Recorder) SetConfig(cfg Config) { r.cfg = cfg }
 
+// Attach — посекундный ряд, профили cgroup и живое состояние службы: они живут дольше цикла замера,
+// каждый новый Recorder получает те же. nil — не копить.
+func (r *Recorder) Attach(series *Series, profiles *Profiles, live *Live) {
+	r.series, r.profiles, r.live = series, profiles, live
+}
+
 // Step кладёт быстрый шаг; готовые случаи (с виновниками) возвращаются.
 func (r *Recorder) Step(s Step) []Case {
 	r.ring.Add(Record{Kind: KindStep, Step: s})
 	step := r.cfg.Step.D()
+	var closed liveCase
 	if r.open != nil && s.At.Sub(r.open.last) > r.cfg.Gap.D()+step {
+		closed = liveCase{start: r.open.start, end: r.open.last}
 		r.waiting = append(r.waiting, r.open.toCase())
 		r.open = nil
 	}
+	stalled := Stalled(s, r.cfg)
 	switch {
-	case Stalled(s, r.cfg) && r.open == nil:
+	case stalled && r.open == nil:
 		r.open = &openCase{start: s.At.Add(-step), last: s.At}
 		r.open.sum.add(s)
-	case Stalled(s, r.cfg):
+	case stalled:
 		r.open.sum.merge(r.open.calm)
 		r.open.sum.add(s)
 		r.open.calm, r.open.last = stepSum{}, s.At
 	case r.open != nil:
 		r.open.calm.add(s)
 	}
+	var stallUS int64
+	if stalled {
+		stallUS = step.Microseconds()
+	}
+	if r.series != nil {
+		r.series.step(&s, stallUS)
+	}
+	if r.live != nil {
+		var open time.Time
+		if r.open != nil {
+			open = r.open.start
+		}
+		r.live.step(&s, stallUS, open, closed)
+	}
 	return r.ready(s.At.Add(-r.cfg.Detail.D() - step))
 }
 
-// Detail кладёт детальную запись в буфер.
-func (r *Recorder) Detail(s Step) { r.ring.Add(Record{Kind: KindDetail, Step: s}) }
+// Detail кладёт детальную запись в буфер, в ряд (Dirty, Writeback), профили и живое состояние.
+func (r *Recorder) Detail(s Step) {
+	r.ring.Add(Record{Kind: KindDetail, Step: s})
+	if r.series != nil {
+		r.series.detail(s.Dirty, s.Writeback)
+	}
+	if r.profiles != nil {
+		r.profiles.detail(&s, r.cfg.Detail.D())
+	}
+	if r.live != nil {
+		r.live.detail(&s, r.cfg.Detail.D())
+	}
+}
 
 // ready — закрытые случаи с концом не позже covered (детальные записи за них уже в буфере).
 func (r *Recorder) ready(covered time.Time) []Case {

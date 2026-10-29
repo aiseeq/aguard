@@ -696,9 +696,18 @@ func TestDeltaCgroupErrorSkipsOnlyIt(t *testing.T) {
 }
 
 // Быстрый шаг Recorder, как в цикле службы: шаг 100 мс, детальная запись раз в секунду, каждые
-// 3 с — простой на 200 мс (случай открывается и закрывается). Горячий путь: без аллокаций.
+// 3 с — простой на 200 мс (случай открывается и закрывается); ряд, профили и живое состояние —
+// как у службы (service) и без них (bare: `aguard io record`, прежний путь). Горячий путь: без аллокаций.
 func BenchmarkRecorderStep(b *testing.B) {
-	r := NewRecorder(Default())
+	b.Run("bare", func(b *testing.B) { benchRecorderStep(b, NewRecorder(Default())) })
+	b.Run("service", func(b *testing.B) {
+		r := NewRecorder(Default())
+		r.Attach(NewSeries(24*time.Hour), NewProfiles(), NewLive())
+		benchRecorderStep(b, r)
+	})
+}
+
+func benchRecorderStep(b *testing.B, r *Recorder) {
 	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
 	detail := Step{Dirty: 40 << 20, Writeback: 1 << 20, Processes: []Process{{PID: 7, Comm: "dd", WriteBytes: 1 << 20, Cgroup: "/user.slice/agent-s-1.scope"}},
 		Cgroups: []Cgroup{{Path: "/user.slice/agent-s-1.scope", ReadBytes: 4096, WriteBytes: 1 << 20, WriteOps: 3, IOFullUS: 1000}}}

@@ -15,22 +15,43 @@ import (
 
 // Сводки случаев живут в памяти службы; файл — их копия при остановке, по запросу сводки и раз в час.
 
+// Копии в папке состояния io: сводки случаев, посекундный ряд машины, профили cgroup — строка JSON на
+// запись, файл пишется целиком.
+const (
+	whatCases    = "сводки случаев"
+	whatSeries   = "ряд машины"
+	whatProfiles = "профили cgroup"
+)
+
 // SaveCases пишет случаи в path целиком (через path.part и переименование).
-func SaveCases(path string, cases []Case) (err error) {
+func SaveCases(path string, cases []Case) error { return saveLines(path, whatCases, cases) }
+
+// SaveSeries пишет секунды ряда в path целиком.
+func SaveSeries(path string, seconds []MachineSecond) error {
+	return saveLines(path, whatSeries, seconds)
+}
+
+// SaveProfiles пишет профили в path целиком.
+func SaveProfiles(path string, profiles []Profile) error {
+	return saveLines(path, whatProfiles, profiles)
+}
+
+// saveLines пишет записи строками JSON в path целиком (через path.*.part и переименование).
+func saveLines[T any](path, what string, items []T) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("папка сводок: %w", err)
+		return fmt.Errorf("папка %s: %w", what, err)
 	}
-	err = writeAtomic(path, func(w *bufio.Writer) error {
+	err := writeAtomic(path, func(w *bufio.Writer) error {
 		enc := json.NewEncoder(w)
-		for i := range cases {
-			if err := enc.Encode(&cases[i]); err != nil {
+		for i := range items {
+			if err := enc.Encode(&items[i]); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("сводки случаев %s: %w", path, err)
+		return fmt.Errorf("%s %s: %w", what, path, err)
 	}
 	return nil
 }
@@ -62,23 +83,50 @@ func writeAtomic(path string, write func(*bufio.Writer) error) error {
 
 // LoadCases читает случаи из path; файла нет — пусто. Битая строка — ошибка: файл пишет только
 // SaveCases целиком, порча — повод разобраться, а не молча потерять историю.
-func LoadCases(path string) ([]Case, error) {
+func LoadCases(path string) ([]Case, error) { return loadLines[Case](path, whatCases) }
+
+// LoadSeries читает секунды ряда с At не раньше since, как LoadCases.
+func LoadSeries(path string, since time.Time) ([]MachineSecond, error) {
+	seconds, err := loadLines[MachineSecond](path, whatSeries)
+	return keepSince(seconds, func(s *MachineSecond) time.Time { return s.At }, since), err
+}
+
+// LoadProfiles читает профили с концом не раньше since, как LoadCases.
+func LoadProfiles(path string, since time.Time) ([]Profile, error) {
+	profiles, err := loadLines[Profile](path, whatProfiles)
+	return keepSince(profiles, func(p *Profile) time.Time { return p.End }, since), err
+}
+
+// keepSince — записи с временем at не раньше since, на месте.
+func keepSince[T any](items []T, at func(*T) time.Time, since time.Time) []T {
+	n := 0
+	for i := range items {
+		if !at(&items[i]).Before(since) {
+			items[n] = items[i]
+			n++
+		}
+	}
+	return items[:n]
+}
+
+// loadLines читает записи строками JSON из path; файла нет — пусто, битая запись — ошибка.
+func loadLines[T any](path, what string) ([]T, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("сводки случаев: %w", err)
+		return nil, fmt.Errorf("%s: %w", what, err)
 	}
 	defer f.Close()
-	var out []Case
+	var out []T
 	dec := json.NewDecoder(bufio.NewReaderSize(f, 64*1024))
 	for dec.More() {
-		var c Case
-		if err := dec.Decode(&c); err != nil {
-			return nil, fmt.Errorf("сводки случаев %s, запись %d: %w", path, len(out)+1, err)
+		var item T
+		if err := dec.Decode(&item); err != nil {
+			return nil, fmt.Errorf("%s %s, запись %d: %w", what, path, len(out)+1, err)
 		}
-		out = append(out, c)
+		out = append(out, item)
 	}
 	return out, nil
 }

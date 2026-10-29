@@ -1,16 +1,14 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/linesock"
 	"github.com/aiseeq/aguard/internal/restart"
 )
 
@@ -29,28 +27,9 @@ func aguardSocket() string {
 // askAguard — вердикт aguard по сессии. Ошибка — ответа нет: сокета нет, срок вышел, другая версия, aguard не
 // разобрал вопрос.
 func askAguard(socket string, req restart.Request) (restart.Answer, error) {
-	conn, err := net.DialTimeout("unix", socket, aguardTimeout)
-	if err != nil {
-		return restart.Answer{}, fmt.Errorf("aguard: %w", err)
-	}
-	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(aguardTimeout)); err != nil {
-		return restart.Answer{}, fmt.Errorf("aguard: срок: %w", err)
-	}
-	line, err := json.Marshal(req)
-	if err != nil {
-		return restart.Answer{}, fmt.Errorf("aguard: вопрос: %w", err)
-	}
-	if _, err := conn.Write(append(line, '\n')); err != nil {
-		return restart.Answer{}, fmt.Errorf("aguard: запись: %w", err)
-	}
-	b, err := bufio.NewReader(conn).ReadBytes('\n')
-	if err != nil {
-		return restart.Answer{}, fmt.Errorf("aguard: ответ: %w", err)
-	}
 	var a restart.Answer
-	if err := json.Unmarshal(b, &a); err != nil {
-		return restart.Answer{}, fmt.Errorf("aguard: ответ не JSON: %w", err)
+	if err := linesock.Ask(socket, aguardTimeout, req, &a); err != nil {
+		return restart.Answer{}, fmt.Errorf("aguard: %w", err)
 	}
 	switch {
 	case a.V != restart.Version:
