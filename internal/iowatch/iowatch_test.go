@@ -448,123 +448,82 @@ func TestRingOverflowOrderAndFiveMinutes(t *testing.T) {
 	}
 }
 
-func eventConfig() Config {
-	cfg := Default()
-	cfg.Calm = policy.Duration(300 * time.Millisecond)
-	return cfg
-}
-
-func TestEventOpensWithBufferExtendsAndClosesAfterCalm(t *testing.T) {
-	dir := t.TempDir()
-	r := NewRecorder(eventConfig(), dir)
-	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
-	step := func(i int, idle int64) *Event {
-		t.Helper()
-		ev, err := r.Step(Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond), IOFullUS: idle})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return ev
-	}
-	step(0, 0)
-	r.Detail(Step{At: base, Processes: []Process{{PID: 1, Comm: "dd", WriteBytes: 1}}})
-	step(1, 10_000)
-	if r.Active() {
-		t.Fatal("шаг ниже доли открыл событие")
-	}
-	step(2, 60_000) // открывает: 50 мс из 100
-	step(3, 20_000)
-	step(4, 70_000) // продлевает: простой спокойного шага 3 входит в событие
-	for i := 5; i < 8; i++ {
-		if ev := step(i, 0); ev != nil {
-			t.Fatalf("закрылось до calm на шаге %d", i)
-		}
-	}
-	ev := step(8, 0)
-	if ev == nil {
-		t.Fatal("не закрылось после calm")
-	}
-	if !ev.Start.Equal(base.Add(200*time.Millisecond)) || !ev.End.Equal(base.Add(400*time.Millisecond)) || ev.IdleUS != 150_000 || ev.PeakUS != 70_000 {
-		t.Fatalf("событие: %+v", ev)
-	}
-	if filepath.Base(ev.Path) != EventName(ev.Start) {
-		t.Fatalf("имя файла %s", ev.Path)
-	}
-	if _, open, err := r.Close(); open || err != nil { // ждёт дописи файла закрытого события
-		t.Fatalf("остановка без открытого события: open=%v err=%v", open, err)
-	}
-	win, err := ReadSnapshots(dir, base.Add(-time.Minute), base.Add(time.Minute), time.Minute, func(err error) { t.Error(err) })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(win.Steps) != 9 || len(win.Details) != 1 || !win.Steps[0].At.Equal(base) {
-		t.Fatalf("снимок: буфер до события и шаги до конца: шагов %d, детальных %d", len(win.Steps), len(win.Details))
-	}
-}
-
-// Два события подряд: второе берёт из буфера только записи позже записанных первым.
-func TestEventNextEventSkipsWrittenRecords(t *testing.T) {
-	dir := t.TempDir()
-	r := NewRecorder(eventConfig(), dir)
-	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
-	closed := 0
-	for i := range 40 {
-		idle := int64(0)
-		if i == 5 || i == 20 {
-			idle = 80_000
-		}
+// feed — шаги по 100 мс с простоем idle[i] от base; detail — детальная запись в начале каждой секунды.
+func feed(r *Recorder, base time.Time, idle []int64, detail func(at time.Time) Step) []Case {
+	var out []Case
+	for i, v := range idle {
 		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
-		if i%10 == 0 {
-			r.Detail(Step{At: at})
+		if i%10 == 0 && detail != nil {
+			r.Detail(detail(at))
 		}
-		ev, err := r.Step(Step{At: at, IOFullUS: idle})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if ev != nil {
-			closed++
-		}
+		out = append(out, r.Step(Step{At: at, IOFullUS: v, WriteBytes: 1 << 20, WIOS: 2, WMS: 60, InFlight: int64(i)})...)
 	}
-	if _, _, err := r.Close(); err != nil || closed != 2 {
-		t.Fatalf("событий %d, err %v", closed, err)
+	return out
+}
+
+func TestCaseStallsMergeAcrossShortCalmAndGetCulprits(t *testing.T) {
+	cfg := Default()
+	cfg.CaseMin = policy.Duration(200 * time.Millisecond)
+	r := NewRecorder(cfg)
+	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	idle := make([]int64, 20)
+	idle[1], idle[2], idle[3], idle[4] = 10_000, 60_000, 20_000, 70_000 // 10 мс — не простой; 20 мс между простоями входит в случай
+	got := feed(r, base, idle, func(at time.Time) Step {
+		return Step{At: at, Dirty: 5 << 20, Processes: []Process{{PID: 1, Start: 3, Comm: "dd", WriteBytes: 7 << 20}},
+			Cgroups: []Cgroup{{Path: "/user.slice/agent-sess7-1.scope", WriteBytes: 7 << 20, IOFullUS: 90_000}}}
+	})
+	if len(got) != 1 {
+		t.Fatalf("случаев %d: %+v", len(got), got)
 	}
-	seen := map[string]int{}
-	files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
-	for _, path := range files {
-		f, err := os.Open(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := ParseSnapshot(f, func(rec Record) { seen[rec.Kind+rec.At.Format(time.StampMilli)]++ }, func(err error) { t.Error(err) }); err != nil {
-			t.Fatal(err)
-		}
-		_ = f.Close()
+	c := got[0]
+	if !c.Start.Equal(base.Add(100*time.Millisecond)) || !c.End.Equal(base.Add(400*time.Millisecond)) || c.DurMS != 300 ||
+		c.IdleMS != 150 || c.PeakMS != 70 || c.IOFullMS != 150 || c.WriteB != 3<<20 || c.WAwaitMS != 30 || c.InFlight != 4 || c.Dirty != 5<<20 {
+		t.Fatalf("сводка: %+v", c)
 	}
-	for key, n := range seen {
-		if n > 1 {
-			t.Errorf("запись %s в снимках %d раз", key, n)
-		}
-	}
-	if len(files) != 2 || len(seen) != 25+3 { // шаги 0…24 (второе событие закрылось на 24), детальные 0, 10, 20
-		t.Fatalf("файлов %d, записей %d", len(files), len(seen))
+	k := c.Culprits
+	if k == nil || k.Main != "/user.slice/agent-sess7-1.scope" || len(k.ProcWrite) != 1 || k.ProcWrite[0] != (Ranked{"dd(1)", 14 << 20}) ||
+		k.CgroupWrite[0].Name != "sess7" || k.CgroupIdle[0].Value != 180 || !k.From.Equal(c.Start.Add(-5*time.Second)) {
+		t.Fatalf("виновники (детальные 0 и 1 с в окне): %+v", k)
 	}
 }
 
-func TestEventCloseOnStopAndDump(t *testing.T) {
-	dir := t.TempDir()
-	r := NewRecorder(eventConfig(), dir)
+// Простои через промежуток больше gap — два случая; короче case_min — без виновников; случай
+// отдаётся, только когда детальная запись за его конец уже пришла.
+func TestCaseSplitByGapShortWithoutCulpritsWaitsDetail(t *testing.T) {
+	r := NewRecorder(Default())
+	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	idle := make([]int64, 40)
+	idle[5], idle[10] = 80_000, 80_000 // 10 − 5 = 500 мс > gap 300 + шаг
+	var got []Case
+	for i, v := range idle {
+		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
+		cases := r.Step(Step{At: at, IOFullUS: v})
+		if len(cases) > 0 && i < 16 {
+			t.Fatalf("случай отдан на шаге %d, до детальной записи за его конец", i)
+		}
+		got = append(got, cases...)
+	}
+	if len(got) != 2 || got[0].DurMS != 100 || !got[1].End.Equal(base.Add(time.Second)) || got[0].Culprits != nil || got[1].Culprits != nil {
+		t.Fatalf("случаи: %+v", got)
+	}
+}
+
+func TestCaseCloseOnStopAndDump(t *testing.T) {
+	r := NewRecorder(Default())
 	base := time.Now()
-	if _, err := r.Step(Step{At: base, MemFullUS: 90_000}); err != nil {
-		t.Fatal(err)
+	if got := r.Step(Step{At: base, MemFullUS: 90_000}); len(got) != 0 {
+		t.Fatalf("случай закрылся сразу: %+v", got)
 	}
-	if !r.Active() {
-		t.Fatal("событие не открылось")
+	got := r.Close()
+	if len(got) != 1 || got[0].MemFullMS != 90 || got[0].IdleMS != 90 || !got[0].Quiet {
+		t.Fatalf("закрытие при остановке (без обмена с диском — тихий): %+v", got)
 	}
-	ev, open, err := r.Close()
-	if err != nil || !open || ev.IdleUS != 90_000 {
-		t.Fatalf("закрытие при остановке: %+v %v", ev, err)
+	r.Step(Step{At: base.Add(time.Second), IOFullUS: 90_000, WriteBytes: 2 << 20})
+	if got := r.Close(); len(got) != 1 || got[0].Quiet {
+		t.Fatalf("с обменом 2 МиБ — не тихий: %+v", got)
 	}
-	snap := r.Dump(base)
+	dir := t.TempDir()
+	snap := r.Dump(dir, base)
 	if err := snap.Wait(); err != nil {
 		t.Fatal(err)
 	}
@@ -573,6 +532,10 @@ func TestEventCloseOnStopAndDump(t *testing.T) {
 	}
 	if _, err := os.Stat(snap.Path + ".part"); !os.IsNotExist(err) {
 		t.Fatalf("временный файл остался: %v", err)
+	}
+	win, err := ReadSnapshots(dir, base.Add(-time.Minute), base.Add(time.Minute), time.Minute, func(err error) { t.Error(err) })
+	if err != nil || len(win.Steps) != 2 {
+		t.Fatalf("снимок: %d шагов, %v", len(win.Steps), err)
 	}
 }
 
@@ -596,43 +559,93 @@ func TestKeepRemovesOldSnapshotsOnly(t *testing.T) {
 	}
 }
 
-func TestFreezesStepsAboveMinAndCulprits(t *testing.T) {
+func TestCasesSaveLoadMergeAndBrokenFile(t *testing.T) {
 	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
-	var w Window
-	for i, idle := range []int64{60_000, 70_000, 0, 0, 0, 60_000, 20_000, 20_000, 20_000} {
-		w.Steps = append(w.Steps, Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond), IOFullUS: idle})
+	path := filepath.Join(t.TempDir(), "io", "cases.jsonl")
+	if got, err := LoadCases(path); err != nil || got != nil {
+		t.Fatalf("нет файла — пусто: %+v %v", got, err)
 	}
-	w.Details = []Step{{At: base.Add(time.Second), Processes: []Process{{PID: 2, Comm: "dd", WriteBytes: 1 << 20}}}, {At: base.Add(5 * time.Second)}}
-	got := w.Freezes(50 * time.Millisecond)
-	if len(got) != 2 {
-		t.Fatalf("фризы: %+v", got)
+	a := []Case{{Start: base, DurMS: 100}, {Start: base.Add(time.Hour), DurMS: 2500, Culprits: &Culprit{Main: "/x.scope", ProcWrite: []Ranked{{"dd(1)", 5}}}}}
+	b := []Case{{Start: base.Add(time.Hour), DurMS: 2500}, {Start: base.Add(-48 * time.Hour)}, {Start: base.Add(30 * time.Minute)}}
+	merged := MergeCases(a, b, base.Add(-time.Hour))
+	if len(merged) != 3 || !merged[1].Start.Equal(base.Add(30*time.Minute)) || merged[2].Culprits == nil {
+		t.Fatalf("слияние: повтор по началу — один, старше since — нет, по времени: %+v", merged)
 	}
-	if got[0].IdleUS != 130_000 || got[0].PeakUS != 70_000 || !got[1].Start.Equal(base.Add(500*time.Millisecond)) || got[1].IdleUS != 60_000 {
-		t.Fatalf("фон ниже min склеен или простой неверен: %+v", got)
+	if err := SaveCases(path, merged); err != nil {
+		t.Fatal(err)
 	}
-	if len(got[0].Details) != 1 || SumCulprits(got[0].Details).ProcWrite["dd(2)"] != 1<<20 {
-		t.Fatalf("виновники фриза: %+v", got[0].Details)
+	got, err := LoadCases(path)
+	if err != nil || len(got) != 3 || got[2].Culprits.ProcWrite[0].Name != "dd(1)" || !got[0].Start.Equal(base) {
+		t.Fatalf("прочитано: %+v %v", got, err)
+	}
+	writeFile(t, path, `{"start":"2026-10-28T15:00:00+01:00"}`+"\n{битая\n")
+	if _, err := LoadCases(path); err == nil || !strings.Contains(err.Error(), "запись 2") {
+		t.Fatalf("битая запись — ошибка с номером: %v", err)
 	}
 }
 
-// Сброс буфера 5 минут в файл (3000 шагов и 300 детальных): столько пишет горутина снимка при
-// открытии события и при ручном снимке.
+func TestSummarizeBucketsHoursMainAndCulprits(t *testing.T) {
+	base := time.Date(2026, 10, 29, 3, 10, 0, 0, time.Local)
+	long := func(at time.Time, ms int64, main, proc string) Case {
+		return Case{Start: at, DurMS: ms, IdleMS: ms / 2, Culprits: &Culprit{Main: main,
+			ProcWrite: []Ranked{{proc + "(1)", 1 << 20}, {proc + "(2)", 1 << 20}}, CgroupSwapIn: []Ranked{{"sess7", 10}}}}
+	}
+	cases := []Case{
+		{Start: base, DurMS: 100, IdleMS: 60},
+		long(base.Add(time.Minute), 2500, "/user.slice/agent-sess7-1.scope", "chrome"),
+		long(base.Add(2*time.Minute), 700, "/user.slice/agent-sess7-1.scope", "chrome"),
+		long(base.Add(time.Hour), 6000, "/app.slice/app-com.google.Chrome@ab12.service", "rm"),
+		{Start: base.Add(-time.Hour), DurMS: 9000}, // до since
+	}
+	s := Summarize(cases, base.Add(-time.Minute), base.Add(2*time.Hour), 500*time.Millisecond)
+	if s.Total != 4 || s.IdleMS != 60+1250+350+3000 || s.Buckets[0].Count != 1 || s.Buckets[2].Count != 1 || s.Buckets[4].Count != 1 ||
+		s.Buckets[5].Count != 1 || s.Buckets[5].Label != "≥5 с" || s.Buckets[5].ToMS != 0 {
+		t.Fatalf("итог и корзины: %+v", s)
+	}
+	if len(s.Hours) != 2 || s.Hours[0].Count != 3 || s.Hours[0].Long != 2 || s.Hours[0].MaxDurMS != 2500 || !s.Hours[1].Hour.Equal(base.Add(time.Hour).Truncate(time.Hour)) {
+		t.Fatalf("часы: %+v", s.Hours)
+	}
+	if len(s.Cases) != 3 || s.Cases[0].DurMS != 6000 || s.Main[0] != (RankedCases{"sess7", 3200, 2}) || s.Main[1].Name != "com.google.Chrome" {
+		t.Fatalf("случаи и главные: %+v %+v", s.Cases, s.Main)
+	}
+	if w := s.Culprits.ProcWrite; len(w) != 2 || w[0] != (RankedCases{"chrome", 4 << 20, 2}) || s.Culprits.CgroupSwapIn[0] != (RankedCases{"sess7", 30, 3}) {
+		t.Fatalf("виновники: процессы без pid, случай считается раз: %+v", s.Culprits)
+	}
+}
+
+func TestCgroupNameSessionAppDocker(t *testing.T) {
+	for path, want := range map[string]string{
+		"/user.slice/user-1000.slice/user@1000.service/app.slice/app-com.google.Chrome@a1e2e36ed98.service": "com.google.Chrome",
+		"/user.slice/user-1000.slice/user@1000.service/app.slice/app-com.google.Chrome-1020295.scope":       "com.google.Chrome",
+		"/user.slice/app-flatpak-com.rtosta.zapzap-3652013825.scope":                                        "flatpak-com.rtosta.zapzap",
+		"/system.slice/docker-ffa992139584eed83753dccdd082ae554395f6cc36ab18839a0eea1701d43e91.scope":       "docker-ffa992139584",
+		"/system.slice/systemd-journald.service":                                                            "systemd-journald.service",
+	} {
+		if got := CgroupName(path); got != want {
+			t.Errorf("%s → %q, хотели %q", path, got, want)
+		}
+	}
+	if got := ProcBase("bash(123)+дети"); got != "bash" {
+		t.Errorf("ProcBase: %q", got)
+	}
+}
+
+// Сброс буфера 5 минут в файл (3000 шагов и 300 детальных) — ручной снимок.
 func BenchmarkRecorderDump5m(b *testing.B) {
-	r := NewRecorder(Default(), b.TempDir())
+	r := NewRecorder(Default())
 	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
 	for i := range 3000 {
 		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
-		if _, err := r.Step(Step{At: at, IOFullUS: 1200, MemFullUS: 300, ReadBytes: 4096, WriteBytes: 8192, RIOS: 2, WIOS: 3, WMS: 8, InFlight: 1}); err != nil {
-			b.Fatal(err)
-		}
+		r.Step(Step{At: at, IOFullUS: 1200, MemFullUS: 300, ReadBytes: 4096, WriteBytes: 8192, RIOS: 2, WIOS: 3, WMS: 8, InFlight: 1})
 		if i%10 == 0 {
 			r.Detail(Step{At: at, Processes: []Process{{PID: i + 1, Comm: "benchmark", ReadBytes: 4096, WriteBytes: 8192}, {PID: i + 2, Comm: "dd", WriteBytes: 1 << 20}},
 				Cgroups: []Cgroup{{Path: "/user.slice/agent-s-1.scope", ReadBytes: 4096, WriteBytes: 8192, WriteOps: 3, IOFullUS: 1000}}})
 		}
 	}
+	dir := b.TempDir()
 	b.ReportAllocs()
 	for b.Loop() {
-		snap := r.Dump(base.Add(5 * time.Minute))
+		snap := r.Dump(dir, base.Add(5*time.Minute))
 		if err := snap.Wait(); err != nil {
 			b.Fatal(err)
 		}

@@ -17,13 +17,23 @@ import (
 	"github.com/aiseeq/aguard/internal/iowatch"
 )
 
-// Команды наблюдателя io: запись в переднем плане, ручной снимок службы, окно по времени, фризы.
+// Команды наблюдателя io: запись в переднем плане, итог случаев, ручной снимок службы и окно по нему,
+// перевод старых снимков событий в случаи.
 
-// ioCmd — aguard io record | dump | at | freezes.
+// ioCmd — aguard io report | record | dump | at | import.
 func (a *app) ioCmd(ctx context.Context, args []string) error {
 	cmd, rest := sub(args)
 	events := filepath.Join(a.dir("io"), "events")
+	cases := filepath.Join(a.dir("io"), ioCasesFile)
 	switch cmd {
+	case "report":
+		fl := flag.NewFlagSet("io report", flag.ContinueOnError)
+		since := fl.Duration("since", 24*time.Hour, "глубина")
+		minDur := fl.Duration("min", 0, "случаи от такой длительности — списком и в виновниках (0 — case_min из конфига)")
+		asJSON := fl.Bool("json", false, "итог JSON")
+		file := fl.String("file", cases, "файл сводок; не файл службы — читается как есть, без запроса службе")
+		parse(fl, rest)
+		return a.ioReport(*file, *file == cases, time.Now().Add(-*since), time.Now(), *minDur, *asJSON)
 	case "record":
 		fl := flag.NewFlagSet("io record", flag.ContinueOnError)
 		dur := fl.Duration("for", 30*time.Second, "длительность записи")
@@ -52,13 +62,13 @@ func (a *app) ioCmd(ctx context.Context, args []string) error {
 			return err
 		}
 		return a.ioAt(*dir, at, *window)
-	case "freezes":
-		fl := flag.NewFlagSet("io freezes", flag.ContinueOnError)
-		since := fl.Duration("since", 24*time.Hour, "глубина поиска")
-		minIdle := fl.Duration("min", 50*time.Millisecond, "простой шага, с которого он — фриз")
-		dir := fl.String("dir", events, "папка снимков")
+	case "import":
+		fl := flag.NewFlagSet("io import", flag.ContinueOnError)
+		dir := fl.String("dir", events, "папка снимков событий")
+		remove := fl.Bool("remove", false, "удалить снимки событий после записи случаев")
+		out := fl.String("out", cases, "файл сводок")
 		parse(fl, rest)
-		return a.ioFreezes(*dir, time.Now().Add(-*since), time.Now(), *minIdle)
+		return a.ioImport(*dir, *out, *out == cases, *remove)
 	}
 	return fmt.Errorf("aguard io: неизвестная команда %s", cmd)
 }
@@ -72,8 +82,8 @@ func (a *app) ioConfig() (iowatch.Config, error) {
 	return c.IO, nil
 }
 
-// ioRecord — замер в переднем плане тем же циклом, буфером и событиями, что у службы, без разбора
-// и писем; в конце — буфер ручным снимком в dir.
+// ioRecord — замер в переднем плане тем же циклом, буфером и случаями, что у службы, без писем;
+// случаи — строкой в вывод, в конце — буфер ручным снимком в dir.
 func (a *app) ioRecord(ctx context.Context, dur time.Duration, dir string) error {
 	if dur <= 0 {
 		return errors.New("aguard io record: длительность должна быть положительной")
@@ -82,7 +92,7 @@ func (a *app) ioRecord(ctx context.Context, dur time.Duration, dir string) error
 	if err != nil {
 		return err
 	}
-	rec := iowatch.NewRecorder(cfg, dir)
+	rec := iowatch.NewRecorder(cfg)
 	sink := &ioRecordSink{a: a, rec: rec}
 	ctx, cancel := context.WithTimeout(ctx, dur)
 	defer cancel()
@@ -90,31 +100,26 @@ func (a *app) ioRecord(ctx context.Context, dur time.Duration, dir string) error
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		err = nil
 	}
-	ev, open, closeErr := rec.Close()
-	if open {
-		fmt.Fprintln(a.out, ioEventLine(ev))
-	}
-	snap := rec.Dump(time.Now())
+	sink.print(rec.Close())
+	snap := rec.Dump(dir, time.Now())
 	dumpErr := snap.Wait()
 	if dumpErr == nil {
 		fmt.Fprintln(a.out, snap.Path)
 	}
-	return errors.Join(err, closeErr, dumpErr)
+	return errors.Join(err, dumpErr)
 }
 
-// ioRecordSink — получатель замеров `aguard io record`: события — строкой в вывод.
+// ioRecordSink — получатель замеров `aguard io record`: случаи — строкой в вывод.
 type ioRecordSink struct {
 	a   *app
 	rec *iowatch.Recorder
 }
 
-func (s *ioRecordSink) step(st iowatch.Step) {
-	ev, err := s.rec.Step(st)
-	if err != nil {
-		s.a.log.Warn("aguard io: снимок фриза", "err", err)
-	}
-	if ev != nil {
-		fmt.Fprintln(s.a.out, ioEventLine(*ev))
+func (s *ioRecordSink) step(st iowatch.Step) { s.print(s.rec.Step(st)) }
+
+func (s *ioRecordSink) print(cases []iowatch.Case) {
+	for i := range cases {
+		fmt.Fprintln(s.a.out, ioCaseLine(&cases[i]))
 	}
 }
 
@@ -124,15 +129,8 @@ func (s *ioRecordSink) sampleErr(_ string, err error) {
 	s.a.log.Warn("aguard io: замер", "err", err)
 }
 
-// ioEventLine — строка журнала о закрытом событии.
-func ioEventLine(ev iowatch.Event) string {
-	return fmt.Sprintf("io: фриз с %s по %s, простой всего %d мс, пик шага %d мс",
-		ev.Start.Format("15:04:05.000"), ev.End.Format("15:04:05.000"), ev.IdleUS/1000, ev.PeakUS/1000)
-}
-
-// ioDump — SIGUSR1 службе и путь ручного снимка, когда он записан (до 10 с).
-func (a *app) ioDump(dir string) error {
-	requested := time.Now().Add(-time.Second)
+// ioSignal — сигнал службе aguard; служба не запущена — ошибка errIONotRunning.
+func ioSignal(sig syscall.Signal) error {
 	out, err := exec.Command("systemctl", "--user", "show", "-p", "MainPID", "--value", "aguard").Output()
 	if err != nil {
 		return fmt.Errorf("systemctl MainPID: %w", err)
@@ -140,10 +138,21 @@ func (a *app) ioDump(dir string) error {
 	value := strings.TrimSpace(string(out))
 	pid, err := strconv.Atoi(value)
 	if err != nil || pid <= 0 {
-		return fmt.Errorf("служба aguard не запущена (MainPID=%q)", value)
+		return fmt.Errorf("%w (MainPID=%q)", errIONotRunning, value)
 	}
-	if err := syscall.Kill(pid, syscall.SIGUSR1); err != nil {
+	if err := syscall.Kill(pid, sig); err != nil {
 		return fmt.Errorf("сигнал службе %d: %w", pid, err)
+	}
+	return nil
+}
+
+var errIONotRunning = errors.New("служба aguard не запущена")
+
+// ioDump — SIGUSR2 службе и путь ручного снимка, когда он записан (до 10 с).
+func (a *app) ioDump(dir string) error {
+	requested := time.Now().Add(-time.Second)
+	if err := ioSignal(syscall.SIGUSR2); err != nil {
+		return err
 	}
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
 		entries, err := os.ReadDir(dir)
@@ -205,16 +214,16 @@ func (a *app) ioSnapshotWarn(err error) { a.log.Warn("aguard io: " + err.Error()
 
 // writeIOWindow — секунды окна, затем итог окна по виновникам.
 func writeIOWindow(w io.Writer, win iowatch.Window) {
-	writeIOSeconds(w, win, false)
+	writeIOSeconds(w, win)
 	writeIOSummary(w, win)
 }
 
-// writeIOSeconds — строка на секунду с быстрыми шагами; onlyIdle — только секунды с простоем.
-func writeIOSeconds(w io.Writer, win iowatch.Window, onlyIdle bool) {
+// writeIOSeconds — строка на секунду с быстрыми шагами.
+func writeIOSeconds(w io.Writer, win iowatch.Window) {
 	seconds := win.Seconds()
 	for i := range seconds {
 		sec := &seconds[i]
-		if sec.Steps == 0 || onlyIdle && sec.IOFullUS+sec.MemFullUS == 0 {
+		if sec.Steps == 0 {
 			continue
 		}
 		fmt.Fprintf(w, "%s  io full %d мс (пик %d)  mem full %d мс  swapin %d стр  диск R/W %.0f/%.0f МБ  занят %.0f%%  ожид R/W %d/%d мс  очередь %d  flush %d\n",
@@ -228,14 +237,14 @@ func writeIOSeconds(w io.Writer, win iowatch.Window, onlyIdle bool) {
 func writeIOSummary(w io.Writer, win iowatch.Window) {
 	c := iowatch.SumCulprits(win.Details)
 	const names = 5
-	writeIOTop(w, "запись процессов", c.ProcWrite, ioBytes, names)
-	writeIOTop(w, "чтение процессов", c.ProcRead, ioBytes, names)
-	writeIOTop(w, "своп процессов", c.ProcMajflt, ioMajflt, names)
-	writeIOTop(w, "запись cgroup", c.CgroupWrite, ioBytes, names)
-	writeIOTop(w, "чтение cgroup", c.CgroupRead, ioBytes, names)
-	writeIOTop(w, "своп cgroup", c.CgroupSwapIn, ioPages, names)
-	writeIOTop(w, "простой IO cgroup", c.CgroupIdle, ioMillis, names)
-	writeIOTop(w, "операции записи cgroup", c.CgroupWriteOps, ioOps, names)
+	writeIOTop(w, "запись процессов", iowatch.Rank(c.ProcWrite, names), ioBytes)
+	writeIOTop(w, "чтение процессов", iowatch.Rank(c.ProcRead, names), ioBytes)
+	writeIOTop(w, "своп процессов", iowatch.Rank(c.ProcMajflt, names), ioMajflt)
+	writeIOTop(w, "запись cgroup", iowatch.Rank(c.CgroupWrite, names), ioBytes)
+	writeIOTop(w, "чтение cgroup", iowatch.Rank(c.CgroupRead, names), ioBytes)
+	writeIOTop(w, "своп cgroup", iowatch.Rank(c.CgroupSwapIn, names), ioPages)
+	writeIOTop(w, "простой IO cgroup", iowatch.Rank(c.CgroupIdle, names), ioMillis)
+	writeIOTop(w, "операции записи cgroup", iowatch.Rank(c.CgroupWriteOps, names), ioOps)
 }
 
 // Единицы строк итога.
@@ -247,27 +256,15 @@ const (
 	ioMajflt        // N, в конце строки «(majflt)»
 )
 
-// writeIOTop — строка «мера: имя N ед, …» до limit имён по убыванию; пусто — «нет».
-func writeIOTop(w io.Writer, label string, m map[string]int64, unit, limit int) {
-	top := iowatch.Rank(m, limit)
+// writeIOTop — строка «мера: имя N ед, …»; пусто — «нет».
+func writeIOTop(w io.Writer, label string, top []iowatch.Ranked, unit int) {
 	if len(top) == 0 {
 		fmt.Fprintf(w, "%s: нет\n", label)
 		return
 	}
 	parts := make([]string, len(top))
 	for i, item := range top {
-		switch unit {
-		case ioBytes:
-			parts[i] = fmt.Sprintf("%s %.0f МБ", item.Name, megabytes(item.Value))
-		case ioPages:
-			parts[i] = fmt.Sprintf("%s %d стр", item.Name, item.Value)
-		case ioMillis:
-			parts[i] = fmt.Sprintf("%s %d мс", item.Name, item.Value)
-		case ioOps:
-			parts[i] = fmt.Sprintf("%s %d оп", item.Name, item.Value)
-		default:
-			parts[i] = fmt.Sprintf("%s %d", item.Name, item.Value)
-		}
+		parts[i] = ioValue(item.Name, item.Value, unit)
 	}
 	suffix := ""
 	if unit == ioMajflt {
@@ -276,35 +273,19 @@ func writeIOTop(w io.Writer, label string, m map[string]int64, unit, limit int) 
 	fmt.Fprintf(w, "%s: %s%s\n", label, strings.Join(parts, ", "), suffix)
 }
 
-func megabytes(b int64) float64 { return float64(b) / (1 << 20) }
-
-// ioFreezes — фризы [since, until) по снимкам dir: шаги с простоем ≥ minIdle подряд.
-func (a *app) ioFreezes(dir string, since, until time.Time, minIdle time.Duration) error {
-	cfg, err := a.ioConfig()
-	if err != nil {
-		return err
+// ioValue — «имя N ед» в единицах unit.
+func ioValue(name string, value int64, unit int) string {
+	switch unit {
+	case ioBytes:
+		return fmt.Sprintf("%s %.0f МБ", name, megabytes(value))
+	case ioPages:
+		return fmt.Sprintf("%s %d стр", name, value)
+	case ioMillis:
+		return fmt.Sprintf("%s %d мс", name, value)
+	case ioOps:
+		return fmt.Sprintf("%s %d оп", name, value)
 	}
-	win, err := iowatch.ReadSnapshots(dir, since.Add(-time.Second), until.Add(time.Second), cfg.Ring.D(), a.ioSnapshotWarn)
-	if err != nil {
-		return err
-	}
-	printed := false
-	for _, f := range win.Freezes(minIdle) {
-		if f.End.Before(since) {
-			continue
-		}
-		length := f.End.Sub(f.Start) + cfg.Step.D()
-		fmt.Fprintf(a.out, "%s — %s  длительность %d мс, простой %d мс, пик %d мс\n", f.Start.Format("2006-01-02 15:04:05.000"),
-			f.End.Format("15:04:05.000"), length.Milliseconds(), f.IdleUS/1000, f.PeakUS/1000)
-		c := iowatch.SumCulprits(f.Details)
-		const names = 3
-		writeIOTop(a.out, "запись процессов", c.ProcWrite, ioBytes, names)
-		writeIOTop(a.out, "чтение процессов", c.ProcRead, ioBytes, names)
-		writeIOTop(a.out, "своп процессов", c.ProcMajflt, ioMajflt, names)
-		printed = true
-	}
-	if !printed {
-		fmt.Fprintln(a.out, "фризов нет")
-	}
-	return nil
+	return fmt.Sprintf("%s %d", name, value)
 }
+
+func megabytes(b int64) float64 { return float64(b) / (1 << 20) }

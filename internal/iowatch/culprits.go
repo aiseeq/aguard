@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/aiseeq/akit/proc"
 )
@@ -73,6 +74,14 @@ func processNames(details []Step) map[procID]string {
 	return names
 }
 
+// ProcBase — имя процесса из processNames без pid и пометки детей: comm(123)+дети → comm.
+func ProcBase(name string) string {
+	if i := strings.LastIndex(name, "("); i > 0 {
+		return name[:i]
+	}
+	return name
+}
+
 // MainCgroup — путь cgroup с наибольшим I/O (запись, чтение, своп в байтах); "" — нет.
 func (c *Culprits) MainCgroup() string {
 	var best string
@@ -84,18 +93,34 @@ func (c *Culprits) MainCgroup() string {
 	return best
 }
 
-// CgroupName — имя cgroup для человека: scope сессии агента — имя сессии, иначе последний компонент.
+// CgroupName — имя cgroup для человека: scope сессии агента — имя сессии; приложение рабочего стола
+// (app-<id>@<хэш>.service, app-<id>-<pid>.scope) — его id: экземпляры одного приложения в итоге
+// складываются; контейнер docker — короткий id; иначе последний компонент.
 func CgroupName(path string) string {
 	if name, _, ok := proc.SessionScope(path); ok {
 		return name
 	}
-	return filepath.Base(filepath.Clean(path))
+	base := filepath.Base(filepath.Clean(path))
+	if id, ok := strings.CutPrefix(base, "app-"); ok {
+		id = strings.TrimSuffix(strings.TrimSuffix(id, ".service"), ".scope")
+		if at := strings.IndexByte(id, '@'); at > 0 {
+			return id[:at]
+		}
+		if dash := strings.LastIndexByte(id, '-'); dash > 0 && strings.Trim(id[dash+1:], "0123456789") == "" {
+			return id[:dash]
+		}
+		return id
+	}
+	if id, ok := strings.CutPrefix(base, "docker-"); ok && len(id) > 12+len(".scope") {
+		return "docker-" + id[:12]
+	}
+	return base
 }
 
 // Ranked — до limit имён меры по убыванию значения (при равенстве — по имени), нули пропускаются.
 type Ranked struct {
-	Name  string
-	Value int64
+	Name  string `json:"name"`
+	Value int64  `json:"value"`
 }
 
 func Rank(m map[string]int64, limit int) []Ranked {

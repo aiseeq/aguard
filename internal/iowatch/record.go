@@ -133,9 +133,6 @@ const nameLayout = "2006-01-02T150405.000"
 
 const manualPrefix = "manual-"
 
-// EventName — имя файла события по его началу.
-func EventName(start time.Time) string { return start.Format(nameLayout) + ".jsonl" }
-
 // ManualName — имя ручного снимка по моменту сброса.
 func ManualName(at time.Time) string { return manualPrefix + at.Format(nameLayout) + ".jsonl" }
 

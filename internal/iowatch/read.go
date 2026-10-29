@@ -160,39 +160,3 @@ func (w Window) Seconds() []Second {
 	}
 	return out
 }
-
-// Freeze — подряд идущие шаги с простоем не меньше порога (разрыв до freezeGap — тот же фриз).
-type Freeze struct {
-	Start, End     time.Time // первый и последний шаг
-	IdleUS, PeakUS int64
-	Details        []Step // детальные записи от Start−1 с до End+1 с: кто
-}
-
-// freezeGap — шаги с превышением через такой разрыв — один фриз.
-const freezeGap = 300 * time.Millisecond
-
-// Freezes — фризы окна: каждый шаг в них — с простоем ≥ min.
-func (w Window) Freezes(min time.Duration) []Freeze {
-	var out []Freeze
-	for i := range w.Steps {
-		s := &w.Steps[i]
-		idle := Idle(*s)
-		if time.Duration(idle)*time.Microsecond < min {
-			continue
-		}
-		if len(out) == 0 || s.At.Sub(out[len(out)-1].End) > freezeGap {
-			out = append(out, Freeze{Start: s.At})
-		}
-		f := &out[len(out)-1]
-		f.End, f.IdleUS, f.PeakUS = s.At, f.IdleUS+idle, max(f.PeakUS, idle)
-	}
-	for i := range out {
-		f := &out[i]
-		for j := range w.Details {
-			if at := w.Details[j].At; !at.Before(f.Start.Add(-time.Second)) && !at.After(f.End.Add(time.Second)) {
-				f.Details = append(f.Details, w.Details[j])
-			}
-		}
-	}
-	return out
-}

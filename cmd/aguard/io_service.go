@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/iowatch"
@@ -112,7 +113,8 @@ func readIODetail(r *iowatch.DetailReader, now time.Time) (res ioDetailResult) {
 
 const (
 	ioReloadEvery   = 10 * time.Second // конфиг перечитывается на ходу
-	ioCleanupEvery  = time.Minute      // старые снимки удаляются
+	ioCleanupEvery  = time.Minute      // старые ручные снимки удаляются
+	ioSaveEvery     = time.Hour        // сводки случаев — копией в файл: на случай падения без остановки
 	ioWarnEvery     = time.Minute      // одно и то же предупреждение — не чаще
 	ioNoDeviceEvery = 24 * time.Hour   // нет диска из device — напоминание раз в сутки
 )
@@ -120,13 +122,15 @@ const (
 // errIORestart — изменились параметры замера (mode, step, detail, ring, device): цикл строится заново.
 var errIORestart = errors.New("io: параметры замера изменились")
 
-// ioService — наблюдатель io в демоне: снимки фриза, строка журнала, разбор агентом и письма.
-// Всё состояние — у горутины ioLoop; конфиг и чистка, разбор и запись ручного снимка идут в своих
-// горутинах и возвращаются через extra: быстрый цикл не ждёт ни диска, ни команд.
+// ioService — наблюдатель io в демоне: сводки случаев фриза в памяти, их копия в файл, письма о
+// длинных случаях, ручной снимок буфера. Всё состояние — у горутины ioLoop; конфиг, чистка, запись
+// файлов и письма идут в своих горутинах и возвращаются через extra: быстрый цикл не ждёт ни диска,
+// ни сокетов.
 type ioService struct {
 	a         *app
 	ctx       context.Context
-	dir       string
+	dir       string // ручные снимки
+	path      string // сводки случаев
 	cfg       iowatch.Config
 	rec       *iowatch.Recorder
 	extra     chan func()
@@ -134,30 +138,41 @@ type ioService struct {
 	restarted bool
 	gen       int // номер цикла замера: итог фоновой работы прошлого цикла не применяется
 	warnAt    map[string]time.Time
-	pending   []iowatch.Event
-	analyzing bool
-	analyzed  time.Time
+	cases     []iowatch.Case
+	alerts    []iowatch.Case // случаи от alert_min, ждут письма
+	alerting  bool
+	alerted   time.Time
 }
 
 func newIOService(ctx context.Context, a *app) *ioService {
-	return &ioService{a: a, ctx: ctx, dir: filepath.Join(a.dir("io"), "events"), extra: make(chan func(), 16), warnAt: map[string]time.Time{}}
+	return &ioService{a: a, ctx: ctx, dir: filepath.Join(a.dir("io"), "events"), path: filepath.Join(a.dir("io"), ioCasesFile),
+		extra: make(chan func(), 16), warnAt: map[string]time.Time{}}
 }
 
+// ioCasesFile — копия сводок случаев в папке состояния io.
+const ioCasesFile = "cases.jsonl"
+
 // ioLoop — наблюдатель io: mode=off — не замеряет совсем; паника или ошибка цикла — warn и перезапуск.
-// usr1 — SIGUSR1, ручной снимок буфера (`aguard io dump`); подписка — в начале run демона, чтобы
-// сигнал до старта наблюдателя не убил процесс.
-func (a *app) ioLoop(ctx context.Context, usr1 <-chan os.Signal) {
+// usr1 — SIGUSR1, сводки в файл (`aguard io report`), usr2 — SIGUSR2, ручной снимок буфера
+// (`aguard io dump`); подписка — в начале run демона, чтобы сигнал до старта наблюдателя не убил
+// процесс. При остановке сводки пишутся в файл.
+func (a *app) ioLoop(ctx context.Context, usr1, usr2 <-chan os.Signal) {
 	s := newIOService(ctx, a)
+	s.load()
 	go func() {
 		for {
+			var f func()
 			select {
 			case <-ctx.Done():
 				return
 			case <-usr1:
-				select {
-				case s.extra <- s.dump:
-				default: // очередь полна: снимок уже в пути
-				}
+				f = s.save
+			case <-usr2:
+				f = s.dump
+			}
+			select {
+			case s.extra <- f:
+			default: // очередь полна: запрос уже в пути
 			}
 		}
 	}()
@@ -183,9 +198,47 @@ func (a *app) ioLoop(ctx context.Context, usr1 <-chan os.Signal) {
 			s.wait(time.Second)
 		}
 	}
+	if err := iowatch.SaveCases(s.path, s.kept(time.Now())); err != nil {
+		a.warn("io", "сводки случаев при остановке", "err", err)
+	}
 }
 
-// wait — пауза, в которой исполняются действия extra (ручной снимок, итог разбора).
+// load — сводки прошлых запусков; файл не читается — он сохраняется рядом с пометкой, история
+// начинается заново (иначе следующая запись затёрла бы его).
+func (s *ioService) load() {
+	cases, err := iowatch.LoadCases(s.path)
+	if err != nil {
+		broken := s.path + ".broken-" + time.Now().Format("20060102T150405")
+		s.a.warn("io", "сводки случаев не прочитаны, файл отложен", "err", err, "path", broken)
+		if err := os.Rename(s.path, broken); err != nil {
+			s.a.warn("io", "отложить файл сводок", "err", err)
+		}
+		return
+	}
+	s.cases = cases
+}
+
+// kept — сводки в сроке cases_keep (по прошлому конфигу, если замер не шёл — по умолчанию).
+func (s *ioService) kept(now time.Time) []iowatch.Case {
+	keep := s.cfg.CasesKeep.D()
+	if keep <= 0 {
+		keep = iowatch.Default().CasesKeep.D()
+	}
+	s.cases = iowatch.MergeCases(s.cases, nil, now.Add(-keep))
+	return s.cases
+}
+
+// save — копия сводок в файл своей горутиной; запрос `aguard io report` ждёт обновления файла.
+func (s *ioService) save() {
+	cases := slices.Clone(s.kept(time.Now()))
+	go func() {
+		if err := iowatch.SaveCases(s.path, cases); err != nil {
+			s.post(s.ctx, func() { s.warn(time.Now(), "save", "сводки случаев", err) })
+		}
+	}()
+}
+
+// wait — пауза, в которой исполняются действия extra (запросы сигналов, итог письма).
 func (s *ioService) wait(d time.Duration) {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -201,7 +254,7 @@ func (s *ioService) wait(d time.Duration) {
 	}
 }
 
-// run — один цикл замера до остановки, перезапуска или паники; открытое событие закрывается.
+// run — один цикл замера до остановки, перезапуска или паники; идущий случай закрывается.
 func (s *ioService) run(cfg iowatch.Config) (err error) {
 	defer func() {
 		if v := recover(); v != nil {
@@ -210,12 +263,8 @@ func (s *ioService) run(cfg iowatch.Config) (err error) {
 		if s.rec == nil {
 			return
 		}
-		ev, open, closeErr := s.rec.Close()
-		if closeErr != nil {
-			s.a.warn("io", "запись снимка фриза", "err", closeErr)
-		}
-		if open {
-			s.closed(ev)
+		for _, c := range s.rec.Close() {
+			s.closed(c)
 		}
 		s.rec = nil
 	}()
@@ -223,7 +272,7 @@ func (s *ioService) run(cfg iowatch.Config) (err error) {
 	defer cancel()
 	s.gen++
 	s.cfg, s.restart, s.restarted = cfg, cancel, false
-	s.rec = iowatch.NewRecorder(cfg, s.dir)
+	s.rec = iowatch.NewRecorder(cfg)
 	go s.housekeep(ctx, s.gen, cfg.Keep.D())
 	err = runIOSampling(ctx, cfg, iowatch.SystemRoots(), s, s.extra)
 	if s.restarted {
@@ -233,14 +282,10 @@ func (s *ioService) run(cfg iowatch.Config) (err error) {
 }
 
 func (s *ioService) step(st iowatch.Step) {
-	ev, err := s.rec.Step(st)
-	if err != nil {
-		s.warn(st.At, "event", "снимок фриза", err)
+	for _, c := range s.rec.Step(st) {
+		s.closed(c)
 	}
-	if ev != nil {
-		s.closed(*ev)
-	}
-	s.launchAnalysis(st.At)
+	s.launchAlert(st.At)
 }
 
 func (s *ioService) detail(st iowatch.Step) { s.rec.Detail(st) }
@@ -262,16 +307,21 @@ func (s *ioService) warnEvery(now time.Time, key string, every time.Duration, wh
 	s.a.warn("io", what, "err", err)
 }
 
-// housekeep — своя горутина цикла замера: срок снимков и конфиг на ходу; итог — через extra.
+// housekeep — своя горутина цикла замера: срок ручных снимков, копия сводок раз в час и конфиг на
+// ходу; итог — через extra.
 func (s *ioService) housekeep(ctx context.Context, gen int, keep time.Duration) {
 	reload := time.NewTicker(ioReloadEvery)
 	defer reload.Stop()
-	cleanAt := time.Time{}
+	cleanAt, saveAt := time.Time{}, time.Now().Add(ioSaveEvery)
 	for {
 		now := time.Now()
 		if now.After(cleanAt) {
 			cleanAt = now.Add(ioCleanupEvery)
 			s.postWarn(ctx, now, "cleanup", "удаление старых снимков", iowatch.CleanupSnapshots(s.dir, keep, now))
+		}
+		if now.After(saveAt) {
+			saveAt = now.Add(ioSaveEvery)
+			s.post(ctx, s.save)
 		}
 		select {
 		case <-ctx.Done():
@@ -320,23 +370,26 @@ func (s *ioService) reconfigure(gen int, next iowatch.Config, err error) {
 	s.rec.SetConfig(next)
 }
 
-// closed — строка журнала о событии; простой не меньше analyze_min — в очередь разбора.
-func (s *ioService) closed(ev iowatch.Event) {
-	line := ioEventLine(ev)
-	s.a.log.Info("aguard " + line)
-	s.a.note("io", "фриз", ev.Start.Format(time.RFC3339), "", ev.IdleUS/1000, "ms")
-	if time.Duration(ev.IdleUS)*time.Microsecond >= s.cfg.AnalyzeMin.D() {
-		s.pending = append(s.pending, ev)
+// closed — случай в сводки; от case_min — строка журнала, от alert_min — в очередь письма.
+func (s *ioService) closed(c iowatch.Case) {
+	s.cases = append(s.cases, c)
+	if c.Dur() < s.cfg.CaseMin.D() {
+		return
+	}
+	s.a.log.Info("aguard io: " + ioCaseLine(&c))
+	s.a.note("io", "фриз", c.Start.Format(time.RFC3339), "", c.DurMS, "ms")
+	if c.Dur() >= s.cfg.AlertMin.D() && !c.Quiet {
+		s.alerts = append(s.alerts, c)
 	}
 }
 
-// dump — ручной снимок буфера по SIGUSR1; файл пишет своя горутина.
+// dump — ручной снимок буфера по SIGUSR2; файл пишет своя горутина.
 func (s *ioService) dump() {
 	if s.rec == nil {
 		s.a.warn("io", "ручной снимок: замер не идёт (mode = off или перезапуск)")
 		return
 	}
-	snap := s.rec.Dump(time.Now())
+	snap := s.rec.Dump(s.dir, time.Now())
 	go func() {
 		if err := snap.Wait(); err != nil {
 			s.a.warn("io", "ручной снимок", "err", err)
@@ -346,33 +399,34 @@ func (s *ioService) dump() {
 	}()
 }
 
-// launchAnalysis — разбор накопленных событий не чаще analyze_every и не больше одного сразу.
-func (s *ioService) launchAnalysis(now time.Time) {
-	if s.analyzing || len(s.pending) == 0 || !s.analyzed.IsZero() && now.Sub(s.analyzed) < s.cfg.AnalyzeEvery.D() {
+// launchAlert — письмо о накопленных длинных случаях не чаще alert_every и не больше одного сразу:
+// первый случай после паузы — сразу, следующие в паузе склеиваются в одно письмо.
+func (s *ioService) launchAlert(now time.Time) {
+	if s.alerting || len(s.alerts) == 0 || !s.alerted.IsZero() && now.Sub(s.alerted) < s.cfg.AlertEvery.D() {
 		return
 	}
-	events := s.pending
-	s.pending, s.analyzing, s.analyzed = nil, true, now
-	cfg, dir, ctx := s.cfg, s.dir, s.ctx
+	cases := s.alerts
+	s.alerts, s.alerting, s.alerted = nil, true, now
+	cfg, ctx := s.cfg, s.ctx
 	go func() {
 		var err error
 		defer func() {
 			if v := recover(); v != nil {
-				err = fmt.Errorf("паника разбора io: %v\n%s", v, debug.Stack())
+				err = fmt.Errorf("паника письма io: %v\n%s", v, debug.Stack())
 			}
 			select {
-			case s.extra <- func() { s.analysisDone(err) }:
+			case s.extra <- func() { s.alertDone(err) }:
 			case <-ctx.Done():
 			}
 		}()
-		err = s.a.analyzeIO(ctx, cfg, dir, events)
+		err = s.a.alertIO(cfg, cases)
 	}()
 }
 
-func (s *ioService) analysisDone(err error) {
-	s.analyzing = false
+func (s *ioService) alertDone(err error) {
+	s.alerting = false
 	if err != nil {
-		s.a.warn("io", "разбор не удался", "err", err)
-		s.a.note("io", "analyze_failed", err.Error(), "", 0, "")
+		s.a.warn("io", "письмо о фризе не ушло", "err", err)
+		s.a.note("io", "alert_failed", err.Error(), "", 0, "")
 	}
 }

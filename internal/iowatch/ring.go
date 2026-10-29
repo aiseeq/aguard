@@ -42,5 +42,17 @@ func (r *Ring) Records() []Record {
 	return out
 }
 
+// Details — детальные записи буфера с временем в (from, to].
+func (r *Ring) Details(from, to time.Time) []Step {
+	var out []Step
+	for i := range r.count {
+		rec := &r.records[(r.head+i)%len(r.records)]
+		if rec.Kind == KindDetail && rec.At.After(from) && !rec.At.After(to) {
+			out = append(out, rec.Step)
+		}
+	}
+	return out
+}
+
 // Len — сколько записей в буфере.
 func (r *Ring) Len() int { return r.count }
