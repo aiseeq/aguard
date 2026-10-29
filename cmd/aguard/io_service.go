@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/activity"
 	"github.com/aiseeq/aguard/internal/iowatch"
 )
 
@@ -116,6 +117,7 @@ const (
 	ioCleanupEvery  = time.Minute      // старые ручные снимки удаляются
 	ioSaveEvery     = time.Hour        // сводки случаев — копией в файл: на случай падения без остановки
 	ioWarnEvery     = time.Minute      // одно и то же предупреждение — не чаще
+	ioPassEvery     = time.Minute      // цикл 100 мс — не safePass: проход в учёт отмечает сам, не чаще
 	ioNoDeviceEvery = 24 * time.Hour   // нет диска из device — напоминание раз в сутки
 )
 
@@ -138,6 +140,7 @@ type ioService struct {
 	restarted bool
 	gen       int // номер цикла замера: итог фоновой работы прошлого цикла не применяется
 	warnAt    map[string]time.Time
+	passAt    time.Time // следующая отметка прохода в учёте срабатываний
 	cases     []iowatch.Case
 	alerts    []iowatch.Case // случаи от alert_min, ждут письма
 	alerting  bool
@@ -281,6 +284,10 @@ func (s *ioService) run(cfg iowatch.Config) (err error) {
 }
 
 func (s *ioService) step(st iowatch.Step) {
+	if !st.At.Before(s.passAt) {
+		s.a.note("io", activity.KindPass, "", "", 0, "")
+		s.passAt = st.At.Add(ioPassEvery)
+	}
 	closed := s.rec.Step(st)
 	for i := range closed {
 		s.closed(closed[i])

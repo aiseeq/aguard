@@ -371,3 +371,28 @@ func TestIONoDeviceWarnsDaily(t *testing.T) {
 		t.Fatalf("предупреждений %d:\n%s", n, logged.String())
 	}
 }
+
+// Цикл io — не safePass: проход отмечает сам, раз в ioPassEvery, иначе отчёт и страница Сна видят
+// «ни одного прохода» (29.10).
+func TestIOStepNotesPassEveryMinute(t *testing.T) {
+	a, _ := testIOApp(t)
+	s := newIOService(context.Background(), a)
+	s.cfg = iowatch.Default()
+	s.rec = iowatch.NewRecorder(s.cfg)
+	base := time.Now()
+	for i := range 1500 { // 2,5 мин шагов по 100 мс
+		s.step(iowatch.Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond)})
+	}
+	a.flush()
+	passes := 0
+	if _, err := activity.NewStore(filepath.Join(a.home, "activity")).Read(time.Time{}, func(r *activity.Record) {
+		if r.Watcher == "io" && r.Kind == activity.KindPass {
+			passes += r.Count
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if passes != 3 {
+		t.Fatalf("отметок прохода io за 2,5 мин: %d, ждал 3", passes)
+	}
+}
