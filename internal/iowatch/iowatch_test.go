@@ -694,3 +694,27 @@ func TestDeltaCgroupErrorSkipsOnlyIt(t *testing.T) {
 		t.Fatalf("пропущенная дельта — в следующий проход: %+v", s.Cgroups)
 	}
 }
+
+// Быстрый шаг Recorder, как в цикле службы: шаг 100 мс, детальная запись раз в секунду, каждые
+// 3 с — простой на 200 мс (случай открывается и закрывается). Горячий путь: без аллокаций.
+func BenchmarkRecorderStep(b *testing.B) {
+	r := NewRecorder(Default())
+	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	detail := Step{Dirty: 40 << 20, Writeback: 1 << 20, Processes: []Process{{PID: 7, Comm: "dd", WriteBytes: 1 << 20, Cgroup: "/user.slice/agent-s-1.scope"}},
+		Cgroups: []Cgroup{{Path: "/user.slice/agent-s-1.scope", ReadBytes: 4096, WriteBytes: 1 << 20, WriteOps: 3, IOFullUS: 1000}}}
+	b.ReportAllocs()
+	i := 0
+	for b.Loop() {
+		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
+		if i%10 == 0 {
+			detail.At = at
+			r.Detail(detail)
+		}
+		s := Step{At: at, IOFullUS: 1200, MemFullUS: 300, ReadBytes: 4096, WriteBytes: 8192, RIOS: 2, WIOS: 3, WMS: 8, InFlight: 1, FIOS: 1}
+		if i%30 < 2 {
+			s.IOFullUS = 80_000
+		}
+		r.Step(s)
+		i++
+	}
+}
