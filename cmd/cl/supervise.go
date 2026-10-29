@@ -526,6 +526,10 @@ func (l launcher) wantIdle(pid int, a restart.Answer, last string, x idleAction)
 // typeInto набирает out.typed в живой сессии под pty; человек вводил меньше humanQuiet назад — не набирает.
 func (l launcher) typeInto(cfg config, now time.Time, pid int, out outcome) {
 	head := fmt.Sprintf("%s pid=%d: ", out.name, pid)
+	if l.console == nil { // typed ставит только wantIdle при открытой консоли
+		journal(cfg.Restart.Journal, now, head+"набор без консоли pty — не набираю (ошибка cl)")
+		return
+	}
 	if quiet := l.console.idle(now); quiet < humanQuiet {
 		journal(cfg.Restart.Journal, now, head+cllog.HumanTyping(quiet))
 		return

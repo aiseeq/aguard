@@ -213,11 +213,9 @@ func clRunning(pid int) bool {
 	return err == nil && strings.TrimSpace(string(b)) == "cl"
 }
 
-// nightNote — учёт срабатывания; учёта нет (тест) — ничего.
+// nightNote — учёт срабатывания; учёта нет (тест) — ничего: нулевой activity.Recorder ничего не делает.
 func (a *app) nightNote(kind, what, target string, value int64, unit string) {
-	if a.act != nil {
-		a.note("night", kind, what, target, value, unit)
-	}
+	a.note("night", kind, what, target, value, unit)
 }
 
 // nightEmail — письмо сессии to.
