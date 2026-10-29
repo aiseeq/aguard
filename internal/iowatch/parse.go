@@ -106,7 +106,8 @@ func parsePressureTotals(data []byte) (some, full int64, err error) {
 }
 
 // parseLoadavgRunnable — готовые к работе сущности планировщика из /proc/loadavg: четвёртое поле
-// «выполняются/всего» до косой черты (`8/5201` → 8). Читающий поток в числе: ядро считает и его.
+// «выполняются/всего» до косой черты без читающего потока, которого ядро считает тоже (`8/5201` → 7):
+// тот же смысл, что у Runnable в akit/pressure (procs_running − 1).
 func parseLoadavgRunnable(data []byte) (int64, error) {
 	var field []byte
 	rest := data
@@ -121,7 +122,10 @@ func parseLoadavgRunnable(data []byte) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("loadavg выполняются: %w", err)
 	}
-	return n, nil
+	if n < 1 {
+		return 0, fmt.Errorf("loadavg: выполняются %d — нет даже читающего потока", n)
+	}
+	return n - 1, nil
 }
 
 // parseVMStat — pswpin, pswpout, pgmajfault из /proc/vmstat.

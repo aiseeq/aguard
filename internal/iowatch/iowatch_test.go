@@ -79,10 +79,10 @@ func TestParsePressureCPUWithoutFullAndLoadavg(t *testing.T) {
 		}
 	}
 	n, err := parseLoadavgRunnable([]byte("17.65 16.94 14.02 8/5201 3854786\n"))
-	if err != nil || n != 8 {
+	if err != nil || n != 7 {
 		t.Fatalf("loadavg: %d %v", n, err)
 	}
-	for _, bad := range []string{"17.65 16.94 14.02\n", "1 2 3 x/5 9\n", "1 2 3 85201 9\n"} {
+	for _, bad := range []string{"17.65 16.94 14.02\n", "1 2 3 x/5 9\n", "1 2 3 85201 9\n", "1 2 3 0/5 9\n"} {
 		if _, err := parseLoadavgRunnable([]byte(bad)); err == nil {
 			t.Errorf("loadavg %q без ошибки", bad)
 		}
@@ -199,7 +199,7 @@ func TestDeltaFastCounterReset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.IOFullUS != 60000 || s.SwapIn != 0 || s.WriteBytes != 8*512 || s.CPUSomeUS != 12000 || s.Runnable != 18 {
+	if s.IOFullUS != 60000 || s.SwapIn != 0 || s.WriteBytes != 8*512 || s.CPUSomeUS != 12000 || s.Runnable != 17 { // 18 в loadavg без читающего потока
 		t.Fatalf("дельты (своп сброшен), CPU some — дельта, runnable — моментальное: %+v", s)
 	}
 }
