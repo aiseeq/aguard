@@ -4,6 +4,7 @@ package night
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ type Config struct {
 	DigestBy     string          `toml:"digest_by"`
 	DigestMarker string          `toml:"digest_marker"`
 	TrustWait    policy.Duration `toml:"trust_wait"`
+	AlsoTo       []string        `toml:"also_to"` // кроме лида: сигнал «лид не поднялся» лиду же не поможет
 	Lead         string          `toml:"-"`
 	SendAuth     bool            `toml:"-"`
 }
@@ -35,7 +37,19 @@ const (
 func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "03:00",
 		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DigestBy: "07:00",
-		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute)}
+		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute),
+		AlsoTo: []string{"git-admin"}}
+}
+
+// Recipients — лид и also_to без повторов, лид первым.
+func (c Config) Recipients() []string {
+	out := []string{c.Lead}
+	for _, to := range c.AlsoTo {
+		if !slices.Contains(out, to) {
+			out = append(out, to)
+		}
+	}
+	return out
 }
 
 // Validate проверяет настройки и раскрывает домашнюю папку в путях.
@@ -48,6 +62,9 @@ func (c *Config) Validate(home string) error {
 	}
 	if !validClock(c.DreamBy) || !validClock(c.DigestBy) {
 		return fmt.Errorf("night.dream_by и night.digest_by должны быть ЧЧ:ММ")
+	}
+	if slices.Contains(c.AlsoTo, "") {
+		return fmt.Errorf("night.also_to: пустое имя сессии")
 	}
 	c.DreamMarker = policy.ExpandHome(c.DreamMarker, home)
 	c.DigestMarker = policy.ExpandHome(c.DigestMarker, home)

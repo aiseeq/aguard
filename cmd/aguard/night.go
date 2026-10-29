@@ -17,8 +17,8 @@ import (
 	"github.com/aiseeq/akit/session"
 )
 
-// nightSent — сигнал: когда и по каким каналам уже дошёл. Канал один — письмо лиду; Telegram снят 28.10 (пользователь
-// на сигналы в группе Дайджеста: «не надо так»).
+// nightSent — сигнал: когда и каким адресатам уже дошёл. Канал — письмо сессии: лиду и night.also_to; Telegram снят
+// 28.10 (пользователь на сигналы в группе Дайджеста: «не надо так»).
 type nightSent struct {
 	At       time.Time            `json:"at"`
 	Channels map[string]time.Time `json:"channels"`
@@ -33,16 +33,16 @@ type nightFailure struct {
 	Err          error
 }
 
-// dispatchNight шлёт каждый сигнал по каждому ещё не дошедшему каналу; дошедший канал не повторяется, неудачный —
-// в следующий проход.
-func dispatchNight(state nightState, signals []night.Signal, now time.Time, send func(string, string) error) (nightState, []nightFailure) {
+// dispatchNight шлёт каждый сигнал каждому адресату to, которому он ещё не дошёл; дошедшему не повторяется,
+// неудачный — в следующий проход.
+func dispatchNight(state nightState, signals []night.Signal, to []string, now time.Time, send func(string, string) error) (nightState, []nightFailure) {
 	var failed []nightFailure
 	for _, s := range signals {
 		rec := state[s.Key]
 		if rec.Channels == nil {
 			rec.Channels = map[string]time.Time{}
 		}
-		for _, channel := range []string{"lead"} {
+		for _, channel := range to {
 			if _, ok := rec.Channels[channel]; ok {
 				continue
 			}
@@ -90,6 +90,7 @@ func (a *app) nightRound(_ context.Context, cfg *night.Config, dry bool) error {
 			map[bool]string{true: "есть", false: "нет"}[facts.DreamMarker], cfg.DigestBy,
 			map[bool]string{true: "есть", false: "нет"}[strings.Contains(facts.DigestText, now.Format("2006-01-02"))],
 			cfg.DigestMarker, recentTrust(facts.TrustEvents, now))
+		fmt.Fprintf(a.out, "адресаты: %s\n", strings.Join(cfg.Recipients(), ", "))
 		for _, e := range facts.TrustEvents {
 			if now.Sub(e.At) <= 24*time.Hour {
 				fmt.Fprintf(a.out, "  %s %s %s подтверждено=%v поднялась=%s\n", e.At.Format("15:04:05"), e.Name, e.Dir, e.Confirmed,
@@ -136,13 +137,13 @@ func (a *app) nightRound(_ context.Context, cfg *night.Config, dry bool) error {
 		a.nightNote("registry_failed", "", "", 0, "")
 	}
 	// состояние в памяти демона: сбой записи state.json не повторяет дошедшее каждую минуту
-	state, failures := dispatchNight(state, signals, now, func(channel, msg string) error {
+	state, failures := dispatchNight(state, signals, cfg.Recipients(), now, func(to, msg string) error {
 		if regErr != nil {
 			return fmt.Errorf("реестр сессий: %w", regErr)
 		}
-		err := a.nightEmail(cfg, alive, msg)
+		err := a.nightEmail(cfg, alive, to, msg)
 		if a.act != nil {
-			a.note("night", map[bool]string{true: "email_sent", false: "email_failed"}[err == nil], "", cfg.Lead, 0, "")
+			a.note("night", map[bool]string{true: "email_sent", false: "email_failed"}[err == nil], "", to, 0, "")
 		}
 		return err
 	})
@@ -219,12 +220,12 @@ func (a *app) nightNote(kind, what, target string, value int64, unit string) {
 	}
 }
 
-// nightEmail — письмо лиду.
-func (a *app) nightEmail(cfg *night.Config, alive map[string]session.Info, msg string) error {
-	if err := a.sendAlive(alive, cfg.Lead, cfg.SendAuth, msg); err != nil {
+// nightEmail — письмо сессии to.
+func (a *app) nightEmail(cfg *night.Config, alive map[string]session.Info, to, msg string) error {
+	if err := a.sendAlive(alive, to, cfg.SendAuth, msg); err != nil {
 		return err
 	}
-	a.log.Info("aguard night: написал", "session", cfg.Lead, "msg", msg)
+	a.log.Info("aguard night: написал", "session", to, "msg", msg)
 	return nil
 }
 

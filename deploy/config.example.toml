@@ -220,7 +220,7 @@ repeat = "1h"           # письмо по проекту и PC, а также 
 file = "~/.cache/graft/remote-broken.jsonl"
 
 # Сторож старта Сна и Дайджеста, а также зависшего окна доверия после перезапуска cl.
-# mode = log — только пишет «написал бы»; alert — письмо лиду.
+# mode = log — только пишет «написал бы»; alert — письмо лиду и also_to (сигнал «лид не поднялся» лиду же не поможет).
 [night]
 mode = "alert"         # off | log | alert
 interval = "1m"
@@ -229,6 +229,7 @@ dream_marker = "~/.claude/improve/runs/{date}/started"
 digest_by = "07:00"
 digest_marker = "~/.local/state/digest/started"
 trust_wait = "5m"
+also_to = ["git-admin"]
 
 [said]                 # указатель сказанного: реплики пользователя -> Luna -> ~/.claude/said.tsv
 mode = "log"           # off | log (разметка и расход только в журнал) | write (и в said.tsv)

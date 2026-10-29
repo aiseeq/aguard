@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cllog"
+	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/night"
+	"github.com/aiseeq/akit/session"
 )
 
 func TestNightDryRunDoesNotWriteState(t *testing.T) {
@@ -86,16 +88,101 @@ func TestNightDeliveryRetriesFailed(t *testing.T) {
 		}
 		return nil
 	}
-	state, failures := dispatchNight(state, signals, now, send)
+	state, failures := dispatchNight(state, signals, []string{"lead"}, now, send)
 	if len(failures) != 1 || failures[0].Channel != "lead" {
 		t.Fatalf("первый проход: %+v", failures)
 	}
 	for i := 1; i <= 2; i++ {
-		if state, failures = dispatchNight(state, signals, now.Add(time.Duration(i)*time.Minute), send); len(failures) != 0 {
+		if state, failures = dispatchNight(state, signals, []string{"lead"}, now.Add(time.Duration(i)*time.Minute), send); len(failures) != 0 {
 			t.Fatalf("проход %d: %+v", i+1, failures)
 		}
 	}
 	if _, ok := state[signals[0].Key].Channels["lead"]; !ok || tries != 2 {
 		t.Fatalf("письмо: попыток %d, состояние %+v", tries, state)
 	}
+}
+
+// Лид не поднялся: письмо ему не уходит, запасному адресату — уходит и не повторяется; лиду — повтор каждый проход
+// (аудит процесса 29.10, D2: сигнал «Лид жив?» уходил только лиду).
+func TestNightBackupRecipientWhenLeadDown(t *testing.T) {
+	signals := []night.Signal{{Key: "dream:2026-10-29", Text: "Сон не стартовал"}}
+	sent := map[string]int{}
+	send := func(to, msg string) error {
+		if to == "lead" {
+			return errors.New("сессии lead нет")
+		}
+		sent[to]++
+		return nil
+	}
+	state := nightState{}
+	now := time.Now()
+	for i := range 3 {
+		var failures []nightFailure
+		state, failures = dispatchNight(state, signals, []string{"lead", "git-admin"}, now.Add(time.Duration(i)*time.Minute), send)
+		if len(failures) != 1 || failures[0].Channel != "lead" {
+			t.Fatalf("проход %d: %+v", i+1, failures)
+		}
+	}
+	if sent["git-admin"] != 1 {
+		t.Fatalf("git-admin получил %d писем, ждали 1", sent["git-admin"])
+	}
+	if _, ok := state[signals[0].Key].Channels["git-admin"]; !ok {
+		t.Fatalf("доставка git-admin не учтена: %+v", state)
+	}
+}
+
+func TestNightRecipients(t *testing.T) {
+	cfg := night.Default(t.TempDir())
+	cfg.Lead = "lead"
+	cfg.AlsoTo = []string{"git-admin", "lead", "work-admin", "git-admin"}
+	if got := strings.Join(cfg.Recipients(), ","); got != "lead,git-admin,work-admin" {
+		t.Fatal(got)
+	}
+	cfg.AlsoTo = []string{""}
+	if err := cfg.Validate(t.TempDir()); err == nil {
+		t.Fatal("пустое имя в also_to прошло проверку")
+	}
+}
+
+// Живая проба доставки: AGUARD_NIGHT_PROBE=<живая сессия> — лид несуществующий, сигнал Сна должен дойти до пробной
+// сессии через её сокет. Без переменной — пропуск.
+func TestNightProbeLive(t *testing.T) {
+	to := os.Getenv("AGUARD_NIGHT_PROBE")
+	if to == "" {
+		t.Skip("AGUARD_NIGHT_PROBE не задан")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := config.Load(config.Path(home), home, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	var logs strings.Builder
+	a := &app{home: dir, stateDir: filepath.Join(dir, "state"), reg: session.ForHome(home), log: slog.New(slog.NewTextHandler(&logs, nil))}
+	cfg := full.Night
+	cfg.Mode = night.ModeAlert
+	cfg.Lead = "night-probe-absent-lead"
+	cfg.AlsoTo = []string{to}
+	cfg.DreamBy = "00:00"
+	cfg.DreamMarker = filepath.Join(dir, "absent")
+	cfg.DigestBy = "23:59"
+	cfg.DigestMarker = filepath.Join(dir, "absent-digest")
+	if err := a.nightRound(nil, &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadNightState(filepath.Join(a.stateDir, "night", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "dream:" + time.Now().Format("2006-01-02")
+	if _, ok := state[key].Channels[to]; !ok {
+		t.Fatalf("письмо %s не дошло: %+v\n%s", to, state, logs.String())
+	}
+	if _, ok := state[key].Channels[cfg.Lead]; ok {
+		t.Fatalf("несуществующему лиду «дошло»: %+v", state)
+	}
+	t.Log(logs.String())
 }
