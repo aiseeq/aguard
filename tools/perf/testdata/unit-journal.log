@@ -1,0 +1,10 @@
+1999928000 host systemd[1]: aguard.service: Consumed 6h CPU time over 6h wall clock time, 1M memory peak.
+1999953200 host systemd[1]: aguard.service: Consumed 7h CPU time over 7h wall clock time, 1M memory peak.
+1999890000 host systemd[1]: aguard.service: Consumed 27.649s CPU time over 1min 34.555s wall clock time, 1M memory peak.
+1999890000 host systemd[1]: aguard.service: Consumed 7h 7min 18.697s CPU time over 32min 281ms wall clock time, 1M memory peak.
+1999890000 host systemd[1]: aguard.service: Consumed 1d 2h 3min 4.5s CPU time over 999us wall clock time, 1M memory peak.
+2000000000 host systemd[1]: aguard.service: disk msg="aguard disk: обход" entries=1 took=3m28s paused=44.012523385s pauses=2 interrupted=false
+1999999999 host systemd[1]: aguard.service: disk msg="aguard disk: обход" entries=2 took=1m30.030224599s paused=0s pauses=0 interrupted=false
+1999999998 host systemd[1]: aguard.service: disk msg="aguard disk: обход" entries=3 took=44.0s paused=0s pauses=0 interrupted=false
+1999999997 host systemd[1]: aguard.service: disk msg="aguard disk: обход" entries=4 took=1h2m3s paused=0s pauses=0 interrupted=true
+1999913599 host systemd[1]: aguard.service: disk msg="aguard disk: обход" entries=5 took=850ms paused=0ms pauses=0 interrupted=false

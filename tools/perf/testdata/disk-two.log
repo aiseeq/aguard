@@ -1,0 +1,2 @@
+2000000000 host systemd[1]: disk msg="aguard disk: обход" entries=1 took=3m28s paused=44.012523385s pauses=2 interrupted=false
+1999999999 host systemd[1]: disk msg="aguard disk: обход" entries=2 took=1m30.030224599s paused=0s pauses=0 interrupted=false

@@ -1,0 +1,3 @@
+1999935200 host systemd[1]: aguard.service: Consumed 1h 30min CPU time over 6h wall clock time, memory peak.
+1999978400 host systemd[1]: aguard.service: Consumed 3h CPU time over 12h wall clock time, memory peak.
+2000007200 host systemd[1]: aguard.service: Consumed 4h CPU time over 8h wall clock time, memory peak.
