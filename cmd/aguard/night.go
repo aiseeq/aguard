@@ -97,23 +97,9 @@ func (a *app) nightRound(_ context.Context, cfg *night.Config, dry bool) error {
 	now := time.Now().In(time.Local)
 	facts := a.nightFacts(cfg, now)
 	signals := night.Check(now, *cfg, facts)
+	signals = append(signals, a.nightFallback(cfg, now, facts, dry)...)
 	if dry {
-		fmt.Fprintf(a.out, "Сон %s: маркер %s; Дайджест %s: дата %s в %s; окон доверия за сутки %d\n", cfg.DreamBy,
-			map[bool]string{true: "есть", false: "нет"}[facts.DreamMarker], cfg.DigestBy,
-			map[bool]string{true: "есть", false: "нет"}[strings.Contains(facts.DigestText, now.Format("2006-01-02"))],
-			cfg.DigestMarker, recentTrust(facts.TrustEvents, now))
-		fmt.Fprintf(a.out, "адресаты: %s; Сон — ещё %s\n", strings.Join(cfg.Recipients(), ", "), strings.Join(cfg.DreamTo, ", "))
-		for _, e := range facts.TrustEvents {
-			if now.Sub(e.At) <= 24*time.Hour {
-				fmt.Fprintf(a.out, "  %s %s %s подтверждено=%v поднялась=%s\n", e.At.Format("15:04:05"), e.Name, e.Dir, e.Confirmed,
-					map[bool]string{true: "нет", false: e.Recovered.Format("15:04:05")}[e.Recovered.IsZero()])
-			}
-		}
-		for _, s := range signals {
-			fmt.Fprintf(a.out, "  → %s: %s\n", s.Key, s.Text)
-		}
-	}
-	if dry {
+		a.nightDry(cfg, now, facts, signals)
 		return nil
 	}
 	if cfg.Mode == night.ModeLog { // учёт «написал бы» — только в памяти: переход на alert шлёт сегодняшнее по-настоящему
@@ -166,6 +152,91 @@ func (a *app) nightRound(_ context.Context, cfg *night.Config, dry bool) error {
 		return err
 	}
 	return nil
+}
+
+// nightDry — печать прохода без отправки.
+func (a *app) nightDry(cfg *night.Config, now time.Time, facts night.Facts, signals []night.Signal) {
+	fmt.Fprintf(a.out, "Сон %s: маркер %s; Дайджест %s: дата %s в %s; окон доверия за сутки %d\n", cfg.DreamBy,
+		map[bool]string{true: "есть", false: "нет"}[facts.DreamMarker], cfg.DigestBy,
+		map[bool]string{true: "есть", false: "нет"}[strings.Contains(facts.DigestText, now.Format("2006-01-02"))],
+		cfg.DigestMarker, recentTrust(facts.TrustEvents, now))
+	fmt.Fprintf(a.out, "адресаты: %s; Сон — ещё %s\n", strings.Join(cfg.Recipients(), ", "), strings.Join(cfg.DreamTo, ", "))
+	for _, e := range facts.TrustEvents {
+		if now.Sub(e.At) <= 24*time.Hour {
+			fmt.Fprintf(a.out, "  %s %s %s подтверждено=%v поднялась=%s\n", e.At.Format("15:04:05"), e.Name, e.Dir, e.Confirmed,
+				map[bool]string{true: "нет", false: e.Recovered.Format("15:04:05")}[e.Recovered.IsZero()])
+		}
+	}
+	for _, s := range signals {
+		fmt.Fprintf(a.out, "  → %s: %s\n", s.Key, s.Text)
+	}
+}
+
+// nightFallback — запасной Сон (night.dream_fallback): запуск, если пора, наблюдение за unit и сигналы о нём. dry —
+// только печать, mode=log — журнал «запустил бы» раз за дату. Сбой — в журнал aguard: сигналы о Сне идут и без него.
+func (a *app) nightFallback(cfg *night.Config, now time.Time, facts night.Facts, dry bool) []night.Signal {
+	signals, err := a.fallbackStep(cfg, now, facts, dry)
+	if err != nil {
+		a.log.Warn("aguard night: запасной Сон", "err", err)
+		a.nightNote("dream_fallback_failed", err.Error(), "", 0, "")
+	}
+	return signals
+}
+
+func (a *app) fallbackStep(cfg *night.Config, now time.Time, facts night.Facts, dry bool) ([]night.Signal, error) {
+	if cfg.DreamFallback == "" {
+		return nil, nil
+	}
+	path := filepath.Join(a.dir("night"), "fallback.json")
+	if a.nightFb == nil {
+		state, err := loadFallbackState(path)
+		if err != nil {
+			return nil, err
+		}
+		a.nightFb = state
+	}
+	date := now.Format("2006-01-02")
+	if dry {
+		rec, launched := a.nightFb[date]
+		fmt.Fprintf(a.out, "запасной Сон: `%s` в %s без маркера, unit %s; за %s %s\n", cfg.DreamFallback, cfg.DreamFallbackBy,
+			night.FallbackUnit(now), date, map[bool]string{true: "запущен в " + rec.At.Format("15:04"), false: "не запускался"}[launched])
+		if !launched && night.FallbackDue(now, *cfg, facts) {
+			fmt.Fprintf(a.out, "  → запустил бы сейчас\n")
+		}
+		return nil, nil
+	}
+	if a.units == nil {
+		return nil, errors.New("запасной Сон: нет запускателя unit")
+	}
+	for d, rec := range a.nightFb {
+		if now.Sub(rec.At) > 7*24*time.Hour {
+			delete(a.nightFb, d)
+		}
+	}
+	save := func(s fallbackState) error { return saveFallbackState(path, s) }
+	signals, notes, err := fallbackRound(cfg, now, facts, a.nightFb, a.units, a.home, save, cfg.Mode == night.ModeLog)
+	for _, n := range notes {
+		if cfg.Mode == night.ModeLog {
+			if a.nightLogged == nil {
+				a.nightLogged = map[string]bool{}
+			}
+			if a.nightLogged["dream-fallback-would:"+date] {
+				continue
+			}
+			a.nightLogged["dream-fallback-would:"+date] = true
+		}
+		a.log.Info("aguard night: запасной Сон", "msg", n)
+		a.nightNote("dream_fallback", n, "", 0, "")
+	}
+	if err != nil {
+		return signals, err
+	}
+	if len(notes) > 0 && cfg.Mode != night.ModeLog {
+		if err := save(a.nightFb); err != nil {
+			return signals, err
+		}
+	}
+	return signals, nil
 }
 
 // recentTrust — окон доверия за последние сутки.

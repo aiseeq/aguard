@@ -25,9 +25,13 @@ type Config struct {
 	AlsoTo       []string        `toml:"also_to"` // кроме лида: сигнал «лид не поднялся» лиду же не поможет
 	// DreamTo — хозяева ночного прогона: сигнал о Сне идёт и им (лид только шлёт таймер; Сон ведёт dream-master,
 	// ~/git/dream/CLAUDE.md, «Хозяин»).
-	DreamTo  []string `toml:"dream_to"`
-	Lead     string   `toml:"-"`
-	SendAuth bool     `toml:"-"`
+	DreamTo []string `toml:"dream_to"`
+	// DreamFallback — запасной Сон без Claude (decisions.md more-terra, пользователь 30.10 10:44; тикет лида
+	// more-terra-1030): нет маркера к DreamFallbackBy — команда раз за дату в своём unit; пусто — выключено.
+	DreamFallback   string `toml:"dream_fallback"`
+	DreamFallbackBy string `toml:"dream_fallback_by"`
+	Lead            string `toml:"-"`
+	SendAuth        bool   `toml:"-"`
 }
 
 const (
@@ -41,7 +45,30 @@ func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "02:50",
 		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DigestBy: "07:00",
 		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute),
-		AlsoTo: []string{"git-admin"}, DreamTo: []string{"dream-master"}}
+		AlsoTo: []string{"git-admin"}, DreamTo: []string{"dream-master"},
+		DreamFallback: "~/.claude/improve/run.sh terra", DreamFallbackBy: "03:10"}
+}
+
+// FallbackWindow — сколько после dream_fallback_by ещё запускать запасной Сон: он идёт до ~08:30, позже ночи не
+// хватит, а демон, поднятый днём, не должен начинать ночь за дату без маркера.
+const FallbackWindow = 3 * time.Hour
+
+// FallbackDue — пора запускать запасной Сон: команда задана, маркера нет, срок прошёл не дальше FallbackWindow.
+func FallbackDue(now time.Time, cfg Config, facts Facts) bool {
+	if cfg.DreamFallback == "" || facts.DreamMarker {
+		return false
+	}
+	t, err := time.Parse("15:04", cfg.DreamFallbackBy)
+	if err != nil {
+		panic(fmt.Sprintf("night: время %q прошло Validate: %v", cfg.DreamFallbackBy, err))
+	}
+	at := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+	return !now.Before(at) && now.Sub(at) < FallbackWindow
+}
+
+// FallbackUnit — unit запасного Сна за местную дату now.
+func FallbackUnit(now time.Time) string {
+	return "dream-terra-" + now.Format("2006-01-02")
 }
 
 // Recipients — лид и also_to без повторов, лид первым.
@@ -65,6 +92,9 @@ func (c *Config) Validate(home string) error {
 	}
 	if !validClock(c.DreamBy) || !validClock(c.DigestBy) {
 		return fmt.Errorf("night.dream_by и night.digest_by должны быть ЧЧ:ММ")
+	}
+	if c.DreamFallback != "" && !validClock(c.DreamFallbackBy) {
+		return fmt.Errorf("night.dream_fallback_by должно быть ЧЧ:ММ при заданном night.dream_fallback")
 	}
 	if slices.Contains(c.AlsoTo, "") || slices.Contains(c.DreamTo, "") {
 		return fmt.Errorf("night.also_to, night.dream_to: пустое имя сессии")
@@ -94,11 +124,15 @@ func Check(now time.Time, cfg Config, facts Facts) []Signal {
 	date := now.Format("2006-01-02")
 	var out []Signal
 	if due(now, cfg.DreamBy) && !facts.DreamMarker {
+		fallback := ""
+		if cfg.DreamFallback != "" {
+			fallback = fmt.Sprintf(" В %s без маркера aguard сам запустит `%s` (unit %s).", cfg.DreamFallbackBy, cfg.DreamFallback, FallbackUnit(now))
+		}
 		out = append(out, Signal{Key: "dream:" + date, To: cfg.DreamTo, Text: fmt.Sprintf("Сон не стартовал к %s: нет %s. "+
 			"Звенья: таймер Сна у %s (CronList; окно доверия, лимит, упавшая консоль) и сессия %s. "+
 			"%s: сначала проверь, не идёт ли он уже (открытый тикет dream-run-%s в ~/git/dream, ход лида или мастера сна: маркер пишет только шаг 4), "+
-			"и только потом запусти Сон сам по скиллу dream.", cfg.DreamBy, DreamPath(cfg, now), cfg.Lead, strings.Join(cfg.DreamTo, ", "),
-			strings.Join(cfg.DreamTo, ", "), now.Format("0102"))})
+			"и только потом запусти Сон сам по скиллу dream.%s", cfg.DreamBy, DreamPath(cfg, now), cfg.Lead, strings.Join(cfg.DreamTo, ", "),
+			strings.Join(cfg.DreamTo, ", "), now.Format("0102"), fallback)})
 	}
 	if due(now, cfg.DigestBy) && !strings.Contains(facts.DigestText, date) {
 		out = append(out, Signal{Key: "digest:" + date, Text: fmt.Sprintf("Дайджест не стартовал к %s: нет сегодняшней даты в %s. "+

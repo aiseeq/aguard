@@ -70,6 +70,8 @@ type app struct {
 	stateDir    string          // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
 	nightSent   nightState      // отправленное ночным сторожем; nil — ещё не прочитано из state.json
 	nightLogged map[string]bool // mode=log: ключи, о которых уже написал «написал бы»
+	nightFb     fallbackState   // запуски запасного Сна; nil — ещё не прочитано из fallback.json
+	units       unitRunner      // запуск запасного Сна отдельным unit; nil — запасной Сон не запускается (ошибка)
 	projects    string
 	reg         session.Registry
 	uid         int
@@ -95,6 +97,7 @@ func main() {
 		uid:      os.Getuid(),
 		log:      lg,
 		out:      os.Stdout,
+		units:    systemdUnits{},
 	}
 	if len(os.Args) < 2 {
 		usage()
