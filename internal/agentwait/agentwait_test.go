@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -226,5 +227,24 @@ func TestValidate(t *testing.T) {
 	c.MaxOpen = 0
 	if c.Validate() == nil {
 		t.Error("max_open 0 прошёл")
+	}
+}
+
+func TestGraftStatsRotated(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".cache", "graft")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"stats.jsonl.1", "stats.jsonl.10", "stats.jsonl.2", "stats.jsonl.tmp", "stats.jsonl.0"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := filepath.Join(dir, "stats.jsonl")
+	want := []string{f + ".10", f + ".2", f + ".1", f}
+	got, err := GraftStats(home)
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("GraftStats = %q, %v; want %q", got, err, want)
 	}
 }

@@ -36,9 +36,13 @@ func (a *app) agentwaitsCmd(args []string) error {
 		parse(fl, rest)
 		now := time.Now()
 		st := agentwait.NewStore(a.dir("agentwaits"))
+		graft, err := agentwait.GraftStats(a.home)
+		if err != nil {
+			return err
+		}
 		s, err := agentwait.Collect(now, func(fn func(*agentwait.Wait)) (int, error) {
 			return st.Read(now.Add(-7*24*time.Hour), fn)
-		}, agentwait.GraftStats(a.home))
+		}, graft)
 		if err != nil {
 			return err
 		}

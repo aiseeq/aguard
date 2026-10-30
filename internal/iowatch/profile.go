@@ -178,8 +178,9 @@ func CgroupGone(root, path string) (bool, error) {
 	return false, nil
 }
 
-// Виды профилей. Вид graft (`graft:<проект>/<задача>`) займёт своё место, когда граф шагов придёт из
-// журнала graft: сейчас его cgroup — service.
+// Виды профилей. Задачи graft идут в cgroup сессии агента (agent), своего листа у них нет: kind, который graft
+// шлёт в now (`<repo>:<task>`, у exec — `<repo>:exec:<программа>`, graft-master 30.10), профиля здесь не находит;
+// профиль задачи graft — его же stats.jsonl (read_mb, write_mb, user_s по profile).
 const (
 	KindAgent         = "agent"
 	kindWorkerPrefix  = "worker:"

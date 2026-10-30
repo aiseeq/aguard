@@ -8,14 +8,37 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 )
 
-// GraftStats — журнал затрат graft (stats.jsonl в ~/.cache/graft) и его старая копия .1: graft сам пишет, сколько
-// задача ждала и чего (очередь тяжёлых, нагрузка, своп, блокировка, sudo деплоя).
-func GraftStats(home string) []string {
-	f := filepath.Join(home, ".cache", "graft", "stats.jsonl")
-	return []string{f + ".1", f}
+// GraftStats — журнал затрат graft (stats.jsonl в ~/.cache/graft) и его старые копии .1 … .N от старшей к младшей,
+// затем сам файл (так же graft stats.Files, e5ae71d): graft сам пишет, сколько задача ждала и чего (очередь
+// тяжёлых, нагрузка, своп, блокировка, sudo деплоя).
+func GraftStats(home string) ([]string, error) {
+	return rotated(filepath.Join(home, ".cache", "graft", "stats.jsonl"))
+}
+
+// rotated — копии file.<n>, n ≥ 1, от старшей к младшей, затем file; чужие суффиксы не в счёт.
+func rotated(file string) ([]string, error) {
+	matches, err := filepath.Glob(file + ".*")
+	if err != nil {
+		return nil, fmt.Errorf("копии %s: %w", file, err)
+	}
+	var ns []int
+	for _, m := range matches {
+		if n, err := strconv.Atoi(strings.TrimPrefix(m, file+".")); err == nil && n >= 1 {
+			ns = append(ns, n)
+		}
+	}
+	slices.Sort(ns)
+	files := make([]string, 0, len(ns)+1)
+	for _, n := range slices.Backward(ns) {
+		files = append(files, file+"."+strconv.Itoa(n))
+	}
+	return append(files, file), nil
 }
 
 // graftLine — строка задачи журнала graft; In пусто — задача верхнего уровня: её wait_s включает вложенные.
