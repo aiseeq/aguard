@@ -134,7 +134,7 @@ func TestAlertLogModeTextAndRecipients(t *testing.T) {
 	}
 	text := logged.String()
 	for _, want := range []string{"написал бы", "to=lead,sess7", "фриз 29.10 07:10:28, 3,4 с (простой 2,5 с, io", "главная cgroup sess7",
-		"запись процессов: dd(2) 300 МБ", "своп in/out 1200/0 стр", "Всего случаев от 2,0 с с 07:09: 2, вместе 5,5 с", "aguard io report -since"} {
+		"запись процессов (данные и метаданные): dd(2) 300 МБ", "своп in/out 1200/0 стр", "Всего случаев от 2,0 с с 07:09: 2, вместе 5,5 с", "aguard io report -since"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("нет %q в журнале:\n%s", want, text)
 		}
@@ -394,5 +394,24 @@ func TestIOStepNotesPassEveryMinute(t *testing.T) {
 	}
 	if passes != 3 {
 		t.Fatalf("отметок прохода io за 2,5 мин: %d, ждал 3", passes)
+	}
+}
+
+// Письмо называет фон ядра и помечает io.stat, набранный чужим коммитом по fsync; своя запись в пределах — без пометки.
+func TestIOCaseFsyncAndKernel(t *testing.T) {
+	c := alertCase(time.Date(2026, 10, 30, 12, 15, 12, 0, time.Local), 7400)
+	c.Culprits.CgroupWrite = []iowatch.Ranked{{Name: "postgresql.service", Value: 870 << 20}, {Name: "sess7", Value: 300 << 20}}
+	c.Culprits.CgroupWrite = append(c.Culprits.CgroupWrite, iowatch.Ranked{Name: "systemd-journald.service", Value: 2 << 20})
+	c.Culprits.CgroupOwn = map[string]int64{"postgresql.service": 5 << 20, "sess7": 290 << 20}
+	c.Culprits.CgroupDirty = []iowatch.Ranked{{Name: "sess7", Value: 290 << 20}}
+	c.Culprits.DeviceWrite, c.Culprits.KernelWrite = 1900<<20, 730<<20
+	var b strings.Builder
+	writeIOCase(&b, &c, 3)
+	text := b.String()
+	for _, want := range []string{"запись диска за окно 1900 МБ, из них фон ядра 730 МБ", "запись процессов по cgroup: sess7 290 МБ",
+		"postgresql.service 870 МБ (своих 5 — коммит btrfs по её fsync), sess7 300 МБ, systemd-journald.service 2 МБ (процессы чужого uid — своя запись не видна)\n"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("нет %q:\n%s", want, text)
+		}
 	}
 }

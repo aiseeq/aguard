@@ -25,6 +25,7 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/waits"
+	"github.com/aiseeq/akit/pressure"
 )
 
 func (a *app) diskCmd(ctx context.Context, args []string) error {
@@ -135,7 +136,13 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 		}
 	}
 	owners := a.diskOwners(cfg)
-	measure := func(entries []string) map[string]disk.Usage { return cfg.Disk.MeasureAll(ctx, entries) }
+	yield := a.diskYield(ctx)
+	measure := func(entries []string) map[string]disk.Usage {
+		usage := cfg.Disk.MeasureAll(ctx, entries, yield.wait)
+		a.log.Info("aguard disk: обход", "entries", len(entries), "took", time.Since(now).Round(time.Second).String(),
+			"paused", yield.paused.String(), "pauses", yield.pauses)
+		return usage
+	}
 	recs, usage, err := st.Pass(&cfg.Disk, now, free, cfg.Disk.Entries, measure, owners.Of)
 	if ctx.Err() != nil {
 		return nil
@@ -201,7 +208,7 @@ func (a *app) diskDry(ctx context.Context, cfg *config.Config) error {
 		a.warn("disk", "записи", "err", err)
 	}
 	owners := a.diskOwners(cfg)
-	usage := cfg.Disk.MeasureAll(ctx, entries)
+	usage := cfg.Disk.MeasureAll(ctx, entries, nil)
 	enc := json.NewEncoder(a.out)
 	for _, e := range entries {
 		u := usage[e]
@@ -344,7 +351,7 @@ func (a *app) diskTracesNow(ctx context.Context, cfg *config.Config, all bool) e
 		return err
 	}
 	owners := a.diskOwners(cfg)
-	usage := cfg.Disk.MeasureAll(ctx, entries)
+	usage := cfg.Disk.MeasureAll(ctx, entries, nil)
 	traces := cfg.Disk.FindTraces(now, entries, usage, a.diskFacts(cfg, owners, entries), owners.Of)
 	var b strings.Builder
 	findings := cfg.Disk.Findings(now, traces)
@@ -449,4 +456,55 @@ func (a *app) diskFreeTest(cfg *disk.Config, minFree, to string) error {
 	}
 	cfg.FreeMode = disk.FreeAlert
 	return a.diskLowFree(cfg, to, msg, free)
+}
+
+// diskYielder — пауза обхода disk на занятой машине: обход ~/.cache — миллионы stat и FIEMAP, при холодном кэше
+// метаданных это чтение диска (30.10 12:47–12:51: 22 МБ/с метаданных btrfs, обход 4+ мин вместо ~20 с, его чтение
+// держало очередь graft heavy — замер akit-master). Машину меряет правило akit (как `busy`), не чаще раза в секунду;
+// занята — 2 с паузы: обход не встаёт насовсем, а идёт урывками.
+type diskYielder struct {
+	ctx    context.Context
+	meter  *pressure.Meter
+	last   time.Time
+	pauses int
+	paused time.Duration
+	warned bool
+	warn   func(error)
+}
+
+const (
+	diskYieldCheck = time.Second
+	diskYieldPause = 2 * time.Second
+)
+
+func (a *app) diskYield(ctx context.Context) *diskYielder {
+	return &diskYielder{ctx: ctx, meter: pressure.NewMeter(procRoot), warn: func(err error) {
+		a.warn("disk", "замер машины для паузы обхода", "err", err)
+	}}
+}
+
+func (y *diskYielder) wait() {
+	if time.Since(y.last) < diskYieldCheck {
+		return
+	}
+	y.last = time.Now()
+	v, err := y.meter.Check(y.ctx, pressure.DefaultLimits, "", false)
+	if err != nil {
+		if !y.warned {
+			y.warned = true
+			y.warn(err)
+		}
+		return
+	}
+	if !v.Busy() {
+		return
+	}
+	start := time.Now()
+	select {
+	case <-y.ctx.Done():
+	case <-time.After(diskYieldPause):
+	}
+	y.pauses++
+	y.paused += time.Since(start)
+	y.last = time.Now()
 }

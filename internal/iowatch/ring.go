@@ -54,5 +54,17 @@ func (r *Ring) Details(from, to time.Time) []Step {
 	return out
 }
 
+// DeviceWrite — запись устройства по быстрым шагам с временем в (from, to].
+func (r *Ring) DeviceWrite(from, to time.Time) int64 {
+	var sum int64
+	for i := range r.count {
+		rec := &r.records[(r.head+i)%len(r.records)]
+		if rec.Kind == KindStep && rec.At.After(from) && !rec.At.After(to) {
+			sum += rec.WriteBytes
+		}
+	}
+	return sum
+}
+
 // Len — сколько записей в буфере.
 func (r *Ring) Len() int { return r.count }

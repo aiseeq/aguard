@@ -2,6 +2,7 @@ package iowatch
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -538,7 +539,7 @@ func TestCaseStallsMergeAcrossShortCalmAndGetCulprits(t *testing.T) {
 	idle := make([]int64, 20)
 	idle[1], idle[2], idle[3], idle[4] = 10_000, 60_000, 20_000, 70_000 // 10 мс — не простой; 20 мс между простоями входит в случай
 	got := feed(r, base, idle, func(at time.Time) Step {
-		return Step{At: at, Dirty: 5 << 20, Processes: []Process{{PID: 1, Start: 3, Comm: "dd", WriteBytes: 7 << 20}},
+		return Step{At: at, Dirty: 5 << 20, Processes: []Process{{PID: 1, Start: 3, Comm: "dd", WriteBytes: 7 << 20, Cgroup: "/user.slice/agent-sess7-1.scope"}},
 			Cgroups: []Cgroup{{Path: "/user.slice/agent-sess7-1.scope", WriteBytes: 7 << 20, IOFullUS: 90_000}}}
 	})
 	if len(got) != 1 {
@@ -553,6 +554,40 @@ func TestCaseStallsMergeAcrossShortCalmAndGetCulprits(t *testing.T) {
 	if k == nil || k.Main != "/user.slice/agent-sess7-1.scope" || len(k.ProcWrite) != 1 || k.ProcWrite[0] != (Ranked{"dd(1)", 14 << 20}) ||
 		k.CgroupWrite[0].Name != "sess7" || k.CgroupIdle[0].Value != 180 || !k.From.Equal(c.Start.Add(-5*time.Second)) {
 		t.Fatalf("виновники (детальные 0 и 1 с в окне): %+v", k)
+	}
+}
+
+// Коммит btrfs по чужому fsync: io.stat у postgres 870 МБ при своих 5 МБ, а тест, удаляющий тысячи файлов, сам пачкает
+// 560 МБ метаданных и в io.stat почти не виден (случай 30.10 12:15) — главный тест; запись устройства сверх листьев cgroup —
+// фон ядра.
+func TestCulpritsMainByProcessWrite(t *testing.T) {
+	cfg := Default()
+	cfg.CaseMin = policy.Duration(200 * time.Millisecond)
+	r := NewRecorder(cfg)
+	base := time.Date(2026, 10, 30, 12, 15, 0, 0, time.Local)
+	idle := make([]int64, 20)
+	idle[1], idle[2], idle[3], idle[4] = 60_000, 60_000, 60_000, 60_000
+	test := fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/agents.slice/agent-sess9-1.scope", os.Getuid(), os.Getuid())
+	const pg = "/system.slice/postgresql.service"
+	got := feed(r, base, idle, func(at time.Time) Step {
+		return Step{At: at, Processes: []Process{
+			{PID: 7, Start: 1, Comm: "dreamstats.test", WriteBytes: 280 << 20, Cgroup: test},
+			{PID: 9, Start: 1, Comm: "postgres", WriteBytes: 2 << 20, Cgroup: pg}},
+			Cgroups: []Cgroup{{Path: pg, WriteBytes: 435 << 20}, {Path: test, WriteBytes: 1 << 20}}}
+	})
+	if len(got) != 1 || got[0].Culprits == nil {
+		t.Fatalf("случаи: %+v", got)
+	}
+	k := got[0].Culprits
+	if k.Main != test || k.CgroupDirty[0] != (Ranked{"sess9", 560 << 20}) || k.CgroupOwn["sess9"] != 560<<20 {
+		t.Fatalf("главный и своя запись: %+v", k)
+	}
+	if _, ok := k.CgroupOwn["postgresql.service"]; ok { // процессы чужого uid: своя запись не видна, ноль — не «не писал»
+		t.Fatalf("своя запись системной службы: %+v", k.CgroupOwn)
+	}
+	// быстрые шаги по 1 МиБ: окно деталей 0 и 1 с — (−1 с, 1 с], в буфере шаги 0…1,0 с — 11 МиБ; cgroup — 872 МиБ
+	if k.DeviceWrite != 11<<20 || k.KernelWrite != 0 {
+		t.Fatalf("запись устройства и фон ядра: %d %d", k.DeviceWrite, k.KernelWrite)
 	}
 }
 
@@ -853,4 +888,19 @@ func BenchmarkReadLive(b *testing.B) {
 		b.ReportMetric(float64(inPass), "in-pass")
 		b.ReportMetric(float64(cpuOnly), "cpu-only")
 	})
+}
+
+// Фон ядра: запись устройства 11 МиБ за окно, листья cgroup — 2 МиБ: 9 МиБ писали потоки ядра в корневую cgroup.
+func TestCulpritsKernelWrite(t *testing.T) {
+	cfg := Default()
+	cfg.CaseMin = policy.Duration(200 * time.Millisecond)
+	r := NewRecorder(cfg)
+	idle := make([]int64, 20)
+	idle[1], idle[2], idle[3], idle[4] = 60_000, 60_000, 60_000, 60_000
+	got := feed(r, time.Date(2026, 10, 30, 12, 15, 0, 0, time.Local), idle, func(at time.Time) Step {
+		return Step{At: at, Cgroups: []Cgroup{{Path: "/system.slice/postgresql.service", WriteBytes: 1 << 20}}}
+	})
+	if len(got) != 1 || got[0].Culprits == nil || got[0].Culprits.DeviceWrite != 11<<20 || got[0].Culprits.KernelWrite != 9<<20 {
+		t.Fatalf("фон ядра: %+v", got)
+	}
 }

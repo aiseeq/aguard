@@ -43,14 +43,51 @@ func writeIOCase(w io.Writer, c *iowatch.Case, names int) {
 		return
 	}
 	fmt.Fprintf(w, "виновники с %s:\n", k.From.Format("15:04:05"))
+	if k.DeviceWrite > 0 {
+		fmt.Fprintf(w, "запись диска за окно %.0f МБ, из них фон ядра %.0f МБ (writeback, коммит и метаданные btrfs вне cgroup — "+
+			"порождает их запись процессов ниже)\n", megabytes(k.DeviceWrite), megabytes(k.KernelWrite))
+	}
 	top := func(list []iowatch.Ranked) []iowatch.Ranked { return list[:min(names, len(list))] }
-	writeIOTop(w, "запись процессов", top(k.ProcWrite), ioBytes)
+	writeIOTop(w, "запись процессов (данные и метаданные)", top(k.ProcWrite), ioBytes)
 	writeIOTop(w, "чтение процессов", top(k.ProcRead), ioBytes)
 	writeIOTop(w, "своп процессов", top(k.ProcMajflt), ioMajflt)
-	writeIOTop(w, "запись cgroup", top(k.CgroupWrite), ioBytes)
+	if k.CgroupDirty != nil { // случаи до 30.10 — без неё
+		writeIOTop(w, "запись процессов по cgroup", top(k.CgroupDirty), ioBytes)
+	}
+	writeIOCgroupWrite(w, top(k.CgroupWrite), k.CgroupOwn)
 	writeIOTop(w, "чтение cgroup", top(k.CgroupRead), ioBytes)
 	writeIOTop(w, "своп cgroup", top(k.CgroupSwapIn), ioPages)
 	writeIOTop(w, "простой IO cgroup", top(k.CgroupIdle), ioMillis)
+}
+
+// ioFsyncShare и ioFsyncMin — io.stat cgroup больше записи её процессов во столько раз и на столько байт: остальное —
+// коммит транзакции btrfs, пришедшийся на её fsync (боец 30.10: 724 МБ при своих ≤3 МБ).
+const (
+	ioFsyncShare = 4
+	ioFsyncMin   = 32 << 20
+)
+
+// writeIOCgroupWrite — запись cgroup по io.stat с пометкой коммита по fsync; cgroup не из own — процессы чужого uid;
+// own nil — случай до 30.10, без пометок.
+func writeIOCgroupWrite(w io.Writer, top []iowatch.Ranked, own map[string]int64) {
+	if len(top) == 0 {
+		fmt.Fprintf(w, "запись cgroup (io.stat): нет\n")
+		return
+	}
+	parts := make([]string, len(top))
+	for i, item := range top {
+		note := ""
+		mine, ok := own[item.Name]
+		switch {
+		case own == nil:
+		case !ok:
+			note = " (процессы чужого uid — своя запись не видна)"
+		case item.Value > ioFsyncShare*mine && item.Value-mine > ioFsyncMin:
+			note = fmt.Sprintf(" (своих %.0f — коммит btrfs по её fsync)", megabytes(mine))
+		}
+		parts[i] = ioValue(item.Name, item.Value, ioBytes) + note
+	}
+	fmt.Fprintf(w, "запись cgroup (io.stat): %s\n", strings.Join(parts, ", "))
 }
 
 // ioSeconds — длительность в мс человеку: до секунды — мс, дальше — секунды с десятыми.

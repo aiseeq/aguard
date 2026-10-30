@@ -47,6 +47,15 @@ type Culprit struct {
 	CgroupRead   []Ranked  `json:"cgroup_read,omitempty"`
 	CgroupSwapIn []Ranked  `json:"cgroup_swapin,omitempty"`
 	CgroupIdle   []Ranked  `json:"cgroup_idle,omitempty"` // мс PSI full io
+	// CgroupDirty — запись процессов cgroup (write_bytes, данные и метаданные): кто порождает запись.
+	CgroupDirty []Ranked `json:"cgroup_dirty,omitempty"`
+	// CgroupOwn — запись процессов для каждой своей (Readable) cgroup из CgroupWrite: io.stat намного больше своей —
+	// коммит btrfs по fsync; cgroup чужого uid здесь нет — её своя запись не видна.
+	CgroupOwn map[string]int64 `json:"cgroup_own,omitempty"`
+	// DeviceWrite и KernelWrite — запись устройства за окно и её часть вне листьев cgroup: потоки ядра (writeback,
+	// коммит и метаданные btrfs) в корневой cgroup.
+	DeviceWrite int64 `json:"device_wr,omitempty"`
+	KernelWrite int64 `json:"kernel_wr,omitempty"`
 }
 
 const caseTop = 5
@@ -239,7 +248,21 @@ func (r *Recorder) finish(c *Case) {
 	c.Culprits = &Culprit{From: from, Main: sum.MainCgroup(),
 		ProcWrite: Rank(sum.ProcWrite, caseTop), ProcRead: Rank(sum.ProcRead, caseTop), ProcMajflt: Rank(sum.ProcMajflt, caseTop),
 		CgroupWrite: Rank(sum.CgroupWrite, caseTop), CgroupRead: Rank(sum.CgroupRead, caseTop),
-		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop)}
+		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
+		CgroupDirty: Rank(sum.CgroupDirty, caseTop), CgroupOwn: map[string]int64{}}
+	for _, g := range c.Culprits.CgroupWrite {
+		if sum.Readable[g.Name] {
+			c.Culprits.CgroupOwn[g.Name] = sum.CgroupDirty[g.Name]
+		}
+	}
+	if len(details) > 0 { // детальная запись — дельта за (At − Detail, At]
+		c.Culprits.DeviceWrite = r.ring.DeviceWrite(details[0].At.Add(-r.cfg.Detail.D()), details[len(details)-1].At)
+		var cgroups int64
+		for _, v := range sum.CgroupWrite {
+			cgroups += v
+		}
+		c.Culprits.KernelWrite = max(0, c.Culprits.DeviceWrite-cgroups)
+	}
 }
 
 // Close при остановке закрывает идущий случай и отдаёт все ждущие с тем, что есть в буфере.

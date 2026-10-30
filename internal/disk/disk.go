@@ -264,10 +264,13 @@ func (f *fileSpace) add(p string, d fs.DirEntry, st *syscall.Stat_t) (int64, err
 
 // measure обходит запись. exact — место по экстентам; иначе по st_blocks: долгоживущий кэш инструмента (go-build —
 // 2,1 млн файлов 26.10) reflink-копий не делает, а экстенты — половина времени обхода.
-func measure(ctx context.Context, path string, seen map[inode]bool, buf *fiemapBuf, exact bool) Usage {
+func measure(ctx context.Context, path string, seen map[inode]bool, buf *fiemapBuf, exact bool, yield func()) Usage {
 	var u Usage
 	space := fileSpace{exact: exact, buf: buf}
 	u.Unread, u.Err = walkEntry(ctx, path, func(p string, d fs.DirEntry, st *syscall.Stat_t) error {
+		if yield != nil && u.Files%yieldEvery == yieldEvery-1 {
+			yield()
+		}
 		if ct := time.Unix(st.Ctim.Unix()); ct.After(u.Changed) {
 			u.Changed = ct
 		}

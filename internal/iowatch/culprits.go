@@ -3,19 +3,32 @@ package iowatch
 import (
 	"cmp"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/aiseeq/akit/proc"
 )
 
 // Culprits — кто дал I/O в детальных записях: сумма по имени процесса и cgroup.
+//
+// Запись cgroup по io.stat — не то, что её процессы записали: на btrfs коммит транзакции по fsync уходит на cgroup
+// того, кто вызвал fsync (сам он мог написать килобайты), а метаданные чужих unlink и reflink пишут потоки ядра в
+// корневую cgroup (лид 30.10, bpftrace: 9,5 из 10,9 ГБ записи в бурю метаданных теста). Свою запись процесс видит в
+// /proc/<pid>/io write_bytes в момент, когда пачкает страницы, и метаданные тоже: reflink-копия и удаление 5000
+// файлов — 8,7–12,6 МиБ write_bytes при нулевых данных (проба aguard-master 30.10). Поэтому главный виновник — по
+// записи процессов cgroup (CgroupDirty), а не по io.stat.
 type Culprits struct {
 	ProcWrite, ProcRead, ProcMajflt                   map[string]int64 // байты, majflt
 	CgroupWrite, CgroupRead, CgroupSwapIn, CgroupIdle map[string]int64 // байты, страницы, мс PSI full io
 	CgroupWriteOps                                    map[string]int64
-	cgroupTotal                                       map[string]int64 // запись + чтение + своп: главный виновник
+	CgroupDirty                                       map[string]int64 // write_bytes процессов топа cgroup: данные и метаданные
+	// Readable — cgroup своего user@<uid>.service: /proc/<pid>/io её процессов aguard читает, своя запись известна.
+	// У системных служб (postgres, journald) процессы чужого uid, их write_bytes не видны — ноль там не значит «не писал».
+	Readable    map[string]bool
+	cgroupTotal map[string]int64 // запись процессов + чтение + своп: главный виновник
 }
 
 type procID struct {
@@ -29,7 +42,9 @@ type procID struct {
 func SumCulprits(details []Step) Culprits {
 	c := Culprits{ProcWrite: map[string]int64{}, ProcRead: map[string]int64{}, ProcMajflt: map[string]int64{},
 		CgroupWrite: map[string]int64{}, CgroupRead: map[string]int64{}, CgroupSwapIn: map[string]int64{},
-		CgroupIdle: map[string]int64{}, CgroupWriteOps: map[string]int64{}, cgroupTotal: map[string]int64{}}
+		CgroupIdle: map[string]int64{}, CgroupWriteOps: map[string]int64{}, CgroupDirty: map[string]int64{}, Readable: map[string]bool{},
+		cgroupTotal: map[string]int64{}}
+	userTree := "/user@" + strconv.Itoa(os.Getuid()) + ".service/"
 	names := processNames(details)
 	for i := range details {
 		d := &details[i]
@@ -38,6 +53,10 @@ func SumCulprits(details []Step) Culprits {
 			c.ProcWrite[name] += p.WriteBytes
 			c.ProcRead[name] += p.ReadBytes
 			c.ProcMajflt[name] += p.Majflt
+			if p.Cgroup != "" && p.WriteBytes > 0 {
+				c.CgroupDirty[CgroupName(p.Cgroup)] += p.WriteBytes
+				c.cgroupTotal[p.Cgroup] += p.WriteBytes
+			}
 		}
 		for _, g := range d.Cgroups {
 			name := CgroupName(g.Path)
@@ -46,7 +65,10 @@ func SumCulprits(details []Step) Culprits {
 			c.CgroupSwapIn[name] += g.SwapIn
 			c.CgroupIdle[name] += g.IOFullUS / 1000
 			c.CgroupWriteOps[name] += g.WriteOps
-			c.cgroupTotal[g.Path] += g.WriteBytes + g.ReadBytes + g.SwapIn*4096
+			c.cgroupTotal[g.Path] += g.ReadBytes + g.SwapIn*4096
+			if strings.Contains(g.Path, userTree) {
+				c.Readable[name] = true
+			}
 		}
 	}
 	return c
@@ -82,7 +104,7 @@ func ProcBase(name string) string {
 	return name
 }
 
-// MainCgroup — путь cgroup с наибольшим I/O (запись, чтение, своп в байтах); "" — нет.
+// MainCgroup — путь cgroup с наибольшим I/O (запись её процессов, чтение, своп в байтах); "" — нет.
 func (c *Culprits) MainCgroup() string {
 	var best string
 	for path, v := range c.cgroupTotal {

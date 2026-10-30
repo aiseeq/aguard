@@ -203,8 +203,9 @@ func (s *State) Save(path string) error {
 type Measure func(entries []string) map[string]Usage
 
 // MeasureAll — замер с диска: жёсткие ссылки считаются один раз на весь обход; долгоживущие кэши — по st_blocks.
-// Отменённый ctx обрывает обход (остановка демона): замер неполон, вызывающий его не сохраняет.
-func (c *Config) MeasureAll(ctx context.Context, entries []string) map[string]Usage {
+// Отменённый ctx обрывает обход (остановка демона): замер неполон, вызывающий его не сохраняет. yield зовётся каждые
+// yieldEvery файлов: обход уступает занятой машине; nil — без пауз (разовые команды).
+func (c *Config) MeasureAll(ctx context.Context, entries []string, yield func()) map[string]Usage {
 	seen := map[inode]bool{}
 	buf := new(fiemapBuf)
 	out := make(map[string]Usage, len(entries))
@@ -212,10 +213,14 @@ func (c *Config) MeasureAll(ctx context.Context, entries []string) map[string]Us
 		if ctx.Err() != nil {
 			break
 		}
-		out[e] = measure(ctx, e, seen, buf, !c.IsLasting(e))
+		out[e] = measure(ctx, e, seen, buf, !c.IsLasting(e), yield)
 	}
 	return out
 }
+
+// yieldEvery — через сколько файлов обход спрашивает, не занята ли машина: при холодном кэше метаданных 1024 stat и
+// FIEMAP — доли секунды чтения диска.
+const yieldEvery = 1024
 
 // Pass — один проход: свободное место free; обход записей раз в walk или по тревоге (место тает быстро).
 // Unread — записи, где не прочитались папки: их пишет вызывающий.

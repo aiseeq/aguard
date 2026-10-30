@@ -3,6 +3,7 @@ package disk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -242,8 +243,8 @@ func TestMeasureReflink(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exact := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), true)
-	blocks := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), false)
+	exact := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), true, nil)
+	blocks := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), false, nil)
 	if exact.Files != 3 || blocks.Bytes < 2<<20 || exact.Bytes >= 3<<19 {
 		t.Errorf("по экстентам %d, по блокам %d, файлов %d", exact.Bytes, blocks.Bytes, exact.Files)
 	}
@@ -259,10 +260,10 @@ func TestMeasureCanceled(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if got := testConfig(t, dir).MeasureAll(ctx, []string{dir}); len(got) != 0 {
+	if got := testConfig(t, dir).MeasureAll(ctx, []string{dir}, nil); len(got) != 0 {
 		t.Errorf("отменённый замер: %v", got)
 	}
-	if u := measure(ctx, dir, map[inode]bool{}, new(fiemapBuf), true); !errors.Is(u.Err, context.Canceled) || u.Files != 0 {
+	if u := measure(ctx, dir, map[inode]bool{}, new(fiemapBuf), true, nil); !errors.Is(u.Err, context.Canceled) || u.Files != 0 {
 		t.Errorf("обход после отмены: %+v", u)
 	}
 }
@@ -328,5 +329,20 @@ func TestLowFreeMessage(t *testing.T) {
 	}
 	if msg := (&State{}).LowFreeMessage(&c, 140<<30, "/h"); !strings.Contains(msg, "обхода записей ещё не было") {
 		t.Fatalf("письмо без обхода: %s", msg)
+	}
+}
+
+// Обход спрашивает о занятой машине каждые 1024 файла: 2100 файлов — два вызова.
+func TestMeasureYield(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 2100 {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%d", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	u := testConfig(t, dir).MeasureAll(t.Context(), []string{dir}, func() { calls++ })[dir]
+	if u.Files < 2100 || calls != 2 {
+		t.Fatalf("файлов %d, пауз спрошено %d", u.Files, calls)
 	}
 }
