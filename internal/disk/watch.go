@@ -204,16 +204,26 @@ type Measure func(entries []string) map[string]Usage
 
 // MeasureAll — замер с диска: жёсткие ссылки считаются один раз на весь обход; долгоживущие кэши — по st_blocks.
 // Отменённый ctx обрывает обход (остановка демона): замер неполон, вызывающий его не сохраняет. yield зовётся каждые
-// yieldEvery файлов: обход уступает занятой машине; nil — без пауз (разовые команды).
+// yieldEvery файлов всего обхода, не записи: записей тысячи, и почти все мельче yieldEvery (проверка 30.10); nil — без
+// пауз (разовые команды).
 func (c *Config) MeasureAll(ctx context.Context, entries []string, yield func()) map[string]Usage {
 	seen := map[inode]bool{}
 	buf := new(fiemapBuf)
 	out := make(map[string]Usage, len(entries))
+	var tick func()
+	if yield != nil {
+		files := 0
+		tick = func() {
+			if files++; files%yieldEvery == 0 {
+				yield()
+			}
+		}
+	}
 	for _, e := range entries {
 		if ctx.Err() != nil {
 			break
 		}
-		out[e] = measure(ctx, e, seen, buf, !c.IsLasting(e), yield)
+		out[e] = measure(ctx, e, seen, buf, !c.IsLasting(e), tick)
 	}
 	return out
 }

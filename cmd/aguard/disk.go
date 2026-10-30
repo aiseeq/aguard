@@ -140,7 +140,7 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	measure := func(entries []string) map[string]disk.Usage {
 		usage := cfg.Disk.MeasureAll(ctx, entries, yield.wait)
 		a.log.Info("aguard disk: обход", "entries", len(entries), "took", time.Since(now).Round(time.Second).String(),
-			"paused", yield.paused.String(), "pauses", yield.pauses)
+			"paused", yield.paused.String(), "pauses", yield.pauses, "interrupted", ctx.Err() != nil)
 		return usage
 	}
 	recs, usage, err := st.Pass(&cfg.Disk, now, free, cfg.Disk.Entries, measure, owners.Of)

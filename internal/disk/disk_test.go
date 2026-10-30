@@ -345,4 +345,23 @@ func TestMeasureYield(t *testing.T) {
 	if u.Files < 2100 || calls != 2 {
 		t.Fatalf("файлов %d, пауз спрошено %d", u.Files, calls)
 	}
+	// записи мельче yieldEvery: счёт — на весь обход (3 записи по 700 файлов с папкой — 2103 — 2 вызова)
+	root := t.TempDir()
+	entries := make([]string, 3)
+	for i := range entries {
+		entries[i] = filepath.Join(root, fmt.Sprintf("e%d", i))
+		if err := os.Mkdir(entries[i], 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for j := range 700 {
+			if err := os.WriteFile(filepath.Join(entries[i], fmt.Sprintf("f%d", j)), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	calls = 0
+	testConfig(t, root).MeasureAll(t.Context(), entries, func() { calls++ })
+	if calls != 2 {
+		t.Fatalf("мелкие записи: пауз спрошено %d", calls)
+	}
 }

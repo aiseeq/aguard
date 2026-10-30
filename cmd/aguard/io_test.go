@@ -420,7 +420,7 @@ func TestIOCaseFsyncAndKernel(t *testing.T) {
 	if b.String() != "запись cgroup (io.stat): sess8 100 МБ\n" {
 		t.Errorf("своих 0: %q", b.String())
 	}
-	if line := ioCaseLine(&c); !strings.Contains(line, "главная cgroup sess7 (неточно: docker.service чужого uid записала по io.stat 900 МБ") {
+	if line := ioCaseLine(&c); !strings.Contains(line, "главная cgroup sess7 (неточно: у docker.service чужого uid по io.stat 900 МБ записи, чтения и свопа") {
 		t.Errorf("заголовок без пометки неточной главной: %s", line)
 	}
 }

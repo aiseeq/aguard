@@ -30,6 +30,7 @@ type Culprits struct {
 	// У системных служб (postgres, journald) процессы чужого uid, их write_bytes не видны — ноль там не значит «не писал».
 	Readable    map[string]bool
 	cgroupTotal map[string]int64 // запись процессов + чтение + своп: главный виновник
+	foreignIO   map[string]int64 // по имени cgroup чужого uid: запись по io.stat + чтение + своп — мера, сравнимая с главной
 }
 
 type procID struct {
@@ -44,8 +45,9 @@ func SumCulprits(details []Step) Culprits {
 	c := Culprits{ProcWrite: map[string]int64{}, ProcRead: map[string]int64{}, ProcMajflt: map[string]int64{},
 		CgroupWrite: map[string]int64{}, CgroupRead: map[string]int64{}, CgroupSwapIn: map[string]int64{},
 		CgroupIdle: map[string]int64{}, CgroupWriteOps: map[string]int64{}, CgroupDirty: map[string]int64{}, Readable: map[string]bool{},
-		cgroupTotal: map[string]int64{}}
+		cgroupTotal: map[string]int64{}, foreignIO: map[string]int64{}}
 	userTree := "/user@" + strconv.Itoa(os.Getuid()) + ".service/"
+	foreign := map[string]bool{} // имя есть и вне user@<uid> (dbus-broker.service и в system.slice): своя запись неизвестна
 	names := processNames(details)
 	for i := range details {
 		d := &details[i]
@@ -69,8 +71,14 @@ func SumCulprits(details []Step) Culprits {
 			c.cgroupTotal[g.Path] += g.ReadBytes + g.SwapIn*4096
 			if strings.Contains(g.Path, userTree) {
 				c.Readable[name] = true
+			} else {
+				foreign[name] = true
+				c.foreignIO[name] += g.WriteBytes + g.ReadBytes + g.SwapIn*4096
 			}
 		}
+	}
+	for name := range foreign {
+		delete(c.Readable, name)
 	}
 	return c
 }
@@ -116,15 +124,18 @@ func (c *Culprits) MainCgroup() string {
 	return best
 }
 
-// ForeignOver — cgroup чужого uid (не Readable, не главная) с наибольшей записью по io.stat, если та больше всей меры
-// главной: своя запись её процессов не видна, и главная выбрана без неё. Это может быть и коммит btrfs по её fsync
-// (postgres 30.10 12:15), и настоящая запись (контейнеры docker) — отличить нечем, поэтому главная остаётся, а случай
-// помечается неточным (проверка 30.10).
+// ForeignOver — cgroup чужого uid (не Readable, не главная) с наибольшим I/O по io.stat (запись, чтение, своп), если
+// он больше всей меры главной: своя запись её процессов не видна, и главная выбрана без неё. Это может быть и коммит
+// btrfs по её fsync (postgres 30.10 12:15), и настоящая запись (контейнеры docker) — отличить нечем, поэтому главная
+// остаётся, а случай помечается неточным (проверка 30.10). Главной нет — нечего и помечать.
 func (c *Culprits) ForeignOver(main string) (Ranked, bool) {
 	var best Ranked
-	for _, name := range slices.Sorted(maps.Keys(c.CgroupWrite)) {
-		v := c.CgroupWrite[name]
-		if !c.Readable[name] && name != CgroupName(main) && v > c.cgroupTotal[main] && v > best.Value {
+	if main == "" {
+		return best, false
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.foreignIO)) {
+		v := c.foreignIO[name]
+		if name != CgroupName(main) && v > c.cgroupTotal[main] && v > best.Value {
 			best = Ranked{name, v}
 		}
 	}

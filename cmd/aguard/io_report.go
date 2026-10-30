@@ -30,7 +30,7 @@ func ioCaseLine(c *iowatch.Case) string {
 	if c.Culprits != nil && c.Culprits.Main != "" {
 		line += ", главная cgroup " + iowatch.CgroupName(c.Culprits.Main)
 		if f := c.Culprits.Foreign; f.Value > 0 {
-			line += fmt.Sprintf(" (неточно: %s чужого uid записала по io.stat %.0f МБ — больше, а своя её запись не видна; "+
+			line += fmt.Sprintf(" (неточно: у %s чужого uid по io.stat %.0f МБ записи, чтения и свопа — больше, а своя её запись не видна; "+
 				"бывает и коммит btrfs по её fsync)", f.Name, megabytes(f.Value))
 		}
 	}

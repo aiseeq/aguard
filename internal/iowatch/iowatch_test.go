@@ -915,3 +915,27 @@ func TestCulpritsKernelWrite(t *testing.T) {
 		t.Fatalf("фон ядра: %+v", got)
 	}
 }
+
+// Чужая cgroup сверх главной — по всему I/O io.stat (docker: чтение 45 меньше 50 главной, с записью 55 — больше); имя и в system.slice, и в
+// user@<uid> — не своё: своя запись неизвестна; главной нет — пометки нет (проверка 30.10).
+func TestCulpritsForeignOver(t *testing.T) {
+	user := fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/", os.Getuid(), os.Getuid())
+	sess := user + "agents.slice/agent-sess9-1.scope"
+	c := SumCulprits([]Step{{Processes: []Process{{PID: 7, Start: 1, Comm: "go", WriteBytes: 50 << 20, Cgroup: sess}},
+		Cgroups: []Cgroup{{Path: sess, WriteBytes: 40 << 20},
+			{Path: "/system.slice/docker-0123456789abcdef0123.scope", WriteBytes: 10 << 20, ReadBytes: 45 << 20},
+			{Path: "/system.slice/dbus-broker.service", WriteBytes: 1 << 20}, {Path: user + "dbus-broker.service", WriteBytes: 1 << 20}}}})
+	main := c.MainCgroup()
+	if main != sess {
+		t.Fatalf("главная %q", main)
+	}
+	if f, ok := c.ForeignOver(main); !ok || f != (Ranked{"docker-0123456789ab", 55 << 20}) {
+		t.Fatalf("чужая сверх главной: %+v %v", f, ok)
+	}
+	if c.Readable["dbus-broker.service"] || !c.Readable["sess9"] {
+		t.Fatalf("своё по имени: %+v", c.Readable)
+	}
+	if f, ok := c.ForeignOver(""); ok {
+		t.Fatalf("без главной: %+v", f)
+	}
+}

@@ -53,7 +53,7 @@ type Culprit struct {
 	// коммит btrfs по fsync; cgroup чужого uid здесь нет — её своя запись не видна.
 	// Пустая — тоже в JSON: nil после чтения — случай до 30.10 без пометок.
 	CgroupOwn map[string]int64 `json:"cgroup_own"`
-	// Foreign — cgroup чужого uid, записавшая по io.stat больше всей меры главной (Culprits.ForeignOver): главная неточна.
+	// Foreign — cgroup чужого uid, у которой I/O по io.stat больше всей меры главной (Culprits.ForeignOver): главная неточна.
 	Foreign Ranked `json:"foreign,omitzero"`
 	// DeviceWrite и KernelWrite — запись устройства за окно и её часть вне листьев cgroup: потоки ядра (writeback,
 	// коммит и метаданные btrfs) в корневой cgroup.
