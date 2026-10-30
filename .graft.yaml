@@ -9,6 +9,7 @@ tasks:
   test:
     desc: все тесты
     tests: go
+    remote: true # тесты не читают вне дерева того, чего нет на PC: reflink без кэша пользователя — пропуск, живая проба night — только по AGUARD_NIGHT_PROBE
     run:
       - go test -p {threads} -json {args} ./...
   build:
