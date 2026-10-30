@@ -130,7 +130,7 @@ func lossChecks(f facts, p allowance, against againstFunc) {
 // Унаследованный с двойником среди своих (тот же cron, prompt и recurring) уже поставлен заново: набор прошёл, а
 // CronDelete старого — нет. Он не потеря, иначе набор повторялся бы и копил копии (проверка git-admin 30.10).
 func inherited(crons []cronJob) []cronJob {
-	own := map[string]bool{}
+	own := map[cronKey]bool{}
 	for _, job := range crons {
 		if job.Own {
 			own[cronTwin(job)] = true
@@ -145,8 +145,13 @@ func inherited(crons []cronJob) []cronJob {
 	return jobs
 }
 
-func cronTwin(job cronJob) string {
-	return fmt.Sprintf("%s\x00%s\x00%t", job.Cron, strings.Join(strings.Fields(job.Prompt), " "), job.Recurring)
+type cronKey struct {
+	cron, prompt string
+	recurring    bool
+}
+
+func cronTwin(job cronJob) cronKey {
+	return cronKey{job.Cron, strings.Join(strings.Fields(job.Prompt), " "), job.Recurring}
 }
 
 // allCronsKnown — у всех известно выражение cron: без него поставить таймер заново нельзя.
