@@ -1,0 +1,2 @@
+1999935200 host aguard[1]: level=INFO msg="aguard: итог запуска" started=2033-05-16T21:33:20Z read_bytes=12000000 write_bytes=24000000 vm_hwm_kb=102400
+1999985600 host aguard[1]: level=INFO msg="aguard: итог запуска" started=2033-05-17T14:33:20Z read_bytes=6000000 write_bytes=12000000 vm_hwm_kb=204800

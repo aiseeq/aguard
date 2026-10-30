@@ -1,0 +1,4 @@
+ControlGroup=/user.slice/user-1000.slice/user@1000.service/app.slice/aguard.service
+ActiveEnterTimestampMonotonic=96400000000
+ActiveState=active
+MainPID=1234

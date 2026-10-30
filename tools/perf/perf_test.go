@@ -41,7 +41,7 @@ func TestUnitCPUDayWeightsHistoryAndActiveRun(t *testing.T) {
 		"AGUARD_PERF_NOW":     endpoint,
 		"AGUARD_PERF_UPTIME":  "100000",
 	}
-	out, code := runScript(t, "unit-cpu-day.sh", env, "--until", "@"+endpoint)
+	out, code := runScript(t, "unit-day.sh", env, "cpu", "--until", "@"+endpoint)
 	if code != 0 || strings.TrimSpace(out) != "86400" {
 		t.Fatalf("got (%q, %d), want (86400, 0)", out, code)
 	}
@@ -56,7 +56,7 @@ func TestUnitCPUDayInsufficientCoverage(t *testing.T) {
 		"AGUARD_PERF_NOW":     endpoint,
 		"AGUARD_PERF_SHOW":    "",
 	}
-	out, code := runScript(t, "unit-cpu-day.sh", env, "--until", "@"+endpoint)
+	out, code := runScript(t, "unit-day.sh", env, "cpu", "--until", "@"+endpoint)
 	if code != 3 || out != "" {
 		t.Fatalf("got (%q, %d), want empty output and code 3", out, code)
 	}
@@ -68,7 +68,7 @@ func TestUnitCPUDayIncludesRunEndingAfterWindow(t *testing.T) {
 		"AGUARD_PERF_NOW":     "2000007200",
 		"AGUARD_PERF_SHOW":    "",
 	}
-	out, code := runScript(t, "unit-cpu-day.sh", env, "--until", "@"+endpoint)
+	out, code := runScript(t, "unit-day.sh", env, "cpu", "--until", "@"+endpoint)
 	if code != 0 || strings.TrimSpace(out) != "27000" {
 		t.Fatalf("got (%q, %d), want (27000, 0)", out, code)
 	}
@@ -88,9 +88,68 @@ func TestUnitCPUDayIncludesActiveRunInPastWindow(t *testing.T) {
 	// overlaps; 14 CPU hours over 14 covered hours normalizes to 24 CPU hours,
 	// or 86400 seconds per day.
 	env["AGUARD_PERF_SHOW"] = fixture("systemctl-past-window.txt")
-	out, code := runScript(t, "unit-cpu-day.sh", env, "--until", "@1999992800")
+	out, code := runScript(t, "unit-day.sh", env, "cpu", "--until", "@1999992800")
 	if code != 0 || strings.TrimSpace(out) != "86400" {
 		t.Fatalf("got (%q, %d), want (86400, 0)", out, code)
+	}
+}
+
+func TestUnitDayDiskMeasuresUseDeviceMaximumAndActiveRun(t *testing.T) {
+	for _, tc := range []struct{ measure, want string }{{"read", "31.5"}, {"write", "48.0"}} {
+		t.Run(tc.measure, func(t *testing.T) {
+			env := map[string]string{
+				"AGUARD_PERF_JOURNAL": fixture("unit-summary.log"),
+				"AGUARD_PERF_SHOW":    fixture("systemctl-day-active.txt"),
+				"AGUARD_PERF_NOW":     endpoint,
+				"AGUARD_PERF_UPTIME":  "100000",
+				"AGUARD_PERF_IOSTAT":  fixture("io-stat-two-devices.txt"),
+			}
+			out, code := runScript(t, "unit-day.sh", env, tc.measure, "--until", "@"+endpoint)
+			if code != 0 || strings.TrimSpace(out) != tc.want {
+				t.Fatalf("got (%q, %d), want (%s, 0)", out, code, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnitDayCurrentIOStatMaximumMatchesWholeDayCounter(t *testing.T) {
+	for _, tc := range []struct{ measure, want string }{{"read", "9.0"}, {"write", "8.0"}} {
+		t.Run(tc.measure, func(t *testing.T) {
+			env := map[string]string{
+				"AGUARD_PERF_JOURNAL": "/dev/null",
+				"AGUARD_PERF_SHOW":    fixture("systemctl-day-24h-active.txt"),
+				"AGUARD_PERF_NOW":     endpoint,
+				"AGUARD_PERF_UPTIME":  "100000",
+				"AGUARD_PERF_IOSTAT":  fixture("io-stat-two-devices.txt"),
+			}
+			out, code := runScript(t, "unit-day.sh", env, tc.measure, "--until", "@"+endpoint)
+			if code != 0 || strings.TrimSpace(out) != tc.want {
+				t.Fatalf("got (%q, %d), want (%s, 0)", out, code, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnitDayRSSIncludesEndedAndCurrentPeak(t *testing.T) {
+	env := map[string]string{
+		"AGUARD_PERF_JOURNAL": fixture("unit-summary.log"),
+		"AGUARD_PERF_SHOW":    fixture("systemctl-day-active.txt"),
+		"AGUARD_PERF_NOW":     endpoint,
+		"AGUARD_PERF_STATUS":  fixture("status-current.txt"),
+	}
+	out, code := runScript(t, "unit-day.sh", env, "rss", "--until", "@"+endpoint)
+	if code != 0 || strings.TrimSpace(out) != "250" {
+		t.Fatalf("got (%q, %d), want (250, 0)", out, code)
+	}
+}
+
+func TestUnitDayDiskInsufficientCoverageAndRSSNoValues(t *testing.T) {
+	for _, measure := range []string{"read", "write", "rss"} {
+		env := map[string]string{"AGUARD_PERF_JOURNAL": fixture("unit-short-journal.log"), "AGUARD_PERF_SHOW": "", "AGUARD_PERF_NOW": endpoint}
+		out, code := runScript(t, "unit-day.sh", env, measure, "--until", "@"+endpoint)
+		if code != 3 || out != "" {
+			t.Errorf("%s: got (%q, %d), want empty output and code 3", measure, out, code)
+		}
 	}
 }
 

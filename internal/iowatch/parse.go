@@ -268,6 +268,29 @@ func parseIOStat(data []byte, devices []string, dst [][ioFields]int64) error {
 	return nil
 }
 
+// ParseIOStatMax — rbytes и wbytes io.stat как максимум по устройствам: dm и диск под ним видят одну и ту же
+// запись, сумма посчитала бы её дважды (как maxDelta).
+func ParseIOStatMax(data []byte) (read, write int64, err error) {
+	var devices []string
+	for rest := data; len(rest) > 0; {
+		line, next := nextLine(rest)
+		rest = next
+		id, _ := nextField(line)
+		if len(id) != 0 {
+			devices = append(devices, string(id))
+		}
+	}
+	counters := make([][ioFields]int64, len(devices))
+	if err := parseIOStat(data, devices, counters); err != nil {
+		return 0, 0, err
+	}
+	for _, counter := range counters {
+		read = max(read, counter[ioReadBytes])
+		write = max(write, counter[ioWriteBytes])
+	}
+	return read, write, nil
+}
+
 // parseProcIO — read_bytes и write_bytes из /proc/<pid>/io.
 //
 // Запись — write_bytes минус cancelled_write_bytes: грязные страницы, отброшенные усечением или

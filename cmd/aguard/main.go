@@ -211,6 +211,7 @@ type watcher struct {
 // проход; не прочитался — проход пропускается (по неизвестным правилам ничего
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
+	started := time.Now()
 	// io: SIGUSR1 — сводки случаев в файл, SIGUSR2 — ручной снимок буфера; подписка до всего, иначе
 	// сигнал убил бы демон
 	usr1, usr2 := make(chan os.Signal, 1), make(chan os.Signal, 1)
@@ -238,6 +239,7 @@ func (a *app) run(ctx context.Context) error {
 	wg.Go(func() { a.flushLoop(ctx) })
 	wg.Wait()
 	a.flush() // остановка: несохранённое — в файл
+	a.logRunSummary(started)
 	return nil
 }
 
