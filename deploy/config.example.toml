@@ -230,7 +230,7 @@ file = "~/.cache/graft/remote-broken.jsonl"
 [night]
 mode = "alert"         # off | log | alert
 interval = "1m"
-dream_by = "03:00"
+dream_by = "02:30"
 dream_marker = "~/.claude/improve/runs/{date}/started"
 digest_by = "07:00"
 digest_marker = "~/.local/state/digest/started"

@@ -198,11 +198,11 @@ func TestNightDreamOwnerGetsDreamSignal(t *testing.T) {
 		t.Fatalf("ждали сигналы Сна и Дайджеста: %+v", signals)
 	}
 	for _, s := range signals {
-		if !strings.Contains(s.Text, ": запусти ") {
+		if !strings.Contains(s.Text, "запусти ") {
 			t.Errorf("%s: в тексте нет следующего шага: %s", s.Key, s.Text)
 		}
 	}
-	if !strings.Contains(signals[0].Text, "dream-master: запусти Сон") {
+	if !strings.Contains(signals[0].Text, "dream-master: сначала проверь") || !strings.Contains(signals[0].Text, "dream-run-1030") {
 		t.Errorf("текст Сна: %s", signals[0].Text)
 	}
 	got := map[string][]string{}

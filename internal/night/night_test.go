@@ -25,9 +25,9 @@ func TestCheckMarkers(t *testing.T) {
 		facts Facts
 		key   string
 	}{
-		{"до Сна", local(2, 59), Facts{}, ""},
-		{"Сон без маркера", local(3, 1), Facts{}, "dream:2026-10-28"},
-		{"Сон с маркером", local(3, 1), Facts{DreamMarker: true}, ""},
+		{"до Сна", local(2, 29), Facts{}, ""},
+		{"Сон без маркера", local(2, 31), Facts{}, "dream:2026-10-28"},
+		{"Сон с маркером", local(2, 31), Facts{DreamMarker: true}, ""},
 		{"Дайджест с датой вчера", local(7, 1), Facts{DreamMarker: true, DigestText: "2026-10-27"}, "digest:2026-10-28"},
 		{"Дайджест с сегодняшней датой", local(7, 1), Facts{DreamMarker: true, DigestText: "done 2026-10-28"}, ""},
 		{"Дайджест без файла", local(7, 1), Facts{DreamMarker: true}, "digest:2026-10-28"},

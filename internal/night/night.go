@@ -38,7 +38,7 @@ const (
 
 // Default returns ночной сторож по умолчанию.
 func Default(home string) Config {
-	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "03:00",
+	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "02:30",
 		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DigestBy: "07:00",
 		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute),
 		AlsoTo: []string{"git-admin"}, DreamTo: []string{"dream-master"}}
@@ -96,8 +96,9 @@ func Check(now time.Time, cfg Config, facts Facts) []Signal {
 	if due(now, cfg.DreamBy) && !facts.DreamMarker {
 		out = append(out, Signal{Key: "dream:" + date, To: cfg.DreamTo, Text: fmt.Sprintf("Сон не стартовал к %s: нет %s. "+
 			"Звенья: таймер Сна у %s (CronList; окно доверия, лимит, упавшая консоль) и сессия %s. "+
-			"%s: запусти Сон сам по скиллу dream.", cfg.DreamBy, DreamPath(cfg, now), cfg.Lead, strings.Join(cfg.DreamTo, ", "),
-			strings.Join(cfg.DreamTo, ", "))})
+			"%s: сначала проверь, не идёт ли он уже (открытый тикет dream-run-%s в ~/git/dream, ход лида или мастера сна: маркер пишет только шаг 4), "+
+			"и только потом запусти Сон сам по скиллу dream.", cfg.DreamBy, DreamPath(cfg, now), cfg.Lead, strings.Join(cfg.DreamTo, ", "),
+			strings.Join(cfg.DreamTo, ", "), now.Format("0102"))})
 	}
 	if due(now, cfg.DigestBy) && !strings.Contains(facts.DigestText, date) {
 		out = append(out, Signal{Key: "digest:" + date, Text: fmt.Sprintf("Дайджест не стартовал к %s: нет сегодняшней даты в %s. "+
