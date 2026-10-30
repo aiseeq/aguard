@@ -40,7 +40,20 @@ type launcher struct {
 	selfExe  string
 	exec     func(path string, argv, env []string) error
 	upgraded *upgrade
+	recreate *recreateState
 }
+
+type recreateState struct {
+	last   map[string]time.Time
+	logged map[string]bool
+}
+
+// recreateRetry — тот же набор таймеров не чаще; recreateCheck — после набора столько ждать хода сессии, прежде чем
+// писать в журнал, что набор не помог.
+const (
+	recreateRetry = 30 * time.Minute
+	recreateCheck = 5 * time.Minute
+)
 
 // outcome — чем кончился один запуск claude.
 type outcome struct {
@@ -58,6 +71,8 @@ type outcome struct {
 	reset bool
 	// typed — не перезапускать, а набрать эту команду в живой сессии под pty (restart.type_mode act).
 	typed string
+	// recreate — typed ставит заново таймеры, унаследованные через /clear, перед перезапуском ради версии.
+	recreate bool
 }
 
 // humanQuiet — сколько человек не должен ничего вводить, чтобы cl набирал в его сессии.
@@ -76,6 +91,7 @@ const compactTimeout = 10 * time.Minute
 // supervise запускает claude и поднимает его снова с той же беседой, если он вышел по сигналу перезапуска от cl.
 // Любой другой выход (/exit, Ctrl+C, Ctrl+D, закрытие вкладки, сбой) — выход cl с кодом claude.
 func (l launcher) supervise(pre, userArgs []string) int {
+	l.recreate = &recreateState{last: map[string]time.Time{}, logged: map[string]bool{}}
 	sigs := make(chan os.Signal, 4)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
 	defer func() { // консоль открывает openPty, и не обязательно на первом подъёме
@@ -133,8 +149,8 @@ func (l launcher) supervise(pre, userArgs []string) int {
 			}
 		}
 		args = append(append(sessionFlags(l.home), "-n", out.name), keep...)
-		// Без реплики: беседа поднята целиком, а таймеры CronCreate --resume возвращает сам (замер лида 27.10 09:58 CET
-		// на 2.1.311; changelog 2.1.110). Реплика — лишний ход на всём контексте и непонятная строка в консоли
+		// Без реплики: беседа поднята целиком, а --resume возвращает таймеры своей беседы. Унаследованные через /clear
+		// aguard удерживает до перезапуска и даёт cl набрать заново перед ним (проба 30.10 на 2.1.314). Реплика — лишний ход на всём контексте и непонятная строка в консоли
 		// (пользователь 27.10 09:50 CET: «если консоль работает, не надо её рестартить. А если не работает, то не о чем
 		// напоминать»).
 		args = append(args, "--resume", out.sessionID)
@@ -364,7 +380,7 @@ func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem str
 			a, askErr := l.ask(pid, argsProblem, l.console != nil && cfg.Restart.TypeMode == modeAct)
 			out, last = l.next(cfg, now, pid, a, askErr, last)
 			if out.typed != "" {
-				l.typeInto(cfg, now, pid, out)
+				l.typeOutcome(cfg, now, pid, out)
 				out = outcome{}
 			}
 			if !out.restart {
@@ -413,7 +429,7 @@ type journalKeys struct {
 
 // next — что делать с сессией по ответу aguard: перезапуск (act) важнее сжатия, сжатие — сброса. aguard не ответил —
 // ничего: своего решения у cl нет, а сомнение — не перезапускать.
-func (l launcher) next(cfg config, now time.Time, pid int, a restart.Answer, askErr error, last journalKeys) (outcome, journalKeys) {
+func (l *launcher) next(cfg config, now time.Time, pid int, a restart.Answer, askErr error, last journalKeys) (outcome, journalKeys) {
 	name := firstNonEmpty(a.Name, l.name)
 	if askErr != nil {
 		last.verdict = journalOnce(cfg, last.verdict, "error/"+askErr.Error(),
@@ -421,6 +437,22 @@ func (l launcher) next(cfg config, now time.Time, pid int, a restart.Answer, ask
 		return outcome{}, last
 	}
 	last.verdict = journalOnce(cfg, last.verdict, a.Key, journalLine(cfg.Restart.Mode, name, pid, a))
+	if a.Recreate != "" && cfg.Restart.Mode == modeAct && l.console != nil {
+		if l.recreate == nil {
+			l.recreate = &recreateState{last: map[string]time.Time{}, logged: map[string]bool{}}
+		}
+		if since, ok := l.recreate.last[a.Recreate]; ok && now.Sub(since) < recreateRetry {
+			// Ход с CronCreate идёт не мгновенно: «не помог» — только когда сессии хватило бы времени.
+			if now.Sub(since) >= recreateCheck && !l.recreate.logged[a.Recreate] {
+				journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: %s", name, pid, cllog.RecreateFailed()))
+				l.recreate.logged[a.Recreate] = true
+			}
+			return outcome{}, last
+		}
+		l.recreate.last[a.Recreate] = now
+		l.recreate.logged[a.Recreate] = false
+		return outcome{typed: a.Recreate, recreate: true, name: name, sessionID: a.SessionID}, last
+	}
 	if a.Restart && cfg.Restart.Mode == modeAct && a.SessionID != "" {
 		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: SIGTERM, поднимаю --resume %s на %s", name, pid, a.SessionID, a.Installed))
 		return outcome{restart: true, sessionID: a.SessionID, name: name, version: a.Installed, at: now}, last
@@ -523,22 +555,34 @@ func (l launcher) wantIdle(pid int, a restart.Answer, last string, x idleAction)
 	return out, head + x.doing + x.noReset + note, key
 }
 
+// typeOutcome набирает out.typed и снимает ограничение повтора, если набор не удался.
+func (l launcher) typeOutcome(cfg config, now time.Time, pid int, out outcome) {
+	if err := l.typeInto(cfg, now, pid, out); err != nil && out.recreate && l.recreate != nil {
+		delete(l.recreate.last, out.typed)
+	}
+}
+
 // typeInto набирает out.typed в живой сессии под pty; человек вводил меньше humanQuiet назад — не набирает.
-func (l launcher) typeInto(cfg config, now time.Time, pid int, out outcome) {
+func (l launcher) typeInto(cfg config, now time.Time, pid int, out outcome) error {
 	head := fmt.Sprintf("%s pid=%d: ", out.name, pid)
 	if l.console == nil { // typed ставит только wantIdle при открытой консоли
 		journal(cfg.Restart.Journal, now, head+"набор без консоли pty — не набираю (ошибка cl)")
-		return
+		return errors.New("нет консоли pty")
 	}
 	if quiet := l.console.idle(now); quiet < humanQuiet {
 		journal(cfg.Restart.Journal, now, head+cllog.HumanTyping(quiet))
-		return
+		return fmt.Errorf("человек вводил %v назад", quiet.Round(time.Second))
 	}
 	if err := l.console.typeLine(out.typed); err != nil {
 		journal(cfg.Restart.Journal, time.Now(), head+cllog.TypeFailed(out.typed, err))
-		return
+		return fmt.Errorf("набор %s: %w", out.typed, err)
 	}
-	journal(cfg.Restart.Journal, time.Now(), head+cllog.Typed(out.typed, out.sessionID))
+	line := cllog.Typed(out.typed, out.sessionID)
+	if out.recreate {
+		line = cllog.RecreateTyped(out.typed)
+	}
+	journal(cfg.Restart.Journal, time.Now(), head+line)
+	return nil
 }
 
 // onceLine — line, если ключ не тот, что в прошлый раз; иначе пусто.

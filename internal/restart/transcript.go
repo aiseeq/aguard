@@ -72,8 +72,10 @@ const textLimit = 300
 // cronJob — таймер сессии; поля — как в результате CronList.
 type cronJob struct {
 	ID        string `json:"id"`
+	Cron      string `json:"cron"`
 	Prompt    string `json:"prompt"`
 	Recurring bool   `json:"recurring"`
+	Own       bool   `json:"-"`
 }
 
 // object — JSON-объект с полями как есть: инструменты и версии Claude Code кладут в одно поле разные типы, и разбор
@@ -147,7 +149,7 @@ var (
 // markers — строки без них транскрипт-скан не разбирает: в них нет ни вызовов, ни уведомлений, ни таймеров, ни
 // запросов и сжатий.
 var markers = [][]byte{[]byte(`"tool_use"`), []byte(`"tool_result"`), []byte(`task-notification`), []byte(`scheduled_task_fire`),
-	[]byte(`"type":"user"`), []byte(`"usage"`), []byte(`compact_boundary`)}
+	[]byte(`"type":"user"`), []byte(`"usage"`), []byte(`compact_boundary`), []byte(`session_cron_carry`)}
 
 // transcriptScan — состояние разбора одного транскрипта.
 type transcriptScan struct {
@@ -222,6 +224,10 @@ func (s *transcriptScan) line(line []byte) error {
 	if err != nil {
 		return err
 	}
+	typ := rec.str("type")
+	if typ == "attachment" {
+		return s.cronCarry(rec)
+	}
 	if !rec.flag("isSidechain") {
 		if err := s.request(rec, at); err != nil {
 			return err
@@ -230,7 +236,6 @@ func (s *transcriptScan) line(line []byte) error {
 	if at.Before(s.since) {
 		return nil
 	}
-	typ := rec.str("type")
 	if typ == "system" && rec.str("subtype") == "scheduled_task_fire" {
 		s.fired[rec.str("taskId")] = true
 		return nil
@@ -448,7 +453,7 @@ func (s *transcriptScan) result(b block, raw json.RawMessage) error {
 		}
 	case "CronCreate":
 		if id := res.str("id"); id != "" {
-			s.crons[id] = cronJob{ID: id, Prompt: use.input.str("prompt"), Recurring: res.flag("recurring")}
+			s.crons[id] = cronJob{ID: id, Cron: use.input.str("cron"), Prompt: use.input.str("prompt"), Recurring: res.flag("recurring"), Own: true}
 		}
 	case "CronDelete":
 		delete(s.crons, res.str("id"))
@@ -473,9 +478,47 @@ func (s *transcriptScan) cronList(res object) error {
 	if err := json.Unmarshal(raw, &jobs); err != nil {
 		return fmt.Errorf("транскрипт: CronList: %w", err)
 	}
+	previous := s.crons
 	s.crons = map[string]cronJob{}
 	for _, j := range jobs {
+		if old, ok := previous[j.ID]; ok {
+			j.Cron = firstNonEmpty(j.Cron, old.Cron)
+			j.Own = old.Own
+		}
 		s.crons[j.ID] = j
+	}
+	return nil
+}
+
+// cronCarry — снимок таймеров на старте беседы или после сжатия: свои и унаследованные из прежней беседы.
+func (s *transcriptScan) cronCarry(rec object) error {
+	attachment, err := parseObject(rec["attachment"])
+	if err != nil {
+		return err
+	}
+	if attachment.str("type") != "session_cron_carry" {
+		return nil
+	}
+	s.crons = map[string]cronJob{}
+	for _, group := range []struct {
+		field string
+		own   bool
+	}{{"tasks", true}, {"otherArmed", false}} {
+		raw := attachment[group.field]
+		if len(raw) == 0 || string(raw) == "null" {
+			continue
+		}
+		var jobs []cronJob
+		if err := json.Unmarshal(raw, &jobs); err != nil {
+			return fmt.Errorf("транскрипт: session_cron_carry %s: %w", group.field, err)
+		}
+		for _, job := range jobs {
+			if job.ID == "" {
+				continue
+			}
+			job.Own = group.own
+			s.crons[job.ID] = job
+		}
 	}
 	return nil
 }

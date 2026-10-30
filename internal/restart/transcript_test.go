@@ -168,6 +168,30 @@ func TestScanTranscriptCrons(t *testing.T) {
 	}
 }
 
+func TestTranscriptCronCarry(t *testing.T) {
+	since := mustTime(t, tsNew)
+	f := scanLines(t, since, since.Add(time.Hour),
+		`{"type":"attachment","timestamp":"`+tsNew+`","attachment":{"type":"session_cron_carry","tasks":[{"id":"A","cron":"47 1 * * *","prompt":"Сон","recurring":true}],"otherArmed":[{"id":"B","cron":"11 6 * * *","prompt":"Дайджест","recurring":true},{"id":"C","cron":"0 9 * * *","prompt":"Старый","recurring":false}]}}`,
+		use(tsNew, "new", "CronCreate", `{"cron":"30 12 * * *","prompt":"Новый","recurring":true}`),
+		result(tsNew, "new", "ok", `{"id":"D","recurring":true}`),
+		use(tsNew, "del", "CronDelete", `{"id":"C"}`),
+		result(tsNew, "del", "ok", `{"id":"C"}`),
+	)
+	want := map[string]struct {
+		cron string
+		own  bool
+	}{"A": {"47 1 * * *", true}, "B": {"11 6 * * *", false}, "D": {"30 12 * * *", true}}
+	if len(f.Crons) != len(want) {
+		t.Fatalf("Crons = %+v", f.Crons)
+	}
+	for _, job := range f.Crons {
+		w, ok := want[job.ID]
+		if !ok || job.Cron != w.cron || job.Own != w.own {
+			t.Errorf("таймер %+v, ожидался cron=%q own=%t", job, w.cron, w.own)
+		}
+	}
+}
+
 func TestScanTranscriptBrokenLine(t *testing.T) {
 	// Недописанная последняя строка живого файла — не ошибка; битая целая строка — ошибка (сомнение).
 	if _, err := scanTranscript(strings.NewReader(`{"type":"user","message":{"content":[{"type":"tool_result"`), time.Time{}); err != nil {

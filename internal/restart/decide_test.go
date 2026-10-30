@@ -2,6 +2,7 @@ package restart
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,11 +88,11 @@ func TestDecideAgainst(t *testing.T) {
 	}
 }
 
-// Таймеры перезапуск не держат: --resume их возвращает (замер лида 27.10 09:58 CET).
+// Свои таймеры текущей беседы --resume возвращает.
 func TestDecideCrons(t *testing.T) {
 	f := idleFacts()
 	f.Name, f.HookState = "lead", "paused"
-	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл dream)", Recurring: true}, {ID: "j3", Prompt: "замер темпа Codex"}}
+	f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл dream)", Recurring: true, Own: true}, {ID: "j3", Prompt: "замер темпа Codex", Own: true}}
 	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart {
 		t.Errorf("таймеры --resume вернёт: %+v", v)
 	}
@@ -106,6 +107,28 @@ func TestDecideCrons(t *testing.T) {
 	f.HookWaits = true // пауза — из-за монитора артефакта или таймеров по chooks
 	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart {
 		t.Errorf("пауза объяснена монитором артефакта: %+v", v)
+	}
+}
+
+func TestDecideRestartInheritedCrons(t *testing.T) {
+	f := idleFacts()
+	f.Transcript.Crons = []cronJob{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true}}
+	v := decide(f, allowance{idle: 10 * time.Minute})
+	if v.Restart || !slices.Contains(codes(v), "crons") || !strings.Contains(v.Against[len(v.Against)-1].Text, "j1") {
+		t.Fatalf("унаследованный таймер должен держать перезапуск: %+v", v)
+	}
+	v = decide(f, allowance{idle: 10 * time.Minute, typed: true})
+	if v.Restart || !strings.Contains(v.Recreate, `cron "47 1 * * *"`) || !strings.Contains(v.Recreate, `prompt "Сон (скилл dream)"`) {
+		t.Errorf("для pty нужна команда восстановления: %+v", v)
+	}
+	f.Transcript.Crons[0].Own = true
+	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); !v.Restart || v.Recreate != "" {
+		t.Errorf("свои таймеры не держат перезапуск: %+v", v)
+	}
+	f.Transcript.Crons[0].Own = false
+	f.Transcript.Crons[0].Cron = ""
+	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); v.Recreate != "" || v.Restart {
+		t.Errorf("неизвестное выражение нельзя набирать: %+v", v)
 	}
 }
 

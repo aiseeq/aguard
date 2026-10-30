@@ -293,6 +293,34 @@ func TestNext(t *testing.T) {
 	}
 }
 
+func TestNextTypesRecreate(t *testing.T) {
+	cfg := defaultConfig(t.TempDir())
+	cfg.Restart.Mode = modeAct
+	l := launcher{name: "x-master", console: &console{}}
+	text := `cl: перед перезапуском ради версии Claude Code поставь заново таймеры прошлой беседы — --resume их не вернёт: CronCreate cron "47 1 * * *" prompt "Сон" recurring true; CronCreate …. Потом удали старые CronDelete j1 (не выйдет — оставь). Больше ничего не делай.`
+	a := restart.Answer{Verdict: restart.Verdict{Against: []restart.Reason{{Code: "crons", Text: "таймеры прошлой беседы --resume не вернёт"}}, Recreate: text},
+		Key: "false,false,crons", SessionID: "s1", Name: "x-master"}
+	now := time.Now()
+	if out, _ := l.next(cfg, now, 7, a, nil, journalKeys{}); out.typed != text || !out.recreate || out.restart {
+		t.Fatalf("команда восстановления не набрана: %+v", out)
+	}
+	if out, _ := l.next(cfg, now.Add(time.Minute), 7, a, nil, journalKeys{}); out.typed != "" || out.restart {
+		t.Fatalf("повтор в 30 минут не подавлен: %+v", out)
+	}
+	if journal := strings.Join(readLines(t, cfg.Restart.Journal), "\n"); strings.Contains(journal, "набор таймеров не помог") {
+		t.Errorf("через минуту сессия ещё может ставить таймеры, а журнал уже пишет «не помог»: %s", journal)
+	}
+	if out, _ := l.next(cfg, now.Add(recreateCheck), 7, a, nil, journalKeys{}); out.typed != "" || out.restart {
+		t.Fatalf("повтор в 30 минут не подавлен: %+v", out)
+	}
+	if journal := strings.Join(readLines(t, cfg.Restart.Journal), "\n"); !strings.Contains(journal, "набор таймеров не помог") {
+		t.Errorf("в журнале нет результата повтора: %s", journal)
+	}
+	if out, _ := l.next(cfg, now.Add(recreateRetry), 7, a, nil, journalKeys{}); out.typed != text {
+		t.Fatalf("через 30 минут набор не повторён: %+v", out)
+	}
+}
+
 // anyClock заменяет время в {why} строки роли (часы теста) на «ЧЧ:ММ».
 func anyClock(args []string) []string {
 	clock := regexp.MustCompile(` в \d\d:\d\d `)

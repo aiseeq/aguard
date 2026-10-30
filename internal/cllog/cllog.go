@@ -71,6 +71,16 @@ func Typed(typed, sessionID string) string {
 	return fmt.Sprintf("набрал %s в беседе %s", typed, sessionID)
 }
 
+// RecreateTyped — набрал команду восстановления унаследованных таймеров перед перезапуском ради версии.
+func RecreateTyped(typed string) string {
+	return fmt.Sprintf("набрал заново таймеры перед перезапуском ради версии: %s", typed)
+}
+
+// RecreateFailed — повторная проверка показала, что набор таймеров не помог; до появления своих таймеров не перезапускать.
+func RecreateFailed() string {
+	return "набор таймеров не помог — перезапуск не делаю"
+}
+
 // HumanTyping — не набрал: человек вводил quiet назад.
 func HumanTyping(quiet time.Duration) string {
 	return fmt.Sprintf("человек вводил %v назад — не набираю", quiet.Round(time.Second))
