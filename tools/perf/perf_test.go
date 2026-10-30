@@ -199,3 +199,21 @@ func TestExecMSZeroBudgetStillRunsOnce(t *testing.T) {
 		t.Fatalf("ran %d times, want once", strings.Count(string(data), "run\n"))
 	}
 }
+
+func TestUnitDaySystemUnitUsesSameAccounting(t *testing.T) {
+	env := map[string]string{
+		"AGUARD_PERF_JOURNAL": fixture("unit-journal.log"),
+		"AGUARD_PERF_SHOW":    fixture("systemctl-active.txt"),
+		"AGUARD_PERF_NOW":     endpoint,
+		"AGUARD_PERF_UPTIME":  "100000",
+	}
+	out, code := runScript(t, "unit-day.sh", env, "cpu", "--system", "tmpguard-track", "--until", "@"+endpoint)
+	if code != 0 || strings.TrimSpace(out) != "86400" {
+		t.Fatalf("got (%q, %d), want (86400, 0)", out, code)
+	}
+	for _, args := range [][]string{{"cpu", "--system"}, {"cpu", "--system", ""}, {"cpu", "--until"}, {"cpu", "--bogus", "x"}} {
+		if _, code := runScript(t, "unit-day.sh", env, args...); code != 2 {
+			t.Fatalf("%v: code %d, want 2", args, code)
+		}
+	}
+}

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# unit-day.sh cpu|read|write|rss [--until T]
+# unit-day.sh cpu|read|write|rss [--system UNIT] [--until T]
+# Without --system the unit is the user service aguard.
 set -uo pipefail
 
-usage() { echo "usage: unit-day.sh cpu|read|write|rss [--until T]" >&2; exit 2; }
+usage() { echo "usage: unit-day.sh cpu|read|write|rss [--system UNIT] [--until T]" >&2; exit 2; }
 (( $# >= 1 )) || usage
 measure=$1; shift
 case $measure in cpu|read|write|rss) ;; *) usage;; esac
 until_arg=
-if (( $# == 2 )) && [[ $1 == --until ]]; then until_arg=$2
-elif (( $# != 0 )); then usage
-fi
+scope=--user unit=aguard
+while (( $# )); do
+ (( $# >= 2 )) && [[ -n $2 ]] || usage
+ case $1 in --until) until_arg=$2;; --system) scope=--system unit=$2;; *) usage;; esac
+ shift 2
+done
 if [[ -n $until_arg ]]; then end=$(date -d "$until_arg" +%s 2>/dev/null) || usage
 else end=$(date +%s) || { echo "unit-day: cannot read clock" >&2; exit 1; }; fi
 start=$((end-86400)); query_start=$((start-8*86400))
@@ -18,7 +22,7 @@ if [[ -n ${AGUARD_PERF_NOW:-} ]]; then now=$AGUARD_PERF_NOW; test_clock=1
 else now=$(date +%s) || { echo "unit-day: cannot read clock" >&2; exit 1; }; fi
 [[ $now =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "unit-day: invalid AGUARD_PERF_NOW" >&2; exit 1; }
 if [[ -n ${AGUARD_PERF_JOURNAL:-} ]]; then journal=$(cat "$AGUARD_PERF_JOURNAL") || { echo "unit-day: cannot read journal fixture" >&2; exit 1; }
-else journal=$(journalctl --user -u aguard -o short-unix --no-pager --since "@$query_start") || { echo "unit-day: journalctl failed" >&2; exit 1; }; fi
+else journal=$(journalctl "$scope" -u "$unit" -o short-unix --no-pager --since "@$query_start") || { echo "unit-day: journalctl failed" >&2; exit 1; }; fi
 
 if [[ $measure == cpu ]]; then
  result=$(awk -v lo="$start" -v hi="$end" '
@@ -47,7 +51,7 @@ END {for(i=1;i<=n;i++)for(j=i+1;j<=n;j++)if(seg[i,1]>seg[j,1]){t=seg[i,1];seg[i,
  printf "%.9f %.9f\n",cpu_total,covered}' <<<"$journal") || { echo "unit-day: CPU journal parsing failed" >&2; exit 1; }
  read -r cpu covered <<<"$result"
  if [[ $test_clock == 1 ]]; then show=$(cat "${AGUARD_PERF_SHOW:-/dev/null}") || { echo "unit-day: cannot read systemctl fixture" >&2; exit 1; }
- else show=$(systemctl --user show aguard -p CPUUsageNSec -p ActiveEnterTimestampMonotonic -p ActiveState) || { echo "unit-day: systemctl show failed" >&2; exit 1; }; fi
+ else show=$(systemctl "$scope" show "$unit" -p CPUUsageNSec -p ActiveEnterTimestampMonotonic -p ActiveState) || { echo "unit-day: systemctl show failed" >&2; exit 1; }; fi
  state='' cpu_ns='' active_us=''
  while IFS='=' read -r key value; do case $key in ActiveState)state=$value;; CPUUsageNSec)cpu_ns=$value;; ActiveEnterTimestampMonotonic)active_us=$value;; esac; done <<<"$show"
  if [[ $state == active ]]; then
@@ -64,7 +68,7 @@ show=''
 if [[ $test_clock == 1 ]]; then
  if [[ -n ${AGUARD_PERF_SHOW:-} ]]; then show=$(cat "$AGUARD_PERF_SHOW") || { echo "unit-day: cannot read systemctl fixture" >&2; exit 1; }
  else show=''; fi
-else show=$(systemctl --user show aguard -p ControlGroup -p ActiveEnterTimestampMonotonic -p ActiveState -p MainPID) || { echo "unit-day: systemctl show failed" >&2; exit 1; }; fi
+else show=$(systemctl "$scope" show "$unit" -p ControlGroup -p ActiveEnterTimestampMonotonic -p ActiveState -p MainPID) || { echo "unit-day: systemctl show failed" >&2; exit 1; }; fi
 state='' control_group='' active_us='' main_pid=''
 while IFS='=' read -r key value; do case $key in ActiveState)state=$value;; ControlGroup)control_group=$value;; ActiveEnterTimestampMonotonic)active_us=$value;; MainPID)main_pid=$value;; esac; done <<<"$show"
 
