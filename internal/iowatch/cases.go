@@ -51,7 +51,10 @@ type Culprit struct {
 	CgroupDirty []Ranked `json:"cgroup_dirty,omitempty"`
 	// CgroupOwn — запись процессов для каждой своей (Readable) cgroup из CgroupWrite: io.stat намного больше своей —
 	// коммит btrfs по fsync; cgroup чужого uid здесь нет — её своя запись не видна.
-	CgroupOwn map[string]int64 `json:"cgroup_own,omitempty"`
+	// Пустая — тоже в JSON: nil после чтения — случай до 30.10 без пометок.
+	CgroupOwn map[string]int64 `json:"cgroup_own"`
+	// Foreign — cgroup чужого uid, записавшая по io.stat больше всей меры главной (Culprits.ForeignOver): главная неточна.
+	Foreign Ranked `json:"foreign,omitzero"`
 	// DeviceWrite и KernelWrite — запись устройства за окно и её часть вне листьев cgroup: потоки ядра (writeback,
 	// коммит и метаданные btrfs) в корневой cgroup.
 	DeviceWrite int64 `json:"device_wr,omitempty"`
@@ -250,6 +253,7 @@ func (r *Recorder) finish(c *Case) {
 		CgroupWrite: Rank(sum.CgroupWrite, caseTop), CgroupRead: Rank(sum.CgroupRead, caseTop),
 		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
 		CgroupDirty: Rank(sum.CgroupDirty, caseTop), CgroupOwn: map[string]int64{}}
+	c.Culprits.Foreign, _ = sum.ForeignOver(c.Culprits.Main)
 	for _, g := range c.Culprits.CgroupWrite {
 		if sum.Readable[g.Name] {
 			c.Culprits.CgroupOwn[g.Name] = sum.CgroupDirty[g.Name]

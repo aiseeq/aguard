@@ -3,6 +3,7 @@ package iowatch
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -113,6 +114,21 @@ func (c *Culprits) MainCgroup() string {
 		}
 	}
 	return best
+}
+
+// ForeignOver — cgroup чужого uid (не Readable, не главная) с наибольшей записью по io.stat, если та больше всей меры
+// главной: своя запись её процессов не видна, и главная выбрана без неё. Это может быть и коммит btrfs по её fsync
+// (postgres 30.10 12:15), и настоящая запись (контейнеры docker) — отличить нечем, поэтому главная остаётся, а случай
+// помечается неточным (проверка 30.10).
+func (c *Culprits) ForeignOver(main string) (Ranked, bool) {
+	var best Ranked
+	for _, name := range slices.Sorted(maps.Keys(c.CgroupWrite)) {
+		v := c.CgroupWrite[name]
+		if !c.Readable[name] && name != CgroupName(main) && v > c.cgroupTotal[main] && v > best.Value {
+			best = Ranked{name, v}
+		}
+	}
+	return best, best.Value > 0
 }
 
 // CgroupName — имя cgroup для человека: scope сессии агента — имя сессии; приложение рабочего стола

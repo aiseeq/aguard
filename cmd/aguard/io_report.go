@@ -29,6 +29,10 @@ func ioCaseLine(c *iowatch.Case) string {
 		ioSeconds(c.IdleMS), cause, c.PeakMS)
 	if c.Culprits != nil && c.Culprits.Main != "" {
 		line += ", главная cgroup " + iowatch.CgroupName(c.Culprits.Main)
+		if f := c.Culprits.Foreign; f.Value > 0 {
+			line += fmt.Sprintf(" (неточно: %s чужого uid записала по io.stat %.0f МБ — больше, а своя её запись не видна; "+
+				"бывает и коммит btrfs по её fsync)", f.Name, megabytes(f.Value))
+		}
 	}
 	return line
 }
@@ -82,7 +86,8 @@ func writeIOCgroupWrite(w io.Writer, top []iowatch.Ranked, own map[string]int64)
 		case own == nil:
 		case !ok:
 			note = " (процессы чужого uid — своя запись не видна)"
-		case item.Value > ioFsyncShare*mine && item.Value-mine > ioFsyncMin:
+		case mine > 0 && item.Value > ioFsyncShare*mine && item.Value-mine > ioFsyncMin:
+			// своих 0 — процессы cgroup не попали в топ шага: доли не знаем
 			note = fmt.Sprintf(" (своих %.0f — коммит btrfs по её fsync)", megabytes(mine))
 		}
 		parts[i] = ioValue(item.Name, item.Value, ioBytes) + note

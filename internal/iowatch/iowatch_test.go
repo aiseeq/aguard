@@ -2,6 +2,7 @@ package iowatch
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -584,6 +585,16 @@ func TestCulpritsMainByProcessWrite(t *testing.T) {
 	}
 	if _, ok := k.CgroupOwn["postgresql.service"]; ok { // процессы чужого uid: своя запись не видна, ноль — не «не писал»
 		t.Fatalf("своя запись системной службы: %+v", k.CgroupOwn)
+	}
+	// io.stat postgres 870 МиБ больше всей меры теста 560 МиБ: главная неточна
+	if k.Foreign != (Ranked{"postgresql.service", 870 << 20}) {
+		t.Fatalf("чужая cgroup сверх главной: %+v", k.Foreign)
+	}
+	var back Culprit
+	if b, err := json.Marshal(Culprit{CgroupOwn: map[string]int64{}}); err != nil {
+		t.Fatal(err)
+	} else if err := json.Unmarshal(b, &back); err != nil || back.CgroupOwn == nil {
+		t.Fatalf("пустая своя запись после чтения %s: %v %v", b, back.CgroupOwn, err)
 	}
 	// быстрые шаги по 1 МиБ: окно деталей 0 и 1 с — (−1 с, 1 с], в буфере шаги 0…1,0 с — 11 МиБ; cgroup — 872 МиБ
 	if k.DeviceWrite != 11<<20 || k.KernelWrite != 0 {

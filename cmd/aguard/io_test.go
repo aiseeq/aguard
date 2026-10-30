@@ -403,6 +403,7 @@ func TestIOCaseFsyncAndKernel(t *testing.T) {
 	c.Culprits.CgroupWrite = []iowatch.Ranked{{Name: "postgresql.service", Value: 870 << 20}, {Name: "sess7", Value: 300 << 20}}
 	c.Culprits.CgroupWrite = append(c.Culprits.CgroupWrite, iowatch.Ranked{Name: "systemd-journald.service", Value: 2 << 20})
 	c.Culprits.CgroupOwn = map[string]int64{"postgresql.service": 5 << 20, "sess7": 290 << 20}
+	c.Culprits.Foreign = iowatch.Ranked{Name: "docker.service", Value: 900 << 20}
 	c.Culprits.CgroupDirty = []iowatch.Ranked{{Name: "sess7", Value: 290 << 20}}
 	c.Culprits.DeviceWrite, c.Culprits.KernelWrite = 1900<<20, 730<<20
 	var b strings.Builder
@@ -413,5 +414,13 @@ func TestIOCaseFsyncAndKernel(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("нет %q:\n%s", want, text)
 		}
+	}
+	b.Reset() // своих 0 — процессы cgroup не попали в топ шага: доли не знаем, пометки нет
+	writeIOCgroupWrite(&b, []iowatch.Ranked{{Name: "sess8", Value: 100 << 20}}, map[string]int64{"sess8": 0})
+	if b.String() != "запись cgroup (io.stat): sess8 100 МБ\n" {
+		t.Errorf("своих 0: %q", b.String())
+	}
+	if line := ioCaseLine(&c); !strings.Contains(line, "главная cgroup sess7 (неточно: docker.service чужого uid записала по io.stat 900 МБ") {
+		t.Errorf("заголовок без пометки неточной главной: %s", line)
 	}
 }
