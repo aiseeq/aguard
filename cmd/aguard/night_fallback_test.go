@@ -170,7 +170,8 @@ func TestNightFallbackExitedLost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(signals) != 2 || !strings.Contains(signals[1].Text, "пропал из systemd") || strings.Contains(signals[1].Text, "код 0") {
+	if len(signals) != 2 || !strings.Contains(signals[1].Text, "пропал из systemd") || strings.Contains(signals[1].Text, "код 0") ||
+		strings.Join(signals[1].To, ",") != "dream-master" {
 		t.Fatalf("пропавший unit: %+v", signals)
 	}
 	if len(units.cleaned) != 0 {
@@ -201,8 +202,11 @@ func TestNightFallbackSaveFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(units.started) != 0 || len(signals) != 1 || signals[0].Key != "dream-fallback-blocked:2026-10-31" ||
-		!strings.Contains(signals[0].Text, "Запусти сам") {
+		!strings.Contains(signals[0].Text, "запущу сам, как только запись пройдёт") || strings.Join(signals[0].To, ",") != "dream-master" {
 		t.Fatalf("запуск без записи: %v %+v", units.started, signals)
+	}
+	if tmp, err := filepath.Glob(path + ".*.tmp"); err != nil || len(tmp) != 0 {
+		t.Fatalf("временные файлы после неудачной записи: %v %v", tmp, err)
 	}
 	if _, ok := a.nightFb["2026-10-31"]; ok {
 		t.Fatal("ключ без записи остался в памяти")
@@ -235,8 +239,37 @@ func TestNightFallbackBrokenState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(units.started) != 0 || len(signals) != 1 || signals[0].Key != "dream-fallback-state:2026-10-31" ||
-		!strings.Contains(signals[0].Text, "выключен") {
+		!strings.Contains(signals[0].Text, "выключен") || strings.Join(signals[0].To, ",") != "dream-master" {
 		t.Fatalf("битое состояние: %v %+v", units.started, signals)
+	}
+}
+
+// Запись атомарна: файл меняется целиком через переименование временного, старое содержимое не обрезается на месте.
+func TestSaveFallbackStateAtomic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fallback.json")
+	if err := saveFallbackState(path, fallbackState{"2026-10-30": {Unit: "dream-terra-2026-10-30"}}); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveFallbackState(path, fallbackState{"2026-10-31": {Unit: "dream-terra-2026-10-31"}}); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(old, cur) {
+		t.Fatal("файл переписан на месте, а не заменён")
+	}
+	state, err := loadFallbackState(path)
+	if err != nil || len(state) != 1 || state["2026-10-31"].Unit != "dream-terra-2026-10-31" {
+		t.Fatalf("прочитано: %+v %v", state, err)
+	}
+	if tmp, err := filepath.Glob(path + ".*.tmp"); err != nil || len(tmp) != 0 {
+		t.Fatalf("временные файлы: %v %v", tmp, err)
 	}
 }
 
@@ -276,6 +309,11 @@ func liveUnit(t *testing.T, code int) {
 	if err := u.start(unit, t.TempDir(), fmt.Sprintf("echo проба-$HOME; exit %d", code)); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { // упавшая на середине проба не оставляет unit (проверка git-admin 30.10)
+		if err := u.clean(unit); err != nil {
+			t.Error(err)
+		}
+	})
 	var st unitStatus
 	for range 50 {
 		var err error

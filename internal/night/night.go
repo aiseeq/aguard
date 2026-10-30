@@ -58,12 +58,22 @@ func FallbackDue(now time.Time, cfg Config, facts Facts) bool {
 	if cfg.DreamFallback == "" || facts.DreamMarker {
 		return false
 	}
+	t := fallbackBy(cfg)
+	at := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+	return !now.Before(at) && now.Sub(at) < FallbackWindow
+}
+
+// FallbackDeadline — до какого времени суток запасной Сон ещё запускается («06:10»).
+func FallbackDeadline(cfg Config) string {
+	return fallbackBy(cfg).Add(FallbackWindow).Format("15:04")
+}
+
+func fallbackBy(cfg Config) time.Time {
 	t, err := time.Parse("15:04", cfg.DreamFallbackBy)
 	if err != nil {
 		panic(fmt.Sprintf("night: время %q прошло Validate: %v", cfg.DreamFallbackBy, err))
 	}
-	at := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
-	return !now.Before(at) && now.Sub(at) < FallbackWindow
+	return t
 }
 
 // FallbackUnit — unit запасного Сна за местную дату now.

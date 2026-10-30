@@ -136,8 +136,10 @@ func fallbackRound(cfg *night.Config, now time.Time, facts night.Facts, state fa
 		if err := save(state); err != nil {
 			delete(state, date)
 			return []night.Signal{{Key: "dream-fallback-blocked:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
-					"Сон не стартовал к %s (нет маркера), а запасной на Terra я не запустил: не записывается состояние (%v) — без "+
-						"записи запуск мог бы повториться. Запусти сам: `%s`.", cfg.DreamFallbackBy, err, cfg.DreamFallback)}},
+					"Сон не стартовал к %s (нет маркера), а запасной на Terra я пока не запустил: не записывается состояние (%v) — без "+
+						"записи запуск мог бы повториться. Пробую каждую минуту и запущу сам, как только запись пройдёт (до %s); не ждёшь — "+
+						"запусти `%s` сам: при начатом Сне (started или тикет dream-run) он выходит, второго прогона не будет.",
+					cfg.DreamFallbackBy, err, night.FallbackDeadline(*cfg), cfg.DreamFallback)}},
 				[]string{"не запустил " + unit + ": " + err.Error()}
 		}
 		rec := state[date]
