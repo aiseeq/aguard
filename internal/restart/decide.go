@@ -127,14 +127,26 @@ func lossChecks(f facts, p allowance, against againstFunc) {
 }
 
 // inherited — таймеры прошлой беседы: --resume их не вернёт.
+// Унаследованный с двойником среди своих (тот же cron, prompt и recurring) уже поставлен заново: набор прошёл, а
+// CronDelete старого — нет. Он не потеря, иначе набор повторялся бы и копил копии (проверка git-admin 30.10).
 func inherited(crons []cronJob) []cronJob {
+	own := map[string]bool{}
+	for _, job := range crons {
+		if job.Own {
+			own[cronTwin(job)] = true
+		}
+	}
 	var jobs []cronJob
 	for _, job := range crons {
-		if !job.Own {
+		if !job.Own && !own[cronTwin(job)] {
 			jobs = append(jobs, job)
 		}
 	}
 	return jobs
+}
+
+func cronTwin(job cronJob) string {
+	return fmt.Sprintf("%s\x00%s\x00%t", job.Cron, strings.Join(strings.Fields(job.Prompt), " "), job.Recurring)
 }
 
 // allCronsKnown — у всех известно выражение cron: без него поставить таймер заново нельзя.

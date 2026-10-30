@@ -181,10 +181,29 @@ func TestTranscriptCronCarry(t *testing.T) {
 		cron string
 		own  bool
 	}{"A": {"47 1 * * *", true}, "B": {"11 6 * * *", false}, "D": {"30 12 * * *", true}}
-	if len(f.Crons) != len(want) {
-		t.Fatalf("Crons = %+v", f.Crons)
+	checkCrons(t, f.Crons, want)
+
+	// CronList после carry — снимок без признака «свой»: признак и cron берутся из прежних записей.
+	f = scanLines(t, since, since.Add(time.Hour),
+		`{"type":"attachment","timestamp":"`+tsNew+`","attachment":{"type":"session_cron_carry","tasks":[{"id":"A","cron":"47 1 * * *","prompt":"Сон","recurring":true}],"otherArmed":[{"id":"B","cron":"11 6 * * *","prompt":"Дайджест","recurring":true}]}}`,
+		use(tsNew, "l1", "CronList", `{}`),
+		result(tsNew, "l1", "ok", `{"jobs":[{"id":"A","prompt":"Сон","recurring":true},{"id":"B","prompt":"Дайджест","recurring":true}]}`),
+	)
+	checkCrons(t, f.Crons, map[string]struct {
+		cron string
+		own  bool
+	}{"A": {"47 1 * * *", true}, "B": {"11 6 * * *", false}})
+}
+
+func checkCrons(t *testing.T, got []cronJob, want map[string]struct {
+	cron string
+	own  bool
+}) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("Crons = %+v", got)
 	}
-	for _, job := range f.Crons {
+	for _, job := range got {
 		w, ok := want[job.ID]
 		if !ok || job.Cron != w.cron || job.Own != w.own {
 			t.Errorf("таймер %+v, ожидался cron=%q own=%t", job, w.cron, w.own)

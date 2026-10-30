@@ -125,7 +125,19 @@ func TestDecideRestartInheritedCrons(t *testing.T) {
 	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); !v.Restart || v.Recreate != "" {
 		t.Errorf("свои таймеры не держат перезапуск: %+v", v)
 	}
+	twin := f.Transcript.Crons[0]
+	twin.ID = "j2"
 	f.Transcript.Crons[0].Own = false
+	f.Transcript.Crons = append(f.Transcript.Crons, twin)
+	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); !v.Restart || v.Recreate != "" {
+		t.Errorf("унаследованный с поставленным заново двойником — не потеря, набор не повторять: %+v", v)
+	}
+	f.Transcript.Crons = f.Transcript.Crons[:1]
+	f.Transcript.Wakeups = []string{"ScheduleWakeup до 19:00"}
+	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); v.Restart || v.Recreate != "" {
+		t.Errorf("набор — только когда таймеры единственный довод: %+v", v)
+	}
+	f.Transcript.Wakeups = nil
 	f.Transcript.Crons[0].Cron = ""
 	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); v.Recreate != "" || v.Restart {
 		t.Errorf("неизвестное выражение нельзя набирать: %+v", v)

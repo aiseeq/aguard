@@ -64,7 +64,7 @@ type restartConfig struct {
 	// ["*"]: пилот 27.10 17:00 CET, выкатка на work-admin 18:08 CET.
 	PtyNames []string `json:"pty_names"`
 	// LiveUpgradeNames — новый cl подхватывается на ходу, не трогая живой claude (upgrade.go, liveUpgrade); пусто — ни
-	// одной: новый cl — только между запусками claude. Для пилота.
+	// одной: новый cl — только между запусками claude. ["*"]: пилот на aguard-master 27–30.10 (4 подхвата, claude тот же pid), всем — 30.10.
 	LiveUpgradeNames []string `json:"live_upgrade_names"`
 	// TypeMode — сжатие и сброс сессии под pty набором /compact и /clear в живой сессии: log — «набрал бы» в журнал
 	// (действует прежний путь через перезапуск), act — набрать вместо перезапуска, off — молчать.

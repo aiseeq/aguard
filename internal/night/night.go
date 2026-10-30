@@ -38,7 +38,7 @@ const (
 
 // Default returns ночной сторож по умолчанию.
 func Default(home string) Config {
-	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "02:30",
+	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "02:50",
 		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DigestBy: "07:00",
 		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute),
 		AlsoTo: []string{"git-admin"}, DreamTo: []string{"dream-master"}}

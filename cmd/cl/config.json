@@ -10,6 +10,7 @@
     "reset_mode": "log",
     "reset_names": [],
     "pty_names": ["*"],
+    "live_upgrade_names": ["*"],
     "type_mode": "log"
   },
   "roles": [
