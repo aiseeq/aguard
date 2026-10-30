@@ -72,16 +72,17 @@ records=''
 while IFS= read -r line; do
  [[ $line == *'aguard: итог запуска'* ]] || continue
  epoch=${line%% *}; [[ $epoch =~ ^[0-9]+([.][0-9]+)?$ ]] || continue
+ epoch_s=${epoch%%.*} # метка journalctl short-unix дробная, а [[ -gt ]] — только целые
  started=$(sed -n 's/.*started=\([^ ]*\).*/\1/p' <<<"$line")
  [[ -n $started ]] || continue
  begin=$(date -d "$started" +%s 2>/dev/null) || continue
  if [[ $measure == rss ]]; then
   value=$(sed -n 's/.*vm_hwm_kb=\([0-9][0-9]*\).*/\1/p' <<<"$line")
-  [[ -n $value && $epoch -gt $start && $epoch -le $end ]] && records+="$begin $epoch $value\n"
+  [[ -n $value && $epoch_s -gt $start && $epoch_s -le $end ]] && records+="$begin $epoch $value\n"
  else
   field=read_bytes; [[ $measure == write ]] && field=write_bytes
   value=$(sed -n "s/.*$field=\\([0-9][0-9]*\\).*/\\1/p" <<<"$line")
-  [[ -n $value && $epoch -gt $begin ]] && records+="$begin $epoch $value\n"
+  [[ -n $value && $epoch_s -gt $begin ]] && records+="$begin $epoch $value\n"
  fi
 done <<<"$journal"
 
