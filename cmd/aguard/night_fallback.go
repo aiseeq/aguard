@@ -24,6 +24,7 @@ type fallbackRun struct {
 	At      time.Time `json:"at"`
 	Err     string    `json:"err,omitempty"` // systemd-run не запустил
 	Done    bool      `json:"done,omitempty"`
+	Lost    bool      `json:"lost,omitempty"` // unit пропал из systemd (перезагрузка, снят руками): кода нет
 	Code    int       `json:"code,omitempty"`
 	Result  string    `json:"result,omitempty"`
 	Tail    string    `json:"tail,omitempty"`
@@ -35,14 +36,18 @@ type fallbackState map[string]fallbackRun
 
 // unitStatus — состояние unit по systemctl show; код — ExecMainStatus.
 type unitStatus struct {
-	Active, Sub, Result string
-	Code                int
+	Load, Active, Sub, Result string
+	Code                      int
 }
 
-// finished — команда кончилась: с RemainAfterExit unit остаётся active/exited, упавший — failed, пропавший (сброшен,
-// перезагрузка) — inactive.
+// lost — unit нет в systemd (перезагрузка, снят руками): show отдаёт для него inactive, success и код 0, а это не конец
+// команды (проверка git-admin 30.10).
+func (s unitStatus) lost() bool { return s.Load == "not-found" }
+
+// finished — команда кончилась: с RemainAfterExit unit остаётся active/exited, упавший — failed; пропавший — тоже конец,
+// но без кода.
 func (s unitStatus) finished() bool {
-	return s.Sub == "exited" || s.Active == "failed" || s.Active == "inactive"
+	return s.lost() || s.Sub == "exited" || s.Active == "failed" || s.Active == "inactive"
 }
 
 // unitRunner — запуск команды отдельным unit пользователя и наблюдение за ним; в тестах — подмена.
@@ -67,8 +72,8 @@ func (systemdUnits) start(unit, dir, cmd string) error {
 }
 
 func (systemdUnits) status(unit string) (unitStatus, error) {
-	out, err := exec.Command("systemctl", "--user", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "Result",
-		"-p", "ExecMainStatus").Output()
+	out, err := exec.Command("systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
+		"-p", "Result", "-p", "ExecMainStatus").Output()
 	if err != nil {
 		return unitStatus{}, fmt.Errorf("systemctl show %s: %w", unit, err)
 	}
@@ -76,6 +81,8 @@ func (systemdUnits) status(unit string) (unitStatus, error) {
 	for line := range strings.Lines(string(out)) {
 		key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
 		switch key {
+		case "LoadState":
+			s.Load = value
 		case "ActiveState":
 			s.Active = value
 		case "SubState":
@@ -113,19 +120,25 @@ func (systemdUnits) clean(unit string) error {
 
 // fallbackRound — запустить запасной Сон, если пора, и проверить идущие; signals — по каждому запуску за сутки (доставку
 // и повтор неудачной ведёт dispatchNight по ключу). save — состояние на диск до запуска: упавший демон не запустит
-// второй раз. log — mode=log: только «запустил бы».
+// второй раз; не записалось — запуска нет, письмо о том, что запускать руками. Запуск и конец unit — тоже на диск;
+// сбой этой записи — заметка: в памяти верно, а после перезапуска демона конец придёт снова под тем же ключом письма.
+// log — mode=log: только «запустил бы».
 func fallbackRound(cfg *night.Config, now time.Time, facts night.Facts, state fallbackState, runner unitRunner, dir string,
-	save func(fallbackState) error, log bool) ([]night.Signal, []string, error) {
+	save func(fallbackState) error, log bool) ([]night.Signal, []string) {
 	date := now.Format("2006-01-02")
 	var notes []string
 	if _, launched := state[date]; !launched && night.FallbackDue(now, *cfg, facts) {
 		unit := night.FallbackUnit(now)
 		if log {
-			return nil, []string{fmt.Sprintf("запустил бы %s: %s", unit, cfg.DreamFallback)}, nil
+			return nil, []string{fmt.Sprintf("запустил бы %s: %s", unit, cfg.DreamFallback)}
 		}
 		state[date] = fallbackRun{Unit: unit, At: now}
 		if err := save(state); err != nil {
-			return nil, nil, fmt.Errorf("запасной Сон не запущен: состояние: %w", err)
+			delete(state, date)
+			return []night.Signal{{Key: "dream-fallback-blocked:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
+					"Сон не стартовал к %s (нет маркера), а запасной на Terra я не запустил: не записывается состояние (%v) — без "+
+						"записи запуск мог бы повториться. Запусти сам: `%s`.", cfg.DreamFallbackBy, err, cfg.DreamFallback)}},
+				[]string{"не запустил " + unit + ": " + err.Error()}
 		}
 		rec := state[date]
 		if err := runner.start(unit, dir, cfg.DreamFallback); err != nil {
@@ -142,20 +155,27 @@ func fallbackRound(cfg *night.Config, now time.Time, facts night.Facts, state fa
 			if err != nil {
 				notes = append(notes, err.Error())
 			} else if st.finished() {
-				rec.Done, rec.Code, rec.Result, rec.EndedAt = true, st.Code, st.Result, now
+				rec.Done, rec.Lost, rec.Code, rec.Result, rec.EndedAt = true, st.lost(), st.Code, st.Result, now
 				rec.Tail = runner.tail(rec.Unit)
-				if err := runner.clean(rec.Unit); err != nil {
+				if rec.Lost {
+					rec.Code, rec.Result = 0, ""
+				} else if err := runner.clean(rec.Unit); err != nil {
 					notes = append(notes, err.Error())
 				}
 				state[d] = rec
-				notes = append(notes, fmt.Sprintf("%s кончился: код %d, %s", rec.Unit, rec.Code, rec.Result))
+				notes = append(notes, fmt.Sprintf("%s кончился: код %d, %s, пропал %v", rec.Unit, rec.Code, rec.Result, rec.Lost))
 			}
 		}
 		if now.Sub(rec.At) <= 24*time.Hour {
 			signals = append(signals, fallbackSignals(cfg, d, rec)...)
 		}
 	}
-	return signals, notes, nil
+	if len(notes) > 0 {
+		if err := save(state); err != nil {
+			notes = append(notes, "состояние не записано: "+err.Error())
+		}
+	}
+	return signals, notes
 }
 
 // fallbackSignals — «Сон запущен на Terra» (или не запустился) и, когда кончился, — код и хвост журнала.
@@ -167,7 +187,12 @@ func fallbackSignals(cfg *night.Config, date string, rec fallbackRun) []night.Si
 			"запусти сам: `%s`.", cfg.DreamFallbackBy, rec.Err, date, cfg.DreamFallback)
 	}
 	out := []night.Signal{{Key: "dream-fallback:" + date, To: cfg.DreamTo, Text: text}}
-	if rec.Done {
+	switch {
+	case rec.Lost:
+		out = append(out, night.Signal{Key: "dream-fallback-end:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
+			"Сон на Terra (%s) пропал из systemd к %s (перезагрузка или снят руками) — кода нет, кончился ли он, не знаю. "+
+				"Хвост журнала:\n%s", rec.Unit, rec.EndedAt.Format("15:04"), rec.Tail)})
+	case rec.Done:
 		out = append(out, night.Signal{Key: "dream-fallback-end:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
 			"Сон на Terra (%s) кончился в %s: код %d, %s. Хвост журнала:\n%s", rec.Unit, rec.EndedAt.Format("15:04"), rec.Code,
 			rec.Result, rec.Tail)})
@@ -205,8 +230,23 @@ func saveFallbackState(path string, state fallbackState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("запасной Сон: %w", err)
 	}
-	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+	// атомарно: обрезанный при сбое файл не читается, а без чтения шаг не запускает ничего
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return fmt.Errorf("запасной Сон: %w", err)
+	}
+	_, werr := f.Write(append(b, '\n'))
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Rename(f.Name(), path)
+	}
+	if werr != nil {
+		if rerr := os.Remove(f.Name()); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			werr = errors.Join(werr, rerr)
+		}
+		return fmt.Errorf("запасной Сон: %w", werr)
 	}
 	return nil
 }

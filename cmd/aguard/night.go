@@ -188,14 +188,17 @@ func (a *app) fallbackStep(cfg *night.Config, now time.Time, facts night.Facts, 
 		return nil, nil
 	}
 	path := filepath.Join(a.dir("night"), "fallback.json")
+	date := now.Format("2006-01-02")
 	if a.nightFb == nil {
 		state, err := loadFallbackState(path)
-		if err != nil {
-			return nil, err
+		if err != nil { // не знаю, запускал ли уже: не запускаю и пишу, раз за дату (ключ), читаю снова каждый проход
+			a.log.Warn("aguard night: запасной Сон", "err", err)
+			return []night.Signal{{Key: "dream-fallback-state:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
+				"Запасной Сон на Terra выключен: %v — не знаю, запускал ли я его уже. Почини или убери файл; до тех пор "+
+					"без маркера к %s Сон сам не начнётся.", err, cfg.DreamFallbackBy)}}, nil
 		}
 		a.nightFb = state
 	}
-	date := now.Format("2006-01-02")
 	if dry {
 		rec, launched := a.nightFb[date]
 		fmt.Fprintf(a.out, "запасной Сон: `%s` в %s без маркера, unit %s; за %s %s\n", cfg.DreamFallback, cfg.DreamFallbackBy,
@@ -214,7 +217,7 @@ func (a *app) fallbackStep(cfg *night.Config, now time.Time, facts night.Facts, 
 		}
 	}
 	save := func(s fallbackState) error { return saveFallbackState(path, s) }
-	signals, notes, err := fallbackRound(cfg, now, facts, a.nightFb, a.units, a.home, save, cfg.Mode == night.ModeLog)
+	signals, notes := fallbackRound(cfg, now, facts, a.nightFb, a.units, a.home, save, cfg.Mode == night.ModeLog)
 	for _, n := range notes {
 		if cfg.Mode == night.ModeLog {
 			if a.nightLogged == nil {
@@ -227,14 +230,6 @@ func (a *app) fallbackStep(cfg *night.Config, now time.Time, facts night.Facts, 
 		}
 		a.log.Info("aguard night: запасной Сон", "msg", n)
 		a.nightNote("dream_fallback", n, "", 0, "")
-	}
-	if err != nil {
-		return signals, err
-	}
-	if len(notes) > 0 && cfg.Mode != night.ModeLog {
-		if err := save(a.nightFb); err != nil {
-			return signals, err
-		}
 	}
 	return signals, nil
 }

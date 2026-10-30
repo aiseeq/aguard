@@ -18,12 +18,16 @@ import (
 type fakeUnits struct {
 	started  []string
 	startErr error
+	onStart  func() // проверка в момент запуска
 	st       unitStatus
 	cleaned  []string
 }
 
 func (f *fakeUnits) start(unit, _, _ string) error {
 	f.started = append(f.started, unit)
+	if f.onStart != nil {
+		f.onStart()
+	}
 	return f.startErr
 }
 
@@ -133,6 +137,107 @@ func TestNightFallbackEnd(t *testing.T) {
 	if len(units.cleaned) != 1 {
 		t.Fatalf("кончившийся снова снят: %v", units.cleaned)
 	}
+	for _, s := range signals {
+		if strings.Join(s.To, ",") != "dream-master" {
+			t.Fatalf("адресаты %s: %v", s.Key, s.To)
+		}
+	}
+}
+
+// Успешный конец с RemainAfterExit — active/exited, код 0; пропавший unit (not-found: show отдаёт inactive, success, 0) —
+// «пропал», без кода и без снятия.
+func TestNightFallbackExitedLost(t *testing.T) {
+	units := &fakeUnits{st: unitStatus{Load: "loaded", Active: "active", Sub: "running"}}
+	a, cfg := fallbackApp(t, units)
+	if _, err := a.fallbackStep(cfg, at("03:10"), night.Facts{}, false); err != nil {
+		t.Fatal(err)
+	}
+	units.st = unitStatus{Load: "loaded", Active: "active", Sub: "exited", Result: "success"}
+	signals, err := a.fallbackStep(cfg, at("08:30"), night.Facts{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 2 || !strings.Contains(signals[1].Text, "кончился в 08:30: код 0, success") {
+		t.Fatalf("конец с кодом 0: %+v", signals)
+	}
+	units = &fakeUnits{st: unitStatus{Load: "loaded", Active: "active", Sub: "running"}}
+	a, cfg = fallbackApp(t, units)
+	if _, err := a.fallbackStep(cfg, at("03:10"), night.Facts{}, false); err != nil {
+		t.Fatal(err)
+	}
+	units.st = unitStatus{Load: "not-found", Active: "inactive", Sub: "dead", Result: "success"}
+	signals, err = a.fallbackStep(cfg, at("05:00"), night.Facts{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 2 || !strings.Contains(signals[1].Text, "пропал из systemd") || strings.Contains(signals[1].Text, "код 0") {
+		t.Fatalf("пропавший unit: %+v", signals)
+	}
+	if len(units.cleaned) != 0 {
+		t.Fatalf("пропавший снят: %v", units.cleaned)
+	}
+}
+
+// Запись о запуске — на диске до запуска; не записалась — запуска нет, письмо «запусти сам», ключа в памяти нет.
+func TestNightFallbackSaveFirst(t *testing.T) {
+	units := &fakeUnits{st: unitStatus{Load: "loaded", Active: "active", Sub: "running"}}
+	a, cfg := fallbackApp(t, units)
+	path := filepath.Join(a.dir("night"), "fallback.json")
+	units.onStart = func() {
+		state, err := loadFallbackState(path)
+		if err != nil || state["2026-10-31"].Unit != "dream-terra-2026-10-31" {
+			t.Errorf("до запуска на диске: %+v %v", state, err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil { // путь занят папкой — запись не выйдет
+		t.Fatal(err)
+	}
+	a.nightFb = fallbackState{}
+	signals, err := a.fallbackStep(cfg, at("03:10"), night.Facts{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(units.started) != 0 || len(signals) != 1 || signals[0].Key != "dream-fallback-blocked:2026-10-31" ||
+		!strings.Contains(signals[0].Text, "Запусти сам") {
+		t.Fatalf("запуск без записи: %v %+v", units.started, signals)
+	}
+	if _, ok := a.nightFb["2026-10-31"]; ok {
+		t.Fatal("ключ без записи остался в памяти")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	signals, err = a.fallbackStep(cfg, at("03:11"), night.Facts{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(units.started) != 1 || len(signals) != 1 || !strings.Contains(signals[0].Text, "запустил на Terra") {
+		t.Fatalf("после починки: %v %+v", units.started, signals)
+	}
+}
+
+// Битый fallback.json — запуска нет, письмо о выключенном шаге.
+func TestNightFallbackBrokenState(t *testing.T) {
+	units := &fakeUnits{}
+	a, cfg := fallbackApp(t, units)
+	path := filepath.Join(a.dir("night"), "fallback.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{обрезан"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signals, err := a.fallbackStep(cfg, at("03:10"), night.Facts{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(units.started) != 0 || len(signals) != 1 || signals[0].Key != "dream-fallback-state:2026-10-31" ||
+		!strings.Contains(signals[0].Text, "выключен") {
+		t.Fatalf("битое состояние: %v %+v", units.started, signals)
+	}
 }
 
 // mode=log — не запускает; выключенный (пустая команда) — ничего.
@@ -153,14 +258,22 @@ func TestNightFallbackLogOff(t *testing.T) {
 	}
 }
 
-// Живой systemd пользователя: unit с кодом 3 — конец, код, хвост журнала, снятие. Только с AGUARD_LIVE_UNITS=1.
+// Живой systemd пользователя: unit с кодом 3 и с кодом 0 (RemainAfterExit держит его active/exited) — конец, код, хвост
+// журнала, снятие, после снятия — not-found. Только с AGUARD_LIVE_UNITS=1.
 func TestSystemdUnitsLive(t *testing.T) {
 	if os.Getenv("AGUARD_LIVE_UNITS") != "1" {
 		t.Skip("AGUARD_LIVE_UNITS=1 — проба на systemd пользователя")
 	}
+	for _, code := range []int{3, 0} {
+		liveUnit(t, code)
+	}
+}
+
+func liveUnit(t *testing.T, code int) {
+	t.Helper()
 	u := systemdUnits{}
-	unit := fmt.Sprintf("aguard-probe-%d", os.Getpid())
-	if err := u.start(unit, t.TempDir(), "echo проба-$HOME; exit 3"); err != nil {
+	unit := fmt.Sprintf("aguard-probe-%d-%d", os.Getpid(), code)
+	if err := u.start(unit, t.TempDir(), fmt.Sprintf("echo проба-$HOME; exit %d", code)); err != nil {
 		t.Fatal(err)
 	}
 	var st unitStatus
@@ -174,16 +287,21 @@ func TestSystemdUnitsLive(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !st.finished() || st.Code != 3 {
+	if !st.finished() || st.lost() || st.Code != code || code == 0 && st.Sub != "exited" {
 		t.Fatalf("состояние: %+v", st)
 	}
-	if tail := u.tail(unit); !strings.Contains(tail, "проба-/") {
+	tail := u.tail(unit)
+	for i := 0; i < 20 && !strings.Contains(tail, "проба-/"); i++ { // журнал доходит с задержкой
+		time.Sleep(100 * time.Millisecond)
+		tail = u.tail(unit)
+	}
+	if !strings.Contains(tail, "проба-/") {
 		t.Fatalf("хвост: %q", tail)
 	}
 	if err := u.clean(unit); err != nil {
 		t.Fatal(err)
 	}
-	if st, err := u.status(unit); err != nil || st.Active != "inactive" {
+	if st, err := u.status(unit); err != nil || !st.lost() {
 		t.Fatalf("после снятия: %+v %v", st, err)
 	}
 	if err := u.clean(unit); err != nil {
