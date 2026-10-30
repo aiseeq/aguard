@@ -924,7 +924,8 @@ func TestCulpritsForeignOver(t *testing.T) {
 	c := SumCulprits([]Step{{Processes: []Process{{PID: 7, Start: 1, Comm: "go", WriteBytes: 50 << 20, Cgroup: sess}},
 		Cgroups: []Cgroup{{Path: sess, WriteBytes: 40 << 20},
 			{Path: "/system.slice/docker-0123456789abcdef0123.scope", WriteBytes: 10 << 20, ReadBytes: 45 << 20},
-			{Path: "/system.slice/dbus-broker.service", WriteBytes: 1 << 20}, {Path: user + "dbus-broker.service", WriteBytes: 1 << 20}}}})
+			{Path: "/system.slice/dbus-broker.service", WriteBytes: 1 << 20}, {Path: user + "dbus-broker.service", WriteBytes: 1 << 20},
+			{Path: fmt.Sprintf("/user.slice/user-%d.slice/session-3.scope", os.Getuid()), WriteBytes: 1 << 20}}}})
 	main := c.MainCgroup()
 	if main != sess {
 		t.Fatalf("главная %q", main)
@@ -932,7 +933,7 @@ func TestCulpritsForeignOver(t *testing.T) {
 	if f, ok := c.ForeignOver(main); !ok || f != (Ranked{"docker-0123456789ab", 55 << 20}) {
 		t.Fatalf("чужая сверх главной: %+v %v", f, ok)
 	}
-	if c.Readable["dbus-broker.service"] || !c.Readable["sess9"] {
+	if c.Readable["dbus-broker.service"] || !c.Readable["sess9"] || !c.Readable["session-3.scope"] {
 		t.Fatalf("своё по имени: %+v", c.Readable)
 	}
 	if f, ok := c.ForeignOver(""); ok {

@@ -26,7 +26,8 @@ type Culprits struct {
 	CgroupWrite, CgroupRead, CgroupSwapIn, CgroupIdle map[string]int64 // байты, страницы, мс PSI full io
 	CgroupWriteOps                                    map[string]int64
 	CgroupDirty                                       map[string]int64 // write_bytes процессов топа cgroup: данные и метаданные
-	// Readable — cgroup своего user@<uid>.service: /proc/<pid>/io её процессов aguard читает, своя запись известна.
+	// Readable — cgroup своего user-<uid>.slice (user@<uid>.service и вход session-N.scope): /proc/<pid>/io её процессов
+	// aguard читает, своя запись известна.
 	// У системных служб (postgres, journald) процессы чужого uid, их write_bytes не видны — ноль там не значит «не писал».
 	Readable    map[string]bool
 	cgroupTotal map[string]int64 // запись процессов + чтение + своп: главный виновник
@@ -46,8 +47,8 @@ func SumCulprits(details []Step) Culprits {
 		CgroupWrite: map[string]int64{}, CgroupRead: map[string]int64{}, CgroupSwapIn: map[string]int64{},
 		CgroupIdle: map[string]int64{}, CgroupWriteOps: map[string]int64{}, CgroupDirty: map[string]int64{}, Readable: map[string]bool{},
 		cgroupTotal: map[string]int64{}, foreignIO: map[string]int64{}}
-	userTree := "/user@" + strconv.Itoa(os.Getuid()) + ".service/"
-	foreign := map[string]bool{} // имя есть и вне user@<uid> (dbus-broker.service и в system.slice): своя запись неизвестна
+	userTree := "/user-" + strconv.Itoa(os.Getuid()) + ".slice/"
+	foreign := map[string]bool{} // имя есть и вне user-<uid>.slice (dbus-broker.service и в system.slice): своя запись неизвестна
 	names := processNames(details)
 	for i := range details {
 		d := &details[i]
