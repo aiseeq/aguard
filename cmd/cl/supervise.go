@@ -419,7 +419,13 @@ func (l launcher) ask(pid int, argsProblem string, typed bool) (restart.Answer, 
 	}
 	req := restart.NewRequest(pid, l.name, argsProblem)
 	req.Typed = typed
-	return askAguard(l.aguard, req)
+	req.Clean = l.console != nil && l.console.clean()
+	asked := time.Now()
+	a, err := askAguard(l.aguard, req)
+	if err == nil && a.FieldEmpty && l.console != nil {
+		l.console.emptySeen(asked)
+	}
+	return a, err
 }
 
 // journalKeys — ключи последних строк журнала: решения о перезапуске, сжатии и сбросе пишутся один раз на решение.

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/linesock"
+	"github.com/aiseeq/aguard/internal/screen"
 )
 
 // Version — версия протокола вопроса cl и ответа aguard. Другая версия у cl — то же, что нет ответа: не перезапускать.
@@ -25,6 +26,10 @@ type Request struct {
 	ArgsProblem string `json:"args_problem"`
 	// Typed — сжатие и сброс cl наберёт в живой сессии под pty (type_mode act): /clear не теряет таймеры CronCreate.
 	Typed bool `json:"typed,omitempty"`
+	// Clean — cl под pty видел весь ввод человека: после запуска claude или последней отправки (Enter, Ctrl+C) текста
+	// он не набирал. Текст в поле тогда — подсказка Claude Code, не черновик (случай chooks-master 30.10: у сессий,
+	// которые ведут письма, реплик человека в транскрипте нет, и признак по atime pts не срабатывал).
+	Clean bool `json:"clean,omitempty"`
 }
 
 // NewRequest — вопрос текущей версии протокола о процессе pid.
@@ -55,7 +60,10 @@ type Answer struct {
 	Reset        bool     `json:"reset"`
 	ResetAgainst []Reason `json:"reset_against"`
 	ResetKey     string   `json:"reset_key"`
-	Error        string   `json:"error,omitempty"`
+	// FieldEmpty — поле ввода по экрану пусто: cl считает его чистым, если человек ничего не вводил с вопроса (так
+	// чистеет и поле, о котором прежний cl при подхвате на ходу не знал).
+	FieldEmpty bool   `json:"field_empty,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // cacheTTL — сколько держать разбор транскрипта сессии, о которой не спрашивают: cl спрашивает раз в минуту.
@@ -107,14 +115,16 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	c.mu.Lock()
 	f := probe(pathsFor(j.Home, cfg), &c.scan, req.Pid, now)
 	c.mu.Unlock()
+	f.cleanField(req.Clean)
 	name := firstNonEmpty(f.Name, req.Name)
 	v := decide(f, allowance{idle: cfg.Idle.D(), argsProblem: req.ArgsProblem, typed: req.Typed})
-	cv := j.Compact(cfg, cc, Request{Pid: req.Pid, Name: name, ArgsProblem: req.ArgsProblem, Typed: req.Typed}, now)
+	cv := j.Compact(cfg, cc, Request{Pid: req.Pid, Name: name, ArgsProblem: req.ArgsProblem, Typed: req.Typed, Clean: req.Clean}, now)
 	return Answer{
 		V: Version, Verdict: v, Key: v.Key(), Mode: cfg.Mode,
 		SessionID: f.SessionID, Name: name, Running: f.Running, Installed: f.Installed, Crons: len(f.Transcript.Crons) > 0,
 		Compact: cv.Compact, CompactAgainst: cv.Against, CompactKey: cv.Key(), Tokens: cv.Tokens,
 		Reset: cv.Reset.Reset, ResetAgainst: cv.Reset.Against, ResetKey: cv.Reset.Key(),
+		FieldEmpty: f.PromptErr == "" && f.Prompt == screen.Empty,
 	}
 }
 

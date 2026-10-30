@@ -193,3 +193,23 @@ func TestDecideScreen(t *testing.T) {
 		}
 	}
 }
+
+// cl видел весь ввод человека: текст в поле — подсказка, и ввод в терминал после хода (фокус) не держит.
+func TestDecideCleanField(t *testing.T) {
+	f := idleFacts()
+	f.Prompt = screen.Draft
+	f.TTYQuiet = f.TurnQuiet - time.Minute
+	if v := decide(f, allowance{idle: 10 * time.Minute}); v.Restart || !slices.Contains(codes(v), "screen") {
+		t.Fatalf("без знания cl текст в поле держит: %+v", v)
+	}
+	f.cleanField(true)
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart {
+		t.Errorf("cl: поле чисто — текст на экране подсказка, перезапуск идёт: %+v", v)
+	}
+	g := idleFacts()
+	g.Prompt = screen.Unknown
+	g.cleanField(true)
+	if v := decide(g, allowance{idle: 10 * time.Minute}); v.Restart {
+		t.Errorf("поля не видно — держит и при чистом вводе: %+v", v)
+	}
+}

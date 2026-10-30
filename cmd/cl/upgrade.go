@@ -36,6 +36,8 @@ type upgrade struct {
 	Pid    int   `json:"pid,omitempty"`
 	Master int   `json:"master,omitempty"`
 	Typed  int64 `json:"typed,omitempty"`
+	// Clean — поле ввода чисто (console.clean); от прежнего cl без поля — может быть текст.
+	Clean bool `json:"clean,omitempty"`
 }
 
 // takeUpgrade — состояние от прежнего cl из окружения; переменную убирает, чтобы её не унаследовал claude. ok —
@@ -132,6 +134,7 @@ func (l launcher) liveUpgrade(cfg config, now time.Time, pid, n int, args []stri
 	if err == nil {
 		u := upgrade{V: upgradeV, Name: l.name, N: n, Args: args, Pid: pid}
 		if l.console != nil {
+			u.Clean = l.console.clean()
 			u.Master, u.Typed, back, err = l.console.handOver()
 		}
 		if err == nil {
@@ -160,6 +163,7 @@ func (l launcher) adopt(u upgrade) (*os.Process, func(), error) {
 		return nil, nil, errors.Join(fmt.Errorf("pty claude pid=%d от прежнего cl: консоли нет", u.Pid), master.Close())
 	}
 	l.console.typed.Store(u.Typed)
+	l.console.drafted.Store(!u.Clean)
 	finish, err := l.console.attach(master, nil)
 	if err != nil {
 		return nil, nil, errors.Join(err, master.Close())

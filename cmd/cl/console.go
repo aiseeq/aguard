@@ -42,6 +42,9 @@ type console struct {
 	master  *os.File
 	raw     *term.State
 	typed   atomic.Int64 // последний ввод человека, unix nano
+	// drafted — в поле может быть текст человека (draft.go); чисто — после запуска claude, отправки или набора cl.
+	// До первого запуска и от прежнего cl без этого знания — может быть.
+	drafted atomic.Bool
 
 	winch chan os.Signal
 	// note — строка в журнал cl: сбой консоли (claude вышел, а ввод ещё шёл; окно или терминал не вернулись) и
@@ -55,6 +58,7 @@ func openConsole(in, out *os.File, note func(string)) *console {
 		return nil
 	}
 	c := &console{in: in, out: out, winch: make(chan os.Signal, 1), note: note}
+	c.drafted.Store(true)
 	signal.Notify(c.winch, syscall.SIGWINCH)
 	go c.pump()
 	go c.resize()
@@ -68,6 +72,7 @@ func (c *console) pump() {
 		n, err := c.in.Read(buf)
 		if n > 0 {
 			c.typed.Store(time.Now().UnixNano())
+			c.drafted.Store(draftAfter(c.drafted.Load(), buf[:n]))
 
 			c.mu.Lock()
 			if c.master != nil {
@@ -123,6 +128,7 @@ func (c *console) start(cmd *exec.Cmd, trustDir string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("pty: %w", err)
 	}
+	c.drafted.Store(false) // новый claude — поле пусто
 	var watch io.Writer
 	if trustDir != "" {
 		watch = newTrustWatch(trustDir, func() { c.confirmTrust(trustDir) })
@@ -262,7 +268,23 @@ func (c *console) typeLine(text string) error {
 		return err
 	}
 	time.Sleep(typePause)
-	return c.write("\r")
+	if err := c.write("\r"); err != nil {
+		return err
+	}
+	c.drafted.Store(false)
+	return nil
+}
+
+// emptySeen — aguard видел поле пустым после asked: чисто, если человек с тех пор ничего не вводил.
+func (c *console) emptySeen(asked time.Time) {
+	if c.typed.Load() < asked.UnixNano() {
+		c.drafted.Store(false)
+	}
+}
+
+// clean — человек текста в поле не набирал: всё, что там видно, — подсказка Claude Code.
+func (c *console) clean() bool {
+	return !c.drafted.Load()
 }
 
 func (c *console) write(s string) error {

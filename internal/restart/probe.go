@@ -52,6 +52,9 @@ type facts struct {
 	// её не отличить, но после отправки последней реплики typed поле пусто, а ввода в терминал с тех пор не было
 	// (atime pts раньше реплики). Реплика queued не в счёт: её Enter раньше записи, набранное между ними не видно.
 	Suggestion bool
+	// Clean — cl видел весь ввод человека, текста после последней отправки нет (Request.Clean): atime pts, который
+	// двигают и фокус окна, и ответы терминала, тогда не нужен.
+	Clean bool
 
 	// Errors — что не прочиталось; любое — сомнение, не перезапускать.
 	Errors []string
@@ -196,6 +199,14 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 	}
 	c := f.Transcript.Context
 	f.Suggestion = f.Prompt == screen.Draft && c.Human == "typed" && f.TTYQuiet > now.Sub(c.HumanAt)
+}
+
+// cleanField — cl видел, что человек текста не набирал (Request.Clean): текст в поле по экрану — подсказка.
+func (f *facts) cleanField(clean bool) {
+	f.Clean = clean
+	if clean && f.Prompt == screen.Draft {
+		f.Suggestion = true
+	}
 }
 
 // hookRecord — запись chooks о сессии.

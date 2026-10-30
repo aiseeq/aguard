@@ -198,7 +198,7 @@ func inputChecks(f facts, against againstFunc) {
 	// конца хода тоже считается: лишний раз не перезапустить дешевле, чем потерять черновик. Экран прочитан и поле
 	// пусто — черновика нет, а ввод — байты фокуса: Claude Code включает отчёт о фокусе (ESC[?1004h), и Konsole при
 	// переключении на вкладку шлёт его в терминал (решение пользователя 26.10 20:54 CET, вариант 2).
-	if f.TTYQuiet <= f.TurnQuiet+ttyGranularity && (f.PromptErr != "" || f.Prompt != screen.Empty) {
+	if !f.Clean && f.TTYQuiet <= f.TurnQuiet+ttyGranularity && (f.PromptErr != "" || f.Prompt != screen.Empty) {
 		against("draft", "ввод в терминал после конца хода (%s назад): может быть набранный текст", minutes(f.TTYQuiet))
 	}
 	// Текст, набранный во время хода, старше конца хода, и проверка выше его не видит: поле ввода — по экрану.

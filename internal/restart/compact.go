@@ -192,6 +192,7 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, req Request, now time.Tim
 		state(p, &ch.scan, pid, now, &f)
 	}
 	ch.mu.Unlock()
+	f.cleanField(req.Clean)
 	ctx := f.Transcript.Context
 	off := []Reason{{Code: "off", Text: "сжатие выключено в конфиге aguard"}}
 	v, r := CompactVerdict{Against: off}, ResetVerdict{Against: off}
