@@ -186,3 +186,32 @@ func TestNightProbeLive(t *testing.T) {
 	}
 	t.Log(logs.String())
 }
+
+// Сон ведёт dream-master: сигнал о Сне идёт и ему и называет следующий шаг, сигнал о Дайджесте — только лиду и
+// also_to (обход design Сна 30.10).
+func TestNightDreamOwnerGetsDreamSignal(t *testing.T) {
+	cfg := night.Default(t.TempDir())
+	cfg.Lead = "lead"
+	now := time.Date(2026, 10, 30, 8, 0, 0, 0, time.Local)
+	signals := night.Check(now, cfg, night.Facts{})
+	if len(signals) != 2 {
+		t.Fatalf("ждали сигналы Сна и Дайджеста: %+v", signals)
+	}
+	for _, s := range signals {
+		if !strings.Contains(s.Text, ": запусти ") {
+			t.Errorf("%s: в тексте нет следующего шага: %s", s.Key, s.Text)
+		}
+	}
+	if !strings.Contains(signals[0].Text, "dream-master: запусти Сон") {
+		t.Errorf("текст Сна: %s", signals[0].Text)
+	}
+	got := map[string][]string{}
+	dispatchNight(nightState{}, signals, cfg.Recipients(), now, func(to, msg string) error {
+		key, _, _ := strings.Cut(msg, " ")
+		got[key] = append(got[key], to)
+		return nil
+	})
+	if strings.Join(got["Сон"], ",") != "lead,git-admin,dream-master" || strings.Join(got["Дайджест"], ",") != "lead,git-admin" {
+		t.Fatalf("адресаты: %v", got)
+	}
+}

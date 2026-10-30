@@ -159,7 +159,10 @@ func usage() {
   aguard bgtask tick [-dry-run]
   aguard agentwaits tick [-dry-run] | report [-json] [-window week]
   aguard cpu tick [-dry-run]
-  aguard io record [-for 30s] [-dir папка] | dump | at время [-window 2m] [-dir папка] | freezes [-since 24h] [-min 50ms] [-dir папка]
+  aguard io report [-since 24h] [-min 0] [-json] [-file сводки]   прошлые фризы: случаи, виновники
+  aguard io now [-kind вид] [-json] | series [-since 1h] [-json] | profiles [-kind вид] [-since 7d] [-json]   из службы: сейчас, посекундный ряд, профили задач
+  aguard io record [-for 30s] [-dir папка] | dump | at время [-window 2m] [-dir папка]   ручные снимки: at читает только их — прошлый фриз смотреть через io report и io series
+  aguard io import [-dir папка] [-remove] [-out файл]   снимки событий прежнего наблюдателя — в сводки, при остановленной службе
   aguard night tick [-dry-run]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)

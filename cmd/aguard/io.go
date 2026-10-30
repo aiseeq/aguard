@@ -89,7 +89,7 @@ func (a *app) ioCmd(ctx context.Context, args []string) error {
 		parse(fl, rest)
 		return a.ioLiveSince(iowatch.Request{Q: iowatch.QueryProfiles, Kind: *kind}, *since, *asJSON)
 	}
-	return fmt.Errorf("aguard io: неизвестная команда %s", cmd)
+	return fmt.Errorf("aguard io: неизвестная команда %s (report, now, series, profiles, record, dump, at, import; справка — aguard -h)", cmd)
 }
 
 // ioConfig — раздел [io] конфига; конфиг не прочитался — ошибка, по неизвестным правилам не пишем.

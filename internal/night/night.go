@@ -23,8 +23,11 @@ type Config struct {
 	DigestMarker string          `toml:"digest_marker"`
 	TrustWait    policy.Duration `toml:"trust_wait"`
 	AlsoTo       []string        `toml:"also_to"` // кроме лида: сигнал «лид не поднялся» лиду же не поможет
-	Lead         string          `toml:"-"`
-	SendAuth     bool            `toml:"-"`
+	// DreamTo — хозяева ночного прогона: сигнал о Сне идёт и им (лид только шлёт таймер; Сон ведёт dream-master,
+	// ~/git/dream/CLAUDE.md, «Хозяин»).
+	DreamTo  []string `toml:"dream_to"`
+	Lead     string   `toml:"-"`
+	SendAuth bool     `toml:"-"`
 }
 
 const (
@@ -38,7 +41,7 @@ func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "03:00",
 		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DigestBy: "07:00",
 		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute),
-		AlsoTo: []string{"git-admin"}}
+		AlsoTo: []string{"git-admin"}, DreamTo: []string{"dream-master"}}
 }
 
 // Recipients — лид и also_to без повторов, лид первым.
@@ -63,8 +66,8 @@ func (c *Config) Validate(home string) error {
 	if !validClock(c.DreamBy) || !validClock(c.DigestBy) {
 		return fmt.Errorf("night.dream_by и night.digest_by должны быть ЧЧ:ММ")
 	}
-	if slices.Contains(c.AlsoTo, "") {
-		return fmt.Errorf("night.also_to: пустое имя сессии")
+	if slices.Contains(c.AlsoTo, "") || slices.Contains(c.DreamTo, "") {
+		return fmt.Errorf("night.also_to, night.dream_to: пустое имя сессии")
 	}
 	c.DreamMarker = policy.ExpandHome(c.DreamMarker, home)
 	c.DigestMarker = policy.ExpandHome(c.DigestMarker, home)
@@ -80,18 +83,26 @@ type Facts struct {
 	TrustEvents []cllog.TrustEvent
 }
 
-// Signal — срабатывание с ключом дедупликации и текстом для человека.
-type Signal struct{ Key, Text string }
+// Signal — срабатывание с ключом дедупликации и текстом для человека; To — адресаты сверх Recipients.
+type Signal struct {
+	Key, Text string
+	To        []string
+}
 
 // Check возвращает события, срок которых наступил для местной даты now.
 func Check(now time.Time, cfg Config, facts Facts) []Signal {
 	date := now.Format("2006-01-02")
 	var out []Signal
 	if due(now, cfg.DreamBy) && !facts.DreamMarker {
-		out = append(out, Signal{"dream:" + date, fmt.Sprintf("Сон не стартовал к %s: нет %s. Лид жив? (окно доверия, лимит, упавшая консоль)", cfg.DreamBy, DreamPath(cfg, now))})
+		out = append(out, Signal{Key: "dream:" + date, To: cfg.DreamTo, Text: fmt.Sprintf("Сон не стартовал к %s: нет %s. "+
+			"Звенья: таймер Сна у %s (CronList; окно доверия, лимит, упавшая консоль) и сессия %s. "+
+			"%s: запусти Сон сам по скиллу dream.", cfg.DreamBy, DreamPath(cfg, now), cfg.Lead, strings.Join(cfg.DreamTo, ", "),
+			strings.Join(cfg.DreamTo, ", "))})
 	}
 	if due(now, cfg.DigestBy) && !strings.Contains(facts.DigestText, date) {
-		out = append(out, Signal{"digest:" + date, fmt.Sprintf("Дайджест не стартовал к %s: нет сегодняшней даты в %s. Лид жив? (окно доверия, лимит, упавшая консоль)", cfg.DigestBy, cfg.DigestMarker)})
+		out = append(out, Signal{Key: "digest:" + date, Text: fmt.Sprintf("Дайджест не стартовал к %s: нет сегодняшней даты в %s. "+
+			"Звено: таймер Дайджеста у %s (CronList; окно доверия, лимит, упавшая консоль). %s: запусти Дайджест по скиллу digest.",
+			cfg.DigestBy, cfg.DigestMarker, cfg.Lead, cfg.Lead)})
 	}
 	for _, e := range facts.TrustEvents {
 		if now.Sub(e.At) > 24*time.Hour || now.Sub(e.At) < cfg.TrustWait.D() || !e.Recovered.IsZero() {
@@ -102,7 +113,7 @@ func Check(now time.Time, cfg Config, facts Facts) []Signal {
 		if e.Confirmed {
 			text = fmt.Sprintf("%s не поднялась за %s после окна доверия к %s: cl подтвердил его в %s — посмотреть её консоль", e.Name, cfg.TrustWait.D(), e.Dir, e.At.Format("15:04"))
 		}
-		out = append(out, Signal{key, text})
+		out = append(out, Signal{Key: key, Text: text})
 	}
 	return out
 }

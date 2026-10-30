@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,8 +34,8 @@ type nightFailure struct {
 	Err          error
 }
 
-// dispatchNight шлёт каждый сигнал каждому адресату to, которому он ещё не дошёл; дошедшему не повторяется,
-// неудачный — в следующий проход.
+// dispatchNight шлёт каждый сигнал каждому адресату to и его собственным (Signal.To), которому он ещё не дошёл;
+// дошедшему не повторяется, неудачный — в следующий проход.
 func dispatchNight(state nightState, signals []night.Signal, to []string, now time.Time, send func(string, string) error) (nightState, []nightFailure) {
 	var failed []nightFailure
 	for _, s := range signals {
@@ -42,7 +43,7 @@ func dispatchNight(state nightState, signals []night.Signal, to []string, now ti
 		if rec.Channels == nil {
 			rec.Channels = map[string]time.Time{}
 		}
-		for _, channel := range to {
+		for _, channel := range nightAddressees(to, s.To) {
 			if _, ok := rec.Channels[channel]; ok {
 				continue
 			}
@@ -58,6 +59,17 @@ func dispatchNight(state nightState, signals []night.Signal, to []string, now ti
 		}
 	}
 	return state, failed
+}
+
+// nightAddressees — общие адресаты и свои адресаты сигнала без повторов, в этом порядке.
+func nightAddressees(to, own []string) []string {
+	out := slices.Clone(to)
+	for _, name := range own {
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // nightCmd — `aguard night tick [-dry-run]`.
@@ -90,7 +102,7 @@ func (a *app) nightRound(_ context.Context, cfg *night.Config, dry bool) error {
 			map[bool]string{true: "есть", false: "нет"}[facts.DreamMarker], cfg.DigestBy,
 			map[bool]string{true: "есть", false: "нет"}[strings.Contains(facts.DigestText, now.Format("2006-01-02"))],
 			cfg.DigestMarker, recentTrust(facts.TrustEvents, now))
-		fmt.Fprintf(a.out, "адресаты: %s\n", strings.Join(cfg.Recipients(), ", "))
+		fmt.Fprintf(a.out, "адресаты: %s; Сон — ещё %s\n", strings.Join(cfg.Recipients(), ", "), strings.Join(cfg.DreamTo, ", "))
 		for _, e := range facts.TrustEvents {
 			if now.Sub(e.At) <= 24*time.Hour {
 				fmt.Fprintf(a.out, "  %s %s %s подтверждено=%v поднялась=%s\n", e.At.Format("15:04:05"), e.Name, e.Dir, e.Confirmed,
