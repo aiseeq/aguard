@@ -288,7 +288,7 @@ func (w *Watcher) step(at time.Time) error {
 		}
 		if at.Sub(s.sampled) >= interval {
 			if err := w.sample(s, at); err != nil {
-				if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ESRCH) {
+				if !procGone(err) {
 					return fmt.Errorf("опрос %s pid=%d: %w", s.Name, pid, err)
 				}
 				if forgetErr := w.forget(pid); forgetErr != nil {
@@ -422,7 +422,7 @@ func (w *Watcher) discoverTargets(wanted map[int]Target) error {
 			continue
 		}
 		s, err := w.newState(t)
-		if errors.Is(err, os.ErrNotExist) {
+		if procGone(err) {
 			continue
 		}
 		if err != nil {
@@ -523,7 +523,7 @@ func (w *Watcher) findTargets() (map[int]Target, error) {
 	if len(w.PIDs) > 0 {
 		for _, t := range w.PIDs {
 			start, err := readStart(w.procPath(t.PID, "stat"))
-			if errors.Is(err, os.ErrNotExist) {
+			if procGone(err) {
 				continue
 			}
 			if err != nil {
@@ -559,7 +559,7 @@ func (w *Watcher) findTargets() (map[int]Target, error) {
 func (w *Watcher) procTarget(pid int, dir string) (Target, error) {
 	base := filepath.Join(w.ProcRoot, dir)
 	stat, err := os.ReadFile(filepath.Join(base, "stat"))
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+	if procUnreadable(err) {
 		return Target{}, nil
 	}
 	if err != nil {
@@ -586,7 +586,7 @@ func (w *Watcher) targetFromStat(pid int, dir string, stat []byte) (Target, erro
 	} else {
 		data, err := os.ReadFile(filepath.Join(base, "cmdline"))
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+			if procUnreadable(err) {
 				return Target{}, nil
 			}
 			return Target{}, fmt.Errorf("прочитать cmdline pid=%d: %w", pid, err)
@@ -669,7 +669,7 @@ func hasHeadlessFlag(cmd string) bool {
 func (w *Watcher) hasBrowserAncestor(pid int) (bool, error) {
 	for depth := 0; pid > 0 && depth < 4; depth++ {
 		stat, err := os.ReadFile(w.procPath(pid, "stat"))
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		if procUnreadable(err) {
 			return false, nil
 		}
 		if err != nil {
@@ -695,7 +695,7 @@ func (w *Watcher) hasBrowserAncestor(pid int) (bool, error) {
 
 func (w *Watcher) isBrowserProcess(pid int) (bool, error) {
 	cmdline, err := os.ReadFile(w.procPath(pid, "cmdline"))
-	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+	if procUnreadable(err) {
 		return false, nil
 	}
 	if err != nil {
@@ -748,7 +748,7 @@ func (s *targetState) close() {
 func (w *Watcher) sample(s *targetState, at time.Time) error {
 	stat, e := s.files["stat"].read()
 	if e != nil {
-		if errors.Is(e, os.ErrNotExist) || errors.Is(e, syscall.ESRCH) {
+		if procGone(e) {
 			return e
 		}
 		s.readErrors = append(s.readErrors, "thread stat: "+e.Error())
@@ -757,7 +757,7 @@ func (w *Watcher) sample(s *targetState, at time.Time) error {
 	}
 	state, maj, run, wait, err := readSampleCounters(s, stat)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+		if procGone(err) {
 			return err
 		}
 		s.readErrors = append(s.readErrors, err.Error())
@@ -1349,7 +1349,7 @@ func (w *Watcher) threadSnapshot(pid int) ([]Thread, []string) {
 	dir := filepath.Join(w.ProcRoot, strconv.Itoa(pid), "task")
 	ents, e := os.ReadDir(dir)
 	if e != nil {
-		if errors.Is(e, os.ErrNotExist) || errors.Is(e, syscall.ESRCH) {
+		if procGone(e) {
 			return nil, nil
 		}
 		return nil, []string{"threads: " + e.Error()}
@@ -1364,7 +1364,7 @@ func (w *Watcher) threadSnapshot(pid int) ([]Thread, []string) {
 		p := filepath.Join(dir, ent.Name())
 		b, e := os.ReadFile(filepath.Join(p, "stat"))
 		if e != nil {
-			if !errors.Is(e, os.ErrNotExist) && !errors.Is(e, syscall.ESRCH) {
+			if !procGone(e) {
 				errs = append(errs, fmt.Sprintf("thread %d stat: %v", tid, e))
 			}
 			continue
@@ -1378,7 +1378,7 @@ func (w *Watcher) threadSnapshot(pid int) ([]Thread, []string) {
 		if st.State != "R" {
 			if b, e := os.ReadFile(filepath.Join(p, "wchan")); e == nil {
 				th.Wchan = strings.TrimSpace(string(b))
-			} else if !errors.Is(e, os.ErrNotExist) && !errors.Is(e, syscall.ESRCH) {
+			} else if !procGone(e) {
 				errs = append(errs, fmt.Sprintf("thread %d wchan: %v", tid, e))
 			}
 		}
@@ -1519,7 +1519,7 @@ func (w *Watcher) readTargetStat(pid int, dir string) ([]byte, bool, error) {
 	}
 	f, err := os.Open(filepath.Join(w.ProcRoot, dir, "stat"))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		if procUnreadable(err) {
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("открыть stat pid=%d для поиска целей: %w", pid, err)
@@ -1527,7 +1527,7 @@ func (w *Watcher) readTargetStat(pid int, dir string) ([]byte, bool, error) {
 	n, err := unix.Pread(int(f.Fd()), w.targetStatBuf, 0)
 	_ = f.Close()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ESRCH) {
+		if procUnreadable(err) {
 			return nil, false, nil
 		}
 		return nil, false, fmt.Errorf("прочитать stat pid=%d для поиска целей: %w", pid, err)
@@ -1544,7 +1544,7 @@ func (w *Watcher) readTopStat(pid int, dir string) ([]byte, bool, error) {
 		var err error
 		f, err = open(filepath.Join(w.ProcRoot, dir, "stat"))
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+			if procUnreadable(err) {
 				return nil, false, nil
 			}
 			return nil, false, fmt.Errorf("открыть stat pid=%d для top: %w", pid, err)
@@ -1557,7 +1557,7 @@ func (w *Watcher) readTopStat(pid int, dir string) ([]byte, bool, error) {
 	}
 	f.close()
 	delete(w.topFiles, pid)
-	if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ESRCH) {
+	if err == nil || procUnreadable(err) {
 		return nil, false, nil
 	}
 	return nil, false, fmt.Errorf("прочитать stat pid=%d для top: %w", pid, err)
@@ -1906,4 +1906,14 @@ func LongestSleep(d Document) time.Duration {
 		}
 	}
 	return maxSleep
+}
+
+// procGone — процесс или поток исчез: файл /proc пропал (ENOENT) или открыт, но процесс умер до чтения (ESRCH).
+func procGone(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
+}
+
+// procUnreadable — процесс исчез или его /proc закрыт правами: для поиска целей это «не цель», а не сбой.
+func procUnreadable(err error) bool {
+	return procGone(err) || errors.Is(err, os.ErrPermission)
 }

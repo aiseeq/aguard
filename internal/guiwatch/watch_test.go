@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -813,8 +815,11 @@ func TestChromeTargetSummaryStableAndRendererCountDoesNotAnnounce(t *testing.T) 
 		30: {Target: Target{Name: "chrome-gpu", PID: 30, Start: 3, Main: true}},
 		40: {Target: Target{Name: "chrome-renderer", PID: 40}},
 	}
-	for range 100 {
+	for i := range 100 {
 		w.reportTargets()
+		if !strings.Contains(w.targetSummary, "chrome pid 10, chrome pid 20") {
+			t.Fatalf("call %d: unstable target order: %q", i, w.targetSummary)
+		}
 	}
 	if calls != 1 || !strings.Contains(last, "chrome pid 10, chrome pid 20") {
 		t.Fatalf("unstable target summary: calls=%d summary=%q", calls, last)
@@ -842,5 +847,19 @@ func TestThreadReadErrorsAreKeptForSlice(t *testing.T) {
 	item := w.makeSlice(s, &episode{start: at, end: at, kind: "D"}, false)
 	if len(item.Errors) == 0 || !strings.Contains(item.Errors[len(item.Errors)-1], "schedstat") {
 		t.Fatalf("schedstat error missing from slice: %#v", item.Errors)
+	}
+}
+
+// Процесс умер между открытием и чтением /proc/<pid>/stat: чтение даёт ESRCH, это «исчез», а не сбой сторожа.
+func TestProcGoneTreatsESRCHAsVanished(t *testing.T) {
+	esrch := &fs.PathError{Op: "read", Path: "/proc/1/stat", Err: syscall.ESRCH}
+	if !procGone(esrch) || !procUnreadable(esrch) {
+		t.Fatalf("ESRCH not treated as vanished process")
+	}
+	if !procUnreadable(&fs.PathError{Op: "open", Path: "/proc/1/stat", Err: fs.ErrPermission}) {
+		t.Fatalf("permission denied not treated as unreadable")
+	}
+	if procGone(&fs.PathError{Op: "open", Path: "/proc/1/stat", Err: fs.ErrPermission}) || procUnreadable(errors.New("io")) {
+		t.Fatalf("other errors treated as vanished")
 	}
 }
