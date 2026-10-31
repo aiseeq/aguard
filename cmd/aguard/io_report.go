@@ -93,10 +93,11 @@ func writeProcessIOTop(w io.Writer, label string, top []iowatch.Ranked, unit int
 		if info.Cmdline == "" {
 			continue
 		}
+		// имя в строке: процесс без команды (поток ядра) пропущен — порядок строк не сопоставить с топом
 		if info.CWD == "" {
-			fmt.Fprintf(w, "  cmd: %s\n", info.Cmdline)
+			fmt.Fprintf(w, "  cmd %s: %s\n", item.Name, info.Cmdline)
 		} else {
-			fmt.Fprintf(w, "  cmd: %s (в %s)\n", info.Cmdline, info.CWD)
+			fmt.Fprintf(w, "  cmd %s: %s (в %s)\n", item.Name, info.Cmdline, info.CWD)
 		}
 	}
 }

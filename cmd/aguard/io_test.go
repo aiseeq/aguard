@@ -421,7 +421,7 @@ func TestIOCaseIncludesProcessCommand(t *testing.T) {
 	var b strings.Builder
 	writeIOCase(&b, &c, 5)
 	text := b.String()
-	for _, want := range []string{"  cmd: dd --write (в /workspace/project)\n", "  cmd: cp a b\n", "  cmd: rg needle\n", "  cmd: cat input\n"} {
+	for _, want := range []string{"  cmd dd(10): dd --write (в /workspace/project)\n", "  cmd cp(12): cp a b\n", "  cmd rg(13): rg needle\n", "  cmd cat(11): cat input\n"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("нет %q:\n%s", want, text)
 		}
@@ -436,7 +436,7 @@ func TestIOCaseIncludesProcessCommand(t *testing.T) {
 	b.Reset()
 	writeIOReport(&b, &iowatch.Summary{Total: 2, Cases: []iowatch.Case{c, old}, Min: 1000})
 	text = b.String()
-	for _, want := range []string{"  cmd: dd --write (в /workspace/project)\n", "  cmd: rg needle\n"} {
+	for _, want := range []string{"  cmd dd(10): dd --write (в /workspace/project)\n", "  cmd rg(13): rg needle\n"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("итог без команды %q:\n%s", want, text)
 		}
@@ -449,7 +449,7 @@ func TestIOCaseIncludesProcessCommand(t *testing.T) {
 	b.Reset()
 	writeIOSummary(&b, iowatch.Window{Details: []iowatch.Step{{Processes: []iowatch.Process{
 		{PID: 10, Start: 1, Comm: "dd", WriteBytes: 4096, Cmdline: "dd --write", CWD: "/workspace/project"}}}}})
-	if !strings.Contains(b.String(), "  cmd: dd --write (в /workspace/project)\n") {
+	if !strings.Contains(b.String(), "  cmd dd(10): dd --write (в /workspace/project)\n") {
 		t.Errorf("aguard io at без команды:\n%s", b.String())
 	}
 }
