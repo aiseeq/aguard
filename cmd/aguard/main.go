@@ -135,7 +135,7 @@ func main() {
 	case "remote":
 		err = a.remoteCmd(os.Args[2:])
 	case "night":
-		err = a.nightCmd(ctx, os.Args[2:])
+		err = a.nightCmd(os.Args[2:])
 	case "report":
 		err = a.reportCmd(os.Args[2:])
 	default:
@@ -268,7 +268,7 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Cpu.Interval.D() }},
 		{"remote", func(_ context.Context, c *config.Config) error { return a.remoteRound(&c.Remote, false, "", false) },
 			func(c *config.Config) time.Duration { return c.Remote.Interval.D() }},
-		{"night", func(ctx context.Context, c *config.Config) error { return a.nightRound(ctx, &c.Night, false) },
+		{"night", func(_ context.Context, c *config.Config) error { return a.nightRound(&c.Night, false) },
 			func(c *config.Config) time.Duration { return c.Night.Interval.D() }},
 	}
 }

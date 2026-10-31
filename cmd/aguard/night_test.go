@@ -24,7 +24,7 @@ func TestNightDryRunDoesNotWriteState(t *testing.T) {
 	cfg.DreamBy = "00:00"
 	cfg.DreamMarker = filepath.Join(dir, "absent")
 	cfg.DigestBy = "23:59"
-	if err := a.nightRound(nil, &cfg, true); err != nil {
+	if err := a.nightRound(&cfg, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(a.stateDir, "night", "state.json")); !errors.Is(err, os.ErrNotExist) {
@@ -63,7 +63,7 @@ func TestNightLogModeOncePerSignal(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if err := a.nightRound(nil, &cfg, false); err != nil {
+		if err := a.nightRound(&cfg, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -170,7 +170,7 @@ func TestNightProbeLive(t *testing.T) {
 	cfg.DreamMarker = filepath.Join(dir, "absent")
 	cfg.DigestBy = "23:59"
 	cfg.DigestMarker = filepath.Join(dir, "absent-digest")
-	if err := a.nightRound(nil, &cfg, false); err != nil {
+	if err := a.nightRound(&cfg, false); err != nil {
 		t.Fatal(err)
 	}
 	state, err := loadNightState(filepath.Join(a.stateDir, "night", "state.json"))
@@ -233,7 +233,7 @@ func TestNightAlertOnlySessionLetters(t *testing.T) {
 	if err := os.WriteFile(cfg.DigestMarker, []byte(now.Format("2006-01-02")+" "+now.AddDate(0, 0, 1).Format("2006-01-02")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.nightRound(nil, &cfg, false); err != nil {
+	if err := a.nightRound(&cfg, false); err != nil {
 		t.Fatal(err)
 	}
 	if msg := <-got; !strings.Contains(msg, "Сон") {

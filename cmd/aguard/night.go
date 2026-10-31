@@ -2,7 +2,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -73,7 +72,7 @@ func nightAddressees(to, own []string) []string {
 }
 
 // nightCmd — `aguard night tick [-dry-run]`.
-func (a *app) nightCmd(ctx context.Context, args []string) error {
+func (a *app) nightCmd(args []string) error {
 	cmd, rest := sub(args)
 	cfg, err := a.config()
 	if err != nil {
@@ -86,11 +85,11 @@ func (a *app) nightCmd(ctx context.Context, args []string) error {
 	fl := flag.NewFlagSet("night tick", flag.ContinueOnError)
 	dry := fl.Bool("dry-run", false, "показать сигналы, не отправлять и не сохранять")
 	parse(fl, rest)
-	return a.nightRound(ctx, &cfg.Night, *dry)
+	return a.nightRound(&cfg.Night, *dry)
 }
 
 // nightRound — один проход: факты, сигналы, доставка, состояние; dry и mode=log — только журнал «написал бы».
-func (a *app) nightRound(_ context.Context, cfg *night.Config, dry bool) error {
+func (a *app) nightRound(cfg *night.Config, dry bool) error {
 	if cfg.Mode == night.ModeOff {
 		return nil
 	}
