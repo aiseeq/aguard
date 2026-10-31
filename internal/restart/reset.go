@@ -21,7 +21,7 @@ type ResetVerdict struct {
 	Candidate bool `json:"candidate"`
 }
 
-// decideReset — сбросить беседу: с того же контекста и простоя, что сжатие (MinTokens, After), без верхней границы
+// decideReset — сбросить беседу: со своего порога контекста (ResetMinTokens) и того же простоя, что сжатие (After), без верхней границы
 // окна — кэш новой беседе не нужен; сжатие беседы сброс не держит; сессия свободна, ничего не идёт, таймеров нет
 // (перезапуск их не восстановит; /clear под pty — p.typed — их не теряет), человек не печатает, аргументы запуска восстановимы (p.argsProblem: cl поднимает новую
 // беседу с ними). Дерево git проверяет Judge последним: git — только когда остальное за. Где сброс можно, он вместо
@@ -29,7 +29,7 @@ type ResetVerdict struct {
 // компромисс», вариант 3 лида — 11:12 CET «Да, давай 3»; подсказка Claude Code «/clear to save» больше не решает.
 func decideReset(f facts, c *CompactConfig, p allowance, now time.Time) ResetVerdict {
 	var v ResetVerdict
-	v.Against, v.Candidate = idleChecks(f, c, p, idleWindow{c.MinTokens, c.After.D(), 0, "сброс", true}, now)
+	v.Against, v.Candidate = idleChecks(f, c, p, idleWindow{c.ResetMinTokens, c.After.D(), 0, "сброс", true}, now)
 	if len(f.Transcript.Crons) > 0 && !p.typed {
 		v.Against = append(v.Against, Reason{Code: "crons", Text: "таймеры пропали бы: " + cronList(f.Transcript.Crons)})
 	}

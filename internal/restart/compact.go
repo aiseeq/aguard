@@ -28,6 +28,9 @@ type CompactConfig struct {
 	Mode string `toml:"mode"`
 	// MinTokens — контекст последнего ответа, с которого сжимать.
 	MinTokens int64 `toml:"min_tokens"`
+	// ResetMinTokens — контекст, с которого сбрасывать: свежая беседа начинается с ~32 тыс., выше — сброс экономит
+	// перезапись кэша после часа простоя (пользователь 31.10 ~11:48 CET: отдельный порог 50 тыс., сжатие — 100 тыс.).
+	ResetMinTokens int64 `toml:"reset_min_tokens"`
 	// After и Before — окно от начала последнего запроса. Раньше After человек ещё может вернуться к беседе. После
 	// Before кэш может умереть раньше, чем сжатие его прочитает.
 	After  policy.Duration `toml:"after"`
@@ -42,16 +45,17 @@ type CompactConfig struct {
 // cacheTTL1h — сколько живёт кэш подсказки у Claude Code (TTL 1 ч).
 const cacheTTL1h = time.Hour
 
-// DefaultCompact — только журнал: порог 100 тыс., окно 53–57 мин.
+// DefaultCompact — только журнал: порог сжатия 100 тыс., сброса — 50 тыс., окно 53–57 мин.
 func DefaultCompact() CompactConfig {
 	return CompactConfig{
-		Mode:      CompactLog,
-		MinTokens: 100_000,
-		After:     policy.Duration(53 * time.Minute),
-		Before:    policy.Duration(57 * time.Minute),
-		TTYQuiet:  policy.Duration(2 * time.Minute),
-		Interval:  policy.Duration(time.Minute),
-		Keep:      policy.Duration(60 * 24 * time.Hour),
+		Mode:           CompactLog,
+		MinTokens:      100_000,
+		ResetMinTokens: 50_000,
+		After:          policy.Duration(53 * time.Minute),
+		Before:         policy.Duration(57 * time.Minute),
+		TTYQuiet:       policy.Duration(2 * time.Minute),
+		Interval:       policy.Duration(time.Minute),
+		Keep:           policy.Duration(60 * 24 * time.Hour),
 	}
 }
 
@@ -64,6 +68,9 @@ func (c *CompactConfig) Validate() error {
 	}
 	if c.MinTokens <= 0 {
 		return fmt.Errorf("compact.min_tokens = %d: больше нуля", c.MinTokens)
+	}
+	if c.ResetMinTokens <= 0 {
+		return fmt.Errorf("compact.reset_min_tokens = %d: больше нуля", c.ResetMinTokens)
 	}
 	if c.After.D() <= 0 || c.After.D() >= c.Before.D() || c.Before.D() >= cacheTTL1h {
 		return fmt.Errorf("compact: окно %v–%v: after < before < %v", c.After.D(), c.Before.D(), cacheTTL1h)

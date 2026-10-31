@@ -78,6 +78,7 @@ func TestCompactConfigValidate(t *testing.T) {
 		"act":      func(c *CompactConfig) { c.Mode = "act" }, // act — в cl, не в aguard
 		"режим":    func(c *CompactConfig) { c.Mode = "on" },
 		"порог":    func(c *CompactConfig) { c.MinTokens = 0 },
+		"сброс":    func(c *CompactConfig) { c.ResetMinTokens = 0 },
 		"окно":     func(c *CompactConfig) { c.After = c.Before },
 		"за часом": func(c *CompactConfig) { c.Before = 61 * 60 * 1e9 },
 		"интервал": func(c *CompactConfig) { c.Interval = 10 * 60 * 1e9 },
@@ -107,13 +108,19 @@ func TestDecideReset(t *testing.T) {
 	if v := decideReset(f, &c, allowance{}, now); !v.Reset {
 		t.Errorf("сброс с того же порога и простоя, что сжатие: %+v", v)
 	}
+	// Порог сброса свой, ниже сжатия (пользователь 31.10 ~11:48 CET): 60 тыс. сбрасывают, сжатию мало.
+	f = resetFacts()
+	f.Transcript.Context.Tokens = 60_000
+	if v := decideReset(f, &c, allowance{}, now); !v.Reset {
+		t.Errorf("60 тыс. — выше порога сброса: %+v", v)
+	}
 	f = resetFacts()
 	f.Transcript.Context.Compacted, f.Transcript.Context.Trigger = now.Add(-time.Hour), "manual"
 	if v := decideReset(f, &c, allowance{}, now); !v.Reset {
 		t.Errorf("сжатую беседу тоже сбросить: %+v", v)
 	}
 	cases := map[string]func(*facts){
-		"tokens": func(f *facts) { f.Transcript.Context.Tokens = 99_000 },
+		"tokens": func(f *facts) { f.Transcript.Context.Tokens = 49_000 },
 		"early":  func(f *facts) { f.Transcript.Context.Request = now.Add(-52 * time.Minute) },
 		"screen": func(f *facts) { f.Prompt = screen.Draft },
 		"crons":  func(f *facts) { f.Transcript.Crons = []cronJob{{ID: "j1", Prompt: "Сон (скилл sleep)"}} },
