@@ -38,16 +38,17 @@ type Case struct {
 
 // Culprit — виновники случая за окно From..End: до caseTop имён на меру.
 type Culprit struct {
-	From         time.Time `json:"from"`
-	Main         string    `json:"main,omitempty"`       // путь cgroup с наибольшим I/O
-	MainValue    int64     `json:"main_value,omitempty"` // мера, по которой главная cgroup выбрана главной
-	ProcWrite    []Ranked  `json:"proc_write,omitempty"`
-	ProcRead     []Ranked  `json:"proc_read,omitempty"`
-	ProcMajflt   []Ranked  `json:"proc_majflt,omitempty"`
-	CgroupWrite  []Ranked  `json:"cgroup_write,omitempty"`
-	CgroupRead   []Ranked  `json:"cgroup_read,omitempty"`
-	CgroupSwapIn []Ranked  `json:"cgroup_swapin,omitempty"`
-	CgroupIdle   []Ranked  `json:"cgroup_idle,omitempty"` // мс PSI full io
+	From           time.Time                 `json:"from"`
+	Main           string                    `json:"main,omitempty"`       // путь cgroup с наибольшим I/O
+	MainValue      int64                     `json:"main_value,omitempty"` // мера, по которой главная cgroup выбрана главной
+	ProcWrite      []Ranked                  `json:"proc_write,omitempty"`
+	ProcRead       []Ranked                  `json:"proc_read,omitempty"`
+	ProcMajflt     []Ranked                  `json:"proc_majflt,omitempty"`
+	ProcessDetails map[string]ProcessDetails `json:"process_details,omitempty"`
+	CgroupWrite    []Ranked                  `json:"cgroup_write,omitempty"`
+	CgroupRead     []Ranked                  `json:"cgroup_read,omitempty"`
+	CgroupSwapIn   []Ranked                  `json:"cgroup_swapin,omitempty"`
+	CgroupIdle     []Ranked                  `json:"cgroup_idle,omitempty"` // мс PSI full io
 	// CgroupDirty — запись процессов cgroup (write_bytes, данные и метаданные): кто порождает запись.
 	CgroupDirty []Ranked `json:"cgroup_dirty,omitempty"`
 	// CgroupOwn — запись процессов для каждой своей (Readable) cgroup из CgroupWrite: io.stat намного больше своей —
@@ -249,10 +250,20 @@ func (r *Recorder) finish(c *Case) {
 		return
 	}
 	sum := SumCulprits(details)
+	procWrite, procRead := Rank(sum.ProcWrite, caseTop), Rank(sum.ProcRead, caseTop)
+	processDetails := make(map[string]ProcessDetails)
+	for _, top := range [][]Ranked{procWrite, procRead} {
+		for _, p := range top {
+			if info, ok := sum.ProcessDetails[p.Name]; ok {
+				processDetails[p.Name] = info
+			}
+		}
+	}
 	main := sum.MainCgroup()
 	c.Culprits = &Culprit{From: from, Main: main, MainValue: sum.cgroupTotal[main],
-		ProcWrite: Rank(sum.ProcWrite, caseTop), ProcRead: Rank(sum.ProcRead, caseTop), ProcMajflt: Rank(sum.ProcMajflt, caseTop),
-		CgroupWrite: Rank(sum.CgroupWrite, caseTop), CgroupRead: Rank(sum.CgroupRead, caseTop),
+		ProcWrite: procWrite, ProcRead: procRead, ProcMajflt: Rank(sum.ProcMajflt, caseTop),
+		ProcessDetails: processDetails,
+		CgroupWrite:    Rank(sum.CgroupWrite, caseTop), CgroupRead: Rank(sum.CgroupRead, caseTop),
 		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
 		CgroupDirty: Rank(sum.CgroupDirty, caseTop), CgroupOwn: map[string]int64{}}
 	c.Culprits.Foreign, _ = sum.ForeignOver(c.Culprits.Main)

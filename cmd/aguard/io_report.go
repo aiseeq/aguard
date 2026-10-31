@@ -77,8 +77,8 @@ func writeIOCase(w io.Writer, c *iowatch.Case, names int) {
 			"порождает их запись процессов ниже)\n", megabytes(k.DeviceWrite), megabytes(k.KernelWrite))
 	}
 	top := func(list []iowatch.Ranked) []iowatch.Ranked { return list[:min(names, len(list))] }
-	writeIOTop(w, "запись процессов (данные и метаданные)", top(k.ProcWrite), ioBytes)
-	writeIOTop(w, "чтение процессов", top(k.ProcRead), ioBytes)
+	writeProcessIOTop(w, "запись процессов (данные и метаданные)", top(k.ProcWrite), ioBytes, k.ProcessDetails)
+	writeProcessIOTop(w, "чтение процессов", top(k.ProcRead), ioBytes, k.ProcessDetails)
 	writeIOTop(w, "своп процессов", top(k.ProcMajflt), ioMajflt)
 	if k.CgroupDirty != nil { // случаи до 30.10 — без неё
 		writeIOTop(w, "запись процессов по cgroup", top(k.CgroupDirty), ioBytes)
@@ -87,6 +87,22 @@ func writeIOCase(w io.Writer, c *iowatch.Case, names int) {
 	writeIOTop(w, "чтение cgroup", top(k.CgroupRead), ioBytes)
 	writeIOTop(w, "своп cgroup", top(k.CgroupSwapIn), ioPages)
 	writeIOTop(w, "простой IO cgroup", top(k.CgroupIdle), ioMillis)
+}
+
+// writeProcessIOTop дополняет первые три процесса командой и cwd из детальной записи.
+func writeProcessIOTop(w io.Writer, label string, top []iowatch.Ranked, unit int, details map[string]iowatch.ProcessDetails) {
+	writeIOTop(w, label, top, unit)
+	for _, item := range top[:min(3, len(top))] {
+		info := details[item.Name]
+		if info.Cmdline == "" {
+			continue
+		}
+		if info.CWD == "" {
+			fmt.Fprintf(w, "  cmd: %s\n", info.Cmdline)
+		} else {
+			fmt.Fprintf(w, "  cmd: %s (в %s)\n", info.Cmdline, info.CWD)
+		}
+	}
 }
 
 // ioFsyncShare и ioFsyncMin — io.stat cgroup больше записи её процессов во столько раз и на столько байт: остальное —

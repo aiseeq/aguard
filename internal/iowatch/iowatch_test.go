@@ -314,6 +314,87 @@ func TestDeltaChildExitParentKeepsJumpMarked(t *testing.T) {
 	}
 }
 
+func TestProcessCommandAndCWDStoredInCulpritsAfterExit(t *testing.T) {
+	fp := fakeProc{t, t.TempDir()}
+	fp.set(10, 1, 100, "dd", 0, 0, 0)
+	dir := filepath.Join(fp.root, "10")
+	writeFile(t, filepath.Join(dir, "cmdline"), "dd\x00--write\x00")
+	if err := os.Symlink("/workspace/project", filepath.Join(dir, "cwd")); err != nil {
+		t.Fatal(err)
+	}
+	r := newProcessReader(fp.root)
+	defer r.close()
+	now := time.Now()
+	readPass(t, r, now)
+	fp.set(10, 1, 100, "dd", 0, 4096, 0)
+	detail := Step{At: now.Add(time.Second)}
+	if skipped, err := r.read(&detail); err != nil || skipped != nil {
+		t.Fatal(err, skipped)
+	}
+	if len(detail.Processes) != 1 || detail.Processes[0].Cmdline != "dd --write" || detail.Processes[0].CWD != "/workspace/project" {
+		t.Fatalf("метаданные топа: %+v", detail.Processes)
+	}
+	fp.remove(10)
+	culprits := SumCulprits([]Step{detail})
+	info, ok := culprits.ProcessDetails["dd(10)"]
+	if !ok || info.Cmdline != "dd --write" || info.CWD != "/workspace/project" {
+		t.Fatalf("метаданные виновника после выхода: %+v", culprits.ProcessDetails)
+	}
+}
+
+func TestProcessCommandReadErrorKeepsProcessAndSkipsRetry(t *testing.T) {
+	fp := fakeProc{t, t.TempDir()}
+	fp.set(10, 1, 100, "dd", 0, 0, 0)
+	if err := os.Mkdir(filepath.Join(fp.root, "10", "cmdline"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := newProcessReader(fp.root)
+	defer r.close()
+	now := time.Now()
+	readPass(t, r, now)
+	fp.set(10, 1, 100, "dd", 0, 4096, 0)
+	detail := Step{At: now.Add(time.Second)}
+	skipped, err := r.read(&detail)
+	if err != nil || skipped == nil {
+		t.Fatalf("ошибка cmdline должна попасть в пропуски: skipped=%v err=%v", skipped, err)
+	}
+	if len(detail.Processes) != 1 || detail.Processes[0].PID != 10 || detail.Processes[0].WriteBytes != 4096 || detail.Processes[0].Cmdline != "" {
+		t.Fatalf("процесс с ошибкой cmdline должен остаться в топе: %+v", detail.Processes)
+	}
+	if e := r.procs[10]; e == nil || !e.cmdlineRead {
+		t.Fatal("ошибка cmdline не закэширована")
+	}
+	fp.set(10, 1, 100, "dd", 0, 8192, 0)
+	if skipped, err = r.read(&Step{At: now.Add(2 * time.Second)}); err != nil || skipped != nil {
+		t.Fatalf("сбойное чтение не должно повторяться: skipped=%v err=%v", skipped, err)
+	}
+}
+
+func TestProcessCommandWithoutCWDPermission(t *testing.T) {
+	fp := fakeProc{t, t.TempDir()}
+	fp.set(10, 1, 100, "dd", 0, 0, 0)
+	dir := filepath.Join(fp.root, "10")
+	writeFile(t, filepath.Join(dir, "cmdline"), "dd\x00--read\x00")
+	r := newProcessReader(fp.root)
+	defer r.close()
+	r.readlink = func(path string) (string, error) {
+		if filepath.Base(path) == "cwd" {
+			return "", os.ErrPermission
+		}
+		return os.Readlink(path)
+	}
+	now := time.Now()
+	readPass(t, r, now)
+	fp.set(10, 1, 100, "dd", 0, 1024, 0)
+	detail := Step{At: now.Add(time.Second)}
+	if skipped, err := r.read(&detail); err != nil || skipped != nil {
+		t.Fatal(err, skipped)
+	}
+	if len(detail.Processes) != 1 || detail.Processes[0].Cmdline != "dd --read" || detail.Processes[0].CWD != "" {
+		t.Fatalf("команда без cwd: %+v", detail.Processes)
+	}
+}
+
 // Процесс с битым stat пропускается в этом проходе, остальные считаются.
 func TestDeltaProcessErrorSkipsOnlyIt(t *testing.T) {
 	fp := fakeProc{t, t.TempDir()}
@@ -336,6 +417,30 @@ func TestDeltaProcessErrorSkipsOnlyIt(t *testing.T) {
 	fp.set(11, 1, 101, "dd", 0, 70, 0)
 	if p := readPass(t, r, now.Add(2*time.Second))[11]; p.WriteBytes != 70 {
 		t.Fatalf("после починки — дельта от прежних счётчиков: %+v", p)
+	}
+}
+
+func TestCaseProcessDetailsOnlyForTopProcesses(t *testing.T) {
+	cfg := Default()
+	r := NewRecorder(cfg)
+	at := time.Now()
+	processes := make([]Process, 6)
+	for i := range processes {
+		pid := i + 1
+		processes[i] = Process{PID: pid, Start: uint64(pid), Comm: fmt.Sprintf("p%d", pid),
+			WriteBytes: int64(100 - i), ReadBytes: int64(200 - i), Cmdline: fmt.Sprintf("p%d --arg", pid)}
+	}
+	r.ring.Add(Record{Kind: KindDetail, Step: Step{At: at, Processes: processes}})
+	c := Case{Start: at, End: at, DurMS: 1000}
+	r.finish(&c)
+	if c.Culprits == nil || len(c.Culprits.ProcWrite) != caseTop || len(c.Culprits.ProcRead) != caseTop {
+		t.Fatalf("ранжирование: %+v", c.Culprits)
+	}
+	if _, ok := c.Culprits.ProcessDetails["p6(6)"]; ok {
+		t.Fatalf("детали процесса вне топа сохранены: %+v", c.Culprits.ProcessDetails)
+	}
+	if len(c.Culprits.ProcessDetails) != caseTop {
+		t.Fatalf("детали только для топа записи/чтения: %+v", c.Culprits.ProcessDetails)
 	}
 }
 

@@ -407,6 +407,24 @@ func TestIOStepNotesPassEveryMinute(t *testing.T) {
 	}
 }
 
+func TestIOCaseIncludesProcessCommand(t *testing.T) {
+	c := alertCase(time.Date(2026, 10, 31, 12, 0, 0, 0, time.Local), 7400)
+	c.Culprits.ProcWrite = []iowatch.Ranked{{Name: "dd(10)", Value: 10}}
+	c.Culprits.ProcRead = []iowatch.Ranked{{Name: "cat(11)", Value: 20}}
+	c.Culprits.ProcessDetails = map[string]iowatch.ProcessDetails{
+		"dd(10)":  {Cmdline: "dd --write", CWD: "/workspace/project"},
+		"cat(11)": {Cmdline: "cat input"},
+	}
+	var b strings.Builder
+	writeIOCase(&b, &c, 3)
+	text := b.String()
+	for _, want := range []string{"  cmd: dd --write (в /workspace/project)\n", "  cmd: cat input\n"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("нет %q:\\n%s", want, text)
+		}
+	}
+}
+
 // Письмо называет фон ядра и помечает io.stat, набранный чужим коммитом по fsync; своя запись в пределах — без пометки.
 func TestIOCaseFsyncAndKernel(t *testing.T) {
 	c := alertCase(time.Date(2026, 10, 30, 12, 15, 12, 0, time.Local), 7400)

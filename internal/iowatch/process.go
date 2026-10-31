@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,16 +35,17 @@ const (
 // родителю с пометкой Children: это хвост детей после последнего прохода, I/O детей, которых проход
 // не застал, и I/O самого родителя — разделить их нечем.
 type processReader struct {
-	root   string
-	dir    *os.File
-	dirBuf []byte
-	pids   []int
-	procs  map[int]*procEntry
-	denied map[int]uint64
-	exited map[int]*exitedChildren // по pid родителя
-	pass   uint64
-	buf    []byte
-	all    []Process
+	root     string
+	dir      *os.File
+	dirBuf   []byte
+	pids     []int
+	procs    map[int]*procEntry
+	denied   map[int]uint64
+	exited   map[int]*exitedChildren // по pid родителя
+	pass     uint64
+	buf      []byte
+	all      []Process
+	readlink func(string) (string, error)
 }
 
 type procEntry struct {
@@ -55,6 +57,9 @@ type procEntry struct {
 	pass             uint64
 	cgroup           string
 	cgroupAt         time.Time
+	cmdline, cwd     string
+	cmdlineRead      bool
+	cwdRead          bool
 }
 
 // exitedChildren — ушедшие дети родителя, чей итог ядро добавит ему при wait().
@@ -65,7 +70,7 @@ type exitedChildren struct {
 
 func newProcessReader(root string) *processReader {
 	return &processReader{root: root, dirBuf: make([]byte, 32*1024), procs: map[int]*procEntry{}, denied: map[int]uint64{},
-		exited: map[int]*exitedChildren{}, buf: make([]byte, 4096)}
+		exited: map[int]*exitedChildren{}, buf: make([]byte, 4096), readlink: os.Readlink}
 }
 
 func (r *processReader) close() {
@@ -373,9 +378,58 @@ func (r *processReader) selectTop(s *Step, fail func(error)) {
 				fail(err)
 			}
 			p.Cgroup = cgroup
+			cmdline, cwd, err := r.processCommand(p.PID)
+			if err != nil {
+				fail(err)
+			}
+			p.Cmdline, p.CWD = cmdline, cwd
 			s.Processes = append(s.Processes, p)
 		}
 	}
+}
+
+// processCommand — командная строка и cwd процесса топа. Успешные поля кэшируются до forget.
+func (r *processReader) processCommand(pid int) (string, string, error) {
+	e := r.procs[pid]
+	if e == nil {
+		return "", "", nil
+	}
+	base := filepath.Join(r.root, strconv.Itoa(pid))
+	if !e.cmdlineRead {
+		path := filepath.Join(base, "cmdline")
+		data, err := os.ReadFile(path)
+		if processGone(err) {
+			e.cmdlineRead, e.cwdRead = true, true
+			return e.cmdline, e.cwd, nil
+		}
+		if err != nil {
+			e.cmdlineRead = true
+			return e.cmdline, e.cwd, fmt.Errorf("прочитать %s: %w", path, err)
+		}
+		line := strings.TrimRight(string(bytes.ReplaceAll(data, []byte{0}, []byte{' '})), " ")
+		runes := []rune(line)
+		if len(runes) > 120 {
+			line = string(runes[:120])
+		}
+		e.cmdline, e.cmdlineRead = line, true
+	}
+	if !e.cwdRead {
+		path := filepath.Join(base, "cwd")
+		cwd, err := r.readlink(path)
+		if processGone(err) {
+			e.cwdRead = true
+			return e.cmdline, e.cwd, nil
+		}
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EPERM) {
+			e.cwdRead = true
+		} else if err != nil {
+			e.cwdRead = true
+			return e.cmdline, e.cwd, fmt.Errorf("прочитать %s: %w", path, err)
+		} else {
+			e.cwd, e.cwdRead = cwd, true
+		}
+	}
+	return e.cmdline, e.cwd, nil
 }
 
 func processMeasure(p *Process, measure int) int64 {

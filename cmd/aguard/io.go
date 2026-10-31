@@ -256,8 +256,8 @@ func writeIOSeconds(w io.Writer, win iowatch.Window) {
 func writeIOSummary(w io.Writer, win iowatch.Window) {
 	c := iowatch.SumCulprits(win.Details)
 	const names = 5
-	writeIOTop(w, "запись процессов", iowatch.Rank(c.ProcWrite, names), ioBytes)
-	writeIOTop(w, "чтение процессов", iowatch.Rank(c.ProcRead, names), ioBytes)
+	writeProcessIOTop(w, "запись процессов", iowatch.Rank(c.ProcWrite, names), ioBytes, c.ProcessDetails)
+	writeProcessIOTop(w, "чтение процессов", iowatch.Rank(c.ProcRead, names), ioBytes, c.ProcessDetails)
 	writeIOTop(w, "своп процессов", iowatch.Rank(c.ProcMajflt, names), ioMajflt)
 	writeIOTop(w, "запись cgroup", iowatch.Rank(c.CgroupWrite, names), ioBytes)
 	writeIOTop(w, "чтение cgroup", iowatch.Rank(c.CgroupRead, names), ioBytes)

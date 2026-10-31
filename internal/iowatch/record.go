@@ -50,6 +50,12 @@ type Step struct {
 	Cgroups    []Cgroup  `json:"cgroups,omitempty"`
 }
 
+// ProcessDetails — команда и рабочая папка процесса из /proc.
+type ProcessDetails struct {
+	Cmdline string `json:"cmdline,omitempty"`
+	CWD     string `json:"cwd,omitempty"`
+}
+
 // Process — дельты процесса за детальный интервал.
 type Process struct {
 	PID        int    `json:"pid"`
@@ -60,6 +66,8 @@ type Process struct {
 	WriteBytes int64  `json:"wr_b,omitempty"`
 	Majflt     int64  `json:"majflt,omitempty"`
 	Cgroup     string `json:"cgroup,omitempty"`
+	Cmdline    string `json:"cmdline,omitempty"`
+	CWD        string `json:"cwd,omitempty"`
 	// Children — за интервал у процесса ушли дети: ядро при wait() добавляет их I/O родителю, уже
 	// учтённое у детей вычтено, остаток может быть их.
 	Children bool `json:"kids,omitempty"`
