@@ -45,12 +45,15 @@ type CompactConfig struct {
 // cacheTTL1h — сколько живёт кэш подсказки у Claude Code (TTL 1 ч).
 const cacheTTL1h = time.Hour
 
+// defaultResetMinTokens — порог сброса: свежая беседа начинается с ~32 тыс. (пользователь 31.10 ~11:48 CET).
+const defaultResetMinTokens = 50_000
+
 // DefaultCompact — только журнал: порог сжатия 100 тыс., сброса — 50 тыс., окно 53–57 мин.
 func DefaultCompact() CompactConfig {
 	return CompactConfig{
 		Mode:           CompactLog,
 		MinTokens:      100_000,
-		ResetMinTokens: 50_000,
+		ResetMinTokens: defaultResetMinTokens,
 		After:          policy.Duration(53 * time.Minute),
 		Before:         policy.Duration(57 * time.Minute),
 		TTYQuiet:       policy.Duration(2 * time.Minute),
