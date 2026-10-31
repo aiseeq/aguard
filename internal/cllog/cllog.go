@@ -19,7 +19,7 @@ import (
 // TimeFormat — время в начале строки журнала, местное с поясом.
 const TimeFormat = "2006-01-02T15:04:05-07:00"
 
-// Path — журнал cl по умолчанию (restart.journal в конфиге cl).
+// Path — журнал cl по умолчанию.
 func Path(home string) string {
 	return filepath.Join(home, ".local", "state", "cl", "restart.log")
 }

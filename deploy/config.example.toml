@@ -218,6 +218,20 @@ series_keep = "24h"    # посекундный ряд машины в памя�
 profiles_keep = "720h" # профили завершившихся cgroup (от 10 МиБ обмена или 60 с): вид, запись, пик МБ/с; копия profiles.jsonl
 # socket = "/run/user/1000/io-state.sock"  # сокет моментального состояния (now, series, profiles); по умолчанию $XDG_RUNTIME_DIR/io-state.sock, смена — с перезапуском службы
 
+# Наблюдение за потоками интерфейса и рендерерами Chrome. Снимки — в ~/.local/state/aguard/gui.
+[gui]
+mode = "log"          # off | log; только наблюдение и запись
+interval = "50ms"     # kwin, plasmashell, Chrome и GPU-процесс
+renderer_every = "250ms"
+rediscover = "5s"
+min_stall = "1s"
+gap = "300ms"
+context = "5s"
+ring = "30s"
+keep = "336h"
+max_per_hour = 60
+max_bytes = 209715200
+
 # Сломанный путь graft на PC: событие из jsonl, письмо мастеру-владельцу и сводка лиду при нескольких мастерах.
 # Старый файл при первом проходе только отмечается; новые строки читаются с сохранённого смещения.
 [remote]

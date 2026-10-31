@@ -105,47 +105,54 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	cmd := os.Args[1]
-	switch cmd {
-	case "run":
-		err = a.run(ctx)
-	case "orphans":
-		err = a.orphansCmd(ctx, os.Args[2:])
-	case "tmp":
-		err = a.tmpCmd(os.Args[2:])
-	case "memory":
-		err = a.memoryCmd(os.Args[2:])
-	case "restart":
-		err = a.restartCmd(os.Args[2:])
-	case "waits":
-		err = a.waitsCmd(os.Args[2:])
-	case "compact":
-		err = a.compactCmd(os.Args[2:])
-	case "disk":
-		err = a.diskCmd(ctx, os.Args[2:])
-	case "said":
-		err = a.saidCmd(ctx, os.Args[2:])
-	case "bgtask":
-		err = a.bgtaskCmd(os.Args[2:])
-	case "agentwaits":
-		err = a.agentwaitsCmd(os.Args[2:])
-	case "cpu":
-		err = a.cpuCmd(ctx, os.Args[2:])
-	case "io":
-		err = a.ioCmd(ctx, os.Args[2:])
-	case "remote":
-		err = a.remoteCmd(os.Args[2:])
-	case "night":
-		err = a.nightCmd(os.Args[2:])
-	case "report":
-		err = a.reportCmd(os.Args[2:])
-	default:
-		usage()
-	}
+	err = a.dispatch(ctx, cmd, os.Args[2:])
 	if err != nil {
 		lg.Error("aguard "+cmd, "err", err)
 		stop()
 		os.Exit(1)
 	}
+}
+
+func (a *app) dispatch(ctx context.Context, cmd string, args []string) error {
+	switch cmd {
+	case "run":
+		return a.run(ctx)
+	case "orphans":
+		return a.orphansCmd(ctx, args)
+	case "tmp":
+		return a.tmpCmd(args)
+	case "memory":
+		return a.memoryCmd(args)
+	case "restart":
+		return a.restartCmd(args)
+	case "waits":
+		return a.waitsCmd(args)
+	case "compact":
+		return a.compactCmd(args)
+	case "disk":
+		return a.diskCmd(ctx, args)
+	case "said":
+		return a.saidCmd(ctx, args)
+	case "bgtask":
+		return a.bgtaskCmd(args)
+	case "agentwaits":
+		return a.agentwaitsCmd(args)
+	case "cpu":
+		return a.cpuCmd(ctx, args)
+	case "io":
+		return a.ioCmd(ctx, args)
+	case "gui":
+		return a.guiCmd(ctx, args)
+	case "remote":
+		return a.remoteCmd(args)
+	case "night":
+		return a.nightCmd(args)
+	case "report":
+		return a.reportCmd(args)
+	default:
+		usage()
+	}
+	return nil
 }
 
 func usage() {
@@ -165,6 +172,7 @@ func usage() {
   aguard io report [-since 24h] [-min 0] [-json] [-file сводки]   прошлые фризы: случаи, виновники
   aguard io now [-kind вид] [-json] | series [-since 1h] [-json] | profiles [-kind вид] [-since 7d] [-json]   из службы: сейчас, посекундный ряд, профили задач
   aguard io record [-for 30s] [-dir папка] | dump | at время [-window 2m] [-dir папка]   ручные снимки: at читает только их — прошлый фриз смотреть через io report и io series
+  aguard gui watch -for 10s [-dir папка] [-pid имя=PID]… | report [-since 24h] [-json] [-dir папка]
   aguard io import [-dir папка] [-remove] [-out файл]   снимки событий прежнего наблюдателя — в сводки, при остановленной службе
   aguard night tick [-dry-run]
   aguard report [-json] [-at время RFC3339]`)
@@ -219,7 +227,7 @@ func (a *app) run(ctx context.Context) error {
 	signal.Notify(usr2, syscall.SIGUSR2)
 	defer signal.Stop(usr1)
 	defer signal.Stop(usr2)
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "remote", "night", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "night", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -233,6 +241,7 @@ func (a *app) run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() { a.restartServe(ctx, judge) })
 	wg.Go(func() { a.ioLoop(ctx, usr1, usr2) })
+	wg.Go(func() { a.guiLoop(ctx) })
 	for _, w := range ws {
 		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей семь, список задан в watchers
 	}

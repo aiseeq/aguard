@@ -18,6 +18,7 @@ import (
 	"github.com/aiseeq/aguard/internal/bgtask"
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/disk"
+	"github.com/aiseeq/aguard/internal/guiwatch"
 	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/night"
@@ -49,6 +50,7 @@ type Config struct {
 	Bgtask  bgtask.Config         `toml:"bgtask"` // забытые фоновые задачи Bash: письмо владельцу
 	Cpu     cpuwatch.Config       `toml:"cpu"`    // перегрузка процессора ноута и PC: письмо тем, чья она
 	IO      iowatch.Config        `toml:"io"`     // телеметрия диска, свопа и фризов
+	GUI     guiwatch.Config       `toml:"gui"`    // потоки графического интерфейса
 	Remote  remotebroken.Config   `toml:"remote"` // сломанный путь graft на PC: письмо владельцу и сводка лиду
 	Night   night.Config          `toml:"night"`  // Сон, Дайджест и окна доверия
 }
@@ -76,6 +78,7 @@ func Default(home string) Config {
 		Bgtask:     bgtask.Default(),
 		Cpu:        cpuwatch.Default(home),
 		IO:         ioDefault(),
+		GUI:        guiwatch.Default(),
 		Remote:     remotebroken.Default(home),
 		Night:      night.Default(home),
 	}
@@ -165,6 +168,9 @@ func (c *Config) finish(home string, uid int) error {
 	}
 	if err := c.IO.Validate(); err != nil {
 		return fmt.Errorf("io: %w", err)
+	}
+	if err := c.GUI.Validate(); err != nil {
+		return fmt.Errorf("gui: %w", err)
 	}
 	if err := c.Remote.Validate(home); err != nil {
 		return fmt.Errorf("remote: %w", err)

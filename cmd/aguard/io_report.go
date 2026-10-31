@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/guiwatch"
 	"github.com/aiseeq/aguard/internal/iowatch"
 )
 
@@ -175,6 +176,11 @@ func (a *app) ioReport(path string, live bool, since, until time.Time, minDur ti
 		return enc.Encode(sum)
 	}
 	writeIOReport(a.out, &sum)
+	gui, guiErr := guiwatch.ReadReport(a.dir("gui"), since)
+	if guiErr != nil {
+		return fmt.Errorf("прочитать отчёт gui: %w", guiErr)
+	}
+	fmt.Fprintf(a.out, "срезов интерфейса: %d, самый длинный S по wchan: %s\n", len(gui.Slices), guiwatch.LongestSleep(gui))
 	return nil
 }
 
