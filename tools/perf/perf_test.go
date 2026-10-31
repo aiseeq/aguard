@@ -143,6 +143,20 @@ func TestUnitDayRSSIncludesEndedAndCurrentPeak(t *testing.T) {
 	}
 }
 
+// Без идущего запуска пик — по итогам кончившихся; метка journalctl short-unix дробная, а [[ -gt ]] берёт только целые
+// (0c5d84e): без отсечения дробной части записи молча выпадали.
+func TestUnitDayRSSEndedRunsOnlyFractionalStamps(t *testing.T) {
+	env := map[string]string{
+		"AGUARD_PERF_JOURNAL": fixture("unit-summary.log"),
+		"AGUARD_PERF_SHOW":    "",
+		"AGUARD_PERF_NOW":     endpoint,
+	}
+	out, code := runScript(t, "unit-day.sh", env, "rss", "--until", "@"+endpoint)
+	if code != 0 || strings.TrimSpace(out) != "200" {
+		t.Fatalf("got (%q, %d), want (200, 0)", out, code)
+	}
+}
+
 func TestUnitDayDiskInsufficientCoverageAndRSSNoValues(t *testing.T) {
 	for _, measure := range []string{"read", "write", "rss"} {
 		env := map[string]string{"AGUARD_PERF_JOURNAL": fixture("unit-short-journal.log"), "AGUARD_PERF_SHOW": "", "AGUARD_PERF_NOW": endpoint}

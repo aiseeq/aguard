@@ -645,8 +645,8 @@ func TestCaseCloseOnStopAndDump(t *testing.T) {
 	if !IsManual(filepath.Base(snap.Path)) {
 		t.Fatalf("имя ручного снимка %s", snap.Path)
 	}
-	if _, err := os.Stat(snap.Path + ".part"); !os.IsNotExist(err) {
-		t.Fatalf("временный файл остался: %v", err)
+	if parts, err := filepath.Glob(filepath.Join(dir, "*.part")); err != nil || len(parts) != 0 {
+		t.Fatalf("временный файл остался: %v %v", parts, err)
 	}
 	win, err := ReadSnapshots(dir, base.Add(-time.Minute), base.Add(time.Minute), time.Minute, func(err error) { t.Error(err) })
 	if err != nil || len(win.Steps) != 2 {

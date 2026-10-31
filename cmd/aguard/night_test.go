@@ -215,3 +215,45 @@ func TestNightDreamOwnerGetsDreamSignal(t *testing.T) {
 		t.Fatalf("адресаты: %v", got)
 	}
 }
+
+// Сигнал уходит только письмом сессиям — лиду, also_to и своим адресатам сигнала; другого канала нет (Telegram снят
+// 28.10, пользователь: «не надо так», a46a53c).
+func TestNightAlertOnlySessionLetters(t *testing.T) {
+	dir := t.TempDir()
+	a := &app{home: dir, stateDir: filepath.Join(dir, "state"), log: slog.New(slog.NewTextHandler(&strings.Builder{}, nil))}
+	got := liveLead(t, a)
+	cfg := night.Default(dir)
+	cfg.Mode = night.ModeAlert
+	cfg.Lead = "lead"
+	cfg.AlsoTo, cfg.DreamTo, cfg.DreamFallback = nil, nil, ""
+	cfg.DreamBy = "00:00"
+	cfg.DreamMarker = filepath.Join(dir, "absent")
+	cfg.DigestMarker = filepath.Join(dir, "digest")
+	now := time.Now() // Дайджест прошёл сегодня и завтра: сигнал один — о Сне, и после полуночи тоже
+	if err := os.WriteFile(cfg.DigestMarker, []byte(now.Format("2006-01-02")+" "+now.AddDate(0, 0, 1).Format("2006-01-02")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.nightRound(nil, &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	if msg := <-got; !strings.Contains(msg, "Сон") {
+		t.Fatalf("лиду пришло: %q", msg)
+	}
+	state, err := loadNightState(filepath.Join(a.stateDir, "night", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state) != 1 {
+		t.Fatalf("сигналов %d, ждали 1 (Сон): %+v", len(state), state)
+	}
+	for key, sent := range state {
+		for channel := range sent.Channels {
+			if channel != "lead" {
+				t.Errorf("%s: доставка по каналу %q — сверх писем сессиям", key, channel)
+			}
+		}
+		if _, ok := sent.Channels["lead"]; !ok {
+			t.Errorf("%s: письмо лиду не учтено: %+v", key, sent)
+		}
+	}
+}
