@@ -1,9 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/aiseeq/akit v1.16.1 h1:tT2hZLh3S01jbtyhe+2ZNjaUpyxiAnzrlJnDRdzRyic=
-github.com/aiseeq/akit v1.16.1/go.mod h1:jnR4/oknueNXx8824Wpnkn3tAO/yniJ3qmvZirGrvxk=
-github.com/aiseeq/akit v1.17.0 h1:JDEnRATnJ51m2+IHJd9eemJG6Msvv07V4S5x4inDGsQ=
-github.com/aiseeq/akit v1.17.0/go.mod h1:jnR4/oknueNXx8824Wpnkn3tAO/yniJ3qmvZirGrvxk=
+github.com/aiseeq/akit v1.18.7 h1:y5ov46XDKexjmmPDnIxdQMOkJB+dJ44QB0AMQOb4dK4=
+github.com/aiseeq/akit v1.18.7/go.mod h1:jnR4/oknueNXx8824Wpnkn3tAO/yniJ3qmvZirGrvxk=
 github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
 github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/go-quicktest/qt v1.102.0 h1:HSQxCeh5YZH3EL3W39ixjtyaEhcWSXQHtHnMBzSs474=

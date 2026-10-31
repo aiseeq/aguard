@@ -2,7 +2,9 @@ package orphans
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,7 +77,7 @@ func Plan(s *proc.Snapshot, cfg *Config, seen map[string]time.Time) []Tree {
 	}
 	children := childIndex(s)
 	var trees []Tree
-	for _, pid := range sortedKeys(orphan) {
+	for _, pid := range slices.Sorted(maps.Keys(orphan)) {
 		p := s.Procs[pid]
 		if _, parentOrphan := orphan[p.Ppid]; parentOrphan {
 			continue // войдёт в дерево предка
@@ -288,13 +290,4 @@ func ShortID(id string) string {
 		return id[:n]
 	}
 	return id
-}
-
-func sortedKeys[V any](m map[int]V) []int {
-	out := make([]int, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Ints(out)
-	return out
 }
