@@ -335,6 +335,14 @@ func signalChild(proc *os.Process, sig os.Signal) error {
 	return nil
 }
 
+// every — срок между проверками: свой check, иначе из конфига.
+func (l launcher) every(c restartConfig) time.Duration {
+	if l.check > 0 {
+		return l.check
+	}
+	return c.interval()
+}
+
 // watch ждёт выхода claude; на каждой проверке спрашивает aguard (решение о перезапуске и сжатии — у него,
 // internal/restart), пишет в журнал смену решения, а в режиме act перезапускает: SIGTERM — мягкий выход Claude Code
 // (беседа дописана, «Resume this session with: claude --resume <id>»). Пока claude рисует экран, cl в терминал не
@@ -347,11 +355,7 @@ func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem str
 	if err != nil {
 		journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: %v — проверка с умолчаниями, режим log", l.name, pid, err))
 	}
-	every := cfg.Restart.interval()
-	if l.check > 0 {
-		every = l.check
-	}
-	ticker := time.NewTicker(every)
+	ticker := time.NewTicker(l.every(cfg.Restart))
 	defer ticker.Stop()
 	var out outcome
 	stopping, upgradeTried := false, false
