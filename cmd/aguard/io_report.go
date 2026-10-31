@@ -27,12 +27,37 @@ func ioCaseLine(c *iowatch.Case) string {
 	}
 	line := fmt.Sprintf("%s, %s (простой %s, %s; пик шага %d мс)", c.Start.Format("02.01 15:04:05"), ioSeconds(c.DurMS),
 		ioSeconds(c.IdleMS), cause, c.PeakMS)
-	if c.Culprits != nil && c.Culprits.Main != "" {
-		line += ", главная cgroup " + iowatch.CgroupName(c.Culprits.Main)
-		if f := c.Culprits.Foreign; f.Value > 0 {
-			line += fmt.Sprintf(" (неточно: у %s чужого uid по io.stat %.0f МБ записи, чтения и свопа — больше, а своя её запись не видна; "+
-				"бывает и коммит btrfs по её fsync)", f.Name, megabytes(f.Value))
+	if attribution := ioCaseAttribution(c); attribution != "" {
+		line += ", " + attribution
+	}
+	return line
+}
+
+// ioCaseAttribution — одна подпись виновника для заголовка и кратких списков случаев.
+func ioCaseAttribution(c *iowatch.Case) string {
+	if c.Culprits == nil || c.Culprits.Main == "" {
+		return ""
+	}
+	k := c.Culprits
+	main := iowatch.CgroupName(k.Main)
+	if k.MainValue > 0 {
+		if k.KernelWrite > k.MainValue && k.KernelWrite >= k.Foreign.Value {
+			percent := int64(0)
+			if k.DeviceWrite > 0 {
+				percent = (100*k.KernelWrite + k.DeviceWrite/2) / k.DeviceWrite
+			}
+			return fmt.Sprintf("фон ядра (writeback, коммит btrfs): %.0f МБ, %d%% записи устройства; главная cgroup %s",
+				megabytes(k.KernelWrite), percent, main)
 		}
+		if k.Foreign.Value > k.MainValue {
+			return fmt.Sprintf("чужая cgroup %s (чужой uid): %.0f МБ; главная cgroup %s",
+				k.Foreign.Name, megabytes(k.Foreign.Value), main)
+		}
+	}
+	line := "главная cgroup " + main
+	if f := k.Foreign; f.Value > 0 {
+		line += fmt.Sprintf(" (неточно: у %s чужого uid по io.stat %.0f МБ записи, чтения и свопа — больше, а своя её запись не видна; "+
+			"бывает и коммит btrfs по её fsync)", f.Name, megabytes(f.Value))
 	}
 	return line
 }

@@ -107,7 +107,7 @@ func TestRepeatWindowAndSummary(t *testing.T) {
 	now := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
 	s := State{}
 	first := s.Apply([]Event{e}, []string{"master-a"}, "lead", now, time.Hour)
-	if len(first) != 1 || first[0].To != "master-a" {
+	if len(first) != 2 || first[0].To != "master-a" || first[1].To != "lead" {
 		t.Fatalf("первое письмо: %+v", first)
 	}
 	e.At = e.At.Add(time.Minute)
@@ -116,7 +116,7 @@ func TestRepeatWindowAndSummary(t *testing.T) {
 	}
 	e.At = e.At.Add(time.Minute)
 	got := s.Apply([]Event{e}, []string{"master-a"}, "lead", now.Add(time.Hour), time.Hour)
-	if len(got) != 1 || !strings.Contains(got[0].Message, "До этого ещё 1 раз") {
+	if len(got) != 2 || !strings.Contains(got[0].Message, "До этого ещё 1 раз") || got[1].To != "lead" {
 		t.Fatalf("счётчик повторов: %+v", got)
 	}
 
@@ -132,6 +132,76 @@ func TestRepeatWindowAndSummary(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("нет сводки лиду: %+v", got)
+	}
+}
+
+func TestFirstEventToLeadAndSummary(t *testing.T) {
+	e, _ := Parse([]byte(sample))
+	now := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	s := State{}
+	apply := func(event Event, owner string, at time.Time) []Notice {
+		return s.Apply([]Event{event}, []string{owner}, "lead", at, time.Hour)
+	}
+	find := func(notices []Notice, to string, summary bool) (Notice, bool) {
+		for _, n := range notices {
+			if n.To == to && n.Summary == summary {
+				return n, true
+			}
+		}
+		return Notice{}, false
+	}
+
+	first := apply(e, "master-a", now)
+	ownerNotice, ownerOK := find(first, "master-a", false)
+	leadNotice, leadOK := find(first, "lead", false)
+	if len(first) != 2 || !ownerOK || !leadOK || leadNotice.Key != "first:pc" ||
+		leadNotice.Message != ownerNotice.Message || leadNotice.Count != 1 {
+		t.Fatalf("первое событие мастеру и лиду: %+v", first)
+	}
+
+	e.At = e.At.Add(time.Minute)
+	if got := apply(e, "master-a", now.Add(time.Minute)); len(got) != 0 {
+		t.Fatalf("второе событие той же машины повторило письмо лиду: %+v", got)
+	}
+	e.Host = "laptop"
+	otherHost := apply(e, "master-a", now.Add(2*time.Minute))
+	if n, ok := find(otherHost, "lead", false); !ok || n.Key != "first:laptop" {
+		t.Fatalf("другая машина не уведомила лида: %+v", otherHost)
+	}
+
+	e.Host = "pc"
+	e.Project = "/other/project"
+	e.At = e.At.Add(time.Minute)
+	secondOwner := apply(e, "master-b", now.Add(3*time.Minute))
+	if _, ok := find(secondOwner, "lead", false); ok {
+		t.Fatalf("первое письмо лиду продублировано при сводке: %+v", secondOwner)
+	}
+	if n, ok := find(secondOwner, "lead", true); !ok || !strings.Contains(n.Message, "у 2 мастеров") {
+		t.Fatalf("нет сводки двум мастерам: %+v", secondOwner)
+	}
+
+	leadState := State{}
+	leadOwner := leadState.Apply([]Event{e}, []string{"lead"}, "lead", now, time.Hour)
+	if len(leadOwner) != 1 || leadOwner[0].To != "lead" {
+		t.Fatalf("владелец-лид получил не одно письмо: %+v", leadOwner)
+	}
+}
+
+func TestFirstLeadNoticeRepeatsAfterWindow(t *testing.T) {
+	e, _ := Parse([]byte(sample))
+	now := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	s := State{}
+	s.Apply([]Event{e}, []string{"master-a"}, "lead", now, time.Hour)
+	e.At = e.At.Add(time.Hour)
+	got := s.Apply([]Event{e}, []string{"master-a"}, "lead", now.Add(time.Hour), time.Hour)
+	count := 0
+	for _, n := range got {
+		if n.To == "lead" && n.Key == "first:pc" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("первое письмо лиду не повторено после окна: %+v", got)
 	}
 }
 

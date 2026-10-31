@@ -81,8 +81,8 @@ func ioAlertText(cases []iowatch.Case, alertMin time.Duration) (string, iowatch.
 		for i := range cases {
 			c := &cases[i]
 			fmt.Fprintf(&b, " %s %s", c.Start.Format("15:04:05"), ioSeconds(c.DurMS))
-			if c.Culprits != nil && c.Culprits.Main != "" {
-				fmt.Fprintf(&b, " (%s)", iowatch.CgroupName(c.Culprits.Main))
+			if attribution := ioCaseAttribution(c); attribution != "" {
+				fmt.Fprintf(&b, " (%s)", attribution)
 			}
 			b.WriteByte(';')
 		}

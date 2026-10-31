@@ -434,3 +434,45 @@ func TestIOCaseFsyncAndKernel(t *testing.T) {
 		t.Errorf("заголовок без пометки неточной главной: %s", line)
 	}
 }
+
+func TestIOCaseAttribution(t *testing.T) {
+	base := time.Date(2026, 10, 30, 12, 15, 12, 0, time.Local)
+	t.Run("ядро больше главной", func(t *testing.T) {
+		c := alertCase(base, 7400)
+		c.Culprits.MainValue = 100 << 20
+		c.Culprits.DeviceWrite, c.Culprits.KernelWrite = 847<<20, 383<<20
+		line := ioCaseLine(&c)
+		if !strings.Contains(line, "фон ядра (writeback, коммит btrfs): 383 МБ, 45% записи устройства; главная cgroup sess7") {
+			t.Fatalf("шапка не называет фон ядра первым: %s", line)
+		}
+	})
+	t.Run("foreign больше главной", func(t *testing.T) {
+		c := alertCase(base, 7400)
+		c.Culprits.MainValue = 560 << 20
+		c.Culprits.Foreign = iowatch.Ranked{Name: "snapperd", Value: 870 << 20}
+		line := ioCaseLine(&c)
+		if !strings.Contains(line, "чужая cgroup snapperd (чужой uid): 870 МБ; главная cgroup sess7") {
+			t.Fatalf("шапка не называет foreign первым: %s", line)
+		}
+	})
+	t.Run("главная больше обоих", func(t *testing.T) {
+		c := alertCase(base, 7400)
+		c.Culprits.MainValue = 900 << 20
+		c.Culprits.DeviceWrite, c.Culprits.KernelWrite = 847<<20, 383<<20
+		c.Culprits.Foreign = iowatch.Ranked{Name: "snapperd", Value: 870 << 20}
+		got := ioCaseLine(&c)
+		want := "30.10 12:15:12, 7,4 с (простой 5,5 с, io; пик шага 99 мс), главная cgroup sess7 (неточно: у snapperd чужого uid по io.stat 870 МБ записи, чтения и свопа — больше, а своя её запись не видна; бывает и коммит btrfs по её fsync)"
+		if got != want {
+			t.Fatalf("строка изменилась:\nполучено: %s\nожидалось: %s", got, want)
+		}
+	})
+	t.Run("старый случай без меры", func(t *testing.T) {
+		c := alertCase(base, 7400)
+		c.Culprits.Foreign = iowatch.Ranked{Name: "snapperd", Value: 870 << 20}
+		got := ioCaseLine(&c)
+		want := "30.10 12:15:12, 7,4 с (простой 5,5 с, io; пик шага 99 мс), главная cgroup sess7 (неточно: у snapperd чужого uid по io.stat 870 МБ записи, чтения и свопа — больше, а своя её запись не видна; бывает и коммит btrfs по её fsync)"
+		if got != want {
+			t.Fatalf("строка старого случая изменилась:\nполучено: %s\nожидалось: %s", got, want)
+		}
+	})
+}

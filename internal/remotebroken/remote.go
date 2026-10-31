@@ -97,6 +97,7 @@ type sent struct {
 }
 type summary struct {
 	At     time.Time       `json:"at"` // когда ушла сводка этого окна; ноль — ещё не уходила
+	LeadAt time.Time       `json:"lead_at,omitzero"`
 	Owners map[string]bool `json:"owners"`
 	First  time.Time       `json:"first"`
 	Reason string          `json:"reason"`
@@ -234,33 +235,11 @@ func (s *State) Apply(events []Event, owners []string, lead string, now time.Tim
 	}
 	var out []Notice
 	byHost := map[string]bool{}
+	newOwner := map[string]bool{}
 	for i := range events {
-		e := &events[i]
+		e := events[i]
 		owner := owners[i]
-		key := e.Project + "\x00" + e.Host
-		v := s.Sent[key]
-		if !v.At.IsZero() && now.Sub(v.At) < repeat {
-			if v.Pending == 0 {
-				v.PendingAt = e.At
-			}
-			v.Pending++
-			s.Sent[key] = v
-		} else {
-			count := v.Pending + 1
-			msg := Message(*e)
-			if v.Pending > 0 { // повторы прошлого окна, о которых ещё не писали
-				msg += fmt.Sprintf(" До этого ещё %d раз с %s.", v.Pending, v.PendingAt.Local().Format("15:04"))
-			}
-			out = append(out, Notice{To: owner, Key: key, Message: msg, Count: count})
-			s.Sent[key] = sent{At: now, Event: *e}
-		}
-		// окно сводки по машине — repeat от первого события; после сводки — repeat от неё
-		x := s.Summaries[e.Host]
-		if x.Owners == nil || (x.At.IsZero() && e.At.Sub(x.First) >= repeat) || (!x.At.IsZero() && now.Sub(x.At) >= repeat) {
-			x = summary{Owners: map[string]bool{}, First: e.At, Reason: e.Reason}
-		}
-		x.Owners[owner] = true
-		s.Summaries[e.Host] = x
+		out = append(out, s.applyEvent(e, owner, lead, now, repeat, newOwner)...)
 		byHost[e.Host] = true
 	}
 	hosts := make([]string, 0, len(byHost))
@@ -269,21 +248,66 @@ func (s *State) Apply(events []Event, owners []string, lead string, now time.Tim
 	}
 	slices.Sort(hosts)
 	for _, host := range hosts {
-		x := s.Summaries[host]
-		if len(x.Owners) < 2 || !x.At.IsZero() { // один мастер или сводка этого окна уже ушла
-			continue
+		if n, ok := s.applySummary(host, newOwner[host], lead, now); ok {
+			out = append(out, n)
 		}
-		list := make([]string, 0, len(x.Owners))
-		for n := range x.Owners {
-			list = append(list, n)
-		}
-		sort.Strings(list)
-		msg := fmt.Sprintf("%s: путь сломан у %d мастеров (%s), первая в %s, причина %s", strings.ToUpper(host), len(x.Owners), joinNames(list), x.First.Local().Format("15:04"), x.Reason)
-		out = append(out, Notice{To: lead, Key: "summary:" + host, Message: msg, Count: len(x.Owners), Summary: true})
-		x.At = now
-		s.Summaries[host] = x
 	}
 	return out
+}
+
+func (s *State) applyEvent(e Event, owner, lead string, now time.Time, repeat time.Duration, newOwner map[string]bool) []Notice {
+	var out []Notice
+	key := e.Project + "\x00" + e.Host
+	v := s.Sent[key]
+	if !v.At.IsZero() && now.Sub(v.At) < repeat {
+		if v.Pending == 0 {
+			v.PendingAt = e.At
+		}
+		v.Pending++
+		s.Sent[key] = v
+	} else {
+		msg := Message(e)
+		if v.Pending > 0 {
+			msg += fmt.Sprintf(" До этого ещё %d раз с %s.", v.Pending, v.PendingAt.Local().Format("15:04"))
+		}
+		out = append(out, Notice{To: owner, Key: key, Message: msg, Count: v.Pending + 1})
+		s.Sent[key] = sent{At: now, Event: e}
+	}
+
+	// Окно сводки начинается с первого события и после сводки — с её времени.
+	x := s.Summaries[e.Host]
+	if x.Owners == nil || (x.At.IsZero() && e.At.Sub(x.First) >= repeat) || (!x.At.IsZero() && now.Sub(x.At) >= repeat) {
+		x = summary{Owners: map[string]bool{}, First: e.At, Reason: e.Reason}
+	}
+	if !x.Owners[owner] {
+		newOwner[e.Host] = true
+	}
+	x.Owners[owner] = true
+	if x.LeadAt.IsZero() || now.Sub(x.LeadAt) >= repeat {
+		if owner != lead {
+			out = append(out, Notice{To: lead, Key: "first:" + e.Host, Message: Message(e), Count: 1})
+		}
+		x.LeadAt = now
+	}
+	s.Summaries[e.Host] = x
+	return out
+}
+
+func (s *State) applySummary(host string, newOwner bool, lead string, now time.Time) (Notice, bool) {
+	x := s.Summaries[host]
+	if len(x.Owners) < 2 || !newOwner || !x.At.IsZero() { // один мастер, повтор владельца или сводка этого окна уже ушла
+		return Notice{}, false
+	}
+	list := make([]string, 0, len(x.Owners))
+	for n := range x.Owners {
+		list = append(list, n)
+	}
+	sort.Strings(list)
+	msg := fmt.Sprintf("%s: путь сломан у %d мастеров (%s), первая в %s, причина %s", strings.ToUpper(host), len(x.Owners), joinNames(list), x.First.Local().Format("15:04"), x.Reason)
+	x.At = now
+	x.LeadAt = now
+	s.Summaries[host] = x
+	return Notice{To: lead, Key: "summary:" + host, Message: msg, Count: len(x.Owners), Summary: true}, true
 }
 
 func joinNames(names []string) string {

@@ -39,7 +39,8 @@ type Case struct {
 // Culprit — виновники случая за окно From..End: до caseTop имён на меру.
 type Culprit struct {
 	From         time.Time `json:"from"`
-	Main         string    `json:"main,omitempty"` // путь cgroup с наибольшим I/O
+	Main         string    `json:"main,omitempty"`       // путь cgroup с наибольшим I/O
+	MainValue    int64     `json:"main_value,omitempty"` // мера, по которой главная cgroup выбрана главной
 	ProcWrite    []Ranked  `json:"proc_write,omitempty"`
 	ProcRead     []Ranked  `json:"proc_read,omitempty"`
 	ProcMajflt   []Ranked  `json:"proc_majflt,omitempty"`
@@ -248,7 +249,8 @@ func (r *Recorder) finish(c *Case) {
 		return
 	}
 	sum := SumCulprits(details)
-	c.Culprits = &Culprit{From: from, Main: sum.MainCgroup(),
+	main := sum.MainCgroup()
+	c.Culprits = &Culprit{From: from, Main: main, MainValue: sum.cgroupTotal[main],
 		ProcWrite: Rank(sum.ProcWrite, caseTop), ProcRead: Rank(sum.ProcRead, caseTop), ProcMajflt: Rank(sum.ProcMajflt, caseTop),
 		CgroupWrite: Rank(sum.CgroupWrite, caseTop), CgroupRead: Rank(sum.CgroupRead, caseTop),
 		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
