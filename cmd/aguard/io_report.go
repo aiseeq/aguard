@@ -219,11 +219,13 @@ func ioRankedCases(list []iowatch.RankedCases, unit int) string {
 // к сводкам в path. В файл службы (live) — только пока она стоит: при остановке она перепишет его
 // своей памятью.
 func (a *app) ioImport(dir, path string, live, remove bool) error {
-	if err := ioSignal(0); live && !errors.Is(err, errIONotRunning) {
-		if err == nil {
-			return errors.New("aguard io import: служба aguard запущена — остановите её (systemctl --user stop aguard), иначе она перепишет сводки")
+	if live {
+		if err := ioSignal(0); !errors.Is(err, errIONotRunning) {
+			if err == nil {
+				return errors.New("aguard io import: служба aguard запущена — остановите её (systemctl --user stop aguard), иначе она перепишет сводки")
+			}
+			return err
 		}
-		return err
 	}
 	cfg, err := a.ioConfig()
 	if err != nil {

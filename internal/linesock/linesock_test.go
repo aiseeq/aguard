@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,5 +39,33 @@ func TestServeAskAndNoServer(t *testing.T) {
 	}
 	if err := Ask(socket, time.Second, 1, &out); !errors.Is(err, ErrNoServer) {
 		t.Fatalf("сокет без сервера: %v", err)
+	}
+}
+
+// Сервер принял вопрос и молчит — Ask возвращает ошибку к сроку, а не висит (тик cl на мёртвом aguard).
+func TestAskSilentServerDeadline(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "silent.sock")
+	ln, err := Listen(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if conn, err := ln.Accept(); err == nil {
+			accepted <- conn
+		}
+	}()
+	const timeout = 100 * time.Millisecond
+	start := time.Now()
+	var out struct{ N int }
+	if err := Ask(socket, timeout, 1, &out); err == nil || errors.Is(err, ErrNoServer) {
+		t.Fatalf("молчит: %v", err)
+	}
+	if d := time.Since(start); d > timeout+time.Second {
+		t.Errorf("ждал %v, срок %v", d, timeout)
+	}
+	if conn := <-accepted; conn != nil {
+		_ = conn.Close()
 	}
 }

@@ -38,9 +38,18 @@ func TestTrustWatch(t *testing.T) {
 			if _, err := w.Write(raw); err != nil { // окно ещё раз — второй раз не зовёт
 				t.Fatal(err)
 			}
+			// found зовётся своей горутиной: ждём нужные вызовы со сроком (под нагрузкой горутина опаздывает), лишний
+			// успел бы за 50 мс — его горутина запущена ещё внутри Write.
+			for i := range tc.want {
+				select {
+				case <-found:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("found %d раз, хотим %d", i, tc.want)
+				}
+			}
 			time.Sleep(50 * time.Millisecond)
-			if got := len(found); got != tc.want {
-				t.Errorf("found %d раз, хотим %d", got, tc.want)
+			if extra := len(found); extra != 0 {
+				t.Errorf("found %d раз, хотим %d", tc.want+extra, tc.want)
 			}
 		})
 	}

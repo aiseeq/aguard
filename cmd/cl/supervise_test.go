@@ -18,7 +18,11 @@ import (
 	"github.com/aiseeq/aguard/internal/restart"
 )
 
-// Перезапуск в режиме act целиком: первая проверка (через 10 с — меньше interval() не даёт) получает от aguard
+// testCheck — срок проверки в тестах act вместо 10 с конфига: запас на старт подменного systemd-run, иначе SIGTERM
+// придёт раньше записи его аргументов.
+const testCheck = time.Second
+
+// Перезапуск в режиме act целиком: первая проверка (через testCheck) получает от aguard
 // «перезапустить», cl шлёт SIGTERM и поднимает claude снова с флагами сессии (dafd514: --allowedTools тоже), именем
 // из ответа, повторяемыми аргументами пользователя, --resume и строкой роли перезапуска; код выхода второго запуска —
 // код cl. systemd-run подменён: первый запуск ждёт сигнала, второй записывает аргументы и выходит с кодом 3.
@@ -37,7 +41,7 @@ exec sleep 25`)
 	socket := fakeAguard(t, `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",`+
 		`"running":"2.1.309","installed":"2.1.310","crons":true}`) // таймеры есть — реплики всё равно нет: --resume их вернёт
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"), name: "x-master",
-		aguard: socket}
+		aguard: socket, check: testCheck}
 
 	code := l.supervise(append(sessionFlags(d), "-n", "x-master"), []string{"--model", "opus", "--effort=high"})
 	if code != 3 {
@@ -98,7 +102,7 @@ exec sleep 25`)
 	socket := fakeAguard(t, `{"v":1,"restart":false,"fresh":true,"key":"false,true","session_id":"s1","name":"x-master",`+
 		`"running":"2.1.310","installed":"2.1.310","compact":true,"compact_key":"true","tokens":150000}`)
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"),
-		aguard: socket, name: "x-master"}
+		aguard: socket, name: "x-master", check: testCheck}
 
 	if code := l.supervise(append(sessionFlags(d), "-n", "x-master"), []string{"--model", "opus"}); code != 3 {
 		t.Errorf("код выхода cl = %d, want 3 (код подъёма)", code)
@@ -151,7 +155,7 @@ exec sleep 25`)
 	symlink(t, "/opt/cl (deleted)", exe)
 	var execed, state string
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"),
-		aguard: socket, name: "x-master", selfExe: exe, exec: func(path string, _, env []string) error {
+		aguard: socket, name: "x-master", check: testCheck, selfExe: exe, exec: func(path string, _, env []string) error {
 			execed = path
 			for _, e := range env {
 				if s, ok := strings.CutPrefix(e, upgradeEnv+"="); ok {

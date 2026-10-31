@@ -93,6 +93,9 @@ func TestLoadConfig(t *testing.T) {
 	if err != nil || cfg.Restart.Mode != modeLog || cfg.Restart.interval() != time.Minute {
 		t.Errorf("без файла — журнал без действий: %+v %v", cfg.Restart, err)
 	}
+	if got := (restartConfig{CheckSeconds: 1}).interval(); got != 10*time.Second {
+		t.Errorf("check_seconds 1 — не чаще 10 с: %v", got)
+	}
 	if err := os.WriteFile(file, []byte(`{"restart":{"mode":"act","journal":"~/j.log"}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}

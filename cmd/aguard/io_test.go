@@ -267,9 +267,16 @@ func TestReportTextAndJSONFromFile(t *testing.T) {
 }
 
 // Старые снимки событий — через тот же Recorder в сводки; в файл службы — только при остановленной
-// службе (в тесте её нет), с -remove снимки удаляются, ручные остаются.
+// службе (в тесте её нет), с -remove снимки удаляются, ручные остаются. Не файл службы — службу не спрашивают:
+// systemctl в PATH подменён и оставляет метку.
 func TestImportEventSnapshotsToCases(t *testing.T) {
 	a, out := testIOApp(t)
+	bin := t.TempDir()
+	called := filepath.Join(bin, "called")
+	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte("#!/bin/sh\n: >'"+called+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
 	dir := filepath.Join(t.TempDir(), "events")
 	base := time.Now().Add(-time.Hour).Truncate(time.Second)
 	var buf bytes.Buffer
@@ -311,6 +318,9 @@ func TestImportEventSnapshotsToCases(t *testing.T) {
 	}
 	if _, err := os.Stat(manual); err != nil || !strings.Contains(out.String(), "снимков 1, случаев 1") {
 		t.Fatalf("ручной снимок: %v; вывод %q", err, out.String())
+	}
+	if _, err := os.Stat(called); err == nil {
+		t.Error("не файл службы, а systemctl вызван")
 	}
 }
 

@@ -41,6 +41,8 @@ type launcher struct {
 	exec     func(path string, argv, env []string) error
 	upgraded *upgrade
 	recreate *recreateState
+	// check — срок между проверками; 0 — restart.check_seconds из конфига (не меньше 10 с).
+	check time.Duration
 }
 
 type recreateState struct {
@@ -345,7 +347,11 @@ func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem str
 	if err != nil {
 		journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: %v — проверка с умолчаниями, режим log", l.name, pid, err))
 	}
-	ticker := time.NewTicker(cfg.Restart.interval())
+	every := cfg.Restart.interval()
+	if l.check > 0 {
+		every = l.check
+	}
+	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	var out outcome
 	stopping, upgradeTried := false, false

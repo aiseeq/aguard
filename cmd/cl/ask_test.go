@@ -10,7 +10,7 @@ import (
 	"github.com/aiseeq/aguard/internal/restart"
 )
 
-// fakeAguard — сокет, который на каждый вопрос отвечает строкой reply (пусто — молчит, пока клиент не уйдёт).
+// fakeAguard — сокет, который на каждый вопрос отвечает строкой reply. Молчащий сервер — linesock.TestAskSilentServerDeadline.
 func fakeAguard(t *testing.T, reply string) string {
 	t.Helper()
 	socket := filepath.Join(t.TempDir(), "aguard.sock")
@@ -25,11 +25,8 @@ func fakeAguard(t *testing.T, reply string) string {
 			if err != nil {
 				return
 			}
-			if _, err := bufio.NewReader(conn).ReadBytes('\n'); err == nil && reply != "" {
+			if _, err := bufio.NewReader(conn).ReadBytes('\n'); err == nil {
 				_, _ = conn.Write([]byte(reply + "\n"))
-			}
-			if reply == "" {
-				time.Sleep(3 * time.Second) // дольше срока клиента
 			}
 			_ = conn.Close()
 		}
@@ -53,7 +50,6 @@ func TestAskAguardNoAnswer(t *testing.T) {
 		"нет сокета":   filepath.Join(t.TempDir(), "нет.sock"),
 		"чужая версия": fakeAguard(t, `{"v":2,"restart":true}`),
 		"ошибка":       fakeAguard(t, `{"v":1,"error":"конфиг aguard: битый"}`),
-		"молчит":       fakeAguard(t, ""),
 	} {
 		start := time.Now()
 		if a, err := askAguard(socket, restart.NewRequest(7, "", "")); err == nil || a.Restart {
