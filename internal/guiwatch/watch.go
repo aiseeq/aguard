@@ -204,6 +204,7 @@ type Watcher struct {
 	baseSuppressed      int
 	OnTargets           func(string, []string)
 	targetSummary       string
+	targetIdentity      string
 	ReloadConfig        func() (Config, error)
 	lastConfigCheck     time.Time
 	journalMu           sync.Mutex
@@ -437,13 +438,13 @@ func (w *Watcher) reportTargets() {
 	if w.OnTargets == nil {
 		return
 	}
-	main := map[string]int{}
+	main := map[string][]Target{}
 	renderers := 0
 	for _, s := range w.states {
 		if s.Name == "chrome-renderer" {
 			renderers++
 		} else if s.Main {
-			main[s.Name] = s.PID
+			main[s.Name] = append(main[s.Name], s.Target)
 		}
 	}
 	parts := []string{}
@@ -465,8 +466,12 @@ func (w *Watcher) reportTargets() {
 		return
 	}
 	for _, name := range []string{"kwin", "plasmashell", "chrome", "chrome-gpu"} {
-		if pid := main[name]; pid != 0 {
-			parts = append(parts, fmt.Sprintf("%s pid %d", name, pid))
+		targets := main[name]
+		sort.Slice(targets, func(i, j int) bool { return targets[i].PID < targets[j].PID })
+		if len(targets) > 0 {
+			for _, target := range targets {
+				parts = append(parts, fmt.Sprintf("%s pid %d", name, target.PID))
+			}
 		} else {
 			parts = append(parts, fmt.Sprintf("%s отсутствует", name))
 			missing = append(missing, name)
@@ -478,10 +483,39 @@ func (w *Watcher) reportTargets() {
 
 // announceTargets — строка целей наружу, только когда набор сменился.
 func (w *Watcher) announceTargets(summary string, missing []string) {
-	if summary != w.targetSummary {
+	identity := targetSetIdentity(w.states, missing)
+	if identity != w.targetIdentity {
+		w.targetIdentity = identity
 		w.targetSummary = summary
 		w.OnTargets(summary, missing)
+	} else {
+		w.targetSummary = summary
 	}
+}
+
+func targetSetIdentity(states map[int]*targetState, missing []string) string {
+	targets := make([]Target, 0, len(states))
+	for _, state := range states {
+		if state.Main && state.Name != "chrome-renderer" {
+			targets = append(targets, state.Target)
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].PID == targets[j].PID {
+			return targets[i].Start < targets[j].Start
+		}
+		return targets[i].PID < targets[j].PID
+	})
+	var b strings.Builder
+	for _, target := range targets {
+		fmt.Fprintf(&b, "%d:%d;", target.PID, target.Start)
+	}
+	b.WriteByte('|')
+	for _, name := range missing {
+		b.WriteString(name)
+		b.WriteByte(';')
+	}
+	return b.String()
 }
 
 func (w *Watcher) findTargets() (map[int]Target, error) {
@@ -540,6 +574,10 @@ func (w *Watcher) targetFromStat(pid int, dir string, stat []byte) (Target, erro
 	if commName != "kwin_wayland" && commName != "plasmashell" && commName != "chrome" {
 		return Target{}, nil
 	}
+	parsed, err := proc.ParseStat(string(stat))
+	if err != nil {
+		return Target{}, fmt.Errorf("разобрать starttime pid=%d: %w", pid, err)
+	}
 	name, main := "", true
 	if commName == "kwin_wayland" {
 		name = "kwin"
@@ -553,7 +591,7 @@ func (w *Watcher) targetFromStat(pid int, dir string, stat []byte) (Target, erro
 			}
 			return Target{}, fmt.Errorf("прочитать cmdline pid=%d: %w", pid, err)
 		}
-		cmd := string(bytes.TrimRight(data, "\x00"))
+		cmd := cmdlineText(data)
 		fields := strings.Fields(cmd)
 		if len(fields) == 0 {
 			return Target{}, nil
@@ -562,10 +600,15 @@ func (w *Watcher) targetFromStat(pid int, dir string, stat []byte) (Target, erro
 		if name == "" {
 			return Target{}, nil
 		}
-	}
-	parsed, err := proc.ParseStat(string(stat))
-	if err != nil {
-		return Target{}, fmt.Errorf("разобрать starttime pid=%d: %w", pid, err)
+		if name == "chrome-gpu" || name == "chrome-renderer" {
+			ok, err := w.hasBrowserAncestor(parsed.Ppid)
+			if err != nil {
+				return Target{}, err
+			}
+			if !ok {
+				return Target{}, nil
+			}
+		}
 	}
 	start, err := strconv.ParseUint(parsed.Start, 10, 64)
 	if err != nil {
@@ -592,7 +635,7 @@ func targetName(comm, cmd string) (string, bool) {
 		return "kwin", true
 	case comm == "plasmashell":
 		return "plasmashell", true
-	case strings.Contains(cmd, "/opt/google/chrome/chrome") && !strings.Contains(cmd, "--type="):
+	case isChromeExecutable(cmd) && !strings.Contains(cmd, "--type=") && !hasHeadlessFlag(cmd):
 		return "chrome", true
 	case strings.Contains(cmd, "--type=gpu-process"):
 		return "chrome-gpu", true
@@ -601,6 +644,70 @@ func targetName(comm, cmd string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// cmdlineText — /proc/<pid>/cmdline одной строкой через пробел: аргументы разделены NUL,
+// а Chrome, переписавший заголовок процесса, кладёт всё в один аргумент через пробелы.
+func cmdlineText(b []byte) string {
+	return strings.ReplaceAll(string(bytes.TrimRight(b, "\x00")), "\x00", " ")
+}
+
+func isChromeExecutable(cmd string) bool {
+	fields := strings.Fields(cmd)
+	return len(fields) > 0 && fields[0] == "/opt/google/chrome/chrome"
+}
+
+func hasHeadlessFlag(cmd string) bool {
+	for arg := range strings.FieldsSeq(cmd) {
+		if strings.HasPrefix(arg, "--headless") {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *Watcher) hasBrowserAncestor(pid int) (bool, error) {
+	for depth := 0; pid > 0 && depth < 4; depth++ {
+		stat, err := os.ReadFile(w.procPath(pid, "stat"))
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("прочитать stat предка pid=%d: %w", pid, err)
+		}
+		parsed, err := proc.ParseStat(string(stat))
+		if err != nil {
+			return false, fmt.Errorf("разобрать stat предка pid=%d: %w", pid, err)
+		}
+		if parsed.Comm == "chrome" {
+			browser, err := w.isBrowserProcess(pid)
+			if err != nil {
+				return false, err
+			}
+			if browser {
+				return true, nil
+			}
+		}
+		pid = parsed.Ppid
+	}
+	return false, nil
+}
+
+func (w *Watcher) isBrowserProcess(pid int) (bool, error) {
+	cmdline, err := os.ReadFile(w.procPath(pid, "cmdline"))
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("прочитать cmdline предка pid=%d: %w", pid, err)
+	}
+	cmd := cmdlineText(cmdline)
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return false, nil
+	}
+	name, _ := targetName(filepath.Base(fields[0]), cmd)
+	return name == "chrome", nil
 }
 func (w *Watcher) procPath(pid int, leaf string) string {
 	return filepath.Join(w.ProcRoot, strconv.Itoa(pid), leaf)

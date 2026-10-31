@@ -751,6 +751,86 @@ func TestTopScanAlsoDiscoversTargets(t *testing.T) {
 	}
 }
 
+func procFixtureStat(pid, ppid, start int, comm string) []byte {
+	fields := make([]string, 20)
+	fields[0], fields[1], fields[19] = "S", fmt.Sprint(ppid), fmt.Sprint(start)
+	for i := range fields {
+		if fields[i] == "" {
+			fields[i] = "0"
+		}
+	}
+	return fmt.Appendf(nil, "%d (%s) %s\n", pid, comm, strings.Join(fields, " "))
+}
+
+func addChromeFixture(t *testing.T, root string, pid, ppid, start int, args ...string) {
+	t.Helper()
+	base := filepath.Join(root, fmt.Sprint(pid))
+	write(t, filepath.Join(base, "stat"), string(procFixtureStat(pid, ppid, start, "chrome")))
+	write(t, filepath.Join(base, "cmdline"), strings.Join(append([]string{"/opt/google/chrome/chrome"}, args...), "\x00")+"\x00")
+	task := filepath.Join(base, "task", fmt.Sprint(pid))
+	write(t, filepath.Join(task, "stat"), string(procFixtureStat(pid, ppid, start, "chrome")))
+	write(t, filepath.Join(task, "schedstat"), "0 0 0\n")
+	write(t, filepath.Join(task, "wchan"), "0\n")
+}
+
+func TestChromeTargetsExcludeHeadlessAndRequireBrowserAncestor(t *testing.T) {
+	root, dir, _, _ := fixture(t)
+	addChromeFixture(t, root, 100, 1, 10, "--profile-directory=Default") // аргументы через NUL, как у не переписавшего cmdline
+	addChromeFixture(t, root, 101, 100, 11, "--type=zygote")
+	addChromeFixture(t, root, 102, 101, 12, "--type=gpu-process")
+	addChromeFixture(t, root, 103, 101, 13, "--type=renderer")
+	addChromeFixture(t, root, 200, 1, 20, "--headless")
+	addChromeFixture(t, root, 201, 200, 21, "--type=zygote", "--headless")
+	addChromeFixture(t, root, 202, 201, 22, "--type=gpu-process", "--headless")
+	addChromeFixture(t, root, 203, 201, 23, "--type=renderer")
+	addChromeFixture(t, root, 300, 999, 30, "--type=renderer")
+	w := New(root, dir, Default(), nil)
+	defer w.closeAll()
+	wanted, err := w.findTargets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range []int{100, 102, 103} {
+		if _, ok := wanted[pid]; !ok {
+			t.Errorf("user Chrome process %d missing from targets", pid)
+		}
+	}
+	for _, pid := range []int{101, 200, 201, 202, 203, 300} {
+		if _, ok := wanted[pid]; ok {
+			t.Errorf("non-user Chrome process %d unexpectedly targeted", pid)
+		}
+	}
+}
+
+func TestChromeTargetSummaryStableAndRendererCountDoesNotAnnounce(t *testing.T) {
+	w := New("", "", Default(), nil)
+	var calls int
+	var last string
+	w.OnTargets = func(summary string, _ []string) { calls++; last = summary }
+	w.states = map[int]*targetState{
+		20: {Target: Target{Name: "chrome", PID: 20, Start: 2, Main: true}},
+		10: {Target: Target{Name: "chrome", PID: 10, Start: 1, Main: true}},
+		30: {Target: Target{Name: "chrome-gpu", PID: 30, Start: 3, Main: true}},
+		40: {Target: Target{Name: "chrome-renderer", PID: 40}},
+	}
+	for range 100 {
+		w.reportTargets()
+	}
+	if calls != 1 || !strings.Contains(last, "chrome pid 10, chrome pid 20") {
+		t.Fatalf("unstable target summary: calls=%d summary=%q", calls, last)
+	}
+	w.states[41] = &targetState{Target: Target{Name: "chrome-renderer", PID: 41}}
+	w.reportTargets()
+	if calls != 1 || !strings.Contains(w.targetSummary, "рендереров 2") {
+		t.Fatalf("renderer count change announced or omitted: calls=%d summary=%q", calls, w.targetSummary)
+	}
+	w.states[10] = &targetState{Target: Target{Name: "chrome", PID: 11, Start: 1, Main: true}}
+	w.reportTargets()
+	if calls != 2 {
+		t.Fatalf("main target change did not announce: calls=%d", calls)
+	}
+}
+
 func TestThreadReadErrorsAreKeptForSlice(t *testing.T) {
 	root, _, pid, at := fixture(t)
 	w, s := setupState(t, root, filepath.Join(root, "out"), pid)
