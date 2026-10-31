@@ -44,6 +44,19 @@ func TestDecideRestartsIdleSession(t *testing.T) {
 	}
 }
 
+// После /clear без хода Stop не было, и записи chooks нет (мастер рабочего проекта 30.10 16:28–31.10 11:07, 2.1.314→2.1.316).
+func TestDecideClearedWithoutTurn(t *testing.T) {
+	f := idleFacts()
+	f.HookState = ""
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart {
+		t.Errorf("беседа без запросов, записи chooks нет — перезапускать: %+v", v)
+	}
+	f.Transcript.Context.Request = time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC)
+	if v := decide(f, allowance{idle: 10 * time.Minute}); v.Restart || !slices.Contains(codes(v), "hook") {
+		t.Errorf("запрос был, а записи chooks нет — сомнение: %+v", v)
+	}
+}
+
 func TestDecideFreshVersion(t *testing.T) {
 	f := idleFacts()
 	f.Running = "2.1.310"

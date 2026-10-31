@@ -238,10 +238,15 @@ func workChecks(f facts, a action, against againstFunc) {
 // как working и error. paused — Stop при фоновых задачах или таймерах: годится, только если задач в .tasks нет
 // (монитор артефакта не в счёт — см. HookTasks), а пауза объяснена таймерами (по транскрипту или по .tasks) или
 // монитором артефакта; живые фоновые команды, мониторы и суб-агенты перезапуск cl (сжатие и сброс без pty — тоже
-// перезапуск) убил бы. Набор под pty (a) их не трогает, кроме суб-агентов у /clear.
+// перезапуск) убил бы. Набор под pty (a) их не трогает, кроме суб-агентов у /clear. Записи нет, а запросов в беседе
+// не было (после /clear хода не было — и Stop тоже): ждать нечего, простой видно по статусу реестра.
 func hookChecks(f facts, a action, against againstFunc) {
 	switch f.HookState {
 	case "done", "idle":
+	case "":
+		if !f.Transcript.Context.Request.IsZero() {
+			against("hook", "chooks: нет записи")
+		}
 	case "paused":
 		switch {
 		case f.HookTasks && a == restart:
