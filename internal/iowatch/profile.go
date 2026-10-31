@@ -125,12 +125,7 @@ func perSecond(b int64, interval time.Duration) int64 {
 
 // Open — пути cgroup, которые копятся: их конец проверяет служба (папки нет в /sys/fs/cgroup).
 func (p *Profiles) Open() []string {
-	out := make([]string, 0, len(p.open))
-	for path := range p.open {
-		out = append(out, path)
-	}
-	slices.Sort(out)
-	return out
+	return slices.Sorted(maps.Keys(p.open))
 }
 
 // End закрывает кончившиеся cgroup (путь → вид) и отдаёт профили, которые стоит хранить: от
