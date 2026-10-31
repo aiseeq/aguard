@@ -333,3 +333,37 @@ func anyClock(args []string) []string {
 	}
 	return args
 }
+
+// Набор таймеров не удался — повтор не ждёт recreateRetry, следующий вопрос набирает снова; удался — в журнале
+// строка набора таймеров, не обычного набора (dce2d00).
+func TestTypeOutcomeRecreate(t *testing.T) {
+	cfg := defaultConfig(t.TempDir())
+	cfg.Restart.Mode = modeAct
+	c := &console{}
+	l := launcher{name: "x-master", console: c}
+	a := restart.Answer{Verdict: restart.Verdict{Against: []restart.Reason{{Code: "crons"}}, Recreate: "cl: поставь таймеры"},
+		Key: "false,crons", SessionID: "s1", Name: "x-master"}
+	now := time.Now()
+	out, _ := l.next(cfg, now, 7, a, nil, journalKeys{})
+	if !out.recreate {
+		t.Fatalf("набор таймеров: %+v", out)
+	}
+	l.typeOutcome(cfg, now, 7, out) // pty claude нет — набор не удался
+	if out, _ = l.next(cfg, now.Add(time.Minute), 7, a, nil, journalKeys{}); out.typed != a.Recreate {
+		t.Fatalf("набор не удался — следующий вопрос набирает снова: %+v", out)
+	}
+	pty := filepath.Join(t.TempDir(), "pty")
+	master, err := os.Create(pty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = master.Close() })
+	c.master = master
+	l.typeOutcome(cfg, now.Add(time.Minute), 7, out)
+	if data, err := os.ReadFile(pty); err != nil || string(data) != a.Recreate+"\r" {
+		t.Errorf("в pty: %q %v", data, err)
+	}
+	if journal := strings.Join(readLines(t, cfg.Restart.Journal), "\n"); !strings.Contains(journal, "набрал заново таймеры перед перезапуском ради версии") {
+		t.Errorf("журнал: %s", journal)
+	}
+}

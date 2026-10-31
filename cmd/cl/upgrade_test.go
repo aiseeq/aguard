@@ -143,7 +143,8 @@ func TestLiveUpgrade(t *testing.T) {
 	if !l.liveUpgrade(cfg, now, cmd.Process.Pid, 3, []string{"--resume", "s1"}) || execs != 1 {
 		t.Fatalf("exec: %d", execs)
 	}
-	if got.Pid != cmd.Process.Pid || got.Master == 0 || got.N != 3 || got.Typed != c.typed.Load() || got.Name != "x-master" {
+	// Clean: claude поднят под этой консолью, человек ничего не набирал — новый cl знает, что поле чисто (c794bfa).
+	if got.Pid != cmd.Process.Pid || got.Master == 0 || got.N != 3 || got.Typed != c.typed.Load() || got.Name != "x-master" || !got.Clean {
 		t.Errorf("состояние: %+v", got)
 	}
 	if fdFlags(t, c.master)&unix.FD_CLOEXEC == 0 {
@@ -184,13 +185,16 @@ func TestAdopt(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := launcher{console: openConsole(tty, tty, nil)}
+	if l.console.clean() {
+		t.Error("консоль без claude ничего не знает о поле — может быть текст")
+	}
 	typed := time.Now().Add(-time.Hour).UnixNano()
-	proc, finish, err := l.adopt(upgrade{Pid: cmd.Process.Pid, Master: fd, Typed: typed})
+	proc, finish, err := l.adopt(upgrade{Pid: cmd.Process.Pid, Master: fd, Typed: typed, Clean: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.console.typed.Load() != typed {
-		t.Error("тишина человека — от прежнего cl")
+	if l.console.typed.Load() != typed || !l.console.clean() {
+		t.Error("тишина человека и чистое поле — от прежнего cl")
 	}
 	if _, err := human.WriteString("hello\r"); err != nil {
 		t.Fatal(err)

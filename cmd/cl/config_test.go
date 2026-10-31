@@ -128,6 +128,9 @@ func TestRepoConfig(t *testing.T) {
 	if line := cfg.roleLine("demu-master", "сброс", "/r/demu-master.md", eventReset); !strings.Contains(line, "продолжай по своей роли") {
 		t.Errorf("мастер: %q", line)
 	}
+	if !matchAny(cfg.Restart.LiveUpgradeNames, "demu-master") { // всем с 30.10 (1dae51b)
+		t.Errorf("живое обновление cl: %q", cfg.Restart.LiveUpgradeNames)
+	}
 	for _, name := range []string{"lead", "work-admin", "git-admin", "demu-master"} {
 		if p := cfg.systemPrompt(name); !strings.Contains(p, "/home/u/.claude/restart/<") || !strings.Contains(p, "/"+name+".md") {
 			t.Errorf("промпт %s без пути возобновления: %q", name, p)

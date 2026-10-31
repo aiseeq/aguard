@@ -74,6 +74,16 @@ type Judge struct {
 	Home   string
 	mu     sync.Mutex
 	caches map[int]*cached
+	// paths — пути вместо живой машины (подменённая сессия в тесте); nil — pathsFor.
+	paths *paths
+}
+
+// pathsOf — где смотреть сессию: живая машина или подмена теста.
+func (j *Judge) pathsOf(cfg *Config) paths {
+	if j.paths != nil {
+		return *j.paths
+	}
+	return pathsFor(j.Home, cfg)
 }
 
 type cached struct {
@@ -113,7 +123,7 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	}
 	c := j.cache(req.Pid, now)
 	c.mu.Lock()
-	f := probe(pathsFor(j.Home, cfg), &c.scan, req.Pid, now)
+	f := probe(j.pathsOf(cfg), &c.scan, req.Pid, now)
 	c.mu.Unlock()
 	f.cleanField(req.Clean)
 	name := firstNonEmpty(f.Name, req.Name)

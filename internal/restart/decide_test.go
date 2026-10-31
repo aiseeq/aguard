@@ -128,6 +128,7 @@ func TestDecideRestartInheritedCrons(t *testing.T) {
 	twin := f.Transcript.Crons[0]
 	twin.ID = "j2"
 	f.Transcript.Crons[0].Own = false
+	f.Transcript.Crons[0].Prompt = "Сон\n(скилл  dream)" // набор ставит prompt одной строкой (recreateCrons)
 	f.Transcript.Crons = append(f.Transcript.Crons, twin)
 	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); !v.Restart || v.Recreate != "" {
 		t.Errorf("унаследованный с поставленным заново двойником — не потеря, набор не повторять: %+v", v)

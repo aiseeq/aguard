@@ -183,7 +183,7 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, req Request, now time.Tim
 	ch := j.cache(pid, now)
 	ch.mu.Lock()
 	var f facts
-	p := pathsFor(j.Home, cfg)
+	p := j.pathsOf(cfg)
 	s, err := readSession(p.sessions, pid)
 	if err != nil {
 		f.Errors = append(f.Errors, err.Error())

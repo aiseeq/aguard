@@ -8,10 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/linesock"
+	"github.com/aiseeq/aguard/internal/screen"
 )
 
 func ask(t *testing.T, socket, line string) Answer {
@@ -74,5 +77,42 @@ func TestAnswerCompactOff(t *testing.T) {
 	a := NewJudge(t.TempDir()).Answer(&cfg, &cc, Request{V: Version, Pid: 1 << 22}, time.Now())
 	if a.Compact || len(a.CompactAgainst) == 0 || a.CompactAgainst[0].Code != "off" {
 		t.Errorf("сжатие выключено: %+v", a)
+	}
+}
+
+// Judge целиком на подменённой сессии: что cl сказал в вопросе, доходит до решений — typed даёт команду набора
+// унаследованных таймеров (dce2d00), clean снимает «набранный текст» с подсказки и для перезапуска, и для сжатия, а
+// пустое по экрану поле — в ответе field_empty (c794bfa).
+func TestAnswerUsesRequest(t *testing.T) {
+	now := time.Now()
+	carry := `{"type":"attachment","timestamp":"` + now.Add(-30*time.Minute).UTC().Format(time.RFC3339Nano) +
+		`","attachment":{"type":"session_cron_carry","otherArmed":[{"id":"B","cron":"11 6 * * *","prompt":"Дайджест","recurring":true}]}}`
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 20 * time.Minute, ttyAgo: 30 * time.Minute}, carry)
+	w.link(t, 4242)
+	cfg, cc := Default(t.TempDir(), t.TempDir()), DefaultCompact()
+	j := NewJudge(t.TempDir())
+	j.paths = &w.p
+	answer := func(r Request) Answer {
+		r.V, r.Pid = Version, 4242
+		return j.Answer(&cfg, &cc, r, now)
+	}
+	held := func(rs []Reason, code string) bool {
+		return slices.ContainsFunc(rs, func(r Reason) bool { return r.Code == code })
+	}
+
+	if a := answer(Request{}); a.Recreate != "" || !held(a.Against, "crons") || !a.FieldEmpty {
+		t.Errorf("без pty: таймер держит, набирать некому, поле пусто: %+v", a)
+	}
+	if a := answer(Request{Typed: true}); !strings.Contains(a.Recreate, `cron "11 6 * * *"`) {
+		t.Errorf("под pty — команда набора таймера: %+v", a.Verdict)
+	}
+
+	w.p.prompt = func(int) (screen.Prompt, error) { return screen.Draft, nil }
+	if a := answer(Request{}); !held(a.Against, "screen") || !held(a.CompactAgainst, "screen") || a.FieldEmpty {
+		t.Errorf("текст в поле, cl о нём не знает — держит перезапуск и сжатие: %+v", a)
+	}
+	if a := answer(Request{Clean: true}); held(a.Against, "screen") || held(a.CompactAgainst, "screen") {
+		t.Errorf("cl: человек не набирал — текст в поле подсказка, не держит ни перезапуск, ни сжатие: against %+v, compact %+v",
+			a.Against, a.CompactAgainst)
 	}
 }

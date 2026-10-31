@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -27,6 +29,7 @@ func TestDraftAfter(t *testing.T) {
 		{"стрелка влево", false, "\x1b[D", false},
 		{"вставка с переводом строки", false, "\x1b[200~a\rb\x1b[201~", true},
 		{"вставка без конца", false, "\x1b[200~abc", true},
+		{"вставка кончается переводом строки", false, "\x1b[200~ab\r\x1b[201~", true},
 		{"\\ перед Enter — перевод строки", false, "a\\\r", true},
 		{"Esc перед Enter — перевод строки", false, "\x1b\r", true},
 		{"одинокий Esc", false, "\x1b", false},
@@ -56,5 +59,22 @@ func TestEmptySeen(t *testing.T) {
 	c.emptySeen(asked)
 	if c.clean() {
 		t.Error("ввод после вопроса — экран мог его не застать")
+	}
+}
+
+// Набор cl кончается Enter — поле снова чисто (c794bfa).
+func TestTypeLineCleans(t *testing.T) {
+	master, err := os.Create(filepath.Join(t.TempDir(), "pty"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = master.Close() })
+	c := &console{master: master}
+	c.drafted.Store(true)
+	if err := c.typeLine("/compact"); err != nil {
+		t.Fatal(err)
+	}
+	if !c.clean() {
+		t.Error("cl отправил набранное — поле чисто")
 	}
 }

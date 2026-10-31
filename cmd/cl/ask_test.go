@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"net"
 	"path/filepath"
 	"testing"
@@ -58,5 +59,50 @@ func TestAskAguardNoAnswer(t *testing.T) {
 		if d := time.Since(start); d > aguardTimeout+time.Second {
 			t.Errorf("%s: ждал %v, срок %v", name, d, aguardTimeout)
 		}
+	}
+}
+
+// cl говорит aguard, чисто ли поле (Request.Clean), а «поле пусто» в ответе чистит его, если человек с вопроса ничего
+// не вводил (c794bfa).
+func TestAskClean(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "aguard.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	reqs := make(chan restart.Request, 4)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			var req restart.Request
+			if b, err := bufio.NewReader(conn).ReadBytes('\n'); err == nil && json.Unmarshal(b, &req) == nil {
+				reqs <- req
+				_, _ = conn.Write([]byte(`{"v":1,"field_empty":true}` + "\n"))
+			}
+			_ = conn.Close()
+		}
+	}()
+	c := &console{}
+	l := launcher{aguard: socket, name: "x-master", console: c}
+	if _, err := l.ask(7, "", true); err != nil {
+		t.Fatal(err)
+	}
+	if req := <-reqs; !req.Clean || !req.Typed {
+		t.Errorf("поле чисто — clean в вопросе: %+v", req)
+	}
+	c.drafted.Store(true)
+	c.typed.Store(time.Now().Add(-time.Minute).UnixNano())
+	if _, err := l.ask(7, "", true); err != nil {
+		t.Fatal(err)
+	}
+	if req := <-reqs; req.Clean {
+		t.Errorf("в поле мог быть текст — clean нет: %+v", req)
+	}
+	if !c.clean() {
+		t.Error("aguard видел поле пустым, человек с вопроса не вводил — чисто")
 	}
 }

@@ -282,6 +282,7 @@ func TestProbeSuggestion(t *testing.T) {
 		"ввод после реплики":            {human("typed", "human"), 12 * time.Minute, false},
 		"реплика набрана во время хода": {human("queued", "human"), 20 * time.Minute, false},
 		"реплика от сессии":             {human("system", "peer"), 20 * time.Minute, false},
+		"реплика от сессии, typed":      {human("typed", "peer"), 20 * time.Minute, false},
 	} {
 		w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: c.ttyAgo}, c.rec)
 		w.p.prompt = func(int) (screen.Prompt, error) { return screen.Draft, nil }
