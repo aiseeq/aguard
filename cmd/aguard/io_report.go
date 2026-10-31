@@ -40,26 +40,22 @@ func ioCaseAttribution(c *iowatch.Case) string {
 	}
 	k := c.Culprits
 	main := iowatch.CgroupName(k.Main)
-	if k.MainValue > 0 {
-		if k.KernelWrite > k.MainValue && k.KernelWrite >= k.Foreign.Value {
-			percent := int64(0)
-			if k.DeviceWrite > 0 {
-				percent = (100*k.KernelWrite + k.DeviceWrite/2) / k.DeviceWrite
-			}
-			return fmt.Sprintf("фон ядра (writeback, коммит btrfs): %.0f МБ, %d%% записи устройства; главная cgroup %s",
-				megabytes(k.KernelWrite), percent, main)
+	// Foreign задан, только когда его I/O больше меры главной (ForeignOver), — так и в случаях до MainValue (31.10):
+	// у них граница для ядра — сам Foreign.
+	kernelOver := k.MainValue > 0 && k.KernelWrite > k.MainValue || k.Foreign.Value > 0 && k.KernelWrite > k.Foreign.Value
+	switch {
+	case kernelOver && k.KernelWrite >= k.Foreign.Value:
+		percent := int64(0)
+		if k.DeviceWrite > 0 {
+			percent = (100*k.KernelWrite + k.DeviceWrite/2) / k.DeviceWrite
 		}
-		if k.Foreign.Value > k.MainValue {
-			return fmt.Sprintf("чужая cgroup %s (чужой uid): %.0f МБ; главная cgroup %s",
-				k.Foreign.Name, megabytes(k.Foreign.Value), main)
-		}
+		return fmt.Sprintf("фон ядра (writeback, коммит btrfs): %.0f МБ, %d%% записи устройства; главная cgroup %s",
+			megabytes(k.KernelWrite), percent, main)
+	case k.Foreign.Value > 0:
+		return fmt.Sprintf("чужая cgroup %s (чужой uid, I/O по io.stat): %.0f МБ; главная cgroup %s",
+			k.Foreign.Name, megabytes(k.Foreign.Value), main)
 	}
-	line := "главная cgroup " + main
-	if f := k.Foreign; f.Value > 0 {
-		line += fmt.Sprintf(" (неточно: у %s чужого uid по io.stat %.0f МБ записи, чтения и свопа — больше, а своя её запись не видна; "+
-			"бывает и коммит btrfs по её fsync)", f.Name, megabytes(f.Value))
-	}
-	return line
+	return "главная cgroup " + main
 }
 
 // writeIOCase — машина за случай и до names виновников на меру.

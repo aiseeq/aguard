@@ -448,8 +448,8 @@ func TestIOCaseFsyncAndKernel(t *testing.T) {
 	if b.String() != "запись cgroup (io.stat): sess8 100 МБ\n" {
 		t.Errorf("своих 0: %q", b.String())
 	}
-	if line := ioCaseLine(&c); !strings.Contains(line, "главная cgroup sess7 (неточно: у docker.service чужого uid по io.stat 900 МБ записи, чтения и свопа") {
-		t.Errorf("заголовок без пометки неточной главной: %s", line)
+	if line := ioCaseLine(&c); !strings.Contains(line, "чужая cgroup docker.service (чужой uid, I/O по io.stat): 900 МБ; главная cgroup sess7") {
+		t.Errorf("шапка не называет чужую cgroup первой: %s", line)
 	}
 }
 
@@ -464,33 +464,36 @@ func TestIOCaseAttribution(t *testing.T) {
 			t.Fatalf("шапка не называет фон ядра первым: %s", line)
 		}
 	})
-	t.Run("foreign больше главной", func(t *testing.T) {
-		c := alertCase(base, 7400)
-		c.Culprits.MainValue = 560 << 20
-		c.Culprits.Foreign = iowatch.Ranked{Name: "snapperd", Value: 870 << 20}
-		line := ioCaseLine(&c)
-		if !strings.Contains(line, "чужая cgroup snapperd (чужой uid): 870 МБ; главная cgroup sess7") {
-			t.Fatalf("шапка не называет foreign первым: %s", line)
-		}
-	})
-	t.Run("главная больше обоих", func(t *testing.T) {
-		c := alertCase(base, 7400)
-		c.Culprits.MainValue = 900 << 20
-		c.Culprits.DeviceWrite, c.Culprits.KernelWrite = 847<<20, 383<<20
-		c.Culprits.Foreign = iowatch.Ranked{Name: "snapperd", Value: 870 << 20}
-		got := ioCaseLine(&c)
-		want := "30.10 12:15:12, 7,4 с (простой 5,5 с, io; пик шага 99 мс), главная cgroup sess7 (неточно: у snapperd чужого uid по io.stat 870 МБ записи, чтения и свопа — больше, а своя её запись не видна; бывает и коммит btrfs по её fsync)"
-		if got != want {
-			t.Fatalf("строка изменилась:\nполучено: %s\nожидалось: %s", got, want)
-		}
-	})
-	t.Run("старый случай без меры", func(t *testing.T) {
-		c := alertCase(base, 7400)
-		c.Culprits.Foreign = iowatch.Ranked{Name: "snapperd", Value: 870 << 20}
-		got := ioCaseLine(&c)
-		want := "30.10 12:15:12, 7,4 с (простой 5,5 с, io; пик шага 99 мс), главная cgroup sess7 (неточно: у snapperd чужого uid по io.stat 870 МБ записи, чтения и свопа — больше, а своя её запись не видна; бывает и коммит btrfs по её fsync)"
-		if got != want {
-			t.Fatalf("строка старого случая изменилась:\nполучено: %s\nожидалось: %s", got, want)
-		}
-	})
+	const head = "30.10 12:15:12, 7,4 с (простой 5,5 с, io; пик шага 99 мс), "
+	kernel := head + "фон ядра (writeback, коммит btrfs): 383 МБ, 45% записи устройства; главная cgroup sess7"
+	foreign := head + "чужая cgroup snapperd (чужой uid, I/O по io.stat): 870 МБ; главная cgroup sess7"
+	mainOnly := head + "главная cgroup sess7"
+	// Foreign в случае — только больше меры главной (ForeignOver); MainValue 0 — случай до 31.10 без меры главной.
+	for _, tc := range []struct {
+		name                 string
+		mainMB, kernelMB, fr int64
+		want                 string
+	}{
+		{"ядро больше главной", 100, 383, 0, kernel},
+		{"ядро равно главной", 383, 383, 0, mainOnly},
+		{"главная больше ядра", 900, 383, 0, mainOnly},
+		{"чужая больше главной", 560, 0, 870, foreign},
+		{"ядро больше главной, чужая больше ядра", 100, 383, 870, foreign},
+		{"ядро больше главной и чужой", 100, 383, 300, kernel},
+		{"старый случай: ядро больше чужой", 0, 383, 300, kernel},
+		{"старый случай: чужая больше ядра", 0, 383, 870, foreign},
+		{"старый случай без чужой", 0, 383, 0, mainOnly},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := alertCase(base, 7400)
+			c.Culprits.MainValue = tc.mainMB << 20
+			c.Culprits.DeviceWrite, c.Culprits.KernelWrite = 847<<20, tc.kernelMB<<20
+			if tc.fr > 0 {
+				c.Culprits.Foreign = iowatch.Ranked{Name: "snapperd", Value: tc.fr << 20}
+			}
+			if got := ioCaseLine(&c); got != tc.want {
+				t.Fatalf("шапка:\nполучено: %s\nожидалось: %s", got, tc.want)
+			}
+		})
+	}
 }

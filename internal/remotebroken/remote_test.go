@@ -116,7 +116,7 @@ func TestRepeatWindowAndSummary(t *testing.T) {
 	}
 	e.At = e.At.Add(time.Minute)
 	got := s.Apply([]Event{e}, []string{"master-a"}, "lead", now.Add(time.Hour), time.Hour)
-	if len(got) != 2 || !strings.Contains(got[0].Message, "До этого ещё 1 раз") || got[1].To != "lead" {
+	if len(got) != 1 || !strings.Contains(got[0].Message, "До этого ещё 1 раз") { // поломка та же — лиду не повторяется
 		t.Fatalf("счётчик повторов: %+v", got)
 	}
 
@@ -187,21 +187,35 @@ func TestFirstEventToLeadAndSummary(t *testing.T) {
 	}
 }
 
-func TestFirstLeadNoticeRepeatsAfterWindow(t *testing.T) {
+// Лиду — только переход в «сломана»: события подряд (чаще repeat) три часа — одно письмо first, хотя окна сводки
+// сменились; после тишины не короче repeat — новая поломка, снова письмо.
+func TestFirstLeadNoticeOncePerIncident(t *testing.T) {
 	e, _ := Parse([]byte(sample))
-	now := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	start := e.At
 	s := State{}
-	s.Apply([]Event{e}, []string{"master-a"}, "lead", now, time.Hour)
-	e.At = e.At.Add(time.Hour)
-	got := s.Apply([]Event{e}, []string{"master-a"}, "lead", now.Add(time.Hour), time.Hour)
-	count := 0
-	for _, n := range got {
-		if n.To == "lead" && n.Key == "first:pc" {
-			count++
+	firsts := func(d time.Duration) int {
+		x := e
+		x.At = start.Add(d)
+		count := 0
+		for _, n := range s.Apply([]Event{x}, []string{"master-a"}, "lead", x.At, time.Hour) {
+			if n.To == "lead" && n.Key == "first:pc" {
+				count++
+			}
 		}
+		return count
 	}
-	if count != 1 {
-		t.Fatalf("первое письмо лиду не повторено после окна: %+v", got)
+	total := 0
+	for d := time.Duration(0); d <= 3*time.Hour; d += 30 * time.Minute {
+		total += firsts(d)
+	}
+	if total != 1 {
+		t.Fatalf("поломка подряд три часа — писем лиду %d, want 1", total)
+	}
+	if got := firsts(3*time.Hour + 59*time.Minute); got != 0 {
+		t.Fatalf("тишина 59 мин — письмо лиду %d, want 0", got)
+	}
+	if got := firsts(5 * time.Hour); got != 1 {
+		t.Fatalf("тишина час — новая поломка, писем лиду %d, want 1", got)
 	}
 }
 

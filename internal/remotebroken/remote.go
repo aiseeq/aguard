@@ -96,8 +96,10 @@ type sent struct {
 	Event     Event     `json:"event"`
 }
 type summary struct {
-	At     time.Time       `json:"at"` // когда ушла сводка этого окна; ноль — ещё не уходила
-	LeadAt time.Time       `json:"lead_at,omitzero"`
+	At time.Time `json:"at"` // когда ушла сводка этого окна; ноль — ещё не уходила
+	// Last — последнее событие по машине, переживает смену окна: тишина от него не короче repeat — новая поломка,
+	// о ней лиду письмо first.
+	Last   time.Time       `json:"last,omitzero"`
 	Owners map[string]bool `json:"owners"`
 	First  time.Time       `json:"first"`
 	Reason string          `json:"reason"`
@@ -276,6 +278,7 @@ func (s *State) applyEvent(e Event, owner, lead string, now time.Time, repeat ti
 
 	// Окно сводки начинается с первого события и после сводки — с её времени.
 	x := s.Summaries[e.Host]
+	last := x.Last
 	if x.Owners == nil || (x.At.IsZero() && e.At.Sub(x.First) >= repeat) || (!x.At.IsZero() && now.Sub(x.At) >= repeat) {
 		x = summary{Owners: map[string]bool{}, First: e.At, Reason: e.Reason}
 	}
@@ -283,11 +286,12 @@ func (s *State) applyEvent(e Event, owner, lead string, now time.Time, repeat ti
 		newOwner[e.Host] = true
 	}
 	x.Owners[owner] = true
-	if x.LeadAt.IsZero() || now.Sub(x.LeadAt) >= repeat {
-		if owner != lead {
-			out = append(out, Notice{To: lead, Key: "first:" + e.Host, Message: Message(e), Count: 1})
-		}
-		x.LeadAt = now
+	if (last.IsZero() || e.At.Sub(last) >= repeat) && owner != lead {
+		out = append(out, Notice{To: lead, Key: "first:" + e.Host, Message: Message(e), Count: 1})
+	}
+	x.Last = last
+	if e.At.After(last) {
+		x.Last = e.At
 	}
 	s.Summaries[e.Host] = x
 	return out
@@ -305,7 +309,6 @@ func (s *State) applySummary(host string, newOwner bool, lead string, now time.T
 	sort.Strings(list)
 	msg := fmt.Sprintf("%s: путь сломан у %d мастеров (%s), первая в %s, причина %s", strings.ToUpper(host), len(x.Owners), joinNames(list), x.First.Local().Format("15:04"), x.Reason)
 	x.At = now
-	x.LeadAt = now
 	s.Summaries[host] = x
 	return Notice{To: lead, Key: "summary:" + host, Message: msg, Count: len(x.Owners), Summary: true}, true
 }
