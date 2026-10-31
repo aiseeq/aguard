@@ -488,7 +488,13 @@ func (y *diskYielder) wait() {
 		return
 	}
 	y.last = time.Now()
-	v, err := y.meter.Check(y.ctx, pressure.DefaultLimits, "", false)
+	// Пороги пользователя — те же, что у busy и очереди graft ($XDG_CONFIG_HOME/akit/pressure.yaml поверх умолчаний);
+	// файл битый — ошибка, умолчаниями не подменяем.
+	limits, err := pressure.UserLimits()
+	var v pressure.Verdict
+	if err == nil {
+		v, err = y.meter.Check(y.ctx, limits, "", false)
+	}
 	if err != nil {
 		if !y.warned {
 			y.warned = true

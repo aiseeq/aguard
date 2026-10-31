@@ -45,8 +45,54 @@ func TestDiskFreeMarksEachRecipient(t *testing.T) {
 
 // Занятая машина: обход ждёт; остановка демона обрывает паузу сразу (f62029e).
 func TestDiskYieldPausesOnBusyMachine(t *testing.T) {
+	m := busyMeter(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	y := &diskYielder{ctx: ctx, meter: m, warn: func(err error) { t.Errorf("замер: %v", err) }}
+	y.wait()
+	if y.pauses != 1 {
+		t.Fatalf("пауз на занятой машине: %d, ждал 1", y.pauses)
+	}
+	y.wait() // второй вызов в ту же секунду — без замера и паузы
+	if y.pauses != 1 {
+		t.Fatalf("пауз после второго вызова: %d", y.pauses)
+	}
+}
+
+// Пороги пользователя из akit (pressure.yaml) — те же, что у busy и очереди graft; битый файл — ошибка, не умолчания.
+func TestDiskYieldUserLimits(t *testing.T) {
+	m := busyMeter(t)
+	file := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "akit", "pressure.yaml")
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("runnable: 100\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	y := &diskYielder{ctx: ctx, meter: m, warn: func(err error) { t.Errorf("замер: %v", err) }}
+	y.wait()
+	if y.pauses != 0 {
+		t.Fatalf("порог пользователя 100 готовых, а пауза была: %d", y.pauses)
+	}
+	if err := os.WriteFile(file, []byte("runnable 16\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var warned error
+	y = &diskYielder{ctx: ctx, meter: m, warn: func(err error) { warned = err }}
+	y.wait()
+	if warned == nil || !strings.Contains(warned.Error(), "pressure.yaml") || y.pauses != 0 {
+		t.Fatalf("битый файл порогов: ошибка %v, пауз %d — ждал ошибку с путём и без паузы", warned, y.pauses)
+	}
+}
+
+// busyMeter — замер машины, занятой по процессору; пороги пользователя — пустой каталог настроек.
+func busyMeter(t *testing.T) *pressure.Meter {
+	t.Helper()
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // нет сокета состояния диска
 	t.Setenv("XDG_STATE_HOME", t.TempDir())  // нет тихого режима
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // нет pressure.yaml пользователя
 	root := t.TempDir()
 	for name, body := range map[string]string{
 		"stat":   "cpu  1\ncpu0 1\ncpu1 1\nprocs_running 9\n", // 8 готовых на 2 потока — занята по процессору
@@ -61,17 +107,7 @@ func TestDiskYieldPausesOnBusyMachine(t *testing.T) {
 	if _, err := m.Check(t.Context(), pressure.Limits{SwapWindow: time.Millisecond}, "", false); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	y := &diskYielder{ctx: ctx, meter: m, warn: func(err error) { t.Errorf("замер: %v", err) }}
-	y.wait()
-	if y.pauses != 1 {
-		t.Fatalf("пауз на занятой машине: %d, ждал 1", y.pauses)
-	}
-	y.wait() // второй вызов в ту же секунду — без замера и паузы
-	if y.pauses != 1 {
-		t.Fatalf("пауз после второго вызова: %d", y.pauses)
-	}
+	return m
 }
 
 // Проход disk спрашивает о машине по ходу обхода (yield.wait передан в MeasureAll, f62029e), а оборванный остановкой
