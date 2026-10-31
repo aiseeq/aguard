@@ -409,19 +409,48 @@ func TestIOStepNotesPassEveryMinute(t *testing.T) {
 
 func TestIOCaseIncludesProcessCommand(t *testing.T) {
 	c := alertCase(time.Date(2026, 10, 31, 12, 0, 0, 0, time.Local), 7400)
-	c.Culprits.ProcWrite = []iowatch.Ranked{{Name: "dd(10)", Value: 10}}
+	c.Culprits.ProcWrite = []iowatch.Ranked{{Name: "dd(10)", Value: 40}, {Name: "cp(12)", Value: 30}, {Name: "rg(13)", Value: 20}, {Name: "tar(14)", Value: 10}}
 	c.Culprits.ProcRead = []iowatch.Ranked{{Name: "cat(11)", Value: 20}}
 	c.Culprits.ProcessDetails = map[string]iowatch.ProcessDetails{
 		"dd(10)":  {Cmdline: "dd --write", CWD: "/workspace/project"},
+		"cp(12)":  {Cmdline: "cp a b"},
+		"rg(13)":  {Cmdline: "rg needle"},
+		"tar(14)": {Cmdline: "tar cf x"},
 		"cat(11)": {Cmdline: "cat input"},
 	}
 	var b strings.Builder
-	writeIOCase(&b, &c, 3)
+	writeIOCase(&b, &c, 5)
 	text := b.String()
-	for _, want := range []string{"  cmd: dd --write (в /workspace/project)\n", "  cmd: cat input\n"} {
+	for _, want := range []string{"  cmd: dd --write (в /workspace/project)\n", "  cmd: cp a b\n", "  cmd: rg needle\n", "  cmd: cat input\n"} {
 		if !strings.Contains(text, want) {
-			t.Errorf("нет %q:\\n%s", want, text)
+			t.Errorf("нет %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "tar cf x") {
+		t.Errorf("команда четвёртого процесса — только у топ-3:\n%s", text)
+	}
+
+	// aguard io report: под самыми длинными случаями — команды топ-3 записи; случай без команд (до 31.10) — без строки процессов.
+	old := alertCase(time.Date(2026, 10, 30, 12, 0, 0, 0, time.Local), 3000)
+	old.Culprits.ProcWrite = []iowatch.Ranked{{Name: "go(5)", Value: 10}}
+	b.Reset()
+	writeIOReport(&b, &iowatch.Summary{Total: 2, Cases: []iowatch.Case{c, old}, Min: 1000})
+	text = b.String()
+	for _, want := range []string{"  cmd: dd --write (в /workspace/project)\n", "  cmd: rg needle\n"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("итог без команды %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "tar cf x") || strings.Contains(text, "go(5)") {
+		t.Errorf("итог: команда вне топ-3 или процессы случая без команд:\n%s", text)
+	}
+
+	// aguard io at: итог окна с командой ушедшего процесса.
+	b.Reset()
+	writeIOSummary(&b, iowatch.Window{Details: []iowatch.Step{{Processes: []iowatch.Process{
+		{PID: 10, Start: 1, Comm: "dd", WriteBytes: 4096, Cmdline: "dd --write", CWD: "/workspace/project"}}}}})
+	if !strings.Contains(b.String(), "  cmd: dd --write (в /workspace/project)\n") {
+		t.Errorf("aguard io at без команды:\n%s", b.String())
 	}
 }
 
@@ -480,6 +509,7 @@ func TestIOCaseAttribution(t *testing.T) {
 		{"чужая больше главной", 560, 0, 870, foreign},
 		{"ядро больше главной, чужая больше ядра", 100, 383, 870, foreign},
 		{"ядро больше главной и чужой", 100, 383, 300, kernel},
+		{"ядро больше главной и равно чужой", 100, 383, 383, kernel},
 		{"старый случай: ядро больше чужой", 0, 383, 300, kernel},
 		{"старый случай: чужая больше ядра", 0, 383, 870, foreign},
 		{"старый случай без чужой", 0, 383, 0, mainOnly},

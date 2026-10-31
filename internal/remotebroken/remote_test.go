@@ -214,7 +214,7 @@ func TestFirstLeadNoticeOncePerIncident(t *testing.T) {
 	if got := firsts(3*time.Hour + 59*time.Minute); got != 0 {
 		t.Fatalf("тишина 59 мин — письмо лиду %d, want 0", got)
 	}
-	if got := firsts(5 * time.Hour); got != 1 {
+	if got := firsts(4*time.Hour + 59*time.Minute); got != 1 { // ровно repeat после события 3:59
 		t.Fatalf("тишина час — новая поломка, писем лиду %d, want 1", got)
 	}
 }

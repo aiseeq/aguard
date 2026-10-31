@@ -428,7 +428,7 @@ func TestCaseProcessDetailsOnlyForTopProcesses(t *testing.T) {
 	for i := range processes {
 		pid := i + 1
 		processes[i] = Process{PID: pid, Start: uint64(pid), Comm: fmt.Sprintf("p%d", pid),
-			WriteBytes: int64(100 - i), ReadBytes: int64(200 - i), Cmdline: fmt.Sprintf("p%d --arg", pid)}
+			WriteBytes: int64(100 - i), ReadBytes: int64(200 - i), Cmdline: fmt.Sprintf("p%d --arg", pid), Cgroup: "/user.slice/agent-sess1.scope"}
 	}
 	r.ring.Add(Record{Kind: KindDetail, Step: Step{At: at, Processes: processes}})
 	c := Case{Start: at, End: at, DurMS: 1000}
@@ -441,6 +441,10 @@ func TestCaseProcessDetailsOnlyForTopProcesses(t *testing.T) {
 	}
 	if len(c.Culprits.ProcessDetails) != caseTop {
 		t.Fatalf("детали только для топа записи/чтения: %+v", c.Culprits.ProcessDetails)
+	}
+	// мера главной — запись её процессов: без неё шапка письма не сравнит главную с ядром
+	if c.Culprits.Main != "/user.slice/agent-sess1.scope" || c.Culprits.MainValue != 100+99+98+97+96+95 {
+		t.Fatalf("главная и её мера: %q %d", c.Culprits.Main, c.Culprits.MainValue)
 	}
 }
 
@@ -1043,5 +1047,24 @@ func TestCulpritsForeignOver(t *testing.T) {
 	}
 	if f, ok := c.ForeignOver(""); ok {
 		t.Fatalf("без главной: %+v", f)
+	}
+	// чужая не больше меры главной (запись её процессов, 50 МБ) — не названа: шапка старых случаев опирается на это
+	for _, foreignMB := range []int64{50, 30} {
+		c := SumCulprits([]Step{{Processes: []Process{{PID: 7, Start: 1, Comm: "go", WriteBytes: 50 << 20, Cgroup: sess}},
+			Cgroups: []Cgroup{{Path: sess, WriteBytes: 40 << 20}, {Path: "/system.slice/snapperd.service", WriteBytes: foreignMB << 20}}}})
+		if f, ok := c.ForeignOver(sess); ok {
+			t.Fatalf("чужая %d МБ при главной 50 МБ названа: %+v", foreignMB, f)
+		}
+	}
+}
+
+// Пустая команда на позднем шаге (процесс ушёл до чтения) не затирает прочитанную раньше.
+func TestSumCulpritsKeepsEarlierCommand(t *testing.T) {
+	c := SumCulprits([]Step{
+		{Processes: []Process{{PID: 10, Start: 1, Comm: "dd", WriteBytes: 1, Cmdline: "dd --write", CWD: "/w"}}},
+		{Processes: []Process{{PID: 10, Start: 1, Comm: "dd", WriteBytes: 1}}},
+	})
+	if got := c.ProcessDetails["dd(10)"]; got.Cmdline != "dd --write" || got.CWD != "/w" {
+		t.Fatalf("команда затёрта: %+v", c.ProcessDetails)
 	}
 }

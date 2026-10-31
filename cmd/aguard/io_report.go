@@ -232,7 +232,11 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 	}
 	fmt.Fprintf(w, "самые длинные:\n")
 	for i := range s.Cases[:min(ioReportCases, len(s.Cases))] {
-		fmt.Fprintf(w, "- %s\n", ioCaseLine(&s.Cases[i]))
+		c := &s.Cases[i]
+		fmt.Fprintf(w, "- %s\n", ioCaseLine(c))
+		if k := c.Culprits; k != nil && len(k.ProcessDetails) > 0 { // случаи до 31.10 — без команд
+			writeProcessIOTop(w, "  запись процессов", k.ProcWrite[:min(3, len(k.ProcWrite))], ioBytes, k.ProcessDetails)
+		}
 	}
 }
 
