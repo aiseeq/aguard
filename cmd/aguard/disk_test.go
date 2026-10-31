@@ -115,6 +115,7 @@ func busyMeter(t *testing.T) *pressure.Meter {
 func TestDiskRoundYieldsAndMarksInterrupted(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // нет pressure.yaml пользователя
 	if err := os.MkdirAll(filepath.Join(state, "akit"), 0o700); err != nil {
 		t.Fatal(err)
 	}
