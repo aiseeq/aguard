@@ -1,6 +1,8 @@
 package guiwatch
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -202,6 +204,83 @@ func TestSleepingSIsNeverBusy(t *testing.T) {
 	}
 }
 
+func TestBusyAndQueueStallsProduceSlices(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		runDelta  uint64
+		waitDelta uint64
+		want      string
+	}{
+		{name: "busy", runDelta: 50_000_000, waitDelta: 0, want: "busy"},
+		{name: "queue", runDelta: 5_000_000, waitDelta: 45_000_000, want: "queue"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, dir, pid, at := fixture(t)
+			w, s := setupState(t, root, dir, pid)
+			defer w.closeAll()
+			base := filepath.Join(root, fmt.Sprint(pid), "task", fmt.Sprint(pid))
+			rewrite(t, filepath.Join(base, "stat"), statLine("R", 100))
+			if err := w.sample(s, at); err != nil {
+				t.Fatal(err)
+			}
+			var run, wait uint64
+			for i := 1; i <= 30; i++ {
+				run += tc.runDelta
+				wait += tc.waitDelta
+				rewrite(t, filepath.Join(base, "schedstat"), fmt.Sprintf("%d %d 0\n", run, wait))
+				if err := w.sample(s, at.Add(time.Duration(i)*50*time.Millisecond)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if len(w.document.Slices) != 1 {
+				t.Fatalf("slices=%#v, want one", w.document.Slices)
+			}
+			got := w.document.Slices[0]
+			if got.Kind != tc.want || got.DurationMS < 1400 || got.DurationMS > 1600 {
+				t.Fatalf("slice=%#v, want %s around 1.5s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWatchUsesCurrentTimeInsteadOfTickerTimestamp(t *testing.T) {
+	root, dir, _, at := fixture(t)
+	w := New(root, dir, Default(), []Target{{Name: "victim", PID: 4321, Main: true}})
+	ticks := make(chan time.Time, 2)
+	w.newTicker = func(time.Duration) watchTick { return watchTick{C: ticks} }
+	clockCalls := make(chan struct{}, 2)
+	w.clock = func() (time.Duration, time.Duration, error) {
+		clockCalls <- struct{}{}
+		return 0, 0, nil
+	}
+	w.now = func() time.Time { return at.Add(2 * time.Second) }
+	ticks <- at
+	ticks <- at.Add(time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Watch(ctx) }()
+	for range 2 {
+		select {
+		case <-clockCalls:
+		case err := <-done:
+			cancel()
+			t.Fatalf("Watch exited early: %v", err)
+		case <-time.After(time.Second):
+			cancel()
+			t.Fatal("Watch did not process ticker events")
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range w.document.Slices {
+		if s.Kind == "sampler_gap" {
+			t.Fatalf("ticker timestamp produced a false sampler gap: %#v", s)
+		}
+	}
+}
+
 func TestClosingEpisodeDoesNotBlockNewOne(t *testing.T) {
 	root, dir, pid, at := fixture(t)
 	w, s := setupState(t, root, dir, pid)
@@ -373,19 +452,80 @@ func TestLongEpisodeUpdateRetainsSamplesPastRing(t *testing.T) {
 }
 
 func TestMaxBytesCountsOnDiskFilesAndPrettyJSON(t *testing.T) {
-	root, dir, _, at := fixture(t)
-	w := New(root, dir, Default(), nil)
+	t.Run("other files count", func(t *testing.T) {
+		root, dir, _, at := fixture(t)
+		w := New(root, dir, Default(), nil)
+		w.now = func() time.Time { return at }
+		w.document.Slices = []Slice{{Target: "v", Kind: "D", Start: at, End: at}}
+		pretty, err := json.MarshalIndent(w.document, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		journal := strings.Repeat("j", 300)
+		write(t, filepath.Join(dir, "journal-extra.json"), journal)
+		w.Config.MaxBytes = int64(len(pretty) + len(journal) - 1)
+		if err := w.prune(); err != nil {
+			t.Fatal(err)
+		}
+		if len(w.document.Slices) != 0 {
+			t.Fatalf("slice retained when pretty JSON plus journal exceeds cap: %#v", w.document.Slices)
+		}
+	})
+
+	t.Run("pretty JSON counts", func(t *testing.T) {
+		root, dir, _, at := fixture(t)
+		w := New(root, dir, Default(), nil)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		w.now = func() time.Time { return at }
+		w.document.Slices = []Slice{{Target: "v", Kind: "D", Start: at, End: at}}
+		pretty, err := json.MarshalIndent(w.document, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		compact, err := json.Marshal(w.document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pretty) <= len(compact)+10 {
+			t.Fatalf("fixture lacks useful pretty/compact boundary: %d/%d", len(pretty), len(compact))
+		}
+		w.Config.MaxBytes = int64(len(compact) + (len(pretty)-len(compact))/2)
+		if err := w.prune(); err != nil {
+			t.Fatal(err)
+		}
+		if len(w.document.Slices) != 0 {
+			t.Fatalf("slice retained when pretty JSON exceeds cap: %#v", w.document.Slices)
+		}
+	})
+}
+
+func TestMaxBytesDoesNotCountReplacedSlicesJSONTwice(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	w := New("/proc", dir, Default(), nil)
+	w.now = func() time.Time { return at }
+	w.document.Slices = []Slice{{ID: "current", Target: "v", Kind: "D", Start: at, End: at}}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	w.document.Slices = []Slice{{ID: "old", Target: "old", Start: at.Add(-time.Hour), End: at.Add(-time.Hour)}}
-	write(t, filepath.Join(dir, "journal-old.json"), strings.Repeat("x", 500))
-	w.Config.MaxBytes = 400
-	if err := w.save(); err != nil {
+	pretty, err := json.MarshalIndent(w.document, "", "  ")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(w.document.Slices) != 0 {
-		t.Fatalf("old slice retained over byte cap: %#v", w.document.Slices)
+	journal := strings.Repeat("j", 200)
+	oldSlices := strings.Repeat("o", len(pretty)+100)
+	write(t, filepath.Join(dir, "slices.json"), oldSlices)
+	write(t, filepath.Join(dir, "journal-current.json"), journal)
+	w.Config.MaxBytes = int64(len(pretty) + len(journal))
+	if w.Config.MaxBytes >= int64(len(oldSlices)+len(pretty)+len(journal)) {
+		t.Fatal("test fixture does not exceed cap when old slices.json is double-counted")
+	}
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 1 {
+		t.Fatalf("new document was pruned using replaced slices.json size: %#v", w.document.Slices)
 	}
 }
 
@@ -515,6 +655,44 @@ func TestMergedEpisodeKeepsCounterAndSamples(t *testing.T) {
 	got := w.document.Slices[0]
 	if got.Merged != 1 || len(got.Samples) != 2 || got.ID != "original" {
 		t.Fatalf("merge lost history or count: %#v", got)
+	}
+}
+
+func TestMergedCountSurvivesLaterSliceUpdateOnDisk(t *testing.T) {
+	root, dir, _, at := fixture(t)
+	w := New(root, dir, Default(), nil)
+	w.now = func() time.Time { return at.Add(10 * time.Second) }
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(fakeBin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(fakeBin, "journalctl"), "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(filepath.Join(fakeBin, "journalctl"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin)
+	old := Slice{ID: "original", Target: "victim", PID: 4321, Starttime: 100, Start: at, End: at.Add(time.Second)}
+	w.document.Slices = []Slice{old}
+	s := &targetState{Target: Target{Name: "victim", PID: 4321, Start: 100}, ring: []Sample{{At: at.Add(2 * time.Second), State: "D"}}}
+	merged := &episode{start: at.Add(2 * time.Second), end: at.Add(3 * time.Second), kind: "D"}
+	if err := w.writeSlice(s, merged); err != nil {
+		t.Fatal(err)
+	}
+	update := &episode{start: at.Add(2 * time.Second), end: at.Add(4 * time.Second), kind: "D", detected: true, sliceID: merged.sliceID}
+	s.ring = append(s.ring, Sample{At: at.Add(4 * time.Second), AtMS: 4000, State: "D"})
+	if err := w.writeSlice(s, update); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "slices.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved Document
+	if err := json.Unmarshal(b, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.Slices) != 1 || saved.Slices[0].Merged != 1 {
+		t.Fatalf("later update lost merged counter on disk: %#v", saved.Slices)
 	}
 }
 

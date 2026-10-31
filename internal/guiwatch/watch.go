@@ -117,6 +117,17 @@ type openFile struct {
 	buf  []byte
 }
 
+type watchTick struct {
+	C    <-chan time.Time
+	stop func()
+}
+
+func (t watchTick) Stop() {
+	if t.stop != nil {
+		t.stop()
+	}
+}
+
 func (f *openFile) read() ([]byte, error) {
 	for {
 		n, err := unix.Pread(f.fd, f.buf, 0)
@@ -170,6 +181,7 @@ type Watcher struct {
 	ProcRoot, Dir       string
 	Config              Config
 	PIDs                []Target
+	newTicker           func(time.Duration) watchTick
 	now                 func() time.Time
 	clock               func() (time.Duration, time.Duration, error)
 	boottime, monotonic time.Duration
@@ -216,7 +228,13 @@ func (w *Watcher) Watch(ctx context.Context) error {
 	if err := w.load(); err != nil {
 		return err
 	}
-	tick := time.NewTicker(w.Config.Interval.D())
+	var tick watchTick
+	if w.newTicker != nil {
+		tick = w.newTicker(w.Config.Interval.D())
+	} else {
+		realTicker := time.NewTicker(w.Config.Interval.D())
+		tick = watchTick{C: realTicker.C, stop: realTicker.Stop}
+	}
 	defer tick.Stop()
 	for {
 		select {
@@ -1613,9 +1631,17 @@ func (w *Watcher) prune() error {
 		}
 		size := int64(len(b))
 		for _, ent := range entries {
-			if info, e := ent.Info(); e == nil {
-				size += info.Size()
+			if ent.Name() == "slices.json" {
+				continue
 			}
+			info, e := ent.Info()
+			if errors.Is(e, os.ErrNotExist) {
+				continue
+			}
+			if e != nil {
+				return fmt.Errorf("получить размер %s: %w", ent.Name(), e)
+			}
+			size += info.Size()
 		}
 		if size <= w.Config.MaxBytes {
 			break
