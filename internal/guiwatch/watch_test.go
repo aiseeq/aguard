@@ -17,6 +17,38 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 )
 
+func TestFreshUserJournalFiles(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 11, 1, 12, 0, 0, 0, time.Local)
+	files := []struct {
+		name  string
+		mtime time.Time
+	}{
+		{"user-1000-old.journal", start.Add(-time.Second)},
+		{"user-1000-fresh.journal", start},
+		{"user-1000@abcdef.journal", start.Add(time.Second)},
+		{"system.journal", start.Add(time.Second)},
+		{"user-no-uid.journal", start.Add(time.Second)},
+	}
+	for _, file := range files {
+		path := filepath.Join(dir, file.name)
+		if err := os.WriteFile(path, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, file.mtime, file.mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := freshUserJournalFiles(dir, start)
+	if err != nil {
+		t.Fatalf("select fresh journal files: %v", err)
+	}
+	want := []string{filepath.Join(dir, "user-1000-fresh.journal"), filepath.Join(dir, "user-1000@abcdef.journal")}
+	if !slices.Equal(got, want) {
+		t.Fatalf("fresh journal files = %v, want %v", got, want)
+	}
+}
+
 func fixture(t *testing.T) (string, string, int, time.Time) {
 	t.Helper()
 	root := t.TempDir()

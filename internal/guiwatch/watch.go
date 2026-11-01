@@ -185,48 +185,59 @@ type episode struct {
 	closing    bool
 }
 type Watcher struct {
-	ProcRoot, Dir       string
-	Config              Config
-	PIDs                []Target
-	newTicker           func(time.Duration) watchTick
-	now                 func() time.Time
-	clock               func() (time.Duration, time.Duration, error)
-	boottime, monotonic time.Duration
-	document            Document
-	states              map[int]*targetState
-	lastDiscover        time.Time
-	lastAny             time.Time
-	top                 map[int]uint64
-	topStart            map[int]uint64
-	topDelta            map[int]uint64
-	topComm             map[int]string
-	topFiles            map[int]*openFile
-	lastTop             time.Time
-	topTracking         bool
-	selfWait            uint64
-	lastSelfWait        int64
-	selfSched           *openFile
-	sleepStats          map[string]*SleepStat
-	sleepCurrent        map[int]sleepRun
-	baseSuppressed      int
-	dirtySlices         map[string]bool
-	storageLoaded       bool
-	lastMaxBytesCheck   time.Time
-	OnTargets           func(string, []string)
-	targetSummary       string
-	targetIdentity      string
-	ReloadConfig        func() (Config, error)
-	lastConfigCheck     time.Time
-	journalMu           sync.Mutex
-	journalPending      map[string]bool
-	scannedTargets      map[int]Target
-	targetStatBuf       []byte
+	ProcRoot, Dir, JournalDir string
+	JournalDirError           string
+	Config                    Config
+	PIDs                      []Target
+	newTicker                 func(time.Duration) watchTick
+	now                       func() time.Time
+	clock                     func() (time.Duration, time.Duration, error)
+	boottime, monotonic       time.Duration
+	document                  Document
+	states                    map[int]*targetState
+	lastDiscover              time.Time
+	lastAny                   time.Time
+	top                       map[int]uint64
+	topStart                  map[int]uint64
+	topDelta                  map[int]uint64
+	topComm                   map[int]string
+	topFiles                  map[int]*openFile
+	lastTop                   time.Time
+	topTracking               bool
+	selfWait                  uint64
+	lastSelfWait              int64
+	selfSched                 *openFile
+	sleepStats                map[string]*SleepStat
+	sleepCurrent              map[int]sleepRun
+	baseSuppressed            int
+	dirtySlices               map[string]bool
+	storageLoaded             bool
+	lastMaxBytesCheck         time.Time
+	OnTargets                 func(string, []string)
+	targetSummary             string
+	targetIdentity            string
+	ReloadConfig              func() (Config, error)
+	lastConfigCheck           time.Time
+	journalMu                 sync.Mutex
+	journalPending            map[string]bool
+	journalAgain              map[string]journalRequest
+	scannedTargets            map[int]Target
+	targetStatBuf             []byte
 }
 
 var ErrConfigChanged = errors.New("gui config changed")
 
+type journalRequest struct {
+	start, end time.Time
+}
+
 func New(root, dir string, c Config, targets []Target) *Watcher {
-	return &Watcher{ProcRoot: root, Dir: dir, Config: c, PIDs: targets, now: time.Now, states: map[int]*targetState{}, document: Document{Version: 1, Slices: []Slice{}}, top: map[int]uint64{}, topStart: map[int]uint64{}, topDelta: map[int]uint64{}, topComm: map[int]string{}, topFiles: map[int]*openFile{}, sleepStats: map[string]*SleepStat{}, sleepCurrent: map[int]sleepRun{}, journalPending: map[string]bool{}, dirtySlices: map[string]bool{}}
+	journalDir, journalDirErr := defaultJournalDir()
+	w := &Watcher{ProcRoot: root, Dir: dir, JournalDir: journalDir, Config: c, PIDs: targets, now: time.Now, states: map[int]*targetState{}, document: Document{Version: 1, Slices: []Slice{}}, top: map[int]uint64{}, topStart: map[int]uint64{}, topDelta: map[int]uint64{}, topComm: map[int]string{}, topFiles: map[int]*openFile{}, sleepStats: map[string]*SleepStat{}, sleepCurrent: map[int]sleepRun{}, journalPending: map[string]bool{}, journalAgain: map[string]journalRequest{}, dirtySlices: map[string]bool{}}
+	if journalDirErr != nil {
+		w.JournalDirError = journalDirErr.Error()
+	}
+	return w
 }
 
 func (w *Watcher) Watch(ctx context.Context) error {
@@ -1090,6 +1101,7 @@ func (w *Watcher) closeEpisode(s *targetState, e *episode, at time.Time) error {
 		if err := w.writeSlice(s, e); err != nil {
 			return err
 		}
+		w.queueJournal(e.sliceID, e.start, e.end)
 	}
 	return nil
 }
@@ -1195,7 +1207,6 @@ func (w *Watcher) writeSlice(s *targetState, e *episode) error {
 		if err := w.save(); err != nil {
 			return err
 		}
-		w.queueJournal(e.sliceID, e.start, e.end)
 		return nil
 	}
 	return w.createSlice(s, e)
@@ -1269,34 +1280,52 @@ func (w *Watcher) queueJournal(id string, start, end time.Time) {
 	}
 	w.journalMu.Lock()
 	if w.journalPending[id] {
+		w.journalAgain[id] = journalRequest{start: start, end: end}
 		w.journalMu.Unlock()
 		return
 	}
 	w.journalPending[id] = true
 	w.journalMu.Unlock()
-	go func() {
-		defer func() { w.journalMu.Lock(); delete(w.journalPending, id); w.journalMu.Unlock() }()
-		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-		defer cancel()
-		lines := journalWindow(ctx, start, end)
-		b, err := json.Marshal(lines)
-		if err != nil {
-			lines = []string{"journal encode error: " + err.Error()}
-			b = []byte("[\"journal encode error\"]")
-		}
-		tmp := filepath.Join(w.Dir, "journal-"+id+"-tmp.json")
-		path := filepath.Join(w.Dir, "journal-"+id+".json")
-		if err := os.WriteFile(tmp, b, privateFileMode); err != nil {
-			lines = append(lines, "journal write error: "+err.Error())
-			return
-		}
-		if err := os.Rename(tmp, path); err != nil {
-			lines = append(lines, "journal rename error: "+err.Error())
-			if removeErr := os.Remove(tmp); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-				lines = append(lines, "journal temp cleanup error: "+removeErr.Error())
+	go func(req journalRequest) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				fmt.Fprintf(os.Stderr, "gui journal panic for %s: %v\n", id, recovered)
 			}
+			w.journalMu.Lock()
+			delete(w.journalPending, id)
+			delete(w.journalAgain, id)
+			w.journalMu.Unlock()
+		}()
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			lines := journalWindow(ctx, req.start, req.end, w.JournalDir, w.JournalDirError)
+			cancel()
+			b, err := json.Marshal(lines)
+			if err != nil {
+				panic(fmt.Errorf("encode journal: %w", err))
+			}
+			tmp := filepath.Join(w.Dir, "journal-"+id+"-tmp.json")
+			path := filepath.Join(w.Dir, "journal-"+id+".json")
+			if err := os.WriteFile(tmp, b, privateFileMode); err != nil {
+				fmt.Fprintf(os.Stderr, "gui journal write error for %s: %v\n", id, err)
+			} else if err := os.Rename(tmp, path); err != nil {
+				fmt.Fprintf(os.Stderr, "gui journal rename error for %s: %v\n", id, err)
+				if removeErr := os.Remove(tmp); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					fmt.Fprintf(os.Stderr, "gui journal temp cleanup error for %s: %v\n", id, removeErr)
+				}
+			}
+
+			w.journalMu.Lock()
+			next, again := w.journalAgain[id]
+			delete(w.journalAgain, id)
+			if !again {
+				w.journalMu.Unlock()
+				return
+			}
+			w.journalMu.Unlock()
+			req = next
 		}
-	}()
+	}(journalRequest{start: start, end: end})
 }
 
 func (w *Watcher) makeSlice(s *targetState, e *episode, includeThreads bool) Slice {
@@ -1418,10 +1447,70 @@ func readPSI(root string) (map[string]string, []string) {
 	}
 	return out, errs
 }
-func journalWindow(ctx context.Context, start, end time.Time) []string {
-	from := start.Add(-5 * time.Second).Format("2006-01-02 15:04:05")
+func defaultJournalDir() (string, error) {
+	machineID, err := os.ReadFile("/etc/machine-id")
+	if err != nil {
+		return "", fmt.Errorf("read machine id: %w", err)
+	}
+	id := strings.TrimSpace(string(machineID))
+	if id == "" {
+		return "", fmt.Errorf("machine id is empty")
+	}
+	return filepath.Join("/var/log/journal", id), nil
+}
+
+func freshUserJournalFiles(dir string, windowStart time.Time) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read journal directory %s: %w", dir, err)
+	}
+	var files []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "user-") {
+			continue
+		}
+		rest := strings.TrimPrefix(name, "user-")
+		digits := 0
+		for digits < len(rest) && rest[digits] >= '0' && rest[digits] <= '9' {
+			digits++
+		}
+		if digits == 0 || !strings.Contains(rest[digits:], ".journal") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, fmt.Errorf("stat journal file %s: %w", filepath.Join(dir, name), err)
+		}
+		if info.ModTime().Before(windowStart) {
+			continue
+		}
+		files = append(files, filepath.Join(dir, name))
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+func journalWindow(ctx context.Context, start, end time.Time, journalDir, journalDirError string) []string {
+	windowStart := start.Add(-5 * time.Second)
+	from := windowStart.Format("2006-01-02 15:04:05")
 	to := end.Add(5 * time.Second).Format("2006-01-02 15:04:05")
-	cmd := exec.CommandContext(ctx, "journalctl", "--user", "-o", "short-iso-precise", "--since", from, "--until", to, "-u", "plasma-kwin_wayland.service", "-u", "plasma-plasmashell.service", "--no-pager")
+	var files []string
+	var fileErr error
+	if journalDirError != "" {
+		fileErr = fmt.Errorf("journal directory unavailable: %s", journalDirError)
+	} else {
+		files, fileErr = freshUserJournalFiles(journalDir, windowStart)
+	}
+	args := []string{"-o", "short-iso-precise", "--since", from, "--until", to, "-u", "plasma-kwin_wayland.service", "-u", "plasma-plasmashell.service", "--no-pager"}
+	if len(files) == 0 {
+		args = append([]string{"--user"}, args...)
+	} else {
+		for i := len(files) - 1; i >= 0; i-- {
+			args = append([]string{"--file=" + files[i]}, args...)
+		}
+	}
+	cmd := exec.CommandContext(ctx, "journalctl", args...)
 	a, err := cmd.Output()
 	if err != nil {
 		a = []byte("journalctl user error: " + err.Error())
@@ -1431,7 +1520,13 @@ func journalWindow(ctx context.Context, start, end time.Time) []string {
 	if err != nil {
 		b = []byte("journalctl kernel error: " + err.Error())
 	}
-	return append(nonemptyLines(a), nonemptyLines(b)...)
+	lines := append(nonemptyLines(a), nonemptyLines(b)...)
+	if fileErr != nil {
+		lines = append([]string{"journal user fallback: " + fileErr.Error()}, lines...)
+	} else if len(files) == 0 {
+		lines = append([]string{"journal user fallback: no fresh user journal files in " + journalDir}, lines...)
+	}
+	return lines
 }
 
 func nonemptyLines(data []byte) []string {
