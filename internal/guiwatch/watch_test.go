@@ -1043,3 +1043,26 @@ func TestProcGoneTreatsESRCHAsVanished(t *testing.T) {
 		t.Fatalf("other errors treated as vanished")
 	}
 }
+
+// Отчёт читает срезы без блокировки: чистка демона может удалить файл между чтением каталога и чтением файла.
+// Пропавший файл — удалённый срез, не ошибка отчёта (висячая ссылка воспроизводит это окно детерминированно).
+func TestReportSkipsSliceRemovedDuringRead(t *testing.T) {
+	dir := t.TempDir()
+	at := time.Now()
+	if err := os.MkdirAll(filepath.Join(dir, "slices"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONAtomic(slicePath(dir, "kept"), Slice{ID: "kept", Target: "v", Start: at, End: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "gone"), slicePath(dir, "removed")); err != nil {
+		t.Fatal(err)
+	}
+	d, err := ReadReport(dir, at.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("removed slice broke the report: %v", err)
+	}
+	if len(d.Slices) != 1 || d.Slices[0].ID != "kept" {
+		t.Fatalf("slices = %#v, want only kept", d.Slices)
+	}
+}

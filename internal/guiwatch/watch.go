@@ -1716,6 +1716,9 @@ func readSliceFiles(dir string) ([]Slice, error) {
 		}
 		path := filepath.Join(root, ent.Name())
 		b, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) { // отчёт читает без блокировки: срез удалила чистка демона после ReadDir
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("прочитать %s: %w", path, err)
 		}
