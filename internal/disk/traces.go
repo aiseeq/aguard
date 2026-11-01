@@ -85,8 +85,8 @@ type Facts struct {
 	Born     func(path string) time.Time
 }
 
-// scratchCleanup — уборка scratchpad: user tmpfiles (~/.config/user-tmpfiles.d, «D ~/.cache/claude-tmp 0700 aisee
-// aisee 7d»), таймер systemd-tmpfiles-clean раз в сутки.
+// scratchCleanup — уборка scratchpad: user tmpfiles (~/.config/user-tmpfiles.d, «D ~/.cache/claude-tmp 0700 alice
+// alice 7d»), таймер systemd-tmpfiles-clean раз в сутки.
 const (
 	scratchCleanup = "systemd-tmpfiles-clean: D ~/.cache/claude-tmp 7d"
 	scratchLife    = 7 * 24 * time.Hour

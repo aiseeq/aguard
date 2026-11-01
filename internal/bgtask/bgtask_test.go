@@ -132,7 +132,7 @@ func TestWaitHow(t *testing.T) {
 		"bash ~/base-full.sh 3146e1b > /x/base.log":                                    "",
 		"bash ~/missing.sh":                                                            "",
 		"cat /proc/loadavg && ~/.claude/improve/run.sh step evals > /x/evals.log 2>&1": "",
-		"cd ~/work/portal && graft test-unit > /x/unit.log":                        "",
+		"cd ~/work/portal && graft test-unit > /x/unit.log":                            "",
 	} {
 		if got, err := WaitHow(cmd, home); err != nil || got != want {
 			t.Errorf("%s: %q %v, нужно %q", cmd, got, err, want)
