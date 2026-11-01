@@ -145,7 +145,7 @@ func TestConfirmTrustDoesNotSelect(t *testing.T) {
 		t.Fatal("терминал не распознан")
 	}
 	cmd := exec.Command("sh", "-c",
-		`stty raw -echo; cat "$0"; dd bs=1 count=3 of=/dev/null 2>/dev/null; if timeout 1 dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' ' | grep -q '^13$'; then echo ENTER-OK; else echo NO-ENTER; fi`,
+		`stty raw -echo; cat "$0"; dd bs=1 count=3 of=/dev/null 2>/dev/null; if timeout --foreground 1 dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' ' | grep -q '^13$'; then echo ENTER-OK; else echo NO-ENTER; fi`,
 		"testdata/trust-dialog-2.1.316.raw")
 	finish, err := c.start(cmd, "/home/alice")
 	if err != nil {
