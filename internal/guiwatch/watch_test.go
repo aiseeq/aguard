@@ -1124,7 +1124,7 @@ func TestCloseAllWaitsJournalCollection(t *testing.T) {
 	root, dir, pid, at := fixture(t)
 	w, _ := setupState(t, root, dir, pid)
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "journalctl"), []byte("#!/bin/sh\nsleep 0.3\necho collected\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "journalctl"), []byte("#!/bin/sh\n/usr/bin/sleep 0.3\necho collected\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
