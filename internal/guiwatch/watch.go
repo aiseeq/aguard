@@ -2,6 +2,7 @@ package guiwatch
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -81,10 +83,14 @@ type sleepRun struct {
 	stat  *SleepStat
 }
 
+// dedupeSamples — по одному сэмплу на момент (AtMS), по времени. Слияние склеивает пересекающиеся окна (старые
+// сэмплы среза и свежее окно кольца, срез в памяти и его файл на диске): дубли не соседние, их убирает сортировка;
+// устойчивая — первым остаётся ранее сохранённый.
 func dedupeSamples(in []Sample) []Sample {
 	if len(in) < 2 {
 		return in
 	}
+	slices.SortStableFunc(in, func(a, b Sample) int { return cmp.Compare(a.AtMS, b.AtMS) })
 	out := in[:0]
 	for _, x := range in {
 		if len(out) == 0 || out[len(out)-1].AtMS != x.AtMS {

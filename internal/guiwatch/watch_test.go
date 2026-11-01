@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -1064,5 +1065,22 @@ func TestReportSkipsSliceRemovedDuringRead(t *testing.T) {
 	}
 	if len(d.Slices) != 1 || d.Slices[0].ID != "kept" {
 		t.Fatalf("slices = %#v, want only kept", d.Slices)
+	}
+}
+
+// Слияние сэмплов среза (обновление в памяти и слияние с файлом на диске) склеивает пересекающиеся окна:
+// дубли не соседние. На машине 01.11 файл среза вырос до 14,6 МБ — 105 817 сэмплов, из них уникальных 129.
+func TestDedupeSamplesRemovesOverlapOfMergedWindows(t *testing.T) {
+	merged := []Sample{{AtMS: 0}, {AtMS: 50}, {AtMS: 100}}
+	for range 10 { // десять сохранений: каждое склеивает старое с новым окном
+		merged = dedupeSamples(append(merged, Sample{AtMS: 50}, Sample{AtMS: 100}, Sample{AtMS: 150}))
+		merged = dedupeSamples(append(slices.Clone(merged), merged...))
+	}
+	got := make([]int64, 0, len(merged))
+	for _, s := range merged {
+		got = append(got, s.AtMS)
+	}
+	if want := []int64{0, 50, 100, 150}; !slices.Equal(got, want) {
+		t.Fatalf("samples after merges = %v, want %v", got, want)
 	}
 }
