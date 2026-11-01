@@ -157,18 +157,39 @@ func (s *State) LowFreeMessage(c *Config, free int64, home string) string {
 		"место не поднимется выше порога.", policy.HumanBytes(free), policy.HumanBytes(int64(c.FreeMin)), biggest)
 }
 
-// Load читает состояние; нет файла — пустое.
+const roundStateName = "round.json"
+
+type roundState struct {
+	Free     []Point              `json:"free"`
+	LastWalk time.Time            `json:"last_walk"`
+	Told     map[string]time.Time `json:"told"`
+}
+
+// LoadRound читает частое состояние; без sidecar загружает старый полный файл.
+func LoadRound(path string) (*State, bool, error) {
+	frequent, exists, err := loadFrequent(path)
+	if err != nil {
+		return nil, false, err
+	}
+	if !exists {
+		st, err := Load(path)
+		return st, true, err
+	}
+	return &State{Sizes: map[string][]Point{}, Free: frequent.Free, LastWalk: frequent.LastWalk,
+		Told: frequent.Told}, false, nil
+}
+
+// Load читает полное состояние. round.json имеет приоритет над одноимёнными полями старого state.json.
 func Load(path string) (*State, error) {
 	s := &State{Sizes: map[string][]Point{}, Told: map[string]time.Time{}}
 	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return s, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("состояние disk: %w", err)
 	}
-	if err := json.Unmarshal(b, s); err != nil {
-		return nil, fmt.Errorf("состояние disk %s: %w", path, err)
+	if err == nil {
+		if err := json.Unmarshal(b, s); err != nil {
+			return nil, fmt.Errorf("состояние disk %s: %w", path, err)
+		}
 	}
 	if s.Sizes == nil {
 		s.Sizes = map[string][]Point{}
@@ -176,15 +197,75 @@ func Load(path string) (*State, error) {
 	if s.Told == nil {
 		s.Told = map[string]time.Time{}
 	}
+	frequent, exists, err := loadFrequent(path)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return s, nil
+	}
+	s.Free, s.LastWalk, s.Told = frequent.Free, frequent.LastWalk, frequent.Told
+	if s.Told == nil {
+		s.Told = map[string]time.Time{}
+	}
 	return s, nil
 }
 
-// Save пишет состояние через временный файл.
-func (s *State) Save(path string) error {
-	b, err := json.Marshal(s)
+func loadFrequent(path string) (roundState, bool, error) {
+	name := filepath.Join(filepath.Dir(path), roundStateName)
+	b, err := os.ReadFile(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return roundState{}, false, nil
+	}
+	if err != nil {
+		return roundState{}, false, fmt.Errorf("состояние disk: %w", err)
+	}
+	var frequent roundState
+	if err := json.Unmarshal(b, &frequent); err != nil {
+		return roundState{}, false, fmt.Errorf("состояние disk %s: %w", name, err)
+	}
+	if frequent.Told == nil {
+		frequent.Told = map[string]time.Time{}
+	}
+	return frequent, true, nil
+}
+
+// SaveWalk пишет только данные обхода атомарно.
+func (s *State) SaveWalk(path string) error {
+	large := struct {
+		Sizes    map[string][]Point `json:"sizes"`
+		LastWalk time.Time          `json:"last_walk"`
+		Traces   map[string]Trace   `json:"traces,omitempty"`
+	}{s.Sizes, s.LastWalk, s.Traces}
+	b, err := json.Marshal(large)
 	if err != nil {
 		return fmt.Errorf("состояние disk: %w", err)
 	}
+	return writeStateAtomic(path, b)
+}
+
+// SaveFrequent пишет данные прохода атомарно.
+func (s *State) SaveFrequent(path string) error {
+	frequent := roundState{Free: s.Free, LastWalk: s.LastWalk, Told: s.Told}
+	b, err := json.Marshal(frequent)
+	if err != nil {
+		return fmt.Errorf("состояние disk: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("состояние disk: %w", err)
+	}
+	return writeStateAtomic(filepath.Join(filepath.Dir(path), roundStateName), b)
+}
+
+// Save пишет полное состояние; используется разовыми сохранениями и тестами.
+func (s *State) Save(path string) error {
+	if err := s.SaveWalk(path); err != nil {
+		return err
+	}
+	return s.SaveFrequent(path)
+}
+
+func writeStateAtomic(path string, b []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("состояние disk: %w", err)
@@ -232,15 +313,30 @@ func (c *Config) MeasureAll(ctx context.Context, entries []string, yield func())
 // FIEMAP — доли секунды чтения диска.
 const yieldEvery = 1024
 
+// WalkDue сообщает, нужен ли обход по сроку или по быстрому падению свободного места.
+func (s *State) WalkDue(c *Config, now time.Time, free int64) bool {
+	points := slices.DeleteFunc(slices.Clone(s.Free), func(p Point) bool { return now.Sub(p.At) > c.FastWindow.D() })
+	points = append(points, Point{At: now, Bytes: free})
+	drop := slices.MaxFunc(points, func(a, b Point) int { return cmp.Compare(a.Bytes, b.Bytes) }).Bytes - free
+	fast := drop >= int64(c.Fast)
+	since := now.Sub(s.LastWalk)
+	return since >= c.Walk.D() || fast && since >= walkGap
+}
+
 // Pass — один проход: свободное место free; обход записей раз в walk или по тревоге (место тает быстро).
 // Unread — записи, где не прочитались папки: их пишет вызывающий.
 func (s *State) Pass(c *Config, now time.Time, free int64, entries func() ([]string, error), m Measure,
 	owner func(path string) (string, string)) ([]Record, map[string]Usage, error) {
+	walkDue := s.WalkDue(c, now, free)
 	s.Free = append(slices.DeleteFunc(s.Free, func(p Point) bool { return now.Sub(p.At) > c.FastWindow.D() }),
 		Point{At: now, Bytes: free})
+	if !walkDue {
+		return nil, nil, nil
+	}
 	drop := slices.MaxFunc(s.Free, func(a, b Point) int { return cmp.Compare(a.Bytes, b.Bytes) }).Bytes - free
 	fast := drop >= int64(c.Fast)
-	if since := now.Sub(s.LastWalk); since < c.Walk.D() && (!fast || since < walkGap) {
+	since := now.Sub(s.LastWalk)
+	if since < c.Walk.D() && (!fast || since < walkGap) {
 		return nil, nil, nil
 	}
 	list, err := entries()

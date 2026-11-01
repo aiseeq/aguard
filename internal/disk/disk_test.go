@@ -2,6 +2,7 @@ package disk
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -125,6 +126,37 @@ func TestPass(t *testing.T) {
 	}
 	if _, ok := s.Sizes[pad]; ok {
 		t.Error("замеры исчезнувшей записи остались")
+	}
+}
+
+func TestStateLegacyMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	at := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	old := &State{
+		Sizes:    map[string][]Point{"/a": {{At: at, Bytes: 5}}},
+		Free:     []Point{{At: at, Bytes: 10}},
+		LastWalk: at,
+		Told:     map[string]time.Time{"grew /a": at},
+		Traces:   map[string]Trace{"/t": {Path: "/t", Lifetime: 72 * time.Hour}},
+	}
+	b, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil || len(loaded.Free) != 1 || loaded.Told["grew /a"].IsZero() || loaded.Sizes["/a"][0].Bytes != 5 {
+		t.Fatalf("старый state.json не прочитан полностью: %+v, %v", loaded, err)
+	}
+	if err := loaded.SaveFrequent(path); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load(path)
+	if err != nil || len(reloaded.Free) != 1 || !reloaded.Told["grew /a"].Equal(at) ||
+		len(reloaded.Sizes) != 1 || reloaded.Traces["/t"].Lifetime != 72*time.Hour {
+		t.Fatalf("после разделения состояния потеряны данные: %+v, %v", reloaded, err)
 	}
 }
 

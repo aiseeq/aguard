@@ -110,8 +110,42 @@ func busyMeter(t *testing.T) *pressure.Meter {
 	return m
 }
 
-// Проход disk спрашивает о машине по ходу обхода (yield.wait передан в MeasureAll, f62029e), а оборванный остановкой
-// обход помечен в журнале (2f23463). Замер машины здесь падает на файле тихого режима — без чтения /proc.
+// Свежие точки и отметки сигналов переживают перезапуск демона.
+func TestDiskRoundRestartPreservesFreeAndTold(t *testing.T) {
+	a, _ := testIOApp(t)
+	if err := os.MkdirAll(a.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	st := &disk.State{
+		Sizes: map[string][]disk.Point{"/entry": {{At: now, Bytes: 123}}}, Told: map[string]time.Time{"grew /entry": now},
+		LastWalk: now, Free: []disk.Point{{At: now.Add(-time.Minute), Bytes: 100}},
+	}
+	statePath := filepath.Join(a.dir("disk"), "state.json")
+	if err := st.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(a.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	if err := a.diskRound(t.Context(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, _ := testIOApp(t)
+	restarted.home, restarted.stateDir = a.home, a.stateDir
+	if err := restarted.diskRound(t.Context(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := disk.Load(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Free) != 3 || !got.Told["grew /entry"].Equal(now) || len(got.Sizes["/entry"]) != 1 || got.Sizes["/entry"][0].Bytes != 123 {
+		t.Fatalf("после перезапуска free=%v told=%v sizes=%v", got.Free, got.Told, got.Sizes)
+	}
+}
+
 func TestDiskRoundYieldsAndMarksInterrupted(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)

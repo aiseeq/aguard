@@ -126,7 +126,7 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	statePath := filepath.Join(a.dir("disk"), "state.json")
-	st, err := disk.Load(statePath)
+	st, err := a.diskRoundState(statePath, cfg, now, free)
 	if err != nil {
 		return err
 	}
@@ -145,6 +145,12 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	}
 	recs, usage, err := st.Pass(&cfg.Disk, now, free, cfg.Disk.Entries, measure, owners.Of)
 	if ctx.Err() != nil {
+		// Pass обновляет состояние до окончания обхода; остановка демона должна отбросить эти частичные изменения.
+		restored, err := disk.Load(statePath)
+		if err != nil {
+			return err
+		}
+		a.diskState, a.diskWalkLoaded = restored, true
 		return nil
 	}
 	if err != nil { // список записей неполон: сигналы по прочитанным всё равно пишем
@@ -165,10 +171,37 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	if err := store.Append(recs); err != nil {
 		return err
 	}
-	if err := st.Save(statePath); err != nil {
+	if usage != nil {
+		if err := st.SaveWalk(statePath); err != nil {
+			return err
+		}
+		a.diskWalkLoaded = true
+	}
+	if err := st.SaveFrequent(statePath); err != nil {
 		return err
 	}
 	return store.Rotate(now, cfg.Disk.Keep.D())
+}
+
+func (a *app) diskRoundState(path string, cfg *config.Config, now time.Time, free int64) (*disk.State, error) {
+	if a.diskState == nil {
+		st, loaded, err := disk.LoadRound(path)
+		if err != nil {
+			return nil, err
+		}
+		a.diskState, a.diskWalkLoaded = st, loaded
+	}
+	st := a.diskState
+	needsSizes := cfg.Disk.FreeMode != disk.FreeOff && free < int64(cfg.Disk.FreeMin)
+	if !a.diskWalkLoaded && (needsSizes || st.WalkDue(&cfg.Disk, now, free)) {
+		loaded, err := disk.Load(path)
+		if err != nil {
+			return nil, err
+		}
+		a.diskState, a.diskWalkLoaded = loaded, true
+		st = loaded
+	}
+	return st, nil
 }
 
 // diskRetro — какие записи выросли бы на grow за день, по ctime файлов, что лежат сейчас (удалённое не видно).
