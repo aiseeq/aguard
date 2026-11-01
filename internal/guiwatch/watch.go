@@ -1505,12 +1505,16 @@ func freshJournalFiles(dir string, windowStart time.Time, match func(string) boo
 		if !match(name) {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil, fmt.Errorf("stat journal file %s: %w", filepath.Join(dir, name), err)
-		}
-		if info.ModTime().Before(windowStart) {
-			continue
+		// Активный файл (без @) берём всегда: в него пишут через mmap, и mtime отстаёт от записи (замер 01.11 —
+		// до 2,1 с при запасе окна 5 с); по mtime отбираются только архивы, их mtime — момент ротации.
+		if strings.Contains(name, "@") {
+			info, err := entry.Info()
+			if err != nil {
+				return nil, fmt.Errorf("stat journal file %s: %w", filepath.Join(dir, name), err)
+			}
+			if info.ModTime().Before(windowStart) {
+				continue
+			}
 		}
 		files = append(files, filepath.Join(dir, name))
 	}

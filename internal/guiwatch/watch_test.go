@@ -24,8 +24,9 @@ func TestFreshUserJournalFiles(t *testing.T) {
 		name  string
 		mtime time.Time
 	}{
-		{"user-1000-old.journal", start.Add(-time.Second)},
-		{"user-1000-fresh.journal", start},
+		{"user-1000@old.journal", start.Add(-time.Second)},
+		{"user-1000-active.journal", start.Add(-time.Hour)},
+		{"user-1000@fresh.journal", start},
 		{"user-1000@abcdef.journal", start.Add(time.Second)},
 		{"system.journal", start.Add(time.Second)},
 		{"user-no-uid.journal", start.Add(time.Second)},
@@ -43,7 +44,7 @@ func TestFreshUserJournalFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("select fresh journal files: %v", err)
 	}
-	want := []string{filepath.Join(dir, "user-1000-fresh.journal"), filepath.Join(dir, "user-1000@abcdef.journal")}
+	want := []string{filepath.Join(dir, "user-1000-active.journal"), filepath.Join(dir, "user-1000@abcdef.journal"), filepath.Join(dir, "user-1000@fresh.journal")}
 	if !slices.Equal(got, want) {
 		t.Fatalf("fresh journal files = %v, want %v", got, want)
 	}
@@ -1114,5 +1115,22 @@ func TestDedupeSamplesRemovesOverlapOfMergedWindows(t *testing.T) {
 	}
 	if want := []int64{0, 50, 100, 150}; !slices.Equal(got, want) {
 		t.Fatalf("samples after merges = %v, want %v", got, want)
+	}
+}
+
+// TestCloseAllWaitsJournalCollection — closeAll дожидается сбора журнала среза: иначе остановка демона теряет сбор
+// последнего эпизода, а тест чистит TempDir, пока горутина пишет journal-<id>.json (тикет gui-journal-flake).
+func TestCloseAllWaitsJournalCollection(t *testing.T) {
+	root, dir, pid, at := fixture(t)
+	w, _ := setupState(t, root, dir, pid)
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "journalctl"), []byte("#!/bin/sh\nsleep 0.3\necho collected\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	w.queueJournal("wait-check", at, at.Add(time.Second))
+	w.closeAll()
+	if _, err := os.Stat(filepath.Join(dir, "journal-wait-check.json")); err != nil {
+		t.Fatalf("closeAll returned before the journal collection finished: %v", err)
 	}
 }
