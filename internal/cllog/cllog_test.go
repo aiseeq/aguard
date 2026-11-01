@@ -92,9 +92,10 @@ func TestTrustEvents(t *testing.T) {
 2026-10-28T10:37:08+01:00 p pid=177304 2.1.311→2.1.312 act: не перезапускаю: тихо 0 мин из 10 мин
 2026-10-28T11:30:00+01:00 p pid=4242: подтвердил доверие к /home/alice: Claude Code не сохраняет доверие к домашней папке
 2026-10-28T11:31:00+01:00 p pid=177305 2.1.312→2.1.312 act: версия свежая
+2026-10-28T11:32:00+01:00 q: окно доверия к /home/q: выбор не встал на «Yes» за 10s, Enter не нажат
 `
 	events, bad, err := TrustEvents(strings.NewReader(log))
-	if err != nil || bad != 0 || len(events) != 8 {
+	if err != nil || bad != 0 || len(events) != 9 {
 		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
 	}
 	if events[0].Name != "lead" || events[0].Dir != "/home/alice" || events[0].At.Format("15:04:05") != "00:38:38" || events[0].Recovered.Format("15:04:05") != "09:34:38" {
@@ -112,5 +113,8 @@ func TestTrustEvents(t *testing.T) {
 	}
 	if e := events[7]; e.Name != "p" || e.PID != 4242 || e.Recovered.Format("15:04:05") != "11:31:00" || events[6].PID != 0 {
 		t.Errorf("окно с pid cl: %+v", e)
+	}
+	if e := events[8]; e.Name != "q" || e.Dir != "/home/q" || e.Confirmed {
+		t.Errorf("неподтверждённое окно выбора: %+v", e)
 	}
 }

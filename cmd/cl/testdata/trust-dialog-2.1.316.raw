@@ -1,0 +1,20 @@
+cd ~ && claude
+]3008;start=049246e8-3077-4bdd-8c47-bf3ff5147e8f;type=shell;machineid=0123456789abcdef0123456789abcdef;user=alice;hostname=fedora;bootid=864a2e90-f175-4631-ac9d-a3ddcd85fde0;pid=3634117;cwd=/home/alice\[?2004h[01;32malice@fedora[00m:[01;34m~[00m$ cd ~ && claude
+[?2004l]3008;start=1e7210bb-aefc-4567-87ec-fa517529d61d;type=command;machineid=0123456789abcdef0123456789abcdef;user=alice;hostname=fedora;bootid=864a2e90-f175-4631-ac9d-a3ddcd85fde0;pid=3634117;cwd=/home/alice\7[r8[?25h[?25l[?2004h[?2031h[?1004h[<u[>5u[>4;2m
+[38;5;220m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[2G[38;5;220m[1mAccessing[12Gworkspace:[22m[39m
+
+[2G[1m/home/alice[22m
+
+[2GQuick[8Gsafety[15Gcheck:[22GIs[25Gthis[30Ga[32Gproject[40Gyou[44Gcreated[52Gor[55Gone[59Gyou[63Gtrust?[70G(Like[76Gyour[81Gown[85Gcode,[91Ga[93Gwell-known[104Gopen[109Gsource[116Gproject,[125Gor[128Gwork[133Gfrom[138Gyour[143Gteam).[150GIf[153Gnot,[158Gtake[163Ga[165Gmoment[172Gto[175Greview[182Gwhat's[189Gin[192Gthis
+[2Gfolder[9Gfirst.
+
+[2GClaude[9GCode'll[17Gbe[20Gable[25Gto[28Gread,[34Gedit,[40Gand[44Gexecute[52Gfiles[58Ghere.
+
+[2G]8;id=zaxmda;https://code.claude.com/docs/en/security[38;5;246mSecurity guide[39m]8;;
+
+[2G[38;5;153m❯[4GNo,[8Gexit[39m
+[4GYes,[9GI[11Gtrust[17Gthis[22Gfolder
+
+[2G[38;5;246mEnter[8Gto[11Gconfirm[19G·[21GEsc[25Gto[28Gcancel[39m
+[1C[4A[>0q[?u]7501;?[c[?2026$p[c

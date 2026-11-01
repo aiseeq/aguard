@@ -131,7 +131,9 @@ func (c *console) start(cmd *exec.Cmd, trustDir string) (func(), error) {
 	c.drafted.Store(false) // новый claude — поле пусто
 	var watch io.Writer
 	if trustDir != "" {
-		watch = newTrustWatch(trustDir, func() { c.confirmTrust(trustDir) })
+		trust := newTrustWatch(trustDir, nil)
+		trust.found = func() { c.confirmTrust(trustDir, trust) }
+		watch = trust
 	}
 	finish, err := c.attach(master, watch)
 	if err != nil { // без сырого режима ввод шёл бы строками с эхом — claude не запускать

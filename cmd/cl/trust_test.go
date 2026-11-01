@@ -53,6 +53,24 @@ func TestTrustWatch(t *testing.T) {
 			}
 		})
 	}
+	raw316, err := os.ReadFile("testdata/trust-dialog-2.1.316.raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, chunk := range []int{len(raw316), 7} {
+		found := make(chan struct{}, 1)
+		w := newTrustWatch("/home/alice", func() { found <- struct{}{} })
+		for i := 0; i < len(raw316); i += chunk {
+			if _, err := w.Write(raw316[i:min(i+chunk, len(raw316))]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		select {
+		case <-found:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("окно 2.1.316 по %d байт не найдено", chunk)
+		}
+	}
 }
 
 // Окна нет в начале вывода — дальше trustScanMax не копит.
@@ -69,10 +87,25 @@ func TestTrustWatchGivesUp(t *testing.T) {
 	}
 }
 
-// Консоль целиком: «claude» выводит окно доверия и ждёт выбор. Терминал на подъёме шлёт ответы на запросы claude
-// (замер 28.10 09:37 CET под Konsole 26.08.1 — их cl до 28.10 принимал за клавиши человека), cl всё равно выбирает
-// «да» (стрелка вниз и Enter) и пишет строку в журнал.
-func TestConfirmTrust(t *testing.T) {
+func TestTrustWatchStopsSelecting(t *testing.T) {
+	w := newTrustWatch("/home/alice", nil)
+	w.selectMu.Lock()
+	w.selecting = true
+	w.selectBuf = []byte("прежний вывод")
+	w.selectMu.Unlock()
+
+	w.stopSelecting()
+	if _, err := w.Write([]byte(strings.Repeat("x", trustScanMax*2))); err != nil {
+		t.Fatal(err)
+	}
+	if w.selecting || w.selectBuf != nil {
+		t.Fatalf("после отключения копится вывод: selecting=%v, selectBuf=%d байт", w.selecting, len(w.selectBuf))
+	}
+}
+
+// TestConfirmTrustSelects проверяет, что ответы Konsole на запросы Claude Code (случай 28.10) проходят через cl,
+// а Enter нажимается только после перерисовки с выбранным «Yes».
+func TestConfirmTrustSelects(t *testing.T) {
 	typer, tty, shown := outerTerminal(t)
 	var mu sync.Mutex
 	var notes []string
@@ -81,8 +114,8 @@ func TestConfirmTrust(t *testing.T) {
 		t.Fatal("терминал не распознан")
 	}
 	cmd := exec.Command("sh", "-c",
-		`stty -echo; cat "$0"; IFS= read -r x; case "$x" in *"$(printf '\033[B')") echo DOWN-OK;; *) echo "OTHER:$x";; esac`,
-		trustDialog)
+		`stty raw -echo; cat "$0"; dd bs=1 count=32 of=/dev/null 2>/dev/null; dd bs=1 count=3 of=/dev/null 2>/dev/null; cat "$1"; y=$(dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' '); if [ "$y" = 13 ]; then echo ENTER-OK; else echo OTHER; fi`,
+		"testdata/trust-dialog-2.1.316.raw", "testdata/trust-down-2.1.316.raw")
 	finish, err := c.start(cmd, "/home/alice")
 	if err != nil {
 		t.Fatal(err)
@@ -90,23 +123,57 @@ func TestConfirmTrust(t *testing.T) {
 	if _, err := typer.WriteString("\x1b_Gi=31;OK\x1b\\\x1b[6;28;13t\x1b[?62;1;4c"); err != nil {
 		t.Fatal(err)
 	}
-	shown.wait(t, "DOWN-OK")
+	shown.wait(t, "ENTER-OK")
 	if err := cmd.Wait(); err != nil {
 		t.Fatal(err)
 	}
 	finish()
-	const want = "подтвердил доверие к /home/alice"
-	noted := func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return slices.ContainsFunc(notes, func(s string) bool { return strings.Contains(s, want) })
+	waitTrustNote(t, &mu, &notes, "подтвердил доверие к /home/alice")
+}
+
+// TestConfirmTrustDoesNotSelect проверяет, что без перерисовки выбора cl не отправляет Enter.
+func TestConfirmTrustDoesNotSelect(t *testing.T) {
+	oldWait := trustSelectWait
+	trustSelectWait = 100 * time.Millisecond
+	t.Cleanup(func() { trustSelectWait = oldWait })
+
+	_, tty, shown := outerTerminal(t)
+	var mu sync.Mutex
+	var notes []string
+	c := openConsole(tty, tty, func(s string) { mu.Lock(); notes = append(notes, s); mu.Unlock() })
+	if c == nil {
+		t.Fatal("терминал не распознан")
 	}
-	for deadline := time.Now().Add(2 * time.Second); !noted() && time.Now().Before(deadline); {
+	cmd := exec.Command("sh", "-c",
+		`stty raw -echo; cat "$0"; dd bs=1 count=3 of=/dev/null 2>/dev/null; if timeout 1 dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' ' | grep -q '^13$'; then echo ENTER-OK; else echo NO-ENTER; fi`,
+		"testdata/trust-dialog-2.1.316.raw")
+	finish, err := c.start(cmd, "/home/alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown.wait(t, "NO-ENTER")
+	if shown.has("ENTER-OK") {
+		t.Fatal("claude получил Enter без подтверждения выбора «Yes»")
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	finish()
+	waitTrustNote(t, &mu, &notes, "окно доверия к /home/alice: выбор не встал на «Yes» за 100ms, Enter не нажат")
+}
+
+func waitTrustNote(t *testing.T, mu *sync.Mutex, notes *[]string, want string) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		mu.Lock()
+		found := slices.ContainsFunc(*notes, func(s string) bool { return strings.Contains(s, want) })
+		mu.Unlock()
+		if found {
+			return
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !noted() {
-		mu.Lock()
-		t.Errorf("в журнале нет %q: %q", want, notes)
-		mu.Unlock()
-	}
+	mu.Lock()
+	defer mu.Unlock()
+	t.Errorf("в журнале нет %q: %q", want, *notes)
 }

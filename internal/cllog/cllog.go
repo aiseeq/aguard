@@ -108,6 +108,11 @@ func TrustConfirmed(dir string) string {
 	return fmt.Sprintf(trustDone+"%s: Claude Code не сохраняет доверие к домашней папке", dir)
 }
 
+// TrustNotSelected — после стрелки вниз вывод не подтвердил выбор «Yes», поэтому Enter не нажат.
+func TrustNotSelected(dir string, wait time.Duration) string {
+	return fmt.Sprintf(trustLeft+"%s: выбор не встал на «Yes» за %v, Enter не нажат", dir, wait)
+}
+
 // TrustEvent — окно доверия при подъёме сессии (подтверждённое cl или оставшееся) и более поздний подъём той же
 // сессии: подтверждение тоже может не дойти, проверяется итог.
 type TrustEvent struct {

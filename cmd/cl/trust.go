@@ -13,16 +13,20 @@ package main
 import (
 	"bytes"
 	"regexp"
+	"sync"
 	"time"
 	"unicode"
 
 	"github.com/aiseeq/aguard/internal/cllog"
 )
 
+// trustSelectWait — сколько ждать подтверждения выбора «Yes»; переменная, чтобы тесты могли задать короткий срок.
+var trustSelectWait = 10 * time.Second
+
 const (
 	// trustScanMax — сколько начала вывода claude смотреть: окно идёт первым экраном, до беседы (проба 27.10 —
-	// первые 1,5 КБ).
-	trustScanMax = 64 << 10
+	// 1,4 и 2,1 КБ; при --resume беседа дальше 8 КБ не должна влиять).
+	trustScanMax = 8 << 10
 	// trustSettle — пауза после того, как окно появилось: меню должно успеть принять ввод.
 	trustSettle = 500 * time.Millisecond
 	// keyDown — стрелка вниз: в окне выбрано «No, exit», Enter сразу закрыл бы claude (проба в tmux 27.10 21:5x CET:
@@ -46,21 +50,38 @@ func plainText(raw []byte) []byte {
 
 // trustWatch смотрит начало вывода claude и один раз зовёт found, когда на экране окно доверия к папке dir.
 type trustWatch struct {
-	needles [][]byte
-	buf     []byte
-	done    bool
-	found   func()
+	selectMu     sync.Mutex
+	selectBuf    []byte
+	selecting    bool
+	selected     chan struct{}
+	selectedOnce sync.Once
+	needles      [][]byte
+	buf          []byte
+	done         bool
+	found        func()
 }
 
 func newTrustWatch(dir string, found func()) *trustWatch {
 	return &trustWatch{
-		needles: [][]byte{[]byte("Accessingworkspace:"), plainText([]byte(dir)), []byte("Yes,Itrustthisfolder")},
-		found:   found,
+		needles:  [][]byte{[]byte("Accessingworkspace:"), plainText([]byte(dir)), []byte("Yes,Itrustthisfolder")},
+		found:    found,
+		selected: make(chan struct{}),
 	}
 }
 
 // Write копит начало вывода; вывод claude в терминал от него не зависит — ошибок нет.
 func (w *trustWatch) Write(p []byte) (int, error) {
+	w.selectMu.Lock()
+	if w.selecting {
+		w.selectBuf = append(w.selectBuf, p...)
+		if bytes.Contains(plainText(w.selectBuf), []byte("❯Yes,Itrustthisfolder")) {
+			w.selecting = false
+			w.selectedOnce.Do(func() { close(w.selected) })
+		} else if len(w.selectBuf) > trustScanMax {
+			w.selectBuf = append(w.selectBuf[:0], w.selectBuf[len(w.selectBuf)-trustScanMax:]...)
+		}
+	}
+	w.selectMu.Unlock()
 	if w.done {
 		return len(p), nil
 	}
@@ -79,11 +100,31 @@ func (w *trustWatch) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func (w *trustWatch) stopSelecting() {
+	w.selectMu.Lock()
+	w.selecting = false
+	w.selectBuf = nil
+	w.selectMu.Unlock()
+}
+
 // confirmTrust выбирает «Yes, I trust this folder» в окне доверия к dir.
-func (c *console) confirmTrust(dir string) {
+func (c *console) confirmTrust(dir string, w *trustWatch) {
 	time.Sleep(trustSettle)
+	w.selectMu.Lock()
+	w.selectBuf = nil
+	w.selecting = true
+	w.selectMu.Unlock()
+	defer w.stopSelecting()
 	if err := c.write(keyDown); err != nil {
 		c.say(cllog.TrustWriteFailed(dir, err))
+		return
+	}
+	timer := time.NewTimer(trustSelectWait)
+	defer timer.Stop()
+	select {
+	case <-w.selected:
+	case <-timer.C:
+		c.say(cllog.TrustNotSelected(dir, trustSelectWait))
 		return
 	}
 	time.Sleep(typePause)
