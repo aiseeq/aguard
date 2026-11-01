@@ -39,7 +39,7 @@ func TestFreshUserJournalFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := freshUserJournalFiles(dir, start)
+	got, err := freshJournalFiles(dir, start, userJournalFile)
 	if err != nil {
 		t.Fatalf("select fresh journal files: %v", err)
 	}

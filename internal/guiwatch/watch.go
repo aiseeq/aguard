@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -1472,7 +1473,28 @@ func defaultJournalDir() (string, error) {
 	return filepath.Join("/var/log/journal", id), nil
 }
 
-func freshUserJournalFiles(dir string, windowStart time.Time) ([]string, error) {
+// userJournalFile — файл журнала пользователя: user-<uid>.journal и его архивы user-<uid>@….journal[~].
+func userJournalFile(name string) bool {
+	rest, ok := strings.CutPrefix(name, "user-")
+	if !ok {
+		return false
+	}
+	digits := 0
+	for digits < len(rest) && rest[digits] >= '0' && rest[digits] <= '9' {
+		digits++
+	}
+	return digits > 0 && strings.Contains(rest[digits:], ".journal")
+}
+
+// systemJournalFile — файл системного журнала (там и сообщения ядра): system.journal и архивы system@….journal[~].
+func systemJournalFile(name string) bool {
+	return name == "system.journal" || (strings.HasPrefix(name, "system@") && strings.Contains(name, ".journal"))
+}
+
+// freshJournalFiles — файлы журнала, изменённые не раньше начала окна: запись в окне есть только в них. journalctl без
+// --file открывает все файлы каталога (на машине 66, 4 ГБ) и при холодном кэше читает сотни мегабайт (замер 01.11:
+// -k по всем файлам — 559 МБ с диска, по свежим — 2,3 МБ).
+func freshJournalFiles(dir string, windowStart time.Time, match func(string) bool) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read journal directory %s: %w", dir, err)
@@ -1480,15 +1502,7 @@ func freshUserJournalFiles(dir string, windowStart time.Time) ([]string, error) 
 	var files []string
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasPrefix(name, "user-") {
-			continue
-		}
-		rest := strings.TrimPrefix(name, "user-")
-		digits := 0
-		for digits < len(rest) && rest[digits] >= '0' && rest[digits] <= '9' {
-			digits++
-		}
-		if digits == 0 || !strings.Contains(rest[digits:], ".journal") {
+		if !match(name) {
 			continue
 		}
 		info, err := entry.Info()
@@ -1513,7 +1527,7 @@ func journalWindow(ctx context.Context, start, end time.Time, journalDir, journa
 	if journalDirError != "" {
 		fileErr = fmt.Errorf("journal directory unavailable: %s", journalDirError)
 	} else {
-		files, fileErr = freshUserJournalFiles(journalDir, windowStart)
+		files, fileErr = freshJournalFiles(journalDir, windowStart, userJournalFile)
 	}
 	userUnitFlag := "-u"
 	if len(files) > 0 {
@@ -1532,18 +1546,54 @@ func journalWindow(ctx context.Context, start, end time.Time, journalDir, journa
 	if err != nil {
 		a = []byte("journalctl user error: " + err.Error())
 	}
-	cmd = exec.CommandContext(ctx, "journalctl", "-k", "-o", "short-iso-precise", "--since", from, "--until", to, "--grep=i915|drm", "--no-pager")
-	b, err := cmd.Output()
-	if err != nil {
-		b = []byte("journalctl kernel error: " + err.Error())
+	kernel, kernelNote := kernelJournalWindow(ctx, from, to, windowStart, journalDir, journalDirError)
+	lines := append(nonemptyLines(a), kernel...)
+	if kernelNote != "" {
+		lines = append([]string{kernelNote}, lines...)
 	}
-	lines := append(nonemptyLines(a), nonemptyLines(b)...)
 	if fileErr != nil {
 		lines = append([]string{"journal user fallback: " + fileErr.Error()}, lines...)
 	} else if len(files) == 0 {
 		lines = append([]string{"journal user fallback: no fresh user journal files in " + journalDir}, lines...)
 	}
 	return lines
+}
+
+// kernelGPU — строки ядра о графике; фильтр в Go, а не journalctl --grep: тот выходит с кодом 1, когда совпадений нет,
+// и пустое окно выглядело ошибкой (335 из 339 журналов срезов 01.11). Регистр не важен, как у --grep со строчным образцом.
+var kernelGPU = regexp.MustCompile(`(?i)i915|drm`)
+
+// kernelJournalWindow — сообщения ядра о графике в окне, по свежим файлам системного журнала; без них — по всем файлам
+// с пометкой отката. Вторым — строка-пометка (откат, ошибка) или пусто.
+func kernelJournalWindow(ctx context.Context, from, to string, windowStart time.Time, journalDir, journalDirError string) ([]string, string) {
+	args := []string{"-k", "-o", "short-iso-precise", "--since", from, "--until", to, "--no-pager"}
+	note := ""
+	if journalDirError != "" {
+		note = "journal kernel fallback: journal directory unavailable: " + journalDirError
+	} else if files, err := freshJournalFiles(journalDir, windowStart, systemJournalFile); err != nil {
+		note = "journal kernel fallback: " + err.Error()
+	} else if len(files) == 0 {
+		note = "journal kernel fallback: no fresh system journal files in " + journalDir
+	} else {
+		for i := len(files) - 1; i >= 0; i-- {
+			args = append([]string{"--file=" + files[i]}, args...)
+		}
+	}
+	out, err := exec.CommandContext(ctx, "journalctl", args...).Output()
+	if err != nil {
+		msg := "journalctl kernel error: " + err.Error()
+		if note != "" {
+			msg = note + "; " + msg
+		}
+		return nil, msg
+	}
+	var lines []string
+	for _, line := range nonemptyLines(out) {
+		if kernelGPU.MatchString(line) {
+			lines = append(lines, line)
+		}
+	}
+	return lines, note
 }
 
 func nonemptyLines(data []byte) []string {
