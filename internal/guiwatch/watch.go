@@ -220,6 +220,7 @@ type Watcher struct {
 	lastConfigCheck           time.Time
 	journalMu                 sync.Mutex
 	journalPending            map[string]bool
+	journalWG                 sync.WaitGroup
 	journalAgain              map[string]journalRequest
 	scannedTargets            map[int]Target
 	targetStatBuf             []byte
@@ -1115,12 +1116,14 @@ func (w *Watcher) forget(pid int) error {
 		if err := w.writeSlice(s, s.episode); err != nil {
 			return err
 		}
+		w.queueJournal(s.episode.sliceID, s.episode.start, s.episode.end)
 	}
 	for _, e := range s.closing {
 		if e.detected {
 			if err := w.writeSlice(s, e); err != nil {
 				return err
 			}
+			w.queueJournal(e.sliceID, e.start, e.end)
 		}
 	}
 	s.close()
@@ -1149,6 +1152,7 @@ func (w *Watcher) finishAll(at time.Time, suspend bool) error {
 			if err := w.writeSlice(s, s.episode); err != nil {
 				return err
 			}
+			w.queueJournal(s.episode.sliceID, s.episode.start, s.episode.end)
 			s.episode = nil
 		}
 		for _, e := range s.closing {
@@ -1156,6 +1160,7 @@ func (w *Watcher) finishAll(at time.Time, suspend bool) error {
 				if err := w.writeSlice(s, e); err != nil {
 					return err
 				}
+				w.queueJournal(e.sliceID, e.start, e.end)
 			}
 		}
 		s.closing = nil
@@ -1167,7 +1172,11 @@ func (w *Watcher) finishAll(at time.Time, suspend bool) error {
 	}
 	return nil
 }
+
+// closeAll ждёт и сборы журнала срезов: иначе остановка демона теряет сбор последнего эпизода (finishAll), а тест —
+// чистит TempDir, пока горутина ещё пишет journal-<id>.json (тикет gui-journal-flake). Каждый сбор ограничен 6 с.
 func (w *Watcher) closeAll() {
+	w.journalWG.Wait()
 	if w.selfSched != nil {
 		w.selfSched.close()
 		w.selfSched = nil
@@ -1286,15 +1295,17 @@ func (w *Watcher) queueJournal(id string, start, end time.Time) {
 	}
 	w.journalPending[id] = true
 	w.journalMu.Unlock()
+	w.journalWG.Add(1)
 	go func(req journalRequest) {
+		defer w.journalWG.Done()
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				fmt.Fprintf(os.Stderr, "gui journal panic for %s: %v\n", id, recovered)
+				w.journalMu.Lock()
+				delete(w.journalPending, id)
+				delete(w.journalAgain, id)
+				w.journalMu.Unlock()
 			}
-			w.journalMu.Lock()
-			delete(w.journalPending, id)
-			delete(w.journalAgain, id)
-			w.journalMu.Unlock()
 		}()
 		for {
 			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -1319,6 +1330,7 @@ func (w *Watcher) queueJournal(id string, start, end time.Time) {
 			next, again := w.journalAgain[id]
 			delete(w.journalAgain, id)
 			if !again {
+				delete(w.journalPending, id)
 				w.journalMu.Unlock()
 				return
 			}
@@ -1360,6 +1372,7 @@ func (w *Watcher) recordSamplerGap(at time.Time, d time.Duration) error {
 				if err := w.writeSlice(s, e); err != nil {
 					return err
 				}
+				w.queueJournal(e.sliceID, e.start, e.end)
 			}
 		}
 		s.episode = nil
@@ -1502,7 +1515,11 @@ func journalWindow(ctx context.Context, start, end time.Time, journalDir, journa
 	} else {
 		files, fileErr = freshUserJournalFiles(journalDir, windowStart)
 	}
-	args := []string{"-o", "short-iso-precise", "--since", from, "--until", to, "-u", "plasma-kwin_wayland.service", "-u", "plasma-plasmashell.service", "--no-pager"}
+	userUnitFlag := "-u"
+	if len(files) > 0 {
+		userUnitFlag = "--user-unit"
+	}
+	args := []string{"-o", "short-iso-precise", "--since", from, "--until", to, userUnitFlag, "plasma-kwin_wayland.service", userUnitFlag, "plasma-plasmashell.service", "--no-pager"}
 	if len(files) == 0 {
 		args = append([]string{"--user"}, args...)
 	} else {
