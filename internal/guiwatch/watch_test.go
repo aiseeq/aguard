@@ -459,11 +459,16 @@ func TestMaxBytesCountsOnDiskFilesAndPrettyJSON(t *testing.T) {
 		w := New(root, dir, Default(), nil)
 		w.now = func() time.Time { return at }
 		w.document.Slices = []Slice{{Target: "v", Kind: "D", Start: at, End: at}}
-		pretty, err := json.MarshalIndent(w.document, "", "  ")
+		w.document.Slices[0].ID = "bounded"
+		pretty, err := json.MarshalIndent(w.document.Slices[0], "", "  ")
 		if err != nil {
 			t.Fatal(err)
 		}
 		journal := strings.Repeat("j", 300)
+		if err := os.MkdirAll(filepath.Join(dir, "slices"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(dir, "slices", "bounded.json"), string(pretty))
 		write(t, filepath.Join(dir, "journal-extra.json"), journal)
 		w.Config.MaxBytes = int64(len(pretty) + len(journal) - 1)
 		if err := w.prune(); err != nil {
@@ -481,18 +486,22 @@ func TestMaxBytesCountsOnDiskFilesAndPrettyJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 		w.now = func() time.Time { return at }
-		w.document.Slices = []Slice{{Target: "v", Kind: "D", Start: at, End: at}}
-		pretty, err := json.MarshalIndent(w.document, "", "  ")
+		w.document.Slices = []Slice{{ID: "pretty", Target: "v", Kind: "D", Start: at, End: at}}
+		pretty, err := json.MarshalIndent(w.document.Slices[0], "", "  ")
 		if err != nil {
 			t.Fatal(err)
 		}
-		compact, err := json.Marshal(w.document)
+		compact, err := json.Marshal(w.document.Slices[0])
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(pretty) <= len(compact)+10 {
 			t.Fatalf("fixture lacks useful pretty/compact boundary: %d/%d", len(pretty), len(compact))
 		}
+		if err := os.MkdirAll(filepath.Join(dir, "slices"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		write(t, filepath.Join(dir, "slices", "pretty.json"), string(pretty))
 		w.Config.MaxBytes = int64(len(compact) + (len(pretty)-len(compact))/2)
 		if err := w.prune(); err != nil {
 			t.Fatal(err)
@@ -511,19 +520,23 @@ func TestMaxBytesDoesNotCountReplacedSlicesJSONTwice(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	pretty, err := json.MarshalIndent(w.document, "", "  ")
+	pretty, err := json.MarshalIndent(w.document.Slices[0], "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
 	journal := strings.Repeat("j", 200)
 	oldSlices := strings.Repeat("o", len(pretty)+100)
 	write(t, filepath.Join(dir, "slices.json"), oldSlices)
+	if err := os.MkdirAll(filepath.Join(dir, "slices"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "slices", "current.json"), string(pretty))
 	write(t, filepath.Join(dir, "journal-current.json"), journal)
 	w.Config.MaxBytes = int64(len(pretty) + len(journal))
-	if w.Config.MaxBytes >= int64(len(oldSlices)+len(pretty)+len(journal)) {
-		t.Fatal("test fixture does not exceed cap when old slices.json is double-counted")
+	if w.Config.MaxBytes != int64(len(pretty)+len(journal)) {
+		t.Fatal("test fixture cap must equal stored slice and journal size")
 	}
-	if err := w.prune(); err != nil {
+	if err := w.save(); err != nil {
 		t.Fatal(err)
 	}
 	if len(w.document.Slices) != 1 {
@@ -594,9 +607,94 @@ func TestConfigReloadRequestsRestart(t *testing.T) {
 
 func TestReportReturnsCorruptFileError(t *testing.T) {
 	dir := t.TempDir()
-	write(t, filepath.Join(dir, "slices.json"), "{")
+	if err := os.MkdirAll(filepath.Join(dir, "slices"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "slices", "broken.json"), "{")
 	if _, err := ReadReport(dir, time.Time{}); err == nil {
 		t.Fatal("corrupt report silently accepted")
+	}
+}
+
+func TestLoadMigratesLegacySlicesAndSuppressed(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	legacy := Document{Version: 1, Suppressed: 4, Slices: []Slice{{ID: "legacy", Target: "old", Start: at, End: at.Add(time.Second)}}}
+	b, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "slices.json"), string(b))
+	w := New("/proc", dir, Default(), nil)
+	if err := w.load(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "slices.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy file remains: %v", err)
+	}
+	d, err := ReadReport(dir, at.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Slices) != 1 || d.Slices[0].ID != "legacy" || d.Suppressed != 4 {
+		t.Fatalf("migrated report = %#v", d)
+	}
+	if err := New("/proc", dir, Default(), nil).load(); err != nil {
+		t.Fatalf("second startup: %v", err)
+	}
+}
+
+func TestPruneRemovesExpiredSliceAndJournalFiles(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	w := New("/proc", dir, Default(), nil)
+	w.now = func() time.Time { return at.Add(15 * 24 * time.Hour) }
+	w.document.Slices = []Slice{{ID: "expired", Target: "old", Start: at, End: at.Add(time.Hour)}}
+	if err := os.MkdirAll(filepath.Join(dir, "slices"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "slices", "expired.json"), `{}`)
+	write(t, filepath.Join(dir, "journal-expired.json"), `[]`)
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 0 {
+		t.Fatalf("expired slice retained: %#v", w.document.Slices)
+	}
+	for _, p := range []string{filepath.Join(dir, "slices", "expired.json"), filepath.Join(dir, "journal-expired.json")} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s remains: %v", p, err)
+		}
+	}
+}
+
+func TestPruneChecksMaxBytesAtMostOncePerMinute(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	w := New("/proc", dir, Default(), nil)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	now := at
+	w.now = func() time.Time { return now }
+	if err := w.save(); err != nil {
+		t.Fatal(err)
+	}
+	if !w.lastMaxBytesCheck.Equal(at) {
+		t.Fatalf("first max_bytes check at %s, want %s", w.lastMaxBytesCheck, at)
+	}
+
+	now = at.Add(30 * time.Second)
+	if err := w.save(); err != nil {
+		t.Fatal(err)
+	}
+	if !w.lastMaxBytesCheck.Equal(at) {
+		t.Fatalf("max_bytes check repeated before a minute: %s", w.lastMaxBytesCheck)
+	}
+
+	now = at.Add(time.Minute)
+	if err := w.save(); err != nil {
+		t.Fatal(err)
+	}
+	if !w.lastMaxBytesCheck.Equal(now) {
+		t.Fatalf("max_bytes check not repeated after a minute: %s", w.lastMaxBytesCheck)
 	}
 }
 
@@ -685,16 +783,16 @@ func TestMergedCountSurvivesLaterSliceUpdateOnDisk(t *testing.T) {
 	if err := w.writeSlice(s, update); err != nil {
 		t.Fatal(err)
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "slices.json"))
+	b, err := os.ReadFile(filepath.Join(dir, "slices", "original.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var saved Document
+	var saved Slice
 	if err := json.Unmarshal(b, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if len(saved.Slices) != 1 || saved.Slices[0].Merged != 1 {
-		t.Fatalf("later update lost merged counter on disk: %#v", saved.Slices)
+	if saved.Merged != 1 {
+		t.Fatalf("later update lost merged counter on disk: %#v", saved)
 	}
 }
 

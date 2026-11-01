@@ -202,6 +202,9 @@ type Watcher struct {
 	sleepStats          map[string]*SleepStat
 	sleepCurrent        map[int]sleepRun
 	baseSuppressed      int
+	dirtySlices         map[string]bool
+	storageLoaded       bool
+	lastMaxBytesCheck   time.Time
 	OnTargets           func(string, []string)
 	targetSummary       string
 	targetIdentity      string
@@ -216,7 +219,7 @@ type Watcher struct {
 var ErrConfigChanged = errors.New("gui config changed")
 
 func New(root, dir string, c Config, targets []Target) *Watcher {
-	return &Watcher{ProcRoot: root, Dir: dir, Config: c, PIDs: targets, now: time.Now, states: map[int]*targetState{}, document: Document{Version: 1, Slices: []Slice{}}, top: map[int]uint64{}, topStart: map[int]uint64{}, topDelta: map[int]uint64{}, topComm: map[int]string{}, topFiles: map[int]*openFile{}, sleepStats: map[string]*SleepStat{}, sleepCurrent: map[int]sleepRun{}, journalPending: map[string]bool{}}
+	return &Watcher{ProcRoot: root, Dir: dir, Config: c, PIDs: targets, now: time.Now, states: map[int]*targetState{}, document: Document{Version: 1, Slices: []Slice{}}, top: map[int]uint64{}, topStart: map[int]uint64{}, topDelta: map[int]uint64{}, topComm: map[int]string{}, topFiles: map[int]*openFile{}, sleepStats: map[string]*SleepStat{}, sleepCurrent: map[int]sleepRun{}, journalPending: map[string]bool{}, dirtySlices: map[string]bool{}}
 }
 
 func (w *Watcher) Watch(ctx context.Context) error {
@@ -1177,6 +1180,7 @@ func (w *Watcher) writeSlice(s *targetState, e *episode) error {
 				item.Samples = dedupeSamples(append(old.Samples, item.Samples...))
 				item.Threads, item.Top = old.Threads, old.Top
 				w.document.Slices[i] = item
+				w.markSliceDirty(item.ID)
 				break
 			}
 		}
@@ -1207,6 +1211,7 @@ func (w *Watcher) createSlice(s *targetState, e *episode) error {
 		old.End = item.End
 		old.DurationMS = old.End.Sub(old.Start).Milliseconds()
 		old.Samples = dedupeSamples(append(old.Samples, item.Samples...))
+		w.markSliceDirty(old.ID)
 		e.start = old.Start
 		e.detected = true
 		e.sliceID = old.ID
@@ -1240,6 +1245,7 @@ func (w *Watcher) createSlice(s *targetState, e *episode) error {
 	item.ID = hex.EncodeToString(idBytes[:])
 	item.Starttime = s.Start
 	w.document.Slices = append(w.document.Slices, item)
+	w.markSliceDirty(item.ID)
 	e.detected = true
 	e.sliceID = item.ID
 	s.lastWritten = now
@@ -1340,7 +1346,12 @@ func (w *Watcher) recordSamplerGap(at time.Time, d time.Duration) error {
 	if count >= w.Config.MaxPerHour {
 		w.document.Suppressed++
 	} else {
-		w.document.Slices = append(w.document.Slices, Slice{Target: "aguard", Kind: "sampler_gap", Start: at.Add(-d), End: at, DurationMS: d.Milliseconds(), SelfWaitMS: w.lastSelfWait})
+		item := Slice{Target: "aguard", Kind: "sampler_gap", Start: at.Add(-d), End: at, DurationMS: d.Milliseconds(), SelfWaitMS: w.lastSelfWait}
+		if err := w.assignSliceID(&item); err != nil {
+			return err
+		}
+		w.document.Slices = append(w.document.Slices, item)
+		w.markSliceDirty(item.ID)
 	}
 	return w.save()
 }
@@ -1608,79 +1619,323 @@ func (w *Watcher) topSnapshot() []ProcessCPU {
 	return out
 }
 
-func (w *Watcher) load() error {
-	p := filepath.Join(w.Dir, "slices.json")
-	b, e := os.ReadFile(p)
-	if os.IsNotExist(e) {
-		return nil
+func (w *Watcher) load() (retErr error) {
+	if err := os.MkdirAll(filepath.Join(w.Dir, "slices"), DirectoryMode); err != nil {
+		return fmt.Errorf("создать каталог файлов срезов: %w", err)
 	}
-	if e != nil {
-		return e
+	lock, err := w.lockSlices()
+	if err != nil {
+		return err
 	}
-	if e = json.Unmarshal(b, &w.document); e != nil {
-		return e
+	defer func() { retErr = errors.Join(retErr, unlockSlices(lock)) }()
+	if err := w.migrateSingleFileDocument(); err != nil {
+		return err
 	}
-	if w.document.Version != 1 {
-		return fmt.Errorf("неподдерживаемая версия gui slices: %d", w.document.Version)
+	if err := w.readSuppressed(); err != nil {
+		return err
 	}
+	items, err := readSliceFiles(w.Dir)
+	if err != nil {
+		return err
+	}
+	w.document.Slices = append(w.document.Slices, items...)
+	w.document.Version = 1
+	w.document.Sleeps = []SleepStat{}
+	sort.Slice(w.document.Slices, func(i, j int) bool { return w.document.Slices[i].Start.Before(w.document.Slices[j].Start) })
 	w.baseSuppressed = w.document.Suppressed
+	w.storageLoaded = true
 	return nil
 }
+
+func (w *Watcher) migrateSingleFileDocument() error {
+	path := filepath.Join(w.Dir, "slices.json")
+	doc, found, err := readSingleFileDocument(path)
+	if err != nil || !found {
+		return err
+	}
+	if doc.Version != 1 {
+		return fmt.Errorf("неподдерживаемая версия gui slices: %d", doc.Version)
+	}
+	for i := range doc.Slices {
+		item := &doc.Slices[i]
+		if err := w.assignSliceID(item); err != nil {
+			return err
+		}
+		if err := writeSliceIfMissing(w.Dir, item); err != nil {
+			return err
+		}
+	}
+	if count, found, err := readSuppressed(w.Dir); err != nil {
+		return err
+	} else if found {
+		doc.Suppressed = max(doc.Suppressed, count)
+	}
+	if err := writeSuppressed(w.Dir, doc.Suppressed); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("удалить старый файл срезов %s: %w", path, err)
+	}
+	return nil
+}
+
+func readSingleFileDocument(path string) (Document, bool, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Document{}, false, nil
+	}
+	if err != nil {
+		return Document{}, false, fmt.Errorf("прочитать %s: %w", path, err)
+	}
+	var doc Document
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return Document{}, false, fmt.Errorf("разобрать %s: %w", path, err)
+	}
+	for i := range doc.Slices {
+		for j := range doc.Slices[i].Samples {
+			doc.Slices[i].Samples[j].At = doc.Slices[i].Start.Add(time.Duration(doc.Slices[i].Samples[j].AtMS) * time.Millisecond)
+		}
+	}
+	return doc, true, nil
+}
+
+func readSliceFiles(dir string) ([]Slice, error) {
+	root := filepath.Join(dir, "slices")
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Slice{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("прочитать каталог срезов: %w", err)
+	}
+	items := make([]Slice, 0, len(entries))
+	for _, ent := range entries {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(root, ent.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("прочитать %s: %w", path, err)
+		}
+		var item Slice
+		if err := json.Unmarshal(b, &item); err != nil {
+			return nil, fmt.Errorf("разобрать %s: %w", path, err)
+		}
+		for i := range item.Samples {
+			item.Samples[i].At = item.Start.Add(time.Duration(item.Samples[i].AtMS) * time.Millisecond)
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func writeSliceIfMissing(dir string, item *Slice) error {
+	path := slicePath(dir, item.ID)
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("проверить срез %s: %w", path, err)
+	}
+	if err := writeJSONAtomic(path, item); err != nil {
+		return fmt.Errorf("сохранить мигрированный срез %s: %w", path, err)
+	}
+	return nil
+}
+
+func readSuppressed(dir string) (int, bool, error) {
+	path := suppressedPath(dir)
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("прочитать %s: %w", path, err)
+	}
+	var count int
+	if err := json.Unmarshal(b, &count); err != nil {
+		return 0, false, fmt.Errorf("разобрать %s: %w", path, err)
+	}
+	return count, true, nil
+}
+
+func (w *Watcher) readSuppressed() error {
+	count, found, err := readSuppressed(w.Dir)
+	if err != nil {
+		return err
+	}
+	if found {
+		w.document.Suppressed = count
+	}
+	return nil
+}
+
+func slicePath(dir, id string) string  { return filepath.Join(dir, "slices", id+".json") }
+func suppressedPath(dir string) string { return filepath.Join(dir, "suppressed.json") }
+
+func (w *Watcher) markSliceDirty(id string) {
+	if id != "" {
+		if w.dirtySlices == nil {
+			w.dirtySlices = map[string]bool{}
+		}
+		w.dirtySlices[id] = true
+	}
+}
+
+func (w *Watcher) assignSliceID(item *Slice) error {
+	if item.ID != "" {
+		return nil
+	}
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return fmt.Errorf("создать id среза: %w", err)
+	}
+	item.ID = hex.EncodeToString(id[:])
+	return nil
+}
+
+func (w *Watcher) lockSlices() (*os.File, error) {
+	lock, err := os.OpenFile(filepath.Join(w.Dir, "slices.lock"), os.O_CREATE|os.O_RDWR, privateFileMode)
+	if err != nil {
+		return nil, fmt.Errorf("открыть блокировку gui: %w", err)
+	}
+	if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("заблокировать срезы gui: %w", err)
+	}
+	return lock, nil
+}
+
+func unlockSlices(lock *os.File) error {
+	return errors.Join(unix.Flock(int(lock.Fd()), unix.LOCK_UN), lock.Close())
+}
+
+func writeJSONAtomic(path string, value any) error {
+	b, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Errorf("сериализовать %s: %w", path, err)
+	}
+	tmp := fmt.Sprintf("%s-%d.tmp", path, os.Getpid())
+	if err = os.WriteFile(tmp, b, privateFileMode); err != nil {
+		return fmt.Errorf("записать %s: %w", tmp, err)
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("переименовать %s: %w", path, err)
+	}
+	return nil
+}
+
+func writeSuppressed(dir string, count int) error { return writeJSONAtomic(suppressedPath(dir), count) }
+
 func (w *Watcher) save() (retErr error) {
 	if err := os.MkdirAll(w.Dir, DirectoryMode); err != nil {
 		return fmt.Errorf("создать каталог gui: %w", err)
 	}
-	lock, err := os.OpenFile(filepath.Join(w.Dir, "slices.lock"), os.O_CREATE|os.O_RDWR, privateFileMode)
+	if err := os.MkdirAll(filepath.Join(w.Dir, "slices"), DirectoryMode); err != nil {
+		return fmt.Errorf("создать каталог файлов срезов: %w", err)
+	}
+	legacyExists := false
+	if _, statErr := os.Stat(filepath.Join(w.Dir, "slices.json")); statErr == nil {
+		legacyExists = true
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("проверить старый файл срезов: %w", statErr)
+	}
+	lock, err := w.lockSlices()
 	if err != nil {
-		return fmt.Errorf("открыть блокировку gui: %w", err)
+		return err
 	}
-	defer func() { retErr = errors.Join(retErr, lock.Close()) }()
-	if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
-		return fmt.Errorf("заблокировать срезы gui: %w", err)
+	defer func() { retErr = errors.Join(retErr, unlockSlices(lock)) }()
+	if err := w.saveSuppressed(); err != nil {
+		return err
 	}
-	defer func() { retErr = errors.Join(retErr, unix.Flock(int(lock.Fd()), unix.LOCK_UN)) }()
-	path := filepath.Join(w.Dir, "slices.json")
-	if b, e := os.ReadFile(path); e == nil {
-		var disk Document
-		if json.Unmarshal(b, &disk) == nil {
-			byID := map[string]int{}
-			for i := range w.document.Slices {
-				s := &w.document.Slices[i]
-				if s.ID != "" {
-					byID[s.ID] = i
-				}
-			}
-			for j := range disk.Slices {
-				s := &disk.Slices[j]
-				if i, ok := byID[s.ID]; s.ID != "" && !ok {
-					w.document.Slices = append(w.document.Slices, *s)
-				} else if ok && s.End.After(w.document.Slices[i].End) {
-					w.document.Slices[i] = *s
-				}
-			}
-			delta := max(w.document.Suppressed-w.baseSuppressed, 0)
-			w.document.Suppressed = disk.Suppressed + delta
-		}
-	} else if !errors.Is(e, os.ErrNotExist) {
-		return fmt.Errorf("прочитать сохранённые срезы: %w", e)
+	if err := w.saveDirtySlices(legacyExists); err != nil {
+		return err
 	}
 	if err := w.prune(); err != nil {
 		return err
 	}
-	b, e := json.MarshalIndent(w.document, "", "  ")
-	if e != nil {
-		return fmt.Errorf("сериализовать срезы: %w", e)
-	}
-	tmp := filepath.Join(w.Dir, fmt.Sprintf("slices-%d.json.tmp", os.Getpid()))
-	if e = os.WriteFile(tmp, b, privateFileMode); e != nil {
-		return fmt.Errorf("записать временный файл срезов: %w", e)
-	}
-	if err = os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("прочитать каталог gui: %w", err)
-	}
 	w.baseSuppressed = w.document.Suppressed
+	w.dirtySlices = map[string]bool{}
+	w.storageLoaded = true
 	return nil
 }
+
+func (w *Watcher) saveSuppressed() error {
+	disk, _, err := readSuppressed(w.Dir)
+	if err != nil {
+		return err
+	}
+	delta := max(w.document.Suppressed-w.baseSuppressed, 0)
+	w.document.Suppressed = disk + delta
+	if delta > 0 {
+		return writeSuppressed(w.Dir, w.document.Suppressed)
+	}
+	return nil
+}
+
+func (w *Watcher) saveDirtySlices(wholeFileExists bool) error {
+	for i := range w.document.Slices {
+		item := &w.document.Slices[i]
+		if err := w.assignSliceID(item); err != nil {
+			return err
+		}
+		shouldSave, err := w.shouldSaveSlice(item.ID, wholeFileExists)
+		if err != nil {
+			return err
+		}
+		if !shouldSave {
+			continue
+		}
+		if err := w.mergeDiskSlice(item); err != nil {
+			return err
+		}
+		if err := writeJSONAtomic(slicePath(w.Dir, item.ID), item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *Watcher) shouldSaveSlice(id string, wholeFileExists bool) (bool, error) {
+	if w.dirtySlices[id] {
+		return true, nil
+	}
+	if w.storageLoaded || wholeFileExists {
+		return false, nil
+	}
+	_, err := os.Stat(slicePath(w.Dir, id))
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("проверить срез %s: %w", slicePath(w.Dir, id), err)
+	}
+	return true, nil
+}
+
+func (w *Watcher) mergeDiskSlice(item *Slice) error {
+	path := slicePath(w.Dir, item.ID)
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("прочитать %s: %w", path, err)
+	}
+	var old Slice
+	if err := json.Unmarshal(b, &old); err != nil {
+		return fmt.Errorf("разобрать %s: %w", path, err)
+	}
+	if old.End.After(item.End) {
+		*item = old
+	} else {
+		item.Merged = max(item.Merged, old.Merged)
+		item.Samples = dedupeSamples(append(old.Samples, item.Samples...))
+	}
+	return nil
+}
+
 func (w *Watcher) saveSleeps() error {
 	byDate := map[string][]SleepStat{}
 	for _, s := range w.sleepStats {
@@ -1716,115 +1971,191 @@ func (w *Watcher) saveSleeps() error {
 }
 func (w *Watcher) prune() error {
 	now := w.now()
-	removed := []string{}
-	keep := w.document.Slices[:0]
-	for i := range w.document.Slices {
-		s := &w.document.Slices[i]
-		if s.End.After(now.Add(-w.Config.Keep.D())) {
-			keep = append(keep, *s)
-		} else if s.ID != "" {
-			removed = append(removed, s.ID)
-		}
+	if err := w.pruneByKeep(now); err != nil {
+		return err
 	}
-	w.document.Slices = keep
-	for {
-		b, err := json.MarshalIndent(w.document, "", "  ")
-		if err != nil {
-			return fmt.Errorf("сериализовать срезы для очистки: %w", err)
+	if !w.lastMaxBytesCheck.IsZero() && now.Before(w.lastMaxBytesCheck.Add(time.Minute)) {
+		return nil
+	}
+	if err := w.pruneByMaxBytes(); err != nil {
+		return err
+	}
+	w.lastMaxBytesCheck = now
+	return nil
+}
+
+func (w *Watcher) pruneByKeep(now time.Time) error {
+	kept := make([]Slice, 0, len(w.document.Slices))
+	for i := range w.document.Slices {
+		item := &w.document.Slices[i]
+		if !item.End.After(now.Add(-w.Config.Keep.D())) {
+			if err := removeSliceFiles(w.Dir, item.ID); err != nil {
+				return err
+			}
+			if err := os.Remove(filepath.Join(w.Dir, "journal-"+item.ID+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("удалить journal среза %s: %w", item.ID, err)
+			}
+			delete(w.dirtySlices, item.ID)
+			continue
 		}
-		entries, err := os.ReadDir(w.Dir)
-		if err != nil {
-			return fmt.Errorf("прочитать каталог gui для очистки: %w", err)
+		kept = append(kept, *item)
+	}
+	w.document.Slices = kept
+	sort.Slice(w.document.Slices, func(i, j int) bool { return w.document.Slices[i].Start.Before(w.document.Slices[j].Start) })
+	return nil
+}
+
+func (w *Watcher) pruneByMaxBytes() error {
+	size, files, err := w.storedFileSizes()
+	if err != nil {
+		return err
+	}
+	return w.removeOldestUntilWithinLimit(size, files)
+}
+
+func (w *Watcher) storedFileSizes() (int64, map[string]int64, error) {
+	entries, err := os.ReadDir(w.Dir)
+	if err != nil {
+		return 0, nil, fmt.Errorf("прочитать каталог gui для очистки: %w", err)
+	}
+	size := int64(0)
+	for _, ent := range entries {
+		if ent.Name() == "slices.json" {
+			continue
 		}
-		size := int64(len(b))
-		for _, ent := range entries {
-			if ent.Name() == "slices.json" {
-				continue
-			}
-			info, e := ent.Info()
-			if errors.Is(e, os.ErrNotExist) {
-				continue
-			}
-			if e != nil {
-				return fmt.Errorf("получить размер %s: %w", ent.Name(), e)
-			}
+		info, err := ent.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return 0, nil, fmt.Errorf("получить размер %s: %w", ent.Name(), err)
+		}
+		if info.Mode().IsRegular() {
 			size += info.Size()
 		}
-		if size <= w.Config.MaxBytes {
-			break
-		}
-		if len(w.document.Slices) == 0 {
-			return fmt.Errorf("gui max_bytes=%d меньше размера файлов %d", w.Config.MaxBytes, size)
-		}
-		removed = append(removed, w.document.Slices[0].ID)
-		if id := w.document.Slices[0].ID; id != "" {
-			if err := os.Remove(filepath.Join(w.Dir, "journal-"+id+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("удалить старый journal: %w", err)
-			}
-		}
-		w.document.Slices = w.document.Slices[1:]
 	}
-	for _, id := range removed {
-		if id != "" {
-			if err := os.Remove(filepath.Join(w.Dir, "journal-"+id+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("удалить journal: %w", err)
-			}
+	entries, err = os.ReadDir(filepath.Join(w.Dir, "slices"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return 0, nil, fmt.Errorf("прочитать каталог файлов срезов: %w", err)
+	}
+	files := make(map[string]int64, len(entries))
+	for _, ent := range entries {
+		info, err := ent.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
 		}
+		if err != nil {
+			return 0, nil, fmt.Errorf("получить размер slices/%s: %w", ent.Name(), err)
+		}
+		if info.Mode().IsRegular() {
+			files[strings.TrimSuffix(ent.Name(), ".json")] = info.Size()
+			size += info.Size()
+		}
+	}
+	return size, files, nil
+}
+
+func (w *Watcher) removeOldestUntilWithinLimit(size int64, files map[string]int64) error {
+	for size > w.Config.MaxBytes && len(w.document.Slices) > 0 {
+		item := &w.document.Slices[0]
+		w.document.Slices = w.document.Slices[1:]
+		if n, ok := files[item.ID]; ok {
+			size -= n
+			delete(files, item.ID)
+		}
+		journal := filepath.Join(w.Dir, "journal-"+item.ID+".json")
+		if info, err := os.Stat(journal); err == nil {
+			size -= info.Size()
+		}
+		if err := removeSliceFiles(w.Dir, item.ID); err != nil {
+			return err
+		}
+		delete(w.dirtySlices, item.ID)
+		if err := os.Remove(journal); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("удалить journal %s: %w", item.ID, err)
+		}
+	}
+	if size > w.Config.MaxBytes {
+		return fmt.Errorf("gui max_bytes=%d меньше размера файлов %d", w.Config.MaxBytes, size)
+	}
+	return nil
+}
+
+func removeSliceFiles(dir, id string) error {
+	if id == "" {
+		return nil
+	}
+	if err := os.Remove(slicePath(dir, id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("удалить срез %s: %w", slicePath(dir, id), err)
 	}
 	return nil
 }
 
 func ReadReport(dir string, since time.Time) (Document, error) {
-	b, e := os.ReadFile(filepath.Join(dir, "slices.json"))
-	if e != nil {
-		if errors.Is(e, os.ErrNotExist) {
-			b = []byte(`{"version":1,"slices":[]}`)
-		} else {
-			return Document{}, e
-		}
+	d := Document{Version: 1, Slices: []Slice{}, Sleeps: []SleepStat{}}
+	whole, wholeFound, err := readSingleFileDocument(filepath.Join(dir, "slices.json"))
+	if err != nil {
+		return Document{}, err
 	}
-	var d Document
-	if e = json.Unmarshal(b, &d); e != nil {
-		return d, e
+	count, countFound, err := readSuppressed(dir)
+	if err != nil {
+		return Document{}, err
 	}
-	if d.Slices == nil {
-		d.Slices = []Slice{}
+	if countFound {
+		d.Suppressed = count
+	} else if wholeFound {
+		d.Suppressed = whole.Suppressed
 	}
-	if d.Sleeps == nil {
-		d.Sleeps = []SleepStat{}
+	if wholeFound {
+		d.Slices = append(d.Slices, whole.Slices...)
 	}
-	out := d.Slices[:0]
-	for i := range d.Slices {
-		s := &d.Slices[i]
-		if s.End.After(since) {
-			for j := range s.Samples {
-				s.Samples[j].At = s.Start.Add(time.Duration(s.Samples[j].AtMS) * time.Millisecond)
-			}
-			out = append(out, *s)
-		}
+	items, err := readSliceFiles(dir)
+	if err != nil {
+		return Document{}, err
 	}
-	d.Slices = out
-	for i := range d.Slices {
-		if d.Slices[i].ID == "" {
-			continue
-		}
-		jb, e := os.ReadFile(filepath.Join(dir, "journal-"+d.Slices[i].ID+".json"))
-		if errors.Is(e, os.ErrNotExist) {
-			continue
-		}
-		if e != nil {
-			return Document{}, e
-		}
-		if e = json.Unmarshal(jb, &d.Slices[i].Journal); e != nil {
-			return Document{}, e
-		}
+	d.Slices = append(d.Slices, items...)
+	if err := filterReportSlices(&d, dir, since); err != nil {
+		return Document{}, err
 	}
-	var err error
 	d.Sleeps, err = readSleepReport(dir, since)
 	if err != nil {
 		return Document{}, err
 	}
 	return d, nil
+}
+
+func filterReportSlices(d *Document, dir string, since time.Time) error {
+	out := d.Slices[:0]
+	for i := range d.Slices {
+		s := &d.Slices[i]
+		if !s.End.After(since) {
+			continue
+		}
+		out = append(out, *s)
+	}
+	d.Slices = out
+	sort.Slice(d.Slices, func(i, j int) bool { return d.Slices[i].Start.Before(d.Slices[j].Start) })
+	return attachSliceJournals(d, dir)
+}
+
+func attachSliceJournals(d *Document, dir string) error {
+	for i := range d.Slices {
+		if d.Slices[i].ID == "" {
+			continue
+		}
+		path := filepath.Join(dir, "journal-"+d.Slices[i].ID+".json")
+		jb, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("прочитать %s: %w", path, err)
+		}
+		if err := json.Unmarshal(jb, &d.Slices[i].Journal); err != nil {
+			return fmt.Errorf("разобрать %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 func readSleepReport(dir string, since time.Time) ([]SleepStat, error) {
