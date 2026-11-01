@@ -61,7 +61,7 @@ The daemon reads `~/.config/aguard/config.toml` and reloads it on each observer 
 - `[agentwaits]`: collection and retention for waits agents create themselves.
 - `[waits]`: transcript-derived wait, API failure, hook timeout, and compaction statistics.
 - `[compact]`: idle-session compaction and reset decisions; defaults to `log`.
-- `[disk]`: disk growth, free-space, and trace observation; decisions are logged by default.
+- `[disk]`: disk growth, free-space, and trace observation; record walks run after a notable free-space change, with a maximum interval; decisions are logged by default.
 - `[bgtask]`: detection thresholds for forgotten background commands; alerts are enabled by default.
 - `[cpu]`: CPU pressure sampling and alert routing; alerts are enabled by default.
 - `[io]`: I/O and memory pressure stall sampling; alerts are enabled by default.

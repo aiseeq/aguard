@@ -24,7 +24,9 @@ import (
 type Config struct {
 	Mode       string          `toml:"mode"`        // log — только журнал
 	Interval   policy.Duration `toml:"interval"`    // замер свободного места
-	Walk       policy.Duration `toml:"walk"`        // полный обход записей
+	Walk       policy.Duration `toml:"walk"`        // минимальный промежуток между обходами записей
+	WalkChange policy.Size     `toml:"walk_change"` // изменение свободного места для обхода
+	WalkMax    policy.Duration `toml:"walk_max"`    // максимум между обходами записей
 	Roots      []string        `toml:"roots"`       // их дети — записи
 	Containers []string        `toml:"containers"`  // шаблоны glob: дети совпавших папок — записи, предки — нет
 	Grow       policy.Size     `toml:"grow"`        // рост записи за сутки
@@ -70,6 +72,7 @@ const ModeLog = "log"
 func Default() Config {
 	return Config{
 		Mode: ModeLog, Interval: policy.Duration(time.Minute), Walk: policy.Duration(time.Hour),
+		WalkChange: 2 << 30, WalkMax: policy.Duration(6 * time.Hour),
 		Roots:      []string{"~/.cache", "~/.local/state", "/var/tmp"},
 		Containers: []string{"~/.cache/claude-tmp/claude-*/*", "~/.cache/worktrees/*"},
 		Grow:       5 << 30, Fast: 5 << 30, FastWindow: policy.Duration(10 * time.Minute),
@@ -91,8 +94,11 @@ func (c *Config) Validate(home string) error {
 	if c.Mode != ModeLog {
 		return fmt.Errorf("disk.mode = %q: есть только %q", c.Mode, ModeLog)
 	}
-	if c.Interval.D() < 10*time.Second || c.Walk.D() < c.Interval.D() || c.FastWindow.D() < c.Interval.D() {
-		return errors.New("disk: interval >= 10s, walk и fast_window не меньше interval")
+	if c.Interval.D() < 10*time.Second || c.Walk.D() < c.Interval.D() || c.WalkMax.D() < c.Walk.D() || c.FastWindow.D() < c.Interval.D() {
+		return errors.New("disk: interval >= 10s, walk и fast_window не меньше interval, walk_max не меньше walk")
+	}
+	if c.WalkChange <= 0 {
+		return errors.New("disk.walk_change > 0")
 	}
 	if c.Grow <= 0 || c.Fast <= 0 || c.StaleMin <= 0 || c.TraceMin <= 0 || c.Stale.D() < time.Hour || c.Keep.D() < 24*time.Hour {
 		return errors.New("disk: grow, fast, stale_min, trace_min > 0, stale >= 1h, keep >= 24h")

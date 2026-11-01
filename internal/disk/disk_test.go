@@ -121,7 +121,7 @@ func TestPass(t *testing.T) {
 
 	// запись исчезла — её замеры уходят из состояния
 	gone := func() ([]string, error) { return []string{build, farm}, nil }
-	if _, _, err := s.Pass(c, at.Add(2*time.Hour), 278*gb, gone, fakeMeasure(sizes, at), owner); err != nil {
+	if _, _, err := s.Pass(c, at.Add(7*time.Hour), 278*gb, gone, fakeMeasure(sizes, at), owner); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := s.Sizes[pad]; ok {
