@@ -36,13 +36,21 @@ tasks:
       - sh: sudo install -m 0755 bin/tmpguard-track /usr/local/sbin/tmpguard-track
       - sh: for unit in tmpguard-track tmpguard-track-home; do sudo install -m 0644 "deploy/$unit.service" "/etc/systemd/system/$unit.service"; done
       - sh: sudo systemctl daemon-reload && sudo systemctl enable tmpguard-track.service tmpguard-track-home.service && sudo systemctl restart tmpguard-track.service tmpguard-track-home.service
+  # glint падает кодом выхода на находке high (умолчание fail_on); остальные проверяет tk done.
+  # remote: при занятом ноуте graft шлёт его на pc (вывод там и тут побайтно один, glint-gate-remote).
+  glint:
+    desc: static analysis
+    heavy: true
+    remote: true
+    env: {GOWORK: "off"}
+    run:
+      - glint check .
 
 # Гейт: go vet (graft сам, первым шагом), gofmt, тесты и glint без находок high.
 gate:
   - sh: 'test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }'
   - task: test
-  # glint падает кодом выхода на находке high (умолчание fail_on); остальные проверяет tk done.
-  - sh: GOWORK=off ~/bin/glint check .
+  - task: glint
 
 version:
   mode: git-tag
