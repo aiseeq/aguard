@@ -45,7 +45,7 @@ gate:
   - sh: GOWORK=off ~/bin/glint check .
 
 version:
-  mode: none
+  mode: git-tag
 
 push:
   force_with_lease: ['w/*']
