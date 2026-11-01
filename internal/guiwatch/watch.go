@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1658,8 +1659,8 @@ func (w *Watcher) migrateSingleFileDocument() error {
 	}
 	for i := range doc.Slices {
 		item := &doc.Slices[i]
-		if err := w.assignSliceID(item); err != nil {
-			return err
+		if item.ID == "" {
+			item.ID = stableSliceID(*item)
 		}
 		if err := writeSliceIfMissing(w.Dir, item); err != nil {
 			return err
@@ -1792,6 +1793,12 @@ func (w *Watcher) assignSliceID(item *Slice) error {
 	}
 	item.ID = hex.EncodeToString(id[:])
 	return nil
+}
+
+func stableSliceID(item Slice) string {
+	identity := fmt.Sprintf("%d:%s|%d|%d:%s|%s", len(item.Target), item.Target, item.PID, len(item.Kind), item.Kind, item.Start.UTC().Format(time.RFC3339Nano))
+	sum := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(sum[:])
 }
 
 func (w *Watcher) lockSlices() (*os.File, error) {
@@ -2056,29 +2063,95 @@ func (w *Watcher) storedFileSizes() (int64, map[string]int64, error) {
 }
 
 func (w *Watcher) removeOldestUntilWithinLimit(size int64, files map[string]int64) error {
-	for size > w.Config.MaxBytes && len(w.document.Slices) > 0 {
-		item := &w.document.Slices[0]
-		w.document.Slices = w.document.Slices[1:]
-		if n, ok := files[item.ID]; ok {
+	if size <= w.Config.MaxBytes { // в пределах: файлы срезов не читаем (обход раз в минуту, история — мегабайты)
+		return nil
+	}
+	candidates, err := w.oldestSliceFiles(files)
+	if err != nil {
+		return err
+	}
+	for size > w.Config.MaxBytes && len(candidates) > 0 {
+		item := candidates[0]
+		candidates = candidates[1:]
+		if n, ok := files[item.id]; ok {
 			size -= n
-			delete(files, item.ID)
+			delete(files, item.id)
 		}
-		journal := filepath.Join(w.Dir, "journal-"+item.ID+".json")
+		journal := filepath.Join(w.Dir, "journal-"+item.id+".json")
 		if info, err := os.Stat(journal); err == nil {
 			size -= info.Size()
 		}
-		if err := removeSliceFiles(w.Dir, item.ID); err != nil {
+		if err := removeSliceFiles(w.Dir, item.id); err != nil {
 			return err
 		}
-		delete(w.dirtySlices, item.ID)
+		delete(w.dirtySlices, item.id)
 		if err := os.Remove(journal); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("удалить journal %s: %w", item.ID, err)
+			return fmt.Errorf("удалить journal %s: %w", journal, err)
 		}
+		kept := w.document.Slices[:0]
+		for i := range w.document.Slices {
+			if w.document.Slices[i].ID != item.id {
+				kept = append(kept, w.document.Slices[i])
+			}
+		}
+		w.document.Slices = kept
 	}
 	if size > w.Config.MaxBytes {
 		return fmt.Errorf("gui max_bytes=%d меньше размера файлов %d", w.Config.MaxBytes, size)
 	}
 	return nil
+}
+
+type slicePruneCandidate struct {
+	id           string
+	start, mtime time.Time
+}
+
+func (w *Watcher) oldestSliceFiles(files map[string]int64) ([]slicePruneCandidate, error) {
+	entries, err := os.ReadDir(filepath.Join(w.Dir, "slices"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("прочитать каталог файлов срезов для очистки: %w", err)
+	}
+	candidates := make([]slicePruneCandidate, 0, len(files))
+	for _, ent := range entries {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".json") {
+			continue
+		}
+		info, err := ent.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("получить время slices/%s: %w", ent.Name(), err)
+		}
+		path := filepath.Join(w.Dir, "slices", ent.Name())
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("прочитать %s для очистки: %w", path, err)
+		}
+		var item Slice
+		if err := json.Unmarshal(b, &item); err != nil {
+			return nil, fmt.Errorf("разобрать %s для очистки: %w", path, err)
+		}
+		start := item.Start
+		if start.IsZero() {
+			start = item.End
+		}
+		if start.IsZero() {
+			start = info.ModTime()
+		}
+		candidates = append(candidates, slicePruneCandidate{strings.TrimSuffix(ent.Name(), ".json"), start, info.ModTime()})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].start.Equal(candidates[j].start) {
+			if candidates[i].mtime.Equal(candidates[j].mtime) {
+				return candidates[i].id < candidates[j].id
+			}
+			return candidates[i].mtime.Before(candidates[j].mtime)
+		}
+		return candidates[i].start.Before(candidates[j].start)
+	})
+	return candidates, nil
 }
 
 func removeSliceFiles(dir, id string) error {
@@ -2107,6 +2180,11 @@ func ReadReport(dir string, since time.Time) (Document, error) {
 		d.Suppressed = whole.Suppressed
 	}
 	if wholeFound {
+		for i := range whole.Slices {
+			if whole.Slices[i].ID == "" {
+				whole.Slices[i].ID = stableSliceID(whole.Slices[i])
+			}
+		}
 		d.Slices = append(d.Slices, whole.Slices...)
 	}
 	items, err := readSliceFiles(dir)
@@ -2114,6 +2192,20 @@ func ReadReport(dir string, since time.Time) (Document, error) {
 		return Document{}, err
 	}
 	d.Slices = append(d.Slices, items...)
+	seen := make(map[string]bool, len(d.Slices))
+	deduped := d.Slices[:0]
+	for i := range d.Slices {
+		item := &d.Slices[i]
+		if item.ID == "" {
+			item.ID = stableSliceID(*item)
+		}
+		if seen[item.ID] {
+			continue
+		}
+		seen[item.ID] = true
+		deduped = append(deduped, *item)
+	}
+	d.Slices = deduped
 	if err := filterReportSlices(&d, dir, since); err != nil {
 		return Document{}, err
 	}

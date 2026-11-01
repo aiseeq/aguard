@@ -593,6 +593,47 @@ func TestConcurrentWritersMergeSlicesUnderLock(t *testing.T) {
 	}
 }
 
+func TestMaxBytesRemovesOldestSliceFromOtherWatcher(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	first := New("/proc", dir, Default(), nil)
+	second := New("/proc", dir, Default(), nil)
+	first.now = func() time.Time { return at.Add(time.Minute) }
+	second.now = func() time.Time { return at }
+	second.document.Slices = []Slice{{ID: "other-old", Target: "other", PID: 2, Kind: "D", Start: at.Add(-time.Hour), End: at.Add(-time.Minute)}}
+	if err := second.save(); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "journal-other-old.json"), strings.Repeat("j", 128))
+	first.document.Slices = []Slice{{ID: "first-new", Target: "first", PID: 1, Kind: "D", Start: at, End: at}}
+	if err := first.save(); err != nil {
+		t.Fatal(err)
+	}
+	first.document.Slices = append(first.document.Slices, second.document.Slices[0])
+	total, files, err := first.storedFileSizes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldSize := files["other-old"]
+	info, err := os.Stat(filepath.Join(dir, "journal-other-old.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Config.MaxBytes = total - oldSize - info.Size()
+	first.lastMaxBytesCheck = time.Time{}
+	if err := first.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(slicePath(dir, "other-old")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old slice from second watcher remains: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "journal-other-old.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old slice journal remains: %v", err)
+	}
+	if len(first.document.Slices) != 1 || first.document.Slices[0].ID != "first-new" {
+		t.Fatalf("memory did not drop the removed foreign slice: %#v", first.document.Slices)
+	}
+}
+
 func TestConfigReloadRequestsRestart(t *testing.T) {
 	root, dir, _, at := fixture(t)
 	w := New(root, dir, Default(), nil)
@@ -640,6 +681,47 @@ func TestLoadMigratesLegacySlicesAndSuppressed(t *testing.T) {
 	}
 	if err := New("/proc", dir, Default(), nil).load(); err != nil {
 		t.Fatalf("second startup: %v", err)
+	}
+}
+
+func TestInterruptedLegacyMigrationIsIdempotentAndReportDeduplicates(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	legacy := Document{Version: 1, Slices: []Slice{
+		{Target: "old", PID: 42, Kind: "sampler_gap", Start: at, End: at.Add(time.Second)},
+		{Target: "old", PID: 42, Kind: "sampler_gap", Start: at.Add(time.Minute), End: at.Add(time.Minute + time.Second)},
+	}}
+	b, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "slices.json"), string(b))
+	if err := os.MkdirAll(filepath.Join(dir, "slices"), DirectoryMode); err != nil {
+		t.Fatal(err)
+	}
+	first := legacy.Slices[0]
+	first.ID = stableSliceID(first)
+	if err := writeJSONAtomic(slicePath(dir, first.ID), first); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ReadReport(dir, at.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.Slices) != len(legacy.Slices) {
+		t.Fatalf("report before retry has %d slices, want %d", len(before.Slices), len(legacy.Slices))
+	}
+	if err := New("/proc", dir, Default(), nil).load(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := ReadReport(dir, at.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Slices) != len(legacy.Slices) {
+		t.Fatalf("report after retry has %d slices, want %d", len(after.Slices), len(legacy.Slices))
+	}
+	if after.Slices[0].ID != stableSliceID(legacy.Slices[0]) || after.Slices[1].ID != stableSliceID(legacy.Slices[1]) {
+		t.Fatalf("migration IDs are not deterministic: %#v", after.Slices)
 	}
 }
 

@@ -45,7 +45,7 @@ func procIO(t *testing.T) (rchar, wchar int64) {
 
 // TestSaveIOBudgetWithLargeHistory — мера тикета self-io: обновление среза не переписывает и не перечитывает
 // всю историю. История — 800 срезов по ~10 КБ в старом формате slices.json (как на машине 01.11: 871 срез, 8,4 МБ),
-// затем 100 обновлений одного идущего эпизода. Бюджет — 256 КБ чтения и записи на обновление (было ~17 МБ).
+// перенесённая при старте (load), затем 100 обновлений одного идущего эпизода. Бюджет — 256 КБ чтения и записи на обновление (было ~17 МБ).
 // После — отчёт видит всю историю и последнее обновление.
 func TestSaveIOBudgetWithLargeHistory(t *testing.T) {
 	root, dir, _, at := fixture(t)
@@ -56,7 +56,7 @@ func TestSaveIOBudgetWithLargeHistory(t *testing.T) {
 	const history = 800
 	doc := Document{Version: 1, Slices: []Slice{}, Suppressed: 7}
 	for i := range history {
-		start := at.Add(-time.Duration(history-i) * time.Minute)
+		start := at.Add(-time.Duration(history-i) * 2 * time.Minute) // 30 в час: ниже max_per_hour, эпизод не подавлен
 		samples := make([]Sample, 100)
 		for j := range samples {
 			samples[j] = Sample{AtMS: int64(j * 50), State: "D", RunMS: 1, WaitMS: 2, Wchan: "folio_wait_bit_common"}
@@ -74,6 +74,9 @@ func TestSaveIOBudgetWithLargeHistory(t *testing.T) {
 	cur := at
 	w := New(root, dir, Default(), nil)
 	w.now = func() time.Time { return cur }
+	if err = w.load(); err != nil { // старт демона: история переносится до замера, замер — обновления на ней
+		t.Fatal(err)
+	}
 	s := &targetState{Target: Target{Name: "victim", PID: 2, Start: 9}, ring: []Sample{{At: at, State: "D"}}}
 	e := &episode{start: at.Add(-time.Second), end: at, kind: "D"}
 	const updates = 100
