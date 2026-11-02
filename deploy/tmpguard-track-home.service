@@ -7,8 +7,9 @@ RequiresMountsFor=/home /var/lib
 # полный замер обходил бы go-build и другие кэши. Папка, которой не было при старте, — после перезапуска службы.
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/tmpguard-track -roots "" -mount /home/alice/.cache \
-	-containers /home/alice/.cache/sc2go-scene-orders,/home/alice/.cache/farm-hard,/home/alice/.local/state/worker,/home/alice/.cache/moment-frame \
+# Метка HOME в собаках в путях ниже — домашняя папка ставящего: graft install-track подставляет $HOME (system-служба, %h — дом root).
+ExecStart=/usr/local/sbin/tmpguard-track -roots "" -mount @HOME@/.cache \
+	-containers @HOME@/.cache/sc2go-scene-orders,@HOME@/.cache/farm-hard,@HOME@/.local/state/worker,@HOME@/.cache/moment-frame \
 	-state-dir /var/lib/tmpguard-home -run-dir /run/tmpguard-home -full 6h
 Restart=always
 RestartSec=5
