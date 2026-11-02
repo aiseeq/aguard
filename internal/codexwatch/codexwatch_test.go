@@ -429,8 +429,45 @@ func TestNoSecondConsumeSameResetsAt(t *testing.T) {
 	if s.Warned || s.Full || s.Reset.Key != key {
 		t.Fatalf("после падения расхода: %+v", s)
 	}
-	if _, _, consume := s.Apply(Reading{At: t0.Add(time.Hour), Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c); consume {
+	_, ns, consume := s.Apply(Reading{At: t0.Add(time.Hour), Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c)
+	if consume {
 		t.Fatal("второй consume по тому же «да»")
+	}
+	// повторная проверка: бойцы снова стоят — лиду письмо «100%, взвод израсходован», один раз
+	if len(ns) != 1 || ns[0].Kind != KindFull || !strings.Contains(ns[0].Message, "израсходован: outcome=reset") ||
+		!strings.Contains(ns[0].Message, "consume — твой") {
+		t.Fatalf("письма при новых 100%%: %+v", ns)
+	}
+	if _, ns, _ := s.Apply(Reading{At: t0.Add(70 * time.Minute), Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c); len(ns) != 0 {
+		t.Fatalf("повтор письма: %+v", ns)
+	}
+}
+
+// Сразу после исхода (расход ещё 100%) — письма «израсходован» нет: исход уже ушёл письмом.
+func TestNoSpentLetterRightAfterOutcome(t *testing.T) {
+	var s State
+	c := cfg()
+	r := Reading{At: t0, Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}
+	s.Apply(r, c)
+	s.Calling()
+	s.Done("nothingToReset", r)
+	if _, ns, consume := s.Apply(Reading{At: t0.Add(10 * time.Minute), Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c); consume || len(ns) != 0 {
+		t.Fatalf("после исхода: consume %v, письма %+v", consume, ns)
+	}
+}
+
+// Повторная проверка: вызов без ответа, затем строка «да» не совпала (akit For усекает минуту) — повтор тем же ключом,
+// а не письмо «consume — твой» (лид своим ключом потратил бы второй кредит).
+func TestArmedKeptAfterApprovalLost(t *testing.T) {
+	var s State
+	c := cfg()
+	base := time.Date(2026, 11, 8, 14, 39, 59, 0, time.UTC)
+	s.Apply(Reading{At: t0, Used: 100, ResetsAt: base, Available: 1, Armed: "x"}, c)
+	s.Calling()
+	key := s.Reset.Key
+	_, ns, consume := s.Apply(Reading{At: t0.Add(2 * time.Minute), Used: 100, ResetsAt: base.Add(time.Second), Available: 1}, c)
+	if !consume || s.Reset.Key != key || len(ns) != 0 {
+		t.Fatalf("consume %v, ключ %q→%q, письма %+v", consume, key, s.Reset.Key, ns)
 	}
 }
 

@@ -319,7 +319,7 @@ func TestCodexRoundTakesLock(t *testing.T) {
 // m3, m4 и доставка лиду: ключ и Called на диске до вызова; исход — письмо лиду (уходит один раз) и строка в тикет:
 // tk упал — строка повторяется следующим проходом, письмо и consume — нет.
 func TestCodexOutcomeDelivered(t *testing.T) {
-	a, _, cfg := armedApp(t)
+	a, logs, cfg := armedApp(t)
 	got := liveLead(t, a)
 	statePath := filepath.Join(a.dir("codex"), "state.json")
 	consumes := 0
@@ -358,6 +358,10 @@ func TestCodexOutcomeDelivered(t *testing.T) {
 	st, err := codexwatch.LoadState(statePath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// повторная проверка (мутация «письмо каждый проход» выживала): второй попытки письма нет — ни успешной, ни упавшей
+	if n := strings.Count(logs.String(), `msg="aguard codex: написал"`); n != 1 || strings.Contains(logs.String(), "исход не отправлен") {
+		t.Fatalf("писем лиду %d, журнал:\n%s", n, logs.String())
 	}
 	if consumes != 1 || len(notes) != 2 || notes[0] != notes[1] || len(st.Pending) != 0 {
 		t.Fatalf("consume %d, тикет %q, к доставке %+v", consumes, notes, st.Pending)

@@ -17,6 +17,7 @@ type Reset struct {
 	Called  bool      `json:"called,omitempty"`  // consume вызывался (ответа могло не быть)
 	Outcome string    `json:"outcome,omitempty"` // ответ consume; не пусто — в окне больше не звать
 	At      time.Time `json:"at,omitzero"`       // когда пришёл исход
+	Spent   bool      `json:"spent,omitempty"`   // после исхода расход упал в том же resetsAt: новые 100% — письмо, не consume
 }
 
 // Delivery — исход взвода к доставке: письмом лиду и строкой в тикет; каждое — до успеха.

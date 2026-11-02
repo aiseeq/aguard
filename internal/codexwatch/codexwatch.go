@@ -210,6 +210,7 @@ func (s *State) record(r Reading) {
 		var keep Reset
 		if sameReset { // «да» — на resetsAt: тот же resetsAt — тот же взвод и ключ, иначе второй consume потратит второй кредит
 			keep = s.Reset
+			keep.Spent = keep.Outcome != ""
 		}
 		*s = State{ResetsAt: r.ResetsAt, Pending: pending, Reset: keep}
 	}
@@ -226,7 +227,8 @@ func (s *State) decide(r Reading, f Forecast, c *Config) ([]Notice, bool) {
 	idle := r.ResetsAt.Sub(r.At)
 	var out []Notice
 	switch {
-	case r.Used >= 100 && r.Armed != "" && idle > c.MinIdle.D():
+	// вызов без ответа держит взвод, даже если строка «да» перестала совпадать: повтор тем же ключом, а не письмо «consume — твой»
+	case r.Used >= 100 && (r.Armed != "" || s.Reset.Called && s.Reset.Outcome == "") && idle > c.MinIdle.D():
 		return s.armed(r, idle)
 	case r.Used >= 100:
 		if !s.Full && idle > c.MinIdle.D() && (r.Available > 0 || s.Warned) {
@@ -256,7 +258,15 @@ func (s *State) decide(r Reading, f Forecast, c *Config) ([]Notice, bool) {
 func (s *State) armed(r Reading, idle time.Duration) ([]Notice, bool) {
 	switch {
 	case s.Reset.Outcome != "":
-		return nil, false
+		// после исхода расход упал и снова 100% в том же resetsAt: взвод израсходован — письмо, как без взвода
+		if !s.Reset.Spent || s.Full || (r.Available == 0 && !s.Warned) {
+			return nil, false
+		}
+		s.Full = true
+		un := r
+		un.Armed = ""
+		return []Notice{{KindFull, fullText(un, idle) + fmt.Sprintf(" Взвод этого окна уже израсходован: outcome=%s, "+
+			"idempotencyKey %s.", s.Reset.Outcome, s.Reset.Key)}}, false
 	case r.Available == 0 && !s.Reset.Called: // consume ничего не даст
 		if s.Full {
 			return nil, false
