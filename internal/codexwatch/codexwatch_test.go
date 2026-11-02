@@ -412,3 +412,68 @@ func TestNewKeyUUID(t *testing.T) {
 		t.Fatalf("ключ %q", k)
 	}
 }
+
+// Проверка взвода 02.11 (проба): после reset расход упал при том же resetsAt — флаги окна заново, а взвод с исходом
+// остаётся: при новых 100% второго consume по тому же «да» нет.
+func TestNoSecondConsumeSameResetsAt(t *testing.T) {
+	var s State
+	c := cfg()
+	r := Reading{At: t0, Used: 100, ResetsAt: reset, Available: 2, Armed: "x"}
+	if _, _, consume := s.Apply(r, c); !consume {
+		t.Fatal("нет consume при взводе")
+	}
+	key := s.Reset.Key
+	s.Calling()
+	s.Done("reset", r)
+	s.Apply(Reading{At: t0.Add(10 * time.Minute), Used: 0, ResetsAt: reset, Allowed: true, Available: 1, Armed: "x"}, c)
+	if s.Warned || s.Full || s.Reset.Key != key {
+		t.Fatalf("после падения расхода: %+v", s)
+	}
+	if _, _, consume := s.Apply(Reading{At: t0.Add(time.Hour), Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c); consume {
+		t.Fatal("второй consume по тому же «да»")
+	}
+}
+
+// Вызов без ответа, затем расход упал при том же resetsAt — письмо «видимо, прошёл», ключ тот же: повтор даст alreadyRedeemed.
+func TestLostAnswerUsageDropped(t *testing.T) {
+	var s State
+	c := cfg()
+	s.Apply(Reading{At: t0, Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c)
+	s.Calling()
+	key := s.Reset.Key
+	s.Apply(Reading{At: t0.Add(2 * time.Minute), Used: 1, ResetsAt: reset, Allowed: true, Armed: "x"}, c)
+	if len(s.Pending) != 1 || !strings.Contains(s.Pending[0].Message, "расход был 100%, теперь 1%") || s.Reset.Key != key {
+		t.Fatalf("состояние: %+v", s)
+	}
+}
+
+// Риск проверки: дрожание секунд через границу минуты (:59 → :01, журнал 02.11: 18:41:51 и :52) — окно и ключ те же.
+func TestSameWindowMinuteBoundary(t *testing.T) {
+	var s State
+	c := cfg()
+	base := time.Date(2026, 11, 8, 14, 39, 59, 0, time.UTC)
+	s.Apply(Reading{At: t0, Used: 100, ResetsAt: base, Available: 1, Armed: "x"}, c)
+	key := s.Reset.Key
+	s.Calling()
+	s.Apply(Reading{At: t0.Add(2 * time.Minute), Used: 100, ResetsAt: base.Add(2 * time.Second), Available: 1, Armed: "x"}, c)
+	if s.Reset.Key != key || len(s.Pending) != 0 {
+		t.Fatalf("граница минуты: %+v", s)
+	}
+	if SameWindow(base, base.Add(time.Minute)) || SameWindow(base, base.Add(7*24*time.Hour)) {
+		t.Fatal("разные окна совпали")
+	}
+}
+
+// m5: каждый из четырёх исходов — своё пояснение в письме и в строке тикета.
+func TestDoneEachOutcome(t *testing.T) {
+	want := map[string]string{"reset": "окно сброшено", "nothingToReset": "сбрасывать нечего", "noCredit": "кредитов сброса нет",
+		"alreadyRedeemed": "уже сбросил"}
+	for outcome, what := range want {
+		var s State
+		s.Done(outcome, Reading{At: t0, Used: 100, ResetsAt: reset, Armed: "x"})
+		if d := s.Pending[0]; !strings.Contains(d.Message, what) || !strings.Contains(d.Note, what) ||
+			!strings.Contains(d.Message, "outcome="+outcome) {
+			t.Fatalf("%s: %+v", outcome, d)
+		}
+	}
+}

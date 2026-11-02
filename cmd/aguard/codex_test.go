@@ -269,3 +269,97 @@ func TestCodexDryRunNoSideEffects(t *testing.T) {
 		t.Fatalf("состояние:\n%s\n→\n%s\nжурнал:\n%s\nвывод:\n%s", was, after, logs.String(), out.String())
 	}
 }
+
+// armedApp — проход со взводом при 100% и кредите: замер подставной, одобрение есть, тикет и consume задаёт тест.
+func armedApp(t *testing.T) (*app, *strings.Builder, codexwatch.Config) {
+	t.Helper()
+	dir := t.TempDir()
+	logs := &strings.Builder{}
+	a := &app{home: dir, stateDir: filepath.Join(dir, "state"), uid: 1000,
+		reg: session.Registry{Dir: filepath.Join(dir, "sessions"), ProcRoot: dir}, log: slog.New(slog.NewTextHandler(logs, nil))}
+	if err := os.MkdirAll(a.dir("codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	noArming(a)
+	a.codexApproved = func(string, time.Time) (string, error) { return "e7192203:278", nil }
+	resets := time.Now().Add(5 * 24 * time.Hour)
+	a.codexRead = func(_ context.Context, _ string, at time.Time) (codexwatch.Reading, error) {
+		return codexwatch.Reading{At: at, Used: 100, ResetsAt: resets, Available: 1}, nil
+	}
+	cfg := codexwatch.Default(dir)
+	cfg.Lead = "lead"
+	return a, logs, cfg
+}
+
+// Проверка взвода 02.11, мутация m1: mode=log — consume не зовётся, только строка «вызвал бы».
+func TestCodexLogModeNoConsume(t *testing.T) {
+	a, logs, cfg := armedApp(t)
+	cfg.Mode = codexwatch.ModeLog
+	if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "вызвал бы consume") {
+		t.Fatalf("журнал:\n%s", logs.String())
+	}
+}
+
+// m2: проход берёт блокировку состояния — при занятой (ручной tick идёт) consume не зовётся.
+func TestCodexRoundTakesLock(t *testing.T) {
+	a, _, cfg := armedApp(t)
+	release, err := codexLock(filepath.Join(a.dir("codex"), "state.json.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := a.codexRound(context.Background(), &cfg, false); err == nil || !strings.Contains(err.Error(), "уже идёт") {
+		t.Fatalf("проход при занятой блокировке: %v", err)
+	}
+}
+
+// m3, m4 и доставка лиду: ключ и Called на диске до вызова; исход — письмо лиду (уходит один раз) и строка в тикет:
+// tk упал — строка повторяется следующим проходом, письмо и consume — нет.
+func TestCodexOutcomeDelivered(t *testing.T) {
+	a, _, cfg := armedApp(t)
+	got := liveLead(t, a)
+	statePath := filepath.Join(a.dir("codex"), "state.json")
+	consumes := 0
+	a.codexConsume = func(_ context.Context, _, key string) (string, error) {
+		consumes++
+		st, err := codexwatch.LoadState(statePath)
+		if err != nil || !st.Reset.Called || st.Reset.Key != key || key == "" {
+			t.Errorf("до вызова на диске: %+v, ключ %q, %v", st.Reset, key, err)
+		}
+		return "noCredit", nil
+	}
+	var notes []string
+	fail := true
+	a.codexNote = func(_ context.Context, _, _, _, text string) error {
+		notes = append(notes, text)
+		if fail {
+			fail = false
+			return fmt.Errorf("tk упал")
+		}
+		return nil
+	}
+	ctx := context.Background()
+	for range 2 {
+		if err := a.codexRound(ctx, &cfg, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case msg := <-got:
+		if !strings.Contains(msg, "outcome=noCredit") || !strings.Contains(msg, "кредитов сброса нет") {
+			t.Fatalf("письмо лиду: %q", msg)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("письма лиду нет")
+	}
+	st, err := codexwatch.LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumes != 1 || len(notes) != 2 || notes[0] != notes[1] || len(st.Pending) != 0 {
+		t.Fatalf("consume %d, тикет %q, к доставке %+v", consumes, notes, st.Pending)
+	}
+}

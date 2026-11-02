@@ -195,14 +195,23 @@ func (s *State) Apply(r Reading, c *Config) (Forecast, []Notice, bool) {
 func (s *State) record(r Reading) {
 	// новое окно: другой плановый сброс или расход упал — недельное окно фиксировано, расход в нём только растёт
 	// (consume 02.11 сменил resetsAt, но падение расхода при том же resetsAt не должно оставлять флаги прошлого окна)
-	if !SameWindow(r.ResetsAt, s.ResetsAt) || (len(s.Samples) > 0 && r.Used < s.Samples[len(s.Samples)-1].Used-windowDrop) {
+	sameReset := SameWindow(r.ResetsAt, s.ResetsAt)
+	last := r.Used
+	if len(s.Samples) > 0 {
+		last = s.Samples[len(s.Samples)-1].Used
+	}
+	if !sameReset || r.Used < last-windowDrop {
 		pending := s.Pending
 		if s.Reset.Key != "" && s.Reset.Called && s.Reset.Outcome == "" {
-			pending = append(pending, Delivery{Message: lostText(s.ResetsAt, r.ResetsAt, s.Reset.Key), At: r.At,
+			pending = append(pending, Delivery{Message: lostText(s.ResetsAt, r.ResetsAt, last, r.Used, s.Reset.Key), At: r.At,
 				Note: "aguard: consume вызывался без ответа, затем окно сменилось — сброс, видимо, прошёл; idempotencyKey " +
 					s.Reset.Key})
 		}
-		*s = State{ResetsAt: r.ResetsAt, Pending: pending}
+		var keep Reset
+		if sameReset { // «да» — на resetsAt: тот же resetsAt — тот же взвод и ключ, иначе второй consume потратит второй кредит
+			keep = s.Reset
+		}
+		*s = State{ResetsAt: r.ResetsAt, Pending: pending, Reset: keep}
 	}
 	s.Samples = append(s.Samples, Sample{At: r.At, Used: r.Used})
 	cut := 0

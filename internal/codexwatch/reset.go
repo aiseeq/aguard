@@ -28,10 +28,12 @@ type Delivery struct {
 	Ticket  bool      `json:"ticket,omitempty"` // строка в тикет записана
 }
 
-// SameWindow — одно ли окно: по минуте UTC. В файле одобрений время с точностью до минуты (15:39:00), app-server
-// даёт секунды (15:39:23); дрожание секунд не должно заводить окно и ключ заново.
+// SameWindow — одно ли окно: resetsAt ближе минуты. app-server даёт секунды, и они дрожат (журнал 02.11: у окна до
+// 09.11 то 18:41:51, то 18:41:52); усечение до минуты на границе (:59 → :00) завело бы окно и ключ заново. Сброс по плану
+// или consume сдвигает resetsAt на дни.
 func SameWindow(a, b time.Time) bool {
-	return a.UTC().Truncate(time.Minute).Equal(b.UTC().Truncate(time.Minute))
+	d := a.Sub(b)
+	return d < time.Minute && d > -time.Minute
 }
 
 // Calling отмечает вызов consume до него: ответ может не дойти, а сброс — пройти.
@@ -78,7 +80,8 @@ func outcomeText(outcome string, r Reading, key string) string {
 		"был %s; idempotencyKey %s.", r.Used, r.Armed, outcome, outcomeWhat[outcome], local(r.ResetsAt), key)
 }
 
-func lostText(old, cur time.Time, key string) string {
+func lostText(old, cur time.Time, wasUsed, used float64, key string) string {
 	return fmt.Sprintf("aguard codex: досрочный сброс Codex вызывался (idempotencyKey %s), ответа не было, а окно сменилось: "+
-		"плановый сброс был %s, теперь %s — сброс, видимо, прошёл.", key, local(old), local(cur))
+		"плановый сброс был %s, теперь %s, расход был %.0f%%, теперь %.0f%% — сброс, видимо, прошёл.", key, local(old),
+		local(cur), wasUsed, used)
 }
