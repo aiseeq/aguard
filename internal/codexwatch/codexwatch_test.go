@@ -265,12 +265,16 @@ func TestNewWindowResetsFlags(t *testing.T) {
 
 func TestStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
-	s := State{ResetsAt: reset, Warned: true, Samples: []Sample{{t0, 91}}}
+	s := State{ResetsAt: reset, Warned: true, Samples: []Sample{{t0, 91}},
+		Reset:   Reset{Key: "k", Called: true, Outcome: "reset", At: t0, Spent: true},
+		Pending: []Delivery{{Message: "m", Note: "n", At: t0, Lead: true}}}
 	if err := s.Save(path); err != nil {
 		t.Fatal(err)
 	}
 	back, err := LoadState(path)
-	if err != nil || !back.Warned || len(back.Samples) != 1 || !back.ResetsAt.Equal(reset) {
+	// проверка 3, D2: Reset (и Spent) проходит через диск — демон читает состояние заново каждый проход
+	if err != nil || !back.Warned || len(back.Samples) != 1 || !back.ResetsAt.Equal(reset) || back.Reset != s.Reset ||
+		len(back.Pending) != 1 || back.Pending[0] != s.Pending[0] {
 		t.Fatalf("%+v %v", back, err)
 	}
 }
@@ -456,9 +460,9 @@ func TestNoSpentLetterRightAfterOutcome(t *testing.T) {
 	}
 }
 
-// Повторная проверка: вызов без ответа, затем строка «да» не совпала (akit For усекает минуту) — повтор тем же ключом,
-// а не письмо «consume — твой» (лид своим ключом потратил бы второй кредит).
-func TestArmedKeptAfterApprovalLost(t *testing.T) {
+// Проверка 3: вызов без ответа, затем «да» снято (или строка не совпала) — consume без «да» не зовётся; лиду письмо
+// «100%, consume — твой» (в том же окне прошлый вызов кредит не потратил: кредит уходит только со сбросом).
+func TestNoConsumeAfterApprovalLost(t *testing.T) {
 	var s State
 	c := cfg()
 	base := time.Date(2026, 11, 8, 14, 39, 59, 0, time.UTC)
@@ -466,8 +470,30 @@ func TestArmedKeptAfterApprovalLost(t *testing.T) {
 	s.Calling()
 	key := s.Reset.Key
 	_, ns, consume := s.Apply(Reading{At: t0.Add(2 * time.Minute), Used: 100, ResetsAt: base.Add(time.Second), Available: 1}, c)
-	if !consume || s.Reset.Key != key || len(ns) != 0 {
+	if consume || s.Reset.Key != key || len(ns) != 1 || !strings.Contains(ns[0].Message, "consume — твой") {
 		t.Fatalf("consume %v, ключ %q→%q, письма %+v", consume, key, s.Reset.Key, ns)
+	}
+}
+
+// Проверка 3, D1: вызов без ответа, расход упал при том же resetsAt, снова 100% — consume нет, лиду письмо «израсходован».
+func TestSpentAfterLostAnswer(t *testing.T) {
+	var s State
+	c := cfg()
+	s.Apply(Reading{At: t0, Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c)
+	s.Calling()
+	s.Apply(Reading{At: t0.Add(10 * time.Minute), Used: 1, ResetsAt: reset, Allowed: true, Available: 1, Armed: "x"}, c)
+	_, ns, consume := s.Apply(Reading{At: t0.Add(time.Hour), Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c)
+	if consume || len(ns) != 1 || !strings.Contains(ns[0].Message, "израсходован: outcome=ответа не было") {
+		t.Fatalf("consume %v, письма %+v", consume, ns)
+	}
+}
+
+// Проверка 3, D3: взвод израсходован, кредитов 0 и письма 1 не было — молчание, как без взвода (текст «кредит пропал
+// после прошлого письма» был бы ложью).
+func TestSpentNoCreditNoWarnSilent(t *testing.T) {
+	s := State{ResetsAt: reset, Reset: Reset{Key: "k", Called: true, Outcome: "reset", Spent: true}}
+	if _, ns, consume := s.Apply(Reading{At: t0, Used: 100, ResetsAt: reset, Armed: "x"}, cfg()); consume || len(ns) != 0 {
+		t.Fatalf("consume %v, письма %+v", consume, ns)
 	}
 }
 
