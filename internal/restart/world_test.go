@@ -100,27 +100,3 @@ func stamped(t *testing.T, file, data string, atime, mtime time.Time) {
 		t.Fatal(err)
 	}
 }
-
-// fakeTool кладёт в dir исполняемый sh-скрипт вместо внешней команды (systemd-run): тест видит, с чем cl её зовёт,
-// и не запускает ни scope, ни claude.
-func fakeTool(t *testing.T, dir, name, body string) string {
-	t.Helper()
-	file := filepath.Join(dir, name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(file, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return file
-}
-
-// readLines — строки файла, который пишет подменённая команда (аргумент на строку).
-func readLines(t *testing.T, file string) []string {
-	t.Helper()
-	data, err := os.ReadFile(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
-}
