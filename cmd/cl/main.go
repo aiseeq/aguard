@@ -41,6 +41,7 @@ func main() {
 		selfExe: "/proc/self/exe", exec: syscall.Exec}
 	if l.upgraded, _, err = takeUpgrade(); err != nil { // не разобралось — старт как обычно: новая беседа, но консоль жива
 		fmt.Fprintln(os.Stderr, "cl:", err)
+		l.journalUpgradeFail(err, "новая беседа, прежний claude без хозяина pty")
 	}
 	args := os.Args[1:]
 	if len(args) == 1 && args[0] == checkFlag {

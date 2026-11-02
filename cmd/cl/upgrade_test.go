@@ -212,3 +212,17 @@ func TestAdopt(t *testing.T) {
 		t.Errorf("терминал не вернулся в прежний режим: %v", err)
 	}
 }
+
+// Сбой подхвата в новом бинаре виден в журнале перезапусков, а не только в stderr консоли.
+func TestUpgradeFailJournaled(t *testing.T) {
+	d := t.TempDir()
+	l := launcher{name: "x-master", home: d, configFile: filepath.Join(d, "нет.json")}
+	l.journalUpgradeFail(errors.New("состояние прежнего cl: версия 0 (нужна 1)"), "новая беседа")
+	data, err := os.ReadFile(defaultConfig(d).Restart.Journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "x-master pid=") || !strings.Contains(string(data), "подхват не удался: состояние прежнего cl: версия 0 (нужна 1) — новая беседа") {
+		t.Fatalf("журнал: %q", data)
+	}
+}

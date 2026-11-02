@@ -123,7 +123,9 @@ func (l launcher) supervise(pre, userArgs []string) int {
 		var finish func()
 		var err error
 		if n == first && l.upgraded != nil && l.upgraded.Pid > 0 {
-			proc, finish, err = l.adopt(*l.upgraded)
+			if proc, finish, err = l.adopt(*l.upgraded); err != nil {
+				l.journalUpgradeFail(err, "выход")
+			}
 		} else {
 			proc, finish, err = l.start(n, args)
 		}
