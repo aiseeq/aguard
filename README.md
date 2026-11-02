@@ -67,6 +67,7 @@ The daemon reads `~/.config/aguard/config.toml` and reloads it on each observer 
 - `[io]`: I/O and memory pressure stall sampling; alerts are enabled by default.
 - `[gui]`: KDE Plasma and Chrome responsiveness sampling; defaults to logging.
 - `[remote]`: detection of remote graft failures; alerts are enabled by default.
+- `[codex]`: Codex weekly limit forecast; notices the lead before an early 100% and at 100%; alerts are enabled by default.
 - `[night]`: overnight run and digest checks; alerts are enabled by default.
 - `[said]`: transcript message classification; defaults to logging without writing the index.
 

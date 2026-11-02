@@ -121,6 +121,7 @@ func (a *app) reportSpecs(cfg *config.Config) []activity.Spec {
 		{Name: "io", Mode: cfg.IO.Mode, Looped: cfg.IO.Mode != iowatch.ModeOff},
 		{Name: "gui", Mode: cfg.GUI.Mode, Looped: cfg.GUI.Mode != guiwatch.ModeOff},
 		{Name: "remote", Mode: cfg.Remote.Mode, Looped: cfg.Remote.Mode != "off"},
+		{Name: "codex", Mode: cfg.Codex.Mode, Looped: cfg.Codex.Mode != "off"},
 		{Name: "night", Mode: cfg.Night.Mode, Looped: cfg.Night.Mode != "off"},
 	}
 }

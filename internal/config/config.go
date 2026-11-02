@@ -1,6 +1,6 @@
 // Package config — единый конфиг aguard (~/.config/aguard/config.toml):
 // общие поля (лид, админы пространств) и разделы наблюдателей [orphans], [tmp],
-// [memory], [restart], [waits], [agentwaits], [compact], [disk], [said], [bgtask], [cpu], [remote]. Перечитывается каждый проход.
+// [memory], [restart], [waits], [agentwaits], [compact], [disk], [said], [bgtask], [cpu], [remote], [codex]. Перечитывается каждый проход.
 package config
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/agentwait"
 	"github.com/aiseeq/aguard/internal/bgtask"
+	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/guiwatch"
@@ -52,6 +53,7 @@ type Config struct {
 	IO      iowatch.Config        `toml:"io"`     // телеметрия диска, свопа и фризов
 	GUI     guiwatch.Config       `toml:"gui"`    // потоки графического интерфейса
 	Remote  remotebroken.Config   `toml:"remote"` // сломанный путь graft на PC: письмо владельцу и сводка лиду
+	Codex   codexwatch.Config     `toml:"codex"`  // недельный лимит Codex: письмо лиду перед досрочным 100% и при нём
 	Night   night.Config          `toml:"night"`  // Сон, Дайджест и окна доверия
 }
 
@@ -80,6 +82,7 @@ func Default(home string) Config {
 		IO:         ioDefault(),
 		GUI:        guiwatch.Default(),
 		Remote:     remotebroken.Default(home),
+		Codex:      codexwatch.Default(home),
 		Night:      night.Default(home),
 	}
 }
@@ -135,6 +138,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.IO.Lead, c.IO.SendAuth = c.Lead, c.SendAuth
 	c.IO.Socket = policy.ExpandHome(c.IO.Socket, home)
 	c.Remote.Lead, c.Remote.SendAuth = c.Lead, c.SendAuth
+	c.Codex.Lead, c.Codex.SendAuth = c.Lead, c.SendAuth
 	c.Night.Lead, c.Night.SendAuth = c.Lead, c.SendAuth
 	if err := c.Orphans.Compile(home); err != nil {
 		return fmt.Errorf("orphans: %w", err)
@@ -174,6 +178,9 @@ func (c *Config) finish(home string, uid int) error {
 	}
 	if err := c.Remote.Validate(home); err != nil {
 		return fmt.Errorf("remote: %w", err)
+	}
+	if err := c.Codex.Validate(home); err != nil {
+		return fmt.Errorf("codex: %w", err)
 	}
 	if err := c.Night.Validate(home); err != nil {
 		return err

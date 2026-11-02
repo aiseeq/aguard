@@ -1,0 +1,10 @@
+#!/bin/bash
+# Подставной codex: `fake-codex app-server` отвечает на account/rateLimits/read содержимым $FAKE_CODEX_ANSWER
+# (result целиком), остальное читает и молчит, как настоящий app-server, — до kill.
+[[ "$1" == "app-server" ]] || { echo "fake-codex: нужен app-server" >&2; exit 2; }
+while IFS= read -r line; do
+  case "$line" in
+    *'"id":1'*) echo '{"id":1,"result":{"userAgent":"fake"}}' ;;
+    *'"id":2'*) printf '{"id":2,"result":%s}\n' "$(cat "$FAKE_CODEX_ANSWER")" ;;
+  esac
+done

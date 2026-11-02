@@ -24,6 +24,8 @@
 //
 //   - remote — сломанный путь graft на PC: письмо владельцу задачи и сводка лиду.
 //
+//   - codex — недельный лимит Codex: письмо лиду за ~2 ч до 100% раньше планового сброса и при 100%.
+//
 //     aguard run                                         демон (user-сервис)
 //     aguard orphans tick [-dry-run] [-min-dead 0s]      один проход сирот
 //     aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
@@ -37,6 +39,7 @@
 //     aguard agentwaits tick [-dry-run] | report [-json] [-window week]  ожидания, которые агенты заводят сами
 //     aguard cpu tick [-dry-run]                        замер ноута и PC: готовые задачи по владельцам
 //     aguard remote tick [-dry-run] [-file путь] [-from-start]  события сломанного пути graft
+//     aguard codex tick [-dry-run]                      замер лимита Codex: темп, прогноз 100%, письма лиду
 //     aguard report [-json] [-at время]                 срабатывания и сбои за сутки, неделю, месяц
 package main
 
@@ -82,6 +85,8 @@ type app struct {
 	cpu            map[string]*cpuHost // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
 	diskState      *disk.State         // состояние наблюдателя disk; загружается один раз демоном
 	diskWalkLoaded bool                // sizes и traces загружены до первого обхода
+	codexStep      time.Duration       // шаг codex, выбранный прошлым проходом; 0 — interval
+	codexRead      codexReader         // замер лимита Codex; подменяется в тестах
 }
 
 func main() {
@@ -92,15 +97,16 @@ func main() {
 		os.Exit(1)
 	}
 	a := &app{
-		home:     home,
-		cfgPath:  config.Path(home),
-		stateDir: filepath.Join(home, ".local", "state", "aguard"),
-		projects: filepath.Join(home, ".claude", "projects"),
-		reg:      session.ForHome(home),
-		uid:      os.Getuid(),
-		log:      lg,
-		out:      os.Stdout,
-		units:    systemdUnits{},
+		home:      home,
+		cfgPath:   config.Path(home),
+		stateDir:  filepath.Join(home, ".local", "state", "aguard"),
+		projects:  filepath.Join(home, ".claude", "projects"),
+		reg:       session.ForHome(home),
+		uid:       os.Getuid(),
+		log:       lg,
+		out:       os.Stdout,
+		units:     systemdUnits{},
+		codexRead: readCodex,
 	}
 	if len(os.Args) < 2 {
 		usage()
@@ -148,6 +154,8 @@ func (a *app) dispatch(ctx context.Context, cmd string, args []string) error {
 		return a.guiCmd(ctx, args)
 	case "remote":
 		return a.remoteCmd(args)
+	case "codex":
+		return a.codexCmd(ctx, args)
 	case "night":
 		return a.nightCmd(args)
 	case "report":
@@ -178,6 +186,7 @@ func usage() {
   aguard gui watch -for 10s [-dir папка] [-pid имя=PID]… | report [-since 24h] [-json] [-dir папка]
   aguard io import [-dir папка] [-remove] [-out файл]   снимки событий прежнего наблюдателя — в сводки, при остановленной службе
   aguard night tick [-dry-run]
+  aguard codex tick [-dry-run]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }
@@ -230,7 +239,7 @@ func (a *app) run(ctx context.Context) error {
 	signal.Notify(usr2, syscall.SIGUSR2)
 	defer signal.Stop(usr1)
 	defer signal.Stop(usr2)
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "night", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "night", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -280,6 +289,8 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Cpu.Interval.D() }},
 		{"remote", func(_ context.Context, c *config.Config) error { return a.remoteRound(&c.Remote, false, "", false) },
 			func(c *config.Config) time.Duration { return c.Remote.Interval.D() }},
+		{"codex", func(ctx context.Context, c *config.Config) error { return a.codexRound(ctx, &c.Codex, false) },
+			func(c *config.Config) time.Duration { return a.codexEvery(&c.Codex) }},
 		{"night", func(_ context.Context, c *config.Config) error { return a.nightRound(&c.Night, false) },
 			func(c *config.Config) time.Duration { return c.Night.Interval.D() }},
 	}
