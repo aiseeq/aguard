@@ -221,6 +221,33 @@ func Owner(e Event, worker func(string) (string, error), session func(int) (stri
 	return lead, nil
 }
 
+// queueReasons — причины перехода на ноут, при которых PC исправен: graft или worker не дождались места в очереди
+// тяжёлых задач PC и штатно ушли на ноут (graft-master, тикет pc-busy-fallback). Поломка — связь, запуск, отправка
+// дерева, уборка, карантин, сбой самой задачи (лид 02.11 03:3x, тикет remote-queue-not-broken).
+var queueReasons = []string{"не впущен очередью", "очередь PC дольше"}
+
+// Queued — событие о занятой очереди PC, а не о сломанном пути.
+func Queued(e Event) bool {
+	for _, r := range queueReasons {
+		if strings.Contains(e.Reason, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// SplitQueued делит события на поломки и переходы по очереди, порядок сохраняется.
+func SplitQueued(events []Event) (broken, queued []Event) {
+	for _, e := range events {
+		if Queued(e) {
+			queued = append(queued, e)
+		} else {
+			broken = append(broken, e)
+		}
+	}
+	return broken, queued
+}
+
 // Message — письмо об одном событии в одну строку, время местное.
 func Message(e Event) string {
 	return fmt.Sprintf("graft-задача %s в %s на %s не дошла (%s): %s; выполнена на ноуте.", e.Task, e.Project, e.Host,

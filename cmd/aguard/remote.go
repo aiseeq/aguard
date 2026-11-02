@@ -52,6 +52,16 @@ func (a *app) remoteRound(cfg *remotebroken.Config, dry bool, fileArg string, fr
 	if err != nil {
 		return fmt.Errorf("журнал graft: %w", err)
 	}
+	events, queued := remotebroken.SplitQueued(events)
+	for i := range queued {
+		e := &queued[i]
+		if dry {
+			fmt.Fprintf(a.out, "%s очередь, не поломка: %s\n", e.At.Local().Format("15:04"), remotebroken.Message(*e))
+			continue
+		}
+		a.log.Info("aguard remote: очередь PC, не поломка — переход на ноут", "project", e.Project, "task", e.Task, "host", e.Host, "reason", e.Reason)
+		a.note("remote", "queued", e.Host, e.Project, 1, "")
+	}
 	alive, aliveErr := a.reg.Alive()
 	if aliveErr != nil && !dry {
 		a.warn("remote", "реестр сессий", "err", aliveErr)
