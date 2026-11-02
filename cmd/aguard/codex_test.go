@@ -367,3 +367,29 @@ func TestCodexOutcomeDelivered(t *testing.T) {
 		t.Fatalf("consume %d, тикет %q, к доставке %+v", consumes, notes, st.Pending)
 	}
 }
+
+// «да» на окно через границу минуты: в файле 15:39:00 (+01:00), секунды сервера дрожат на обе стороны —
+// 14:38:58 и 14:39:59 UTC — то же окно; ровно минута и дальше — другое окно, взвода нет.
+func TestApprovedCodexAcrossMinute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ok.tsv")
+	if err := os.WriteFile(path, []byte("2026-11-08T15:39:00+01:00\te7192203:278 «Да»\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		at   time.Time
+		want string
+	}{
+		{time.Date(2026, 11, 8, 14, 38, 58, 0, time.UTC), "e7192203:278 «Да»"},
+		{time.Date(2026, 11, 8, 14, 39, 59, 0, time.UTC), "e7192203:278 «Да»"},
+		{time.Date(2026, 11, 8, 14, 40, 0, 0, time.UTC), ""},
+		{time.Date(2026, 11, 8, 14, 38, 0, 0, time.UTC), ""},
+	} {
+		got, err := approvedCodex(path, c.at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("approvedCodex(%s) = %q, want %q", c.at.Format(time.RFC3339), got, c.want)
+		}
+	}
+}

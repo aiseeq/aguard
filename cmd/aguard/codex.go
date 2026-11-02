@@ -54,7 +54,7 @@ func consumeCodex(ctx context.Context, codex, key string) (string, error) {
 	return string(out), nil
 }
 
-// approvedCodex — «да» на окно по минуте resetsAt (akit/codexlimit, общий с dreamstats).
+// approvedCodex — «да» на окно: строка ближе codexlimit.ApprovalTolerance к resetsAt (akit/codexlimit, общий с dreamstats).
 func approvedCodex(path string, resetsAt time.Time) (string, error) {
 	ap, err := codexlimit.ReadApproved(path)
 	if err != nil {
