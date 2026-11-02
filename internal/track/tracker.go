@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -552,22 +553,18 @@ func (t *Tracker) restore() {
 func (t *Tracker) save(persist bool) {
 	now := time.Now()
 	s := record.State{Updated: now, Started: t.started, Roots: t.cfg.Roots, Containers: t.cfg.Containers}
-	s.Entries = make([]record.Entry, 0, len(t.entries))
+	es := make([]*record.Entry, 0, len(t.entries))
 	for _, e := range t.entries {
-		s.Entries = append(s.Entries, *e)
+		es = append(es, e)
 	}
-	sort.Slice(s.Entries, func(i, j int) bool { return s.Entries[i].Path < s.Entries[j].Path })
-	b, err := json.Marshal(s)
+	sort.Slice(es, func(i, j int) bool { return es[i].Path < es[j].Path })
 	t.dirty = false
-	if err != nil {
-		t.log.Error("tmpguard-track: снимок не собран", "err", err)
-		return
-	}
-	if err := record.WriteFileAtomic(filepath.Join(t.cfg.RunDir, record.StateFile), b, 0o644); err != nil {
+	fill := func(w io.Writer) error { return writeState(w, &s, es) }
+	if err := record.WriteFileAtomicFunc(filepath.Join(t.cfg.RunDir, record.StateFile), 0o644, fill); err != nil {
 		t.log.Error("tmpguard-track: снимок", "err", err)
 	}
 	if persist {
-		if err := record.WriteFileAtomic(filepath.Join(t.cfg.StateDir, record.StateFile), b, 0o644); err != nil {
+		if err := record.WriteFileAtomicFunc(filepath.Join(t.cfg.StateDir, record.StateFile), 0o644, fill); err != nil {
 			t.log.Error("tmpguard-track: снимок на диск", "err", err)
 		}
 		t.lastSave = now
@@ -582,4 +579,41 @@ func (t *Tracker) logStats() {
 		s.events, s.creates, s.deletes, s.renames, s.overflow, s.procOK, s.procReaped, s.procUnknown,
 		s.sessPpid, s.sessCgroup, s.noSession, t.tombs.overrun.Load(), len(t.entries)))
 	t.st = counters{}
+}
+
+// writeState пишет снимок в формате record.State (поле Entries — из es)
+// потоком по записи: json.Marshal всего снимка выделял ~70 МБ на 30 тыс.
+// записей при живой куче 22 МБ и раздувал службу до MemoryMax=256M со
+// свопом (тикет tmpguard-track-swap). Ключи — как теги record.State;
+// совпадение формата держит TestWriteStateMatchesMarshal.
+func writeState(w io.Writer, s *record.State, es []*record.Entry) error {
+	enc := json.NewEncoder(w)
+	put := func(lit string, v any) error {
+		if _, err := io.WriteString(w, lit); err != nil {
+			return err
+		}
+		return enc.Encode(v)
+	}
+	for _, f := range []struct {
+		lit string
+		v   any
+	}{{`{"updated":`, s.Updated}, {`,"started":`, s.Started}, {`,"roots":`, s.Roots}, {`,"containers":`, s.Containers}} {
+		if err := put(f.lit, f.v); err != nil {
+			return err
+		}
+	}
+	sep := `,"entries":[`
+	for _, e := range es {
+		if err := put(sep, e); err != nil {
+			return err
+		}
+		sep = ","
+	}
+	if len(es) == 0 {
+		sep += "]" // пустой снимок: `"entries":[]`, как у json.Marshal
+	} else {
+		sep = "]"
+	}
+	_, err := io.WriteString(w, sep+"}")
+	return err
 }

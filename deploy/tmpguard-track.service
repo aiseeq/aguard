@@ -5,7 +5,10 @@ RequiresMountsFor=/tmp /var/lib
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/tmpguard-track -roots /tmp -containers /tmp/claude-tmp
+# -persist 24h: /tmp — tmpfs, после сбоя питания записей нет и снимок с диска не нужен;
+# при остановке службы снимок пишется на диск всегда, перезапуск берёт свежий из /run.
+# Каждые 30 мин (по умолчанию) — 21 МБ на 30 тыс. записей, ~1 ГБ/сут записи на SSD (тикет tmpguard-track-swap).
+ExecStart=/usr/local/sbin/tmpguard-track -roots /tmp -containers /tmp/claude-tmp -persist 24h
 Restart=always
 RestartSec=5
 StateDirectory=tmpguard

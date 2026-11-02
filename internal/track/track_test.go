@@ -1,10 +1,15 @@
 package track
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,5 +101,58 @@ func TestDeleteReachesLogAndSnapshot(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Ev != record.EvDelete || got[0].LifeS < 47*3600 || got[0].MaxBytes != 100<<20 || !got[0].Measured {
 		t.Fatalf("строка удаления: %+v", got)
+	}
+}
+
+// Потоковый снимок читается в то же, что json.Marshal(record.State).
+func TestWriteStateMatchesMarshal(t *testing.T) {
+	now := time.Date(2026, 11, 2, 2, 40, 0, 0, time.UTC)
+	own := &record.Owner{Proc: record.Proc{Pid: 7, Comm: "node", Args: `node <x> & "y"`, UID: 1000, State: record.ProcOK},
+		Chain: []record.Link{{Pid: 6, Comm: "claude"}}, Session: &record.Session{Pid: 6, Via: "ppid"}}
+	for _, es := range [][]*record.Entry{
+		nil,
+		{{Path: "/tmp/a", Ino: 1, UID: 0, Born: now}, {Path: "/tmp/b", Dir: true, Ino: 2, UID: 1000, Born: now, Owner: own, Bytes: 4096, MeasuredAt: now}},
+	} {
+		s := record.State{Updated: now, Started: now.Add(-time.Hour), Roots: []string{"/tmp"}}
+		var buf bytes.Buffer
+		if err := writeState(&buf, &s, es); err != nil {
+			t.Fatal(err)
+		}
+		want := s
+		want.Entries = make([]record.Entry, 0, len(es))
+		for _, e := range es {
+			want.Entries = append(want.Entries, *e)
+		}
+		wb, err := json.Marshal(want)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got, exp any
+		if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+			t.Fatalf("снимок не JSON: %v\n%s", err, buf.String())
+		}
+		if err := json.Unmarshal(wb, &exp); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, exp) {
+			t.Fatalf("снимок расходится с json.Marshal:\n%s\n%s", buf.String(), wb)
+		}
+	}
+}
+
+// Сохранение снимка не держит его целиком в памяти: на 3 000 записей —
+// не больше ~50 выделений на запись (было: копия всех записей и буфер во весь JSON).
+func BenchmarkSave(b *testing.B) {
+	dir := b.TempDir()
+	tr := &Tracker{cfg: Config{RunDir: dir, StateDir: dir}, entries: map[string]*record.Entry{}, log: slog.New(slog.DiscardHandler)}
+	own := &record.Owner{Proc: record.Proc{Pid: 7, Comm: "chrome", Args: strings.Repeat("--flag=value ", 40), UID: 1000, State: record.ProcOK},
+		Chain: []record.Link{{Pid: 6, Comm: "node"}, {Pid: 5, Comm: "claude"}}}
+	for i := range 3000 {
+		p := fmt.Sprintf("/tmp/playwright-artifacts-%06d", i)
+		tr.entries[p] = &record.Entry{Path: p, Dir: true, Ino: uint64(i), UID: 1000, Born: time.Now(), Owner: own}
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		tr.save(false)
 	}
 }

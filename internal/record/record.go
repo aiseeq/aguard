@@ -153,12 +153,25 @@ func ReadState(path string) (*State, error) {
 // WriteFileAtomic пишет файл через временный и rename, чтобы читатель
 // никогда не видел половину снимка.
 func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return WriteFileAtomicFunc(path, perm, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
+}
+
+// WriteFileAtomicFunc — то же, но содержимое пишет fill потоком, без
+// промежуточного буфера во весь файл (большие снимки).
+func WriteFileAtomicFunc(path string, perm os.FileMode, fill func(io.Writer) error) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return fmt.Errorf("запись %s: %w", path, err)
 	}
 	name := tmp.Name()
-	_, err = tmp.Write(data)
+	bw := bufio.NewWriterSize(tmp, 256<<10)
+	err = fill(bw)
+	if err == nil {
+		err = bw.Flush()
+	}
 	err = errors.Join(err, tmp.Close())
 	if err == nil {
 		err = os.Chmod(name, perm)
