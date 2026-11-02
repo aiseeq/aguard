@@ -210,7 +210,7 @@ func (s *State) record(r Reading) {
 		var keep Reset
 		if sameReset { // «да» — на resetsAt: тот же resetsAt — тот же взвод и ключ, иначе второй consume потратит второй кредит
 			keep = s.Reset
-			keep.Spent = keep.Called // расход упал после вызова — сброс был
+			keep.Spent = true // расход упал — окно сброшено (нами или другим): «да» на окно — один сброс
 		}
 		*s = State{ResetsAt: r.ResetsAt, Pending: pending, Reset: keep}
 	}
@@ -235,7 +235,12 @@ func (s *State) decide(r Reading, f Forecast, c *Config) ([]Notice, bool) {
 	case r.Used >= 100:
 		if !s.Full && idle > c.MinIdle.D() && (r.Available > 0 || s.Warned) {
 			s.Full = true
-			out = append(out, Notice{KindFull, fullText(r, idle)})
+			msg := fullText(r, idle)
+			if s.Reset.Called && s.Reset.Outcome == "" { // «да» не совпало после вызова без ответа: один ключ на оба исполнителя
+				msg += fmt.Sprintf(" aguard уже вызывал consume в этом окне без ответа: зови тем же idempotencyKey %s — "+
+					"второго кредита он не потратит.", s.Reset.Key)
+			}
+			out = append(out, Notice{KindFull, msg})
 		}
 	case !r.Allowed:
 		if !s.Blocked {
@@ -268,12 +273,7 @@ func (s *State) armed(r Reading, idle time.Duration) ([]Notice, bool) {
 		s.Full = true
 		un := r
 		un.Armed = ""
-		outcome := s.Reset.Outcome
-		if outcome == "" {
-			outcome = "ответа не было"
-		}
-		return []Notice{{KindFull, fullText(un, idle) + fmt.Sprintf(" Взвод этого окна уже израсходован: outcome=%s, "+
-			"idempotencyKey %s.", outcome, s.Reset.Key)}}, false
+		return []Notice{{KindFull, fullText(un, idle) + " " + spentText(s.Reset)}}, false
 	case s.Reset.Outcome != "":
 		return nil, false
 	case r.Available == 0 && !s.Reset.Called: // consume ничего не даст
@@ -321,7 +321,7 @@ func (s *State) Step(r Reading, f Forecast, c *Config) time.Duration {
 	if r.ResetsAt.Sub(f.At) <= c.MinIdle.D() {
 		return c.Interval.D()
 	}
-	armed := r.Armed != "" && s.Reset.Outcome == ""
+	armed := r.Armed != "" && s.Reset.Outcome == "" && !s.Reset.Spent
 	if armed || (!s.Full && (r.Available > 0 || s.Warned)) {
 		return c.Fast.D()
 	}

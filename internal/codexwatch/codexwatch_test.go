@@ -540,3 +540,32 @@ func TestDoneEachOutcome(t *testing.T) {
 		}
 	}
 }
+
+// Проверка 4: окно сбросил не aguard (расход упал при том же resetsAt без нашего вызова) — по тому же «да» consume нет,
+// лиду письмо «израсходован… не через aguard»; у близких 100% без кредита — шаг interval (при 100% писать нечего).
+func TestSpentByOtherNoConsume(t *testing.T) {
+	var s State
+	c := cfg()
+	s.Apply(Reading{At: t0, Used: 99, ResetsAt: reset, Allowed: true, Available: 1, Armed: "x"}, c)
+	s.Apply(Reading{At: t0.Add(10 * time.Minute), Used: 2, ResetsAt: reset, Allowed: true, Available: 1, Armed: "x"}, c)
+	near := Reading{At: t0.Add(30 * time.Minute), Used: 99, ResetsAt: reset, Allowed: true, Armed: "x"} // кредитов 0: при 100% писать нечего
+	if st := s.Step(near, Forecast{At: near.At.Add(10 * time.Minute)}, c); st != c.Interval.D() {
+		t.Fatalf("шаг у близких 100%% после израсходованного взвода: %v", st)
+	}
+	_, ns, consume := s.Apply(Reading{At: t0.Add(time.Hour), Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c)
+	if consume || len(ns) != 1 || !strings.Contains(ns[0].Message, "не через aguard") {
+		t.Fatalf("consume %v, письма %+v", consume, ns)
+	}
+}
+
+// Проверка 4: вызов без ответа, «да» не совпало — в письме «consume — твой» ключ прошлого вызова.
+func TestFullLetterNamesPendingKey(t *testing.T) {
+	var s State
+	c := cfg()
+	s.Apply(Reading{At: t0, Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c)
+	s.Calling()
+	_, ns, _ := s.Apply(Reading{At: t0.Add(2 * time.Minute), Used: 100, ResetsAt: reset, Available: 1}, c)
+	if len(ns) != 1 || !strings.Contains(ns[0].Message, "тем же idempotencyKey "+s.Reset.Key) {
+		t.Fatalf("письма %+v", ns)
+	}
+}
