@@ -224,12 +224,13 @@ func Owner(e Event, worker func(string) (string, error), session func(int) (stri
 // queueReasons — причины перехода на ноут, при которых PC исправен: graft или worker не дождались места в очереди
 // тяжёлых задач PC и штатно ушли на ноут (graft-master, тикет pc-busy-fallback). Поломка — связь, запуск, отправка
 // дерева, уборка, карантин, сбой самой задачи (лид 02.11 03:3x, тикет remote-queue-not-broken).
-var queueReasons = []string{"не впущен очередью", "очередь PC дольше"}
+// Сверка — с начала причины: подстрока в середине (текст файла карантина, вывод задачи) поломку не прячет.
+var queueReasons = []string{"run exited 125: pc: не впущен очередью graft ", "run exited 125: worker: очередь PC дольше "}
 
 // Queued — событие о занятой очереди PC, а не о сломанном пути.
 func Queued(e Event) bool {
 	for _, r := range queueReasons {
-		if strings.Contains(e.Reason, r) {
+		if strings.HasPrefix(e.Reason, r) {
 			return true
 		}
 	}

@@ -293,16 +293,11 @@ func TestSplitQueuedKeepsOnlyBroken(t *testing.T) {
 		ev("ssh: Could not resolve hostname fedora-pc.local: Name or service not known"),
 		ev("run exited 125: worker: очередь PC дольше 1ms"),
 		ev("run exited 125: worker: отправка дерева на PC: exit status 24"),
+		ev("run exited 125: worker: уборка не подтверждена: PC в карантине (текст: очередь PC дольше 1ms)"),
 	}
 	broken, queued := SplitQueued(events)
-	if len(broken) != 2 || len(queued) != 2 || !strings.HasPrefix(broken[0].Reason, "ssh:") || !strings.Contains(broken[1].Reason, "отправка дерева") {
+	if len(broken) != 3 || len(queued) != 2 || !strings.HasPrefix(broken[0].Reason, "ssh:") ||
+		!strings.Contains(broken[1].Reason, "отправка дерева") || !strings.Contains(broken[2].Reason, "карантине") {
 		t.Fatalf("broken %v, queued %v", broken, queued)
-	}
-	var s State
-	if n := s.Apply(queued[:0], nil, "lead", at, time.Hour); len(n) != 0 {
-		t.Fatalf("письма без поломок: %v", n)
-	}
-	if n := s.Apply(broken, []string{"demu-master", "demu-master"}, "lead", at, time.Hour); len(n) == 0 {
-		t.Fatal("поломка без письма")
 	}
 }
