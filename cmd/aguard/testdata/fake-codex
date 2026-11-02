@@ -1,10 +1,15 @@
 #!/bin/bash
 # Подставной codex: `fake-codex app-server` отвечает на account/rateLimits/read содержимым $FAKE_CODEX_ANSWER
-# (result целиком), остальное читает и молчит, как настоящий app-server, — до kill.
+# (result целиком), на account/rateLimitResetCredit/consume — outcome из $FAKE_CODEX_OUTCOME (hang — молчит), каждый
+# consume — строкой запроса в $FAKE_CODEX_CALLS; остальное читает и молчит, как настоящий app-server, — до kill.
 [[ "$1" == "app-server" ]] || { echo "fake-codex: нужен app-server" >&2; exit 2; }
 while IFS= read -r line; do
   case "$line" in
     *'"id":1'*) echo '{"id":1,"result":{"userAgent":"fake"}}' ;;
+    *'rateLimitResetCredit/consume'*)
+      printf '%s\n' "$line" >> "$FAKE_CODEX_CALLS"
+      id=$(sed -n 's/.*"id":\([0-9]*\).*/\1/p' <<<"$line")
+      [[ "$FAKE_CODEX_OUTCOME" == "hang" ]] || printf '{"id":%s,"result":{"outcome":"%s"}}\n' "$id" "$FAKE_CODEX_OUTCOME" ;;
     *'"id":2'*) printf '{"id":2,"result":%s}\n' "$(cat "$FAKE_CODEX_ANSWER")" ;;
   esac
 done

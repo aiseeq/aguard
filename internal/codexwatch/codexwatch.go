@@ -1,7 +1,7 @@
 // Package codexwatch — сторож недельного лимита Codex: письмо лиду за ~2 ч до 100%, когда 100% наступит раньше
-// планового сброса с простоем больше суток и есть досрочный сброс, и второе — при 100%. Сам сброс не делает:
-// исполнитель consume — лид (решение пользователя codex-reset-on-approval в ~/.claude/decisions.md, 02.11,
-// `tl e7192203:147`, `:264`).
+// планового сброса с простоем больше суток и есть досрочный сброс, и второе — при 100%. Без «да» на окно сброс не
+// делает: исполнитель consume — лид (решение пользователя codex-reset-on-approval в ~/.claude/decisions.md, 02.11,
+// `tl e7192203:147`, `:264`); с «да» на окно — «взвод» (reset.go): consume при 100% вызывает сам.
 //
 // Замер — чтение account/rateLimits/read у codex app-server раз в шаг; темп — больший из наклонов за 30 мин и
 // за 2 ч: раннее письмо дешевле позднего (противник замысла 02.11: разгон с 2 до 10 %/ч и разгон сразу после
@@ -37,6 +37,9 @@ var rateWindows = []struct {
 // keep — сколько замеров окна хранить: самое длинное окно темпа.
 const keep = 2 * time.Hour
 
+// windowDrop — падение расхода между замерами, после которого окно считается новым: больше погрешности целого процента.
+const windowDrop = 5
+
 // Config — раздел [codex] конфига aguard.
 type Config struct {
 	Mode     string          `toml:"mode"`
@@ -46,8 +49,13 @@ type Config struct {
 	Warn     policy.Duration `toml:"warn"`     // письмо 1: прогноз 100% ближе этого
 	MinIdle  policy.Duration `toml:"min_idle"` // простой до планового сброса, с которого сброс стоит предлагать
 	Codex    string          `toml:"codex"`    // путь к codex (app-server)
-	Lead     string          `toml:"-"`
-	SendAuth bool            `toml:"-"`
+	// Approvals — «да» пользователя на окно: строка `<resetsAt RFC3339><TAB><источник>` (формат Сна, dream 0a3b072).
+	Approvals  string `toml:"approvals"`
+	Tk         string `toml:"tk"`          // путь к tk: исход взвода — строкой в тикет
+	TicketRoot string `toml:"ticket_root"` // папка, где tk ищет тикет
+	Ticket     string `toml:"ticket"`      // тикет исходов взвода
+	Lead       string `toml:"-"`
+	SendAuth   bool   `toml:"-"`
 }
 
 // Default — шаг 10 мин: одно чтение ~1,5 с CPU и 230 МБ RSS на 8 с (замер 02.11), 144 в сутки; при темпе 02.11
@@ -56,7 +64,8 @@ type Config struct {
 func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(10 * time.Minute), Fast: policy.Duration(2 * time.Minute),
 		Near: policy.Duration(30 * time.Minute), Warn: policy.Duration(2 * time.Hour), MinIdle: policy.Duration(24 * time.Hour),
-		Codex: home + "/.npm/bin/codex"}
+		Codex: home + "/.npm/bin/codex", Approvals: home + "/.claude/improve/state/codex-reset-approved.tsv",
+		Tk: home + "/bin/tk", TicketRoot: home + "/git", Ticket: "codex-limit-reset"}
 }
 
 // Validate проверяет режим и шаги и раскрывает путь codex.
@@ -70,9 +79,11 @@ func (c *Config) Validate(home string) error {
 	if c.Near.D() <= 0 || c.Warn.D() < c.Near.D() || c.MinIdle.D() <= 0 {
 		return errors.New("codex.near > 0, codex.warn >= codex.near, codex.min_idle > 0")
 	}
-	c.Codex = policy.ExpandHome(c.Codex, home)
-	if c.Codex == "" {
-		return errors.New("codex.codex пуст")
+	for _, p := range []*string{&c.Codex, &c.Approvals, &c.Tk, &c.TicketRoot} {
+		*p = policy.ExpandHome(*p, home)
+	}
+	if c.Codex == "" || c.Approvals == "" || c.Tk == "" || c.TicketRoot == "" || c.Ticket == "" {
+		return errors.New("codex.codex, codex.approvals, codex.tk, codex.ticket_root и codex.ticket не пусты")
 	}
 	return nil
 }
@@ -84,6 +95,7 @@ type Reading struct {
 	ResetsAt  time.Time // плановый сброс окна
 	Allowed   bool      // ordinaryUsageAllowed
 	Available int       // доступных досрочных сбросов
+	Armed     string    // «да» пользователя на это окно (источник из файла одобрений); пусто — не взведено
 }
 
 // Sample — замер в истории окна.
@@ -100,6 +112,9 @@ type State struct {
 	Full     bool      `json:"full"`      // письмо «100%» ушло
 	Blocked  bool      `json:"blocked"`   // письмо «работа запрещена до 100%» ушло
 	NoCredit bool      `json:"no_credit"` // строка «сброса нет» записана
+	Reset    Reset     `json:"reset"`     // взвод: ключ consume и исход в этом окне
+	// Pending — исходы взвода, ещё не доставленные лиду и в тикет; переживают смену окна.
+	Pending []Delivery `json:"pending,omitempty"`
 }
 
 func LoadState(path string) (State, error) {
@@ -166,9 +181,28 @@ type Forecast struct {
 
 // Apply добавляет замер в историю и решает, что написать. Смена resetsAt (сброс окна по плану или consume) —
 // история и флаги окна заново.
-func (s *State) Apply(r Reading, c *Config) (Forecast, []Notice) {
-	if !r.ResetsAt.Equal(s.ResetsAt) {
-		*s = State{ResetsAt: r.ResetsAt}
+//
+// Взвод: при used ≥ 100, простое больше MinIdle и «да» на окно (r.Armed) — Consume в ответе вместо письма «пора»;
+// ключ идемпотентности окна создаётся здесь, до вызова. Вызов и его исход — Called и Done.
+func (s *State) Apply(r Reading, c *Config) (Forecast, []Notice, bool) {
+	s.record(r)
+	f := s.forecast(r)
+	out, consume := s.decide(r, f, c)
+	return f, out, consume
+}
+
+// record — замер в историю; новое окно — история и флаги заново, неотправленные исходы взвода — с собой.
+func (s *State) record(r Reading) {
+	// новое окно: другой плановый сброс или расход упал — недельное окно фиксировано, расход в нём только растёт
+	// (consume 02.11 сменил resetsAt, но падение расхода при том же resetsAt не должно оставлять флаги прошлого окна)
+	if !SameWindow(r.ResetsAt, s.ResetsAt) || (len(s.Samples) > 0 && r.Used < s.Samples[len(s.Samples)-1].Used-windowDrop) {
+		pending := s.Pending
+		if s.Reset.Key != "" && s.Reset.Called && s.Reset.Outcome == "" {
+			pending = append(pending, Delivery{Message: lostText(s.ResetsAt, r.ResetsAt, s.Reset.Key), At: r.At,
+				Note: "aguard: consume вызывался без ответа, затем окно сменилось — сброс, видимо, прошёл; idempotencyKey " +
+					s.Reset.Key})
+		}
+		*s = State{ResetsAt: r.ResetsAt, Pending: pending}
 	}
 	s.Samples = append(s.Samples, Sample{At: r.At, Used: r.Used})
 	cut := 0
@@ -176,10 +210,15 @@ func (s *State) Apply(r Reading, c *Config) (Forecast, []Notice) {
 		cut++
 	}
 	s.Samples = s.Samples[cut:]
-	f := s.forecast(r)
+}
+
+// decide — письма прохода и нужен ли consume.
+func (s *State) decide(r Reading, f Forecast, c *Config) ([]Notice, bool) {
 	idle := r.ResetsAt.Sub(r.At)
 	var out []Notice
 	switch {
+	case r.Used >= 100 && r.Armed != "" && idle > c.MinIdle.D():
+		return s.armed(r, idle)
 	case r.Used >= 100:
 		if !s.Full && idle > c.MinIdle.D() && (r.Available > 0 || s.Warned) {
 			s.Full = true
@@ -201,7 +240,25 @@ func (s *State) Apply(r Reading, c *Config) (Forecast, []Notice) {
 			out = append(out, Notice{KindWarn, warnText(r, f)})
 		}
 	}
-	return f, out
+	return out, false
+}
+
+// armed — 100% во взведённом окне: consume тем же ключом до исхода; кредит пропал до вызова — письмо «100%».
+func (s *State) armed(r Reading, idle time.Duration) ([]Notice, bool) {
+	switch {
+	case s.Reset.Outcome != "":
+		return nil, false
+	case r.Available == 0 && !s.Reset.Called: // consume ничего не даст
+		if s.Full {
+			return nil, false
+		}
+		s.Full = true
+		return []Notice{{KindFull, fullText(r, idle)}}, false
+	}
+	if s.Reset.Key == "" {
+		s.Reset.Key = newKey()
+	}
+	return nil, true
 }
 
 // forecast — больший из наклонов окон rateWindows; окно без замера старше его половины не считается.
@@ -225,13 +282,19 @@ func (s *State) forecast(r Reading) Forecast {
 	return Forecast{Rate: rate, At: r.At.Add(time.Duration((100 - r.Used) / rate * float64(time.Hour)))}
 }
 
-// Step — шаг до следующего замера: у самых 100% — Fast, иначе Interval. После 100% быстрый шаг не нужен: письмо
-// ушло, дальше ждём сброса.
-func Step(r Reading, f Forecast, c *Config) time.Duration {
-	if r.Used >= 100 {
+// Step — шаг до следующего замера: Fast, когда прогноз 100% ближе Near и при 100% что-то будет (письмо «100%» или
+// consume), иначе Interval. Порога по проценту нет: на паузе у 99% темп падает до нуля, и шаг — Interval (проверка
+// 02.11: при «used ≥ 99» пауза на 99% давала 355 чтений по 2 мин за 12 ч, то же — без кредита и при простое меньше
+// суток, когда при 100% писать нечего).
+func (s *State) Step(r Reading, f Forecast, c *Config) time.Duration {
+	if r.Used >= 100 || f.At.IsZero() || f.At.Sub(r.At) > c.Near.D() {
 		return c.Interval.D()
 	}
-	if r.Used >= 99 || (!f.At.IsZero() && f.At.Sub(r.At) <= c.Near.D()) {
+	if r.ResetsAt.Sub(f.At) <= c.MinIdle.D() {
+		return c.Interval.D()
+	}
+	armed := r.Armed != "" && s.Reset.Outcome == ""
+	if armed || (!s.Full && (r.Available > 0 || s.Warned)) {
 		return c.Fast.D()
 	}
 	return c.Interval.D()
@@ -244,13 +307,22 @@ func local(t time.Time) string { return t.Local().Format("02.01 15:04 MST") }
 func days(d time.Duration) string { return fmt.Sprintf("%.1f сут", d.Hours()/24) }
 
 func warnText(r Reading, f Forecast) string {
-	return fmt.Sprintf("aguard codex: недельный лимит Codex — %.0f%%, при темпе %.1f %%/ч 100%% около %s; плановый сброс %s, "+
-		"простой %s; досрочных сбросов доступно: %d. Вопрос пользователю и consume при 100%% — твои; %s. "+
-		"Письмо «100%%» пришлю, когда дойдёт.", r.Used, f.Rate, local(f.At), local(r.ResetsAt), days(r.ResetsAt.Sub(f.At)),
-		r.Available, ref)
+	head := fmt.Sprintf("aguard codex: недельный лимит Codex — %.0f%%, при темпе %.1f %%/ч 100%% около %s; плановый сброс %s, "+
+		"простой %s; досрочных сбросов доступно: %d.", r.Used, f.Rate, local(f.At), local(r.ResetsAt),
+		days(r.ResetsAt.Sub(f.At)), r.Available)
+	if r.Armed != "" {
+		return head + fmt.Sprintf(" Сброс взведён («да» на окно: %s): consume при 100%% вызову я, исход пришлю; "+
+			"сам не вызывай.", r.Armed)
+	}
+	return head + fmt.Sprintf(" Вопрос пользователю и consume при 100%% — твои (или «да» строкой в файл одобрений — тогда "+
+		"сброшу сам); %s. Письмо «100%%» пришлю, когда дойдёт.", ref)
 }
 
 func fullText(r Reading, idle time.Duration) string {
+	if r.Available == 0 && r.Armed != "" {
+		return fmt.Sprintf("aguard codex: недельный лимит Codex — %.0f%%, сброс взведён («да»: %s), но досрочных сбросов нет "+
+			"— consume не вызываю; плановый сброс %s, простой %s.", r.Used, r.Armed, local(r.ResetsAt), days(idle))
+	}
 	if r.Available == 0 {
 		return fmt.Sprintf("aguard codex: недельный лимит Codex — %.0f%%, но досрочных сбросов больше нет (после прошлого "+
 			"письма кредит пропал); плановый сброс %s, простой %s. consume не поможет.", r.Used, local(r.ResetsAt), days(idle))

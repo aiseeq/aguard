@@ -15,7 +15,7 @@ import (
 )
 
 // Проход codex: лида нет — письмо «100%» не ушло, флаг снят, следующий проход пробует снова; mode=log — «написал
-// бы» один раз; шаг у 99% — быстрый.
+// бы» один раз.
 func TestCodexRoundRetriesUnsent(t *testing.T) {
 	dir := t.TempDir()
 	var logs strings.Builder
@@ -26,6 +26,7 @@ func TestCodexRoundRetriesUnsent(t *testing.T) {
 	}
 	now := time.Now()
 	used := 99.0
+	noArming(a)
 	a.codexRead = func(_ context.Context, _ string, at time.Time) (codexwatch.Reading, error) {
 		return codexwatch.Reading{At: at, Used: used, ResetsAt: now.Add(5 * 24 * time.Hour), Allowed: true, Available: 1}, nil
 	}
@@ -34,9 +35,6 @@ func TestCodexRoundRetriesUnsent(t *testing.T) {
 	ctx := context.Background()
 	if err := a.codexRound(ctx, &cfg, false); err != nil {
 		t.Fatal(err)
-	}
-	if a.codexEvery(&cfg) != cfg.Fast.D() {
-		t.Fatalf("шаг у 99%%: %v", a.codexEvery(&cfg))
 	}
 	used = 100
 	for range 2 {
@@ -92,6 +90,7 @@ func TestCodexFakeAppServer(t *testing.T) {
 			answer := filepath.Join(dir, "answer.json")
 			t.Setenv("FAKE_CODEX_ANSWER", answer)
 			at := start
+			noArming(a)
 			a.codexRead = func(ctx context.Context, codex string, _ time.Time) (codexwatch.Reading, error) {
 				return readCodex(ctx, codex, at)
 			}
@@ -127,5 +126,146 @@ func TestCodexFakeAppServer(t *testing.T) {
 				t.Fatalf("«написал бы» %d раз", n)
 			}
 		})
+	}
+}
+
+// noArming — проход без взвода: одобрений нет, consume и тикет — ошибка теста.
+func noArming(a *app) {
+	a.codexApproved = func(string, time.Time) (string, error) { return "", nil }
+	a.codexConsume = func(context.Context, string, string) (string, error) {
+		panic("consume без взвода")
+	}
+	a.codexNote = func(context.Context, string, string, string, string) error { panic("тикет без взвода") }
+}
+
+// Взвод на подставном app-server: строка «да» на окно (секунды в файле — :00, у сервера — :23), при 100% — один
+// consume с ключом окна; первый вызов без ответа — повтор тем же ключом через fast; исход — строка в тикет; письмо
+// лиду не ушло (лида нет) — повтор письма, но не consume.
+func TestCodexArmedFakeAppServer(t *testing.T) {
+	fake, err := filepath.Abs("testdata/fake-codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	var logs strings.Builder
+	a := &app{home: dir, stateDir: filepath.Join(dir, "state"), uid: 1000,
+		reg: session.Registry{Dir: filepath.Join(dir, "sessions"), ProcRoot: dir}, log: slog.New(slog.NewTextHandler(&logs, nil)),
+		codexConsume: consumeCodex, codexApproved: approvedCodex}
+	if err := os.MkdirAll(a.dir("codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resets := time.Date(2026, 11, 8, 14, 39, 23, 0, time.UTC)
+	answer, calls, approvals := filepath.Join(dir, "answer.json"), filepath.Join(dir, "calls"), filepath.Join(dir, "ok.tsv")
+	t.Setenv("FAKE_CODEX_ANSWER", answer)
+	t.Setenv("FAKE_CODEX_CALLS", calls)
+	t.Setenv("FAKE_CODEX_OUTCOME", "hang")
+	if err := os.WriteFile(approvals, []byte("2026-11-08T15:39:00+01:00\te7192203:278 «Да»\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"rateLimits":{"primary":{"usedPercent":100,"windowDurationMins":10080,"resetsAt":%d},"planType":"pro"},`+
+		`"accountId":"acc","ordinaryUsageAllowed":false,"rateLimitResetCredits":{"availableCount":1,"credits":[]}}`, resets.Unix())
+	if err := os.WriteFile(answer, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 2, 19, 0, 0, 0, time.UTC)
+	a.codexRead = func(ctx context.Context, codex string, _ time.Time) (codexwatch.Reading, error) {
+		return readCodex(ctx, codex, at)
+	}
+	var notes []string
+	a.codexNote = func(_ context.Context, _, _, ticket, text string) error {
+		notes = append(notes, ticket+": "+text)
+		return nil
+	}
+	cfg := codexwatch.Default(dir)
+	cfg.Codex, cfg.Approvals, cfg.Lead = fake, approvals, "lead"
+	ctx := context.Background()
+	if err := a.codexRound(ctx, &cfg, false); err != nil { // consume без ответа
+		t.Fatal(err)
+	}
+	if a.codexEvery(&cfg) != cfg.Fast.D() {
+		t.Fatalf("шаг после consume без ответа: %v", a.codexEvery(&cfg))
+	}
+	t.Setenv("FAKE_CODEX_OUTCOME", "reset")
+	for range 2 {
+		at = at.Add(2 * time.Minute)
+		if err := a.codexRound(ctx, &cfg, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	st, err := codexwatch.LoadState(filepath.Join(a.dir("codex"), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 2 || !strings.Contains(lines[0], st.Reset.Key) || !strings.Contains(lines[1], st.Reset.Key) {
+		t.Fatalf("вызовы consume (ключ %s):\n%s", st.Reset.Key, raw)
+	}
+	if st.Reset.Outcome != "reset" || len(notes) != 1 || !strings.Contains(notes[0], "codex-limit-reset: aguard: consume") {
+		t.Fatalf("исход %q, тикет %q", st.Reset.Outcome, notes)
+	}
+	if len(st.Pending) != 1 || st.Pending[0].Lead || !st.Pending[0].Ticket ||
+		strings.Count(logs.String(), "исход не отправлен лиду") != 2 {
+		t.Fatalf("доставка: %+v\n%s", st.Pending, logs.String())
+	}
+}
+
+// Блокировка: второй проход при занятой — ошибка, consume не зовётся.
+func TestCodexLockExclusive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json.lock")
+	release, err := codexLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := codexLock(path); err == nil || !strings.Contains(err.Error(), "уже идёт") {
+		t.Fatalf("вторая блокировка: %v", err)
+	}
+	release()
+	again, err := codexLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again()
+}
+
+// dry-run (проверка 02.11: мутации «dry сохраняет», «dry шлёт» выживали): состояние не меняется, писем и consume нет,
+// решение — в выводе.
+func TestCodexDryRunNoSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	var logs, out strings.Builder
+	a := &app{home: dir, stateDir: filepath.Join(dir, "state"), log: slog.New(slog.NewTextHandler(&logs, nil)), out: &out}
+	if err := os.MkdirAll(a.dir("codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	noArming(a)
+	a.codexApproved = func(string, time.Time) (string, error) { return "x", nil } // взведено, но dry не зовёт consume
+	now := time.Now()
+	a.codexRead = func(_ context.Context, _ string, at time.Time) (codexwatch.Reading, error) {
+		return codexwatch.Reading{At: at, Used: 100, ResetsAt: now.Add(5 * 24 * time.Hour), Available: 1}, nil
+	}
+	statePath := filepath.Join(a.dir("codex"), "state.json")
+	before := codexwatch.State{ResetsAt: now.Add(5 * 24 * time.Hour), Warned: true}
+	if err := before.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	was, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := codexwatch.Default(dir)
+	cfg.Lead = "lead"
+	if err := a.codexRound(context.Background(), &cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(was) || strings.Contains(logs.String(), "написал") ||
+		!strings.Contains(out.String(), "consume: вызвал бы") {
+		t.Fatalf("состояние:\n%s\n→\n%s\nжурнал:\n%s\nвывод:\n%s", was, after, logs.String(), out.String())
 	}
 }

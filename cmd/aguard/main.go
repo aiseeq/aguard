@@ -87,6 +87,9 @@ type app struct {
 	diskWalkLoaded bool                // sizes и traces загружены до первого обхода
 	codexStep      time.Duration       // шаг codex, выбранный прошлым проходом; 0 — interval
 	codexRead      codexReader         // замер лимита Codex; подменяется в тестах
+	codexConsume   codexConsumer       // досрочный сброс Codex; подменяется в тестах
+	codexApproved  codexApprovals      // «да» на окно из файла одобрений
+	codexNote      codexNoter          // строка исхода в тикет
 }
 
 func main() {
@@ -97,16 +100,19 @@ func main() {
 		os.Exit(1)
 	}
 	a := &app{
-		home:      home,
-		cfgPath:   config.Path(home),
-		stateDir:  filepath.Join(home, ".local", "state", "aguard"),
-		projects:  filepath.Join(home, ".claude", "projects"),
-		reg:       session.ForHome(home),
-		uid:       os.Getuid(),
-		log:       lg,
-		out:       os.Stdout,
-		units:     systemdUnits{},
-		codexRead: readCodex,
+		home:          home,
+		cfgPath:       config.Path(home),
+		stateDir:      filepath.Join(home, ".local", "state", "aguard"),
+		projects:      filepath.Join(home, ".claude", "projects"),
+		reg:           session.ForHome(home),
+		uid:           os.Getuid(),
+		log:           lg,
+		out:           os.Stdout,
+		units:         systemdUnits{},
+		codexRead:     readCodex,
+		codexConsume:  consumeCodex,
+		codexApproved: approvedCodex,
+		codexNote:     noteTicket,
 	}
 	if len(os.Args) < 2 {
 		usage()

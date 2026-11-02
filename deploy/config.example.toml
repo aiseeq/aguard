@@ -244,7 +244,7 @@ file = "~/.cache/graft/remote-broken.jsonl"
 
 # Недельный лимит Codex: замер `codex app-server` (account/rateLimits/read), темп — больший из наклонов за 30 мин и 2 ч.
 # Письмо лиду, когда 100% наступит раньше планового сброса с простоем больше min_idle и есть досрочный сброс: за warn до
-# 100% и при 100%. Сам сброс (consume) делает лид по «да» пользователя — decisions.md codex-reset-on-approval.
+# 100% и при 100%. Без взвода сброс (consume) делает лид по «да» пользователя — decisions.md codex-reset-on-approval.
 [codex]
 mode = "alert"         # off | log (только журнал «написал бы») | alert
 interval = "10m"       # одно чтение — ~1,5 с CPU и 230 МБ RSS на 8 с
@@ -253,6 +253,12 @@ near = "30m"
 warn = "2h"
 min_idle = "24h"
 codex = "~/.npm/bin/codex"
+# Взвод: строка «да» на окно в approvals (`<resetsAt RFC3339><TAB><источник>`) — при 100% consume вызывает сам демон
+# (ключ идемпотентности окна — в состоянии до вызова), исход — письмом лиду и строкой в ticket через tk.
+approvals = "~/.claude/improve/state/codex-reset-approved.tsv"
+tk = "~/bin/tk"
+ticket_root = "~/git"
+ticket = "codex-limit-reset"
 
 # Сторож старта Сна и Дайджеста, а также зависшего окна доверия после перезапуска cl.
 # mode = log — только пишет «написал бы»; alert — письмо лиду и also_to (сигнал «лид не поднялся» лиду же не поможет).

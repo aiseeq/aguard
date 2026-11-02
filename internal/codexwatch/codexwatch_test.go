@@ -33,9 +33,14 @@ func feed(s *State, c *Config, from, to time.Time, step time.Duration, used func
 		if mod != nil {
 			mod(&r)
 		}
-		_, ns := s.Apply(r, c)
+		_, ns, consume := s.Apply(r, c)
 		for _, n := range ns {
 			out = append(out, got{at, n})
+		}
+		if consume { // подставной consume: сразу reset
+			out = append(out, got{at, Notice{Kind: "consume"}})
+			s.Calling()
+			s.Done("reset", r)
 		}
 	}
 	return out
@@ -170,8 +175,8 @@ func TestPauseAfterWarnBackToInterval(t *testing.T) {
 	fast := 0
 	for at := t0.Add(4*time.Hour + 10*time.Minute); at.Before(t0.Add(16 * time.Hour)); at = at.Add(10 * time.Minute) {
 		r := Reading{At: at, Used: 94, ResetsAt: reset, Allowed: true, Available: 1}
-		f, _ := s.Apply(r, c)
-		if Step(r, f, c) == c.Fast.D() {
+		f, _, _ := s.Apply(r, c)
+		if s.Step(r, f, c) == c.Fast.D() {
 			fast++
 		}
 	}
@@ -180,20 +185,72 @@ func TestPauseAfterWarnBackToInterval(t *testing.T) {
 	}
 }
 
-// Быстрый шаг: used ≥ 99 или прогноз ближе Near; после 100% — обычный.
+// Быстрый шаг — только при прогнозе ближе Near и когда при 100% что-то будет: письмо (есть кредит или было письмо
+// 1) или consume по взводу; без прогноза, после 100%, без кредита, при простое меньше суток — обычный (проверка 02.11).
 func TestStep(t *testing.T) {
 	c := cfg()
-	r := Reading{At: t0, Used: 99}
-	if Step(r, Forecast{}, c) != c.Fast.D() {
-		t.Fatal("99% — не быстрый шаг")
+	near := Forecast{At: t0.Add(20 * time.Minute)}
+	r := Reading{At: t0, Used: 99, ResetsAt: reset, Available: 1}
+	var s State
+	if s.Step(r, Forecast{}, c) != c.Interval.D() {
+		t.Fatal("99% без прогноза — быстрый шаг")
 	}
-	r.Used = 90
-	if Step(r, Forecast{At: t0.Add(20 * time.Minute)}, c) != c.Fast.D() || Step(r, Forecast{At: t0.Add(time.Hour)}, c) != c.Interval.D() {
+	if s.Step(r, near, c) != c.Fast.D() || s.Step(r, Forecast{At: t0.Add(time.Hour)}, c) != c.Interval.D() {
 		t.Fatal("шаг по прогнозу")
 	}
+	if s.Step(Reading{At: t0, Used: 99, ResetsAt: reset}, near, c) != c.Interval.D() {
+		t.Fatal("без кредита и письма 1 — быстрый шаг")
+	}
+	if (&State{Warned: true}).Step(Reading{At: t0, Used: 99, ResetsAt: reset}, near, c) != c.Fast.D() {
+		t.Fatal("было письмо 1, кредит пропал — письмо «100%» уйдёт, а шаг не быстрый")
+	}
+	if s.Step(Reading{At: t0, Used: 99, ResetsAt: t0.Add(10 * time.Hour), Available: 1}, near, c) != c.Interval.D() {
+		t.Fatal("простой меньше суток — быстрый шаг")
+	}
+	if (&State{Full: true}).Step(Reading{At: t0, Used: 99, ResetsAt: reset, Available: 1, Armed: "x"}, near, c) != c.Fast.D() {
+		t.Fatal("взвод без исхода — не быстрый шаг")
+	}
 	r.Used = 100
-	if Step(r, Forecast{}, c) != c.Interval.D() {
+	if s.Step(r, Forecast{}, c) != c.Interval.D() {
 		t.Fatal("100% — быстрый шаг")
+	}
+}
+
+// Проверка 02.11, дефект 1: письмо 1 ушло, работа встала на 12 ч на 99% — быстрый шаг держится, пока наклон за 2 ч
+// ещё помнит рост (~40 мин, 20 чтений), а не все 12 ч (было 355).
+func TestPauseAt99BackToInterval(t *testing.T) {
+	var s State
+	c := cfg()
+	used := func(at time.Time) float64 { return min(99, 70+4.5*at.Sub(t0).Hours()) }
+	feed(&s, c, t0, t0.Add(7*time.Hour), 10*time.Minute, used, nil)
+	if !s.Warned {
+		t.Fatal("письма 1 нет")
+	}
+	fast := 0
+	for at := t0.Add(7*time.Hour + 2*time.Minute); at.Before(t0.Add(19 * time.Hour)); {
+		r := Reading{At: at, Used: 99, ResetsAt: reset, Allowed: true, Available: 1}
+		f, _, _ := s.Apply(r, c)
+		step := s.Step(r, f, c)
+		if step == c.Fast.D() {
+			fast++
+		}
+		at = at.Add(step)
+	}
+	if fast > 25 {
+		t.Fatalf("быстрых шагов за 12 ч паузы: %d", fast)
+	}
+}
+
+// Проверка 02.11, дефект 2: расход упал при том же resetsAt (сброс без смены планового) — окно новое, флаги заново.
+func TestUsageDropIsNewWindow(t *testing.T) {
+	s := State{ResetsAt: reset, Warned: true, Full: true, Samples: []Sample{{t0, 100}}}
+	s.Apply(Reading{At: t0.Add(10 * time.Minute), Used: 0, ResetsAt: reset, Allowed: true, Available: 1}, cfg())
+	if s.Warned || s.Full || len(s.Samples) != 1 {
+		t.Fatalf("состояние: %+v", s)
+	}
+	s.Apply(Reading{At: t0.Add(20 * time.Minute), Used: 0, ResetsAt: reset, Allowed: true, Available: 1}, cfg())
+	if len(s.Samples) != 2 {
+		t.Fatal("ровный расход завёл окно заново")
 	}
 }
 
@@ -226,5 +283,132 @@ func TestValidate(t *testing.T) {
 	c.Mode = "send"
 	if c.Validate("/home/u") == nil {
 		t.Fatal("mode send принят")
+	}
+}
+
+func armed(r *Reading) { r.Armed = "e7192203:278" }
+
+// Взвод: при 100% — consume вместо письма «пора», один раз в окне; письмо 1 говорит, что сброшу сам.
+func TestArmedConsumesOnce(t *testing.T) {
+	var s State
+	g := feed(&s, cfg(), t0, t0.Add(8*time.Hour), 10*time.Minute, linear(70, t0, 4.5), armed)
+	if kinds(g) == "" || len(g) != 2 || g[0].n.Kind != KindWarn || g[1].n.Kind != "consume" {
+		t.Fatalf("решения: %s", kinds(g))
+	}
+	if !strings.Contains(g[0].n.Message, "Сброс взведён") || s.Reset.Key == "" || len(s.Pending) != 1 ||
+		!strings.Contains(s.Pending[0].Message, "outcome=reset") || !strings.Contains(s.Pending[0].Message, s.Reset.Key) {
+		t.Fatalf("состояние: %+v; письмо 1: %s", s, g[0].n.Message)
+	}
+}
+
+// Без взвода consume нет — только письма.
+func TestUnarmedNoConsume(t *testing.T) {
+	var s State
+	g := feed(&s, cfg(), t0, t0.Add(8*time.Hour), 10*time.Minute, linear(70, t0, 4.5), nil)
+	if strings.Contains(kinds(g), "consume") || s.Reset.Key != "" {
+		t.Fatalf("решения: %s", kinds(g))
+	}
+}
+
+// Противник 1: взвод, но до планового сброса меньше суток — consume нет.
+func TestArmedShortIdleNoConsume(t *testing.T) {
+	var s State
+	near := t0.Add(20 * time.Hour)
+	g := feed(&s, cfg(), t0, t0.Add(8*time.Hour), 10*time.Minute, linear(70, t0, 4.5), func(r *Reading) {
+		armed(r)
+		r.ResetsAt = near
+	})
+	if len(g) != 0 {
+		t.Fatalf("решения: %s", kinds(g))
+	}
+}
+
+// Противник 2: взвод без кредита — письмо «100%, кредита нет», consume нет.
+func TestArmedNoCreditLetter(t *testing.T) {
+	var s State
+	g := feed(&s, cfg(), t0, t0.Add(8*time.Hour), 10*time.Minute, linear(85, t0, 4.5), func(r *Reading) {
+		armed(r)
+		if r.Used >= 100 {
+			r.Available = 0
+		}
+	})
+	last := g[len(g)-1]
+	if strings.Contains(kinds(g), "consume") || last.n.Kind != KindFull || !strings.Contains(last.n.Message, "не вызываю") {
+		t.Fatalf("решения: %s", kinds(g))
+	}
+}
+
+// Сбой вызова: повтор тем же ключом; после вызова кредит пропал (ушёл на наш же сброс) — всё равно повтор, ответ
+// alreadyRedeemed скажет, что сброс был.
+func TestArmedRetrySameKey(t *testing.T) {
+	var s State
+	c := cfg()
+	r := Reading{At: t0, Used: 100, ResetsAt: reset, Allowed: false, Available: 1, Armed: "x"}
+	_, _, consume := s.Apply(r, c)
+	key := s.Reset.Key
+	if !consume || key == "" {
+		t.Fatal("нет consume")
+	}
+	s.Calling() // ответа нет
+	r.At, r.Available = t0.Add(2*time.Minute), 0
+	_, ns, consume := s.Apply(r, c)
+	if !consume || s.Reset.Key != key || len(ns) != 0 {
+		t.Fatalf("повтор: consume=%v ключ %q→%q письма %v", consume, key, s.Reset.Key, ns)
+	}
+	s.Done("alreadyRedeemed", r)
+	if _, _, consume = s.Apply(r, c); consume {
+		t.Fatal("consume после исхода")
+	}
+}
+
+// Противник 3: вызов без ответа, затем окно сменилось — исход «видимо, прошёл» к доставке; ключ нового окна — новый.
+func TestLostAnswerWindowChanged(t *testing.T) {
+	var s State
+	c := cfg()
+	r := Reading{At: t0, Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}
+	s.Apply(r, c)
+	s.Calling()
+	key := s.Reset.Key
+	s.Apply(Reading{At: t0.Add(2 * time.Minute), Used: 0, ResetsAt: t0.Add(7 * 24 * time.Hour), Allowed: true}, c)
+	if len(s.Pending) != 1 || !strings.Contains(s.Pending[0].Message, key) || s.Reset.Key != "" {
+		t.Fatalf("состояние: %+v", s)
+	}
+}
+
+// Противник 4: недоставленный исход переживает проходы и смену окна; уходит, когда доставлен и лиду, и в тикет.
+func TestPendingKeptUntilDelivered(t *testing.T) {
+	s := State{ResetsAt: reset, Pending: []Delivery{{Message: "m", Lead: true}}}
+	s.Apply(Reading{At: t0, Used: 0, ResetsAt: t0.Add(7 * 24 * time.Hour), Allowed: true}, cfg())
+	s.Delivered()
+	if len(s.Pending) != 1 {
+		t.Fatal("исход пропал до записи в тикет")
+	}
+	s.Pending[0].Ticket = true
+	s.Delivered()
+	if len(s.Pending) != 0 {
+		t.Fatal("доставленный исход остался")
+	}
+}
+
+// Противник 6: секунды resetsAt дрожат в той же минуте — окно и ключ те же.
+func TestSameWindowByMinute(t *testing.T) {
+	var s State
+	c := cfg()
+	base := time.Date(2026, 11, 8, 14, 39, 23, 0, time.UTC)
+	s.Apply(Reading{At: t0, Used: 100, ResetsAt: base, Available: 1, Armed: "x"}, c)
+	key := s.Reset.Key
+	s.Apply(Reading{At: t0.Add(2 * time.Minute), Used: 100, ResetsAt: base.Add(24 * time.Second), Available: 1, Armed: "x"}, c)
+	if s.Reset.Key != key {
+		t.Fatal("ключ сменился при дрожании секунд")
+	}
+	if !SameWindow(base, time.Date(2026, 11, 8, 15, 39, 0, 0, time.FixedZone("CET", 3600))) {
+		t.Fatal("15:39:00 CET и 14:39:23 UTC — одно окно")
+	}
+}
+
+func TestNewKeyUUID(t *testing.T) {
+	k := newKey()
+	if len(k) != 36 || k[14] != '4' || k == newKey() {
+		t.Fatalf("ключ %q", k)
 	}
 }
