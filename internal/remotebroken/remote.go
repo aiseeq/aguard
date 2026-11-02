@@ -239,11 +239,11 @@ func Queued(e Event) bool {
 
 // SplitQueued делит события на поломки и переходы по очереди, порядок сохраняется.
 func SplitQueued(events []Event) (broken, queued []Event) {
-	for _, e := range events {
-		if Queued(e) {
-			queued = append(queued, e)
+	for i := range events {
+		if Queued(events[i]) {
+			queued = append(queued, events[i])
 		} else {
-			broken = append(broken, e)
+			broken = append(broken, events[i])
 		}
 	}
 	return broken, queued
