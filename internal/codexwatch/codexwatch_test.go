@@ -13,6 +13,23 @@ var (
 	reset = t0.Add(6 * 24 * time.Hour) // плановый сброс через 6 суток
 )
 
+// Учётки по умолчанию не делят ни имя (файл состояния), ни CODEX_HOME (лимит и кредит), ни файл «да» (взвод).
+func TestDefaultAccountsDistinct(t *testing.T) {
+	seen := map[string]bool{}
+	accounts := Default("/home/u").Accounts
+	if len(accounts) != 2 {
+		t.Fatalf("учётки: %+v", accounts)
+	}
+	for _, a := range accounts {
+		for _, v := range []string{a.Name, a.Home, a.Approvals} {
+			if v == "" || seen[v] {
+				t.Fatalf("пусто или повтор %q: %+v", v, accounts)
+			}
+			seen[v] = true
+		}
+	}
+}
+
 func cfg() *Config {
 	c := Default("/home/u")
 	return &c

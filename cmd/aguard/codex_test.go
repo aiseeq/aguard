@@ -559,26 +559,24 @@ func TestCodexAllOutRetriedWhenUnsent(t *testing.T) {
 	}
 }
 
-// Шаг прохода — меньший из учёток: близкая к 100% учётка держит шаг fast, хотя другая спокойна.
+// Шаг прохода — меньший из учёток, в любом порядке: близкая к 100% учётка держит шаг fast, хотя другая спокойна.
 func TestCodexStepIsShortest(t *testing.T) {
-	reset := time.Now().Add(5 * 24 * time.Hour)
-	used := 90.0
-	a, _, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
-		"work": limit(5, reset, 0),
-		"personal": func(at time.Time) (codexwatch.Reading, error) {
-			return limit(used, reset, 1)(at)
-		},
-	})
-	statePath := filepath.Join(a.dir("codex"), "personal.json")
-	seed := codexwatch.State{ResetsAt: reset, Samples: []codexwatch.Sample{{At: time.Now().Add(-time.Hour), Used: 70}}}
-	if err := seed.Save(statePath); err != nil {
-		t.Fatal(err)
-	}
-	used = 99
-	if err := a.codexRound(context.Background(), &cfg, false); err != nil {
-		t.Fatal(err)
-	}
-	if a.codexEvery(&cfg) != cfg.Fast.D() {
-		t.Fatalf("шаг: %v", a.codexEvery(&cfg))
+	for _, near := range []string{"work", "personal"} {
+		t.Run(near, func(t *testing.T) {
+			reset := time.Now().Add(5 * 24 * time.Hour)
+			read := map[string]func(time.Time) (codexwatch.Reading, error){"work": limit(5, reset, 0), "personal": limit(5, reset, 0)}
+			read[near] = limit(99, reset, 1)
+			a, _, cfg := twoAccounts(t, read)
+			seed := codexwatch.State{ResetsAt: reset, Samples: []codexwatch.Sample{{At: time.Now().Add(-time.Hour), Used: 70}}}
+			if err := seed.Save(filepath.Join(a.dir("codex"), near+".json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+				t.Fatal(err)
+			}
+			if a.codexEvery(&cfg) != cfg.Fast.D() {
+				t.Fatalf("шаг: %v", a.codexEvery(&cfg))
+			}
+		})
 	}
 }

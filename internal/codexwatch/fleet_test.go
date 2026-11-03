@@ -26,6 +26,7 @@ func TestFleetApply(t *testing.T) {
 		{"лимит есть — флаг снят", []Reading{named("work", 100, false), named("personal", 5, true)}, nil, true, false, false},
 		{"одной нет замера", blocked[:1], []string{"personal"}, false, false, false},
 		{"нет замера, но вторая с лимитом — флаг снят", []Reading{named("personal", 5, true)}, []string{"work"}, true, false, false},
+		{"две без лимита, третья без замера — письма нет", blocked, []string{"third"}, false, false, false},
 		{"одна учётка", blocked[:1], nil, false, false, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
