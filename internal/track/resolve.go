@@ -202,7 +202,13 @@ func (r *Resolver) chain(ppid int) ([]record.Link, *record.Session) {
 			continue
 		}
 		links = append(links, record.Link{Pid: ppid, Comm: st.Comm})
-		if s := r.sessionAt(ppid, st.Start, procUID(ppid)); s != nil {
+		uid, err := procUID(ppid)
+		if err != nil { // предок умер после чтения stat: его сессию не проверить, цепочка идёт выше
+			r.log.Warn("aguard слежение: сессия не проверена", "pid", ppid, "err", err)
+			ppid = st.Ppid
+			continue
+		}
+		if s := r.sessionAt(ppid, st.Start, uid); s != nil {
 			return links, s
 		}
 		ppid = st.Ppid
@@ -210,15 +216,16 @@ func (r *Resolver) chain(ppid int) ([]record.Link, *record.Session) {
 	return links, nil
 }
 
-func procUID(pid int) int {
+func procUID(pid int) (int, error) {
 	fi, err := os.Stat("/proc/" + strconv.Itoa(pid))
-	if err != nil { //nolint:silent-error-handling // процесс ушёл: uid неизвестен (-1), и sessionAt сессию по нему не ищет
-		return -1
+	if err != nil {
+		return 0, fmt.Errorf("uid процесса %d: %w", pid, err)
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		return int(st.Uid)
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("uid процесса %d: stat без сведений о владельце (%T)", pid, fi.Sys())
 	}
-	return -1
+	return int(st.Uid), nil
 }
 
 // Демон работает от пользователя: реестры других учёток ему закрыты, и у их процессов сессии не ищем.

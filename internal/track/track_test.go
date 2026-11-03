@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -335,5 +336,20 @@ func TestReadProcForeignWithoutCwd(t *testing.T) {
 	d, err := readProc(1)
 	if err != nil || d.comm == "" || d.cwd != "" {
 		t.Fatalf("%+v, %v", d, err)
+	}
+}
+
+// Ушедший процесс — ошибка, а не uid-заглушка: вызывающий не примет её за учётку.
+func TestProcUID(t *testing.T) {
+	uid, err := procUID(os.Getpid())
+	if err != nil || uid != os.Geteuid() {
+		t.Fatalf("свой процесс: uid %d, err %v, хотим %d", uid, err, os.Geteuid())
+	}
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if uid, err := procUID(cmd.Process.Pid); err == nil {
+		t.Fatalf("умерший процесс %d: uid %d без ошибки", cmd.Process.Pid, uid)
 	}
 }
