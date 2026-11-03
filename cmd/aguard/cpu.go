@@ -98,7 +98,7 @@ func (a *app) cpuSample(ctx context.Context, h *cpuHost, now time.Time, all bool
 		if s.Tasks, err = a.cpuRemote(ctx, h, true); err != nil {
 			return nil, err
 		}
-	} else if s.Tasks, err = cpuwatch.ReadTasks(procRoot); err != nil {
+	} else if s.Tasks, err = cpuwatch.ReadTasks(h.root); err != nil {
 		// часть процессов не прочиталась — замер всё равно идёт: load average от этого не зависит
 		a.warn("cpu", "процессы прочитаны не все", "err", err)
 	}
