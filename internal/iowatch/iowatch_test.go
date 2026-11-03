@@ -303,9 +303,9 @@ func TestCleanerCPUAndPIDChange(t *testing.T) {
 	}
 	fp.setThreadStat(10, 2, 100, "btrfs-cleaner", 0, 0, 25)
 	fp.setThreadStat(20, 1, 200, "btrfs-cleaner", 0, 0, 25)
-	fp.setThreadStat(21, 1, 210, "btrfs-cleaner", kernelThreadFlag, 0, 25)
-	if got := pass(now.Add(time.Second)).CleanerMS; got != 400 {
-		t.Fatalf("дельта stime для ppid=2 и PF_KTHREAD, обычный процесс исключён: cleaner %d мс", got)
+	fp.setThreadStat(21, 1, 210, "btrfs-cleaner", kernelThreadFlag, 7, 25)
+	if got := pass(now.Add(time.Second)).CleanerMS; got != 470 {
+		t.Fatalf("дельта utime+stime для ppid=2 и PF_KTHREAD, обычный процесс исключён: cleaner %d мс", got)
 	}
 	fp.remove(10)
 	fp.set(11, 2, 101, "btrfs-cleaner", 0, 0, 0)
