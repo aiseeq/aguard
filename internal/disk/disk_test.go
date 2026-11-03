@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/policy"
 )
 
 const gb = int64(1) << 30
@@ -395,5 +397,44 @@ func TestMeasureYield(t *testing.T) {
 	testConfig(t, root).MeasureAll(t.Context(), entries, func() { calls++ })
 	if calls != 2 {
 		t.Fatalf("мелкие записи: пауз спрошено %d", calls)
+	}
+}
+
+// При обходе раз в сутки прошлый замер старше 24 часов, но база роста — он: иначе база — сам текущий замер, и рост не виден.
+func TestPassGrewOnDailyWalk(t *testing.T) {
+	home := "/home/u"
+	c := testConfig(t, home)
+	c.Walk, c.WalkMax = policy.Duration(24*time.Hour), policy.Duration(24*time.Hour)
+	farm := home + "/.cache/farm-hard"
+	list := func() ([]string, error) { return []string{farm}, nil }
+	owner := func(string) (string, string) { return "x", "test" }
+	t0 := time.Date(2026, 10, 25, 4, 9, 0, 0, time.UTC)
+	sizes := map[string]int64{farm: gb}
+	s := &State{Sizes: map[string][]Point{}, Told: map[string]time.Time{}}
+	if recs, _, err := s.Pass(c, t0, 300*gb, list, fakeMeasure(sizes, t0), owner); err != nil || len(recs) != 0 {
+		t.Fatalf("первый обход: %+v, %v", recs, err)
+	}
+	// обход на минуту позже суток: рост с прошлого обхода
+	sizes[farm] = 7 * gb
+	at := t0.Add(24*time.Hour + time.Minute)
+	recs, _, err := s.Pass(c, at, 300*gb, list, fakeMeasure(sizes, at), owner)
+	if err != nil || len(recs) != 1 || recs[0].Kind != KindGrew || recs[0].Delta != 6*gb || !recs[0].Since.Equal(t0) {
+		t.Fatalf("рост за сутки: %+v, %v", recs, err)
+	}
+	// обход задержан дольше history (машина спала): база — всё тот же прошлый обход, срок виден в Since
+	sizes[farm] = 13 * gb
+	late := at.Add(30 * time.Hour)
+	s.Told = map[string]time.Time{}
+	recs, _, err = s.Pass(c, late, 300*gb, list, fakeMeasure(sizes, late), owner)
+	if err != nil || len(recs) != 1 || recs[0].Kind != KindGrew || recs[0].Delta != 6*gb || !recs[0].Since.Equal(at) {
+		t.Fatalf("рост после задержки: %+v, %v", recs, err)
+	}
+	// новая запись: прошлого замера нет, роста нет
+	s.Sizes = map[string][]Point{}
+	sizes[farm] = 20 * gb
+	s.Told = map[string]time.Time{}
+	last := late.Add(25 * time.Hour)
+	if recs, _, err := s.Pass(c, last, 300*gb, list, fakeMeasure(sizes, last), owner); err != nil || len(recs) != 0 {
+		t.Fatalf("новая запись: %+v, %v", recs, err)
 	}
 }

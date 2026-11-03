@@ -391,11 +391,12 @@ func (s *State) entry(c *Config, now time.Time, path string, u Usage, fast bool,
 			tell(Record{Kind: KindFast, Path: path, Bytes: u.Bytes, Delta: u.Bytes - prev.Bytes, Since: prev.At}, c.FastWindow.D())
 		}
 	}
-	pts = append(slices.DeleteFunc(pts, func(p Point) bool { return now.Sub(p.At) > history }), Point{At: now, Bytes: u.Bytes})
-	s.Sizes[path] = pts
-	if base := baseline(pts, now); u.Bytes-base.Bytes >= int64(c.Grow) {
-		tell(Record{Kind: KindGrew, Path: path, Bytes: u.Bytes, Delta: u.Bytes - base.Bytes, Since: base.At}, repeatDaily)
+	if len(pts) > 0 { // база — из прошлых замеров, до текущего: при обходе раз в сутки прошлый старше 24 часов
+		if base := baseline(pts, now); u.Bytes-base.Bytes >= int64(c.Grow) {
+			tell(Record{Kind: KindGrew, Path: path, Bytes: u.Bytes, Delta: u.Bytes - base.Bytes, Since: base.At}, repeatDaily)
+		}
 	}
+	s.Sizes[path] = append(slices.DeleteFunc(pts, func(p Point) bool { return now.Sub(p.At) > history }), Point{At: now, Bytes: u.Bytes})
 	if u.Bytes >= int64(c.StaleMin) && !u.Changed.IsZero() && now.Sub(u.Changed) >= c.Stale.D() && !c.IsLasting(path) {
 		tell(Record{Kind: KindStale, Path: path, Bytes: u.Bytes, Since: u.Changed}, repeatDaily)
 	}
@@ -446,7 +447,7 @@ func (s *State) Account(c *Config, now time.Time, traces []Trace, free int64, ho
 	return out
 }
 
-// baseline — самый ранний замер за последние сутки: от него считается рост.
+// baseline — самый ранний прошлый замер за последние сутки, а если за сутки их нет — последний: от него считается рост.
 func baseline(pts []Point, now time.Time) Point {
 	for _, p := range pts {
 		if now.Sub(p.At) <= 24*time.Hour {
