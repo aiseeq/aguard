@@ -197,7 +197,7 @@ func TestOwners(t *testing.T) {
 		Table:    map[string]string{filepath.Join(home, ".cache/farm-hard"): "llmark-master"},
 		Admins:   map[string]string{filepath.Join(home, "git"): "git-admin"},
 		Lead:     "lead",
-		Live:     []Session{{Name: "aguard-master", ID: "s1", Cwd: filepath.Join(home, "git/aguard")}, {Name: "sc2go-master", ID: "s2", Cwd: repo}},
+		Live:     []Session{{Name: "aguard-master", ID: "s1", Cwd: filepath.Join(home, "git/aguard")}, {Name: "sc2go-master", ID: "s2", Cwd: repo}, {Name: "aisee-c0", ID: "s3", Cwd: home}},
 		Projects: map[string]string{ProjectKey(home): "lead", ProjectKey(filepath.Join(home, "git/life")): "life-master"},
 	}
 	cases := []struct{ path, owner, why string }{

@@ -71,13 +71,14 @@ func (o *Owners) scratchpad(id, project string) (string, string) {
 			return s.Name, "session"
 		}
 	}
+	// Таблица имён раньше живых сессий той же папки: в ~ живёт и лид, и случайные aisee-c0 — след оставил хозяин проекта.
+	if name := o.Projects[project]; name != "" {
+		return name, "names"
+	}
 	for _, s := range o.Live {
 		if projectDir(s.Cwd) == project {
 			return s.Name, "project"
 		}
-	}
-	if name := o.Projects[project]; name != "" {
-		return name, "names"
 	}
 	return o.admin(func(prefix string) bool { return strings.HasPrefix(project, projectDir(prefix)) })
 }

@@ -8,9 +8,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -260,11 +262,19 @@ func (a *app) cpuDry(ctx context.Context, cfg *cpuwatch.Config) error {
 		}
 		var win cpuwatch.Host // своя перегрузка: окно демона пробой не трогается; письма — какими были бы через after
 		if v := win.Judge(s, owner); v.Over {
-			for _, m := range v.Recipients(cfg.Notify) {
-				fmt.Fprintf(a.out, "  → %s: %s\n", m.Name, cpuwatch.MasterMessage(h.win.Name, &v, &m, now, true))
-			}
-			fmt.Fprintf(a.out, "  → %s: %s\n", cfg.Lead, cpuwatch.LeadMessage(h.win.Name, &v, nil, now))
+			cpuDryLetters(a.out, cfg, h.win.Name, &v, now)
 		}
 	}
 	return r.Err()
+}
+
+// cpuDryLetters — письма перегрузки такими, какими они ушли бы: в сводке лиду — те, кому написано строкой выше.
+func cpuDryLetters(w io.Writer, cfg *cpuwatch.Config, host string, v *cpuwatch.Verdict, now time.Time) {
+	var told []string
+	for _, m := range v.Recipients(cfg.Notify) {
+		fmt.Fprintf(w, "  → %s: %s\n", m.Name, cpuwatch.MasterMessage(host, v, &m, now, true))
+		told = append(told, m.Name)
+	}
+	slices.Sort(told) // как Host.Told
+	fmt.Fprintf(w, "  → %s: %s\n", cfg.Lead, cpuwatch.LeadMessage(host, v, told, now))
 }
