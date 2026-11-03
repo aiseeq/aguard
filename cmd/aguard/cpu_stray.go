@@ -44,20 +44,20 @@ func (a *app) readStrays(ctx context.Context, h *cpuHost) ([]byte, error) {
 	return out, nil
 }
 
-// strayJudge — замер машины и процессы, о которых пора писать.
-func (a *app) strayJudge(ctx context.Context, cfg *cpuwatch.Config, h *cpuHost, now time.Time) ([]cpuwatch.Stray, error) {
+// strayJudge — замер машины: процессы, о которых пора писать, и все живые без родителя.
+func (a *app) strayJudge(ctx context.Context, cfg *cpuwatch.Config, h *cpuHost, now time.Time) ([]cpuwatch.Stray, []cpuwatch.Detail, error) {
 	if a.strayRead == nil {
-		return nil, errors.New("замер процессов без родителя не подключён")
+		return nil, nil, errors.New("замер процессов без родителя не подключён")
 	}
 	raw, err := a.strayRead(ctx, h)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	procs, details, err := cpuwatch.ParseStrays(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", h.win.Name, err)
+		return nil, nil, fmt.Errorf("%s: %w", h.win.Name, err)
 	}
-	return h.strays.Judge(now, procs, details, &cfg.Strays), nil
+	return h.strays.Judge(now, procs, details, &cfg.Strays), details, nil
 }
 
 // strayRound — проход по машинам: раз в strays.every замер и письма, сбой одной не мешает другой.
@@ -75,7 +75,7 @@ func (a *app) strayRound(ctx context.Context, cfg *cpuwatch.Config, r *cpuwatch.
 			continue
 		}
 		h.strayAt = now
-		strays, err := a.strayJudge(ctx, cfg, h, now)
+		strays, present, err := a.strayJudge(ctx, cfg, h, now)
 		if err != nil {
 			if !h.strayBad {
 				a.warn("cpu", "процессы без родителя: замер не удался, жду", "host", h.win.Name, "err", err)
@@ -84,7 +84,7 @@ func (a *app) strayRound(ctx context.Context, cfg *cpuwatch.Config, r *cpuwatch.
 			continue
 		}
 		h.strayBad = false
-		changed = st.Forget(h.win.Name, strays) || changed
+		changed = st.Forget(h.win.Name, present) || changed
 		changed = a.strayLetters(cfg, r, h, strays, &st, now) || changed
 	}
 	if changed {
@@ -159,7 +159,7 @@ func (a *app) strayDry(ctx context.Context, cfg *cpuwatch.Config, r *cpuwatch.Re
 	saved := h.strays
 	h.strays = cpuwatch.StrayWatch{}
 	defer func() { h.strays = saved }()
-	strays, err := a.strayJudge(ctx, cfg, h, time.Now())
+	strays, _, err := a.strayJudge(ctx, cfg, h, time.Now())
 	if err != nil {
 		fmt.Fprintf(a.out, "  процессы без родителя: %v\n", err)
 		return

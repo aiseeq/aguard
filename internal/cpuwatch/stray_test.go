@@ -130,11 +130,14 @@ func TestStrayRateFirstPassAndNewChild(t *testing.T) {
 
 func TestCleanCmd(t *testing.T) {
 	for in, want := range map[string]string{
-		"curl --token=abc123 https://x": "curl --token=*** https://x",
-		"app API_KEY: qwe rest":         "app API_KEY: *** rest",
-		"x password hunter2 y":          "x password *** y",
-		"run sk-abcdefghijklmnopqrstuv": "run ***",
-		"bash -c 'while :; do :; done'": "bash -c 'while :; do :; done'",
+		"curl --token=abc123 https://x":             "curl --token=*** https://x",
+		"app API_KEY: qwe rest":                     "app API_KEY: *** rest",
+		"x password hunter2 y":                      "x password *** y",
+		"run sk-abcdefghijklmnopqrstuv":             "run ***",
+		"bash -c 'while :; do :; done'":             "bash -c 'while :; do :; done'",
+		"curl -H Authorization: Bearer secretvalue": "curl -H Authorization: Bearer ***",
+		"curl -H 'authorization: basic dXNlcjpw'":   "curl -H 'authorization: basic ***",
+		"tool bearer secretvalue x":                 "tool bearer *** x",
 	} {
 		if got := CleanCmd(in); got != want {
 			t.Errorf("%q → %q, ждали %q", in, got, want)
@@ -164,10 +167,10 @@ func TestStrayStateForgetAndDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := Stray{Detail: Detail{Pid: 7, Start: 1}}
+	s := Detail{Pid: 7, Start: 1}
 	st.Told[s.Key("pc")] = time.Now()
 	st.Told["ноут:9:9"] = time.Now()
-	if st.Forget("pc", []Stray{s}) {
+	if st.Forget("pc", []Detail{s}) {
 		t.Fatal("живой забыт")
 	}
 	if err := st.Save(path); err != nil {
@@ -264,7 +267,7 @@ func TestStrayScriptLive(t *testing.T) {
 	}
 	var d *Detail
 	var w StrayWatch
-	cfg := StrayConfig{After: 0, Hot: 0.3, Exclude: DefaultStrays().Exclude}
+	cfg := StrayConfig{Every: DefaultStrays().Every, After: 0, Hot: 0.3, Exclude: DefaultStrays().Exclude}
 	ps, ds := read()
 	for i := range ds {
 		if ds[i].Pid == pid {
@@ -311,4 +314,107 @@ func adopted(t *testing.T, pid int) bool {
 		t.Fatal(err)
 	}
 	return strings.TrimSpace(string(comm)) == "systemd"
+}
+
+// Сессия без места у logind зовётся session-c1.scope: это та же сессия, простой остаток считается по возрасту.
+func TestStrayLogindSessionName(t *testing.T) {
+	var w StrayWatch
+	got := w.Judge(time.Now(), []Proc{{Pid: 7, PPid: 1, Age: time.Hour, Comm: "bash"}},
+		[]Detail{{Pid: 7, Start: 1, Cgroup: "/user.slice/user-1000.slice/session-c1.scope"}}, strayCfg())
+	if len(got) != 1 {
+		t.Fatalf("session-c1.scope не остаток сессии: %+v", got)
+	}
+}
+
+// Ровно порог — занято: проверка >=, а не >.
+func TestStrayBusyExactlyHalf(t *testing.T) {
+	if got := busyRun(t, 10, otherCg, func(i int) (float64, float64) { return float64(i) * 150, 0 }); got != 6 {
+		t.Fatalf("письмо на проходе %d", got)
+	}
+}
+
+// Пропуск замеров дольше двух every (сбой ssh, сон машины): средняя за пропуск не заменяет проходы подряд, отсчёт заново.
+func TestStrayGapRestartsCount(t *testing.T) {
+	var w StrayWatch
+	at := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	cpu := 0.0
+	pass := func(step time.Duration, grew float64) []Stray {
+		at, cpu = at.Add(step), cpu+grew
+		return w.Judge(at, []Proc{{Pid: 7, PPid: 1, Age: 3 * time.Hour, CPU: cpu, Comm: "x"}}, []Detail{{Pid: 7, Start: 1, Cgroup: otherCg}}, strayCfg())
+	}
+	pass(0, 0)
+	pass(5*time.Minute, 300)
+	if got := pass(35*time.Minute, 2100); len(got) != 0 {
+		t.Fatalf("письмо сразу после пропуска: %+v", got)
+	}
+	for i := range 5 {
+		if got := pass(5*time.Minute, 300); len(got) != 0 {
+			t.Fatalf("письмо на %d-м проходе после пропуска: %+v", i+1, got)
+		}
+	}
+	if got := pass(5*time.Minute, 300); len(got) != 1 {
+		t.Fatalf("30 мин занятости после пропуска без письма: %+v", got)
+	}
+}
+
+// Ключ различает машину, pid и starttime: pid переиспользуется, отметка чужому не достаётся.
+func TestStrayKeyIdentity(t *testing.T) {
+	a, b := Stray{Detail: Detail{Pid: 7, Start: 1}}, Stray{Detail: Detail{Pid: 7, Start: 2}}
+	if a.Key("pc") != "pc:7:1" || a.Key("pc") == b.Key("pc") || a.Key("pc") == a.Key("laptop") {
+		t.Fatalf("%s %s %s", a.Key("pc"), b.Key("pc"), a.Key("laptop"))
+	}
+}
+
+// Битая строка замера — ошибка, не тишина: иначе сломанный ps выглядел бы как «процессов нет» и снимал отметки.
+func TestParseStraysMalformed(t *testing.T) {
+	for _, raw := range []string{
+		"##procs\n 7 1 bash\n##strays\n##end\n",
+		"##procs\n x 1 7200 0 bash\n##strays\n##end\n",
+		"##procs\n 7 1 7200 0 bash\n##strays\n7\t1\t/c\n##end\n",
+		"##procs\n 7 1 7200 0 bash\n##strays\nx\t1\t/c\t/w\t\t\tcmd\n##end\n",
+		"##procs\n 7 1 7200 0 bash\n##strays\n7\tx\t/c\t/w\t\t\tcmd\n##end\n",
+		"##procs\n 7 1 7200 0 bash\n##strays\n",
+	} {
+		if _, _, err := ParseStrays([]byte(raw)); err == nil {
+			t.Errorf("%q: нет ошибки", raw)
+		}
+	}
+}
+
+// Сам скрипт отсекает службы и init.scope по cgroup и пропускает остальное: поддельный ps даёт процесс с ppid 1,
+// поддельный sed — его cgroup; среду машины проба не использует.
+func TestStrayScriptCgroupFilter(t *testing.T) {
+	real, err := exec.LookPath("sed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for cg, want := range map[string]int{
+		"/user.slice/user-1000.slice/user@1000.service/app.slice/x.service": 0,
+		"/init.scope": 0,
+		"/user.slice/user-1000.slice/session-5.scope":                         1,
+		"/user.slice/user-1000.slice/user@1000.service/app.slice/app-x.scope": 1,
+	} {
+		dir := t.TempDir()
+		write(t, filepath.Join(dir, "ps"), fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' '%d 1 7200 0 bash'\n", os.Getpid()))
+		write(t, filepath.Join(dir, "sed"), fmt.Sprintf("#!/bin/sh\ncase \"$3\" in /proc/*/cgroup) echo %s ;; *) exec %s \"$@\" ;; esac\n", cg, real))
+		for _, f := range []string{"ps", "sed"} {
+			if err := os.Chmod(filepath.Join(dir, f), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c := exec.Command("sh", "-s")
+		c.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+		c.Stdin = strings.NewReader(StrayScript)
+		out, err := c.Output()
+		if err != nil {
+			t.Fatalf("%s: %v", cg, err)
+		}
+		_, ds, err := ParseStrays(out)
+		if err != nil {
+			t.Fatalf("%s: %v", cg, err)
+		}
+		if len(ds) != want {
+			t.Errorf("%s: %+v, ждали %d", cg, ds, want)
+		}
+	}
 }

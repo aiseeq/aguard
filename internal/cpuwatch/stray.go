@@ -184,17 +184,19 @@ type Stray struct {
 }
 
 // Key — процесс на машине: pid переиспользуется, starttime — нет.
-func (s *Stray) Key(host string) string { return fmt.Sprintf("%s:%d:%d", host, s.Pid, s.Start) }
+func (d *Detail) Key(host string) string { return fmt.Sprintf("%s:%d:%d", host, d.Pid, d.Start) }
 
-// StrayWatch — память прохода по одной машине: прирост процессора считается между проходами. Рестарт демона её теряет:
-// занятость другого scope считается заново, остаток сессии от неё не зависит.
+// StrayWatch — память прохода по одной машине: прирост процессора считается между проходами. Рестарт демона её теряет, а
+// пропуск замеров дольше двух every обесценивает (средняя за пропуск — не занятость на каждом проходе): занятость другого
+// scope считается заново, остаток сессии от неё не зависит.
 type StrayWatch struct {
 	cpu  map[int]float64
 	at   time.Time
 	busy map[string]time.Time // процесс -> с какого прохода дерево занято подряд
 }
 
-var sessionScope = regexp.MustCompile(`/session-\d+\.scope$`)
+// sessionScope — сессия logind: номер или, без места, c1, c2.
+var sessionScope = regexp.MustCompile(`/session-[^/]+\.scope$`)
 
 // Judge — процессы, о которых пора писать, по замеру машины.
 func (w *StrayWatch) Judge(now time.Time, procs []Proc, details []Detail, c *StrayConfig) []Stray {
@@ -207,7 +209,7 @@ func (w *StrayWatch) Judge(now time.Time, procs []Proc, details []Detail, c *Str
 		kids[p.PPid] = append(kids[p.PPid], p.Pid)
 	}
 	dt := now.Sub(w.at).Seconds()
-	first := w.cpu == nil
+	first := w.cpu == nil || dt > 2*c.Every.D().Seconds()
 	busy := map[string]time.Time{}
 	var out []Stray
 	for i := range details {
@@ -310,11 +312,13 @@ func (st *StrayState) Save(path string) error {
 	return nil
 }
 
-// Forget убирает отметки машины о процессах, которых больше нет среди strays: процесс снят или снова спокоен.
-func (st *StrayState) Forget(host string, strays []Stray) bool {
-	keep := make(map[string]bool, len(strays))
-	for i := range strays {
-		keep[strays[i].Key(host)] = true
+// Forget убирает отметки машины о процессах, которых больше нет среди живых без родителя (present — замер прохода).
+// Спокойный процесс отметку держит: первый проход после рестарта занятости не знает, а дерево, занятое рывками, иначе
+// писало бы каждые After, а не раз в Repeat.
+func (st *StrayState) Forget(host string, present []Detail) bool {
+	keep := make(map[string]bool, len(present))
+	for i := range present {
+		keep[present[i].Key(host)] = true
 	}
 	changed := false
 	for k := range st.Told {
@@ -327,7 +331,7 @@ func (st *StrayState) Forget(host string, strays []Stray) bool {
 }
 
 // secret — значение после слова-признака секрета в строке запуска: письмо и журнал его не несут.
-var secret = regexp.MustCompile(`(?i)((?:token|secret|passw(?:or)?d|api[-_]?key|auth)[a-z_-]*[=: ]+)\S+|\b(?:sk|ghp|gho|glpat|xox[bp])-?[a-z0-9_-]{16,}`)
+var secret = regexp.MustCompile(`(?i)((?:token|secret|passw(?:or)?d|api[-_]?key|auth)[a-z_-]*[=: ]+(?:(?:bearer|basic) +)?|\bbearer +)\S+|\b(?:sk|ghp|gho|glpat|xox[bp])-?[a-z0-9_-]{16,}`)
 
 // cmdMax — сколько символов строки запуска в письме: узнать процесс, а не читать аргументы.
 const cmdMax = 100

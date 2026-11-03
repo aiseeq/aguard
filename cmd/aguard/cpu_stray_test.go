@@ -167,3 +167,58 @@ func TestStrayAddress(t *testing.T) {
 		}
 	}
 }
+
+// Рестарт демона: первый проход не знает занятости другого scope, но процесс жив — отметка остаётся, нового письма нет.
+// Спокойный процесс тоже держит отметку: иначе дерево, занятое рывками, писало бы каждые 30 мин, а не раз в repeat.
+func TestStrayRestartKeepsLiveMark(t *testing.T) {
+	a, logs, cfg := strayApp(t)
+	const other = "##procs\n 7 1 7200 3600 bash\n##strays\n7\t555\t/user.slice/user-1000.slice/user@1000.service/app.slice/app-x.scope\t/home/u/git/graft\t\t\tbash -c x\n##end\n"
+	a.strayRead = func(_ context.Context, h *cpuHost) ([]byte, error) {
+		if h.ssh == "" {
+			return []byte("##procs\n##strays\n##end\n"), nil
+		}
+		return []byte(other), nil
+	}
+	path := filepath.Join(a.dir("cpu"), "strays.json")
+	told := time.Now().Add(-time.Minute).Round(0)
+	st := cpuwatch.StrayState{Told: map[string]time.Time{"pc:7:555": told}}
+	if err := st.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	strayPass(a, cfg)
+	got, err := cpuwatch.LoadStrayState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Told["pc:7:555"].Equal(told) {
+		t.Fatalf("отметка живого процесса снята: %+v", got)
+	}
+	if strings.Contains(logs.String(), "написал") {
+		t.Fatalf("письмо после рестарта:\n%s", logs.String())
+	}
+}
+
+// Повтор живому мастеру: письмо ему и копия лиду.
+func TestStrayRepeatCopiesLead(t *testing.T) {
+	a, logs, cfg := strayApp(t)
+	ents, err := os.ReadDir(a.reg.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(a.reg.Dir, ents[0].Name())
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(p, []byte(strings.Replace(string(b), `"lead"`, `"graft-master"`, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := a.cpuHosts(cfg)[1]
+	now := time.Now()
+	s := cpuwatch.Stray{Detail: cpuwatch.Detail{Pid: 7, Start: 555, Cwd: "/home/u/git/graft"}}
+	st := cpuwatch.StrayState{Told: map[string]time.Time{s.Key(h.win.Name): now.Add(-7 * time.Hour)}}
+	a.strayLetters(cfg, a.cpuResolver(cfg), h, []cpuwatch.Stray{s}, &st, now)
+	if !strings.Contains(logs.String(), "session=graft-master") || !strings.Contains(logs.String(), "session=lead") {
+		t.Fatalf("нет мастера или копии лиду:\n%s", logs.String())
+	}
+}
