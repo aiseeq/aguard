@@ -41,7 +41,7 @@ type Task struct {
 }
 
 // Sample — замер машины: load average, готовые к работе задачи в момент замера (procs_running без себя), потоки машины
-// и, в перегрузку, готовые потоки по процессам.
+// и, при высоком load average за минуту, готовые потоки по процессам.
 type Sample struct {
 	At       time.Time
 	Load     pressure.LoadAvg
@@ -50,11 +50,10 @@ type Sample struct {
 	Tasks    []Task
 }
 
-// Over — машина перегружена: load average за минуту и готовых к работе задач в момент замера не меньше потоков. Других
-// чисел нагрузки не нужно (пользователь 28.10 00:02:45 CET в сессии лида: «я всегда использовал только эти 2 цифры:
-// моментальный и минутный»).
+// Over — машина перегружена для наблюдения серии: load average за минуту не меньше числа потоков. Мгновенное число
+// готовых задач сохраняется для снимка владельцев и письма, но не начинает и не прерывает серию.
 func (s *Sample) Over() bool {
-	return s.Threads > 0 && s.Load.Avg1 >= float64(s.Threads) && s.Runnable >= s.Threads
+	return s.Threads > 0 && s.Load.Avg1 >= float64(s.Threads)
 }
 
 // ReadLoad — load average, готовые задачи и потоки машины procRoot (/proc или папка снятых по ssh файлов).

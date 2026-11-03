@@ -248,13 +248,13 @@ func TestJudge(t *testing.T) {
 	if v := h.Judge(sample(start.Add(-2*time.Minute), 21.9, 30, heavy), byCgroup); v.Over || v.Loads != nil {
 		t.Fatalf("load average за минуту ниже потоков — не перегрузка и владельцы не разбираются: %+v", v)
 	}
-	// load average запаздывает: нагрузка уже кончилась, готовых сейчас 3 — не перегрузка
-	if v := h.Judge(sample(start.Add(-time.Minute), 30, 3, map[Owner]int{glintSess: 1, desktop: 2}), byCgroup); v.Over {
-		t.Fatalf("готовых сейчас меньше потоков — не перегрузка: %+v", v)
+	// Мгновенные готовые задачи сами не начинают серию при низком LA.
+	if v := h.Judge(sample(start.Add(-time.Minute), 21, 30, map[Owner]int{glintSess: 1, desktop: 2}), byCgroup); v.Over {
+		t.Fatalf("низкий load average — не перегрузка: %+v", v)
 	}
 	v := h.Judge(sample(start, 22, 30, heavy), byCgroup)
 	if !v.Over || !v.Started || !v.Since.Equal(start) || v.Avg1 != 22 || v.Runnable != 30 || v.Threads != 22 {
-		t.Fatalf("load average за минуту и готовые сейчас дошли до потоков — начало перегрузки: %+v", v)
+		t.Fatalf("load average за минуту дошёл до потоков — начало перегрузки: %+v", v)
 	}
 	if v.Long(start.Add(9*time.Minute), 10*time.Minute) || !v.Long(start, 0) {
 		t.Error("письма — когда перегрузка держится подряд не меньше after")
@@ -297,10 +297,14 @@ func TestJudge(t *testing.T) {
 			t.Errorf("сводка лиду без %q: %s", part, lead)
 		}
 	}
-	// один замер без перегрузки — конец: длительность — подряд
+	// Высокий LA продолжает серию при низком runnable; низкий LA завершает её при высоком runnable.
 	at = at.Add(time.Minute)
-	if v = h.Judge(sample(at, 25, 3, heavy), byCgroup); v.Over || !v.Ended.Equal(start) || v.Lasted != 11*time.Minute || v.Loads != nil {
-		t.Errorf("готовых сейчас 3 — конец перегрузки, начатой %v: %+v", start, v)
+	if v = h.Judge(sample(at, 30, 3, heavy), byCgroup); !v.Over || !v.Since.Equal(start) {
+		t.Errorf("низкий runnable не рвёт серию: %+v", v)
+	}
+	at = at.Add(time.Minute)
+	if v = h.Judge(sample(at, 21, 30, heavy), byCgroup); v.Over || !v.Ended.Equal(start) || v.Lasted != 12*time.Minute || v.Loads != nil {
+		t.Errorf("низкий LA завершает серию, даже если runnable высок: %+v", v)
 	}
 	if h.Due("glint-master", at, time.Minute) {
 		t.Error("вне перегрузки писем нет")
@@ -312,6 +316,28 @@ func TestJudge(t *testing.T) {
 	}
 	if !h.First("glint-master") || len(h.Told()) != 0 || h.Due("glint-master", at, 30*time.Minute) {
 		t.Error("письмо 2 минуты назад в прошлую перегрузку: в этой ещё не писали, но повтор раньше repeat")
+	}
+}
+
+func TestJudgeLAOverloadStreakWithRunnableFluctuations(t *testing.T) {
+	start := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
+	var h Host
+	var firstLong time.Time
+	for i := range 60 {
+		runnable := 30
+		if i%10 < 7 {
+			runnable = 40
+		}
+		at := start.Add(time.Duration(i) * time.Minute)
+		s := sample(at, 40, runnable, nil)
+		s.Threads = 32
+		v := h.Judge(s, byCgroup)
+		if v.Long(at, 10*time.Minute) && firstLong.IsZero() {
+			firstLong = at
+		}
+	}
+	if firstLong.IsZero() || firstLong.After(start.Add(15*time.Minute)) {
+		t.Fatalf("60 минут высокого LA с меняющимся runnable должны достичь порога к 15-й минуте, получили %v", firstLong)
 	}
 }
 
