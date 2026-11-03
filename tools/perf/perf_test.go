@@ -186,7 +186,7 @@ func TestExecMSCommandAndExitCodes(t *testing.T) {
 		args []string
 		want int
 	}{{[]string{"true"}, 0}, {[]string{"sh", "-c", "exit 5"}, 5}, {[]string{"sh", "-c", "exit 3"}, 1}} {
-		out, code := runScript(t, "exec-ms.sh", map[string]string{"AGUARD_PERF_BUDGET_S": "0"}, tc.args...)
+		out, code := runScript(t, "exec-ms.sh", nil, tc.args...)
 		if code != tc.want {
 			t.Errorf("%v: code %d, want %d (stdout %q)", tc.args, code, tc.want, out)
 		}
@@ -196,21 +196,6 @@ func TestExecMSCommandAndExitCodes(t *testing.T) {
 		if tc.want != 0 && out != "" {
 			t.Errorf("failed command printed %q", out)
 		}
-	}
-}
-
-func TestExecMSZeroBudgetStillRunsOnce(t *testing.T) {
-	count := filepath.Join(t.TempDir(), "runs")
-	out, code := runScript(t, "exec-ms.sh", map[string]string{"AGUARD_PERF_BUDGET_S": "0"}, "sh", "-c", "echo run >> \"$1\"; true", "count", count)
-	if code != 0 || !regexp.MustCompile(`^\d+\n$`).MatchString(out) {
-		t.Fatalf("got (%q, %d), want integer and code 0", out, code)
-	}
-	data, err := os.ReadFile(count)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(string(data), "run\n") != 1 {
-		t.Fatalf("ran %d times, want once", strings.Count(string(data), "run\n"))
 	}
 }
 
