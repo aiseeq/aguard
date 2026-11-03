@@ -139,11 +139,12 @@ func (a *app) codexRound(ctx context.Context, cfg *codexwatch.Config, dry bool) 
 	}
 	readings, failed, errs := a.codexReadAll(ctx, cfg)
 	stale := false // consume в этом проходе: замер снят до сброса, про лимит учётки он уже ничего не говорит
-	for _, r := range readings {
-		r.Others = codexwatch.Others(readings, failed, r.Account.Name)
-		consumed, err := a.codexAccount(ctx, cfg, r, dry)
+	for i := range readings {
+		name := readings[i].Account.Name
+		readings[i].Others = codexwatch.Others(readings, failed, name)
+		consumed, err := a.codexAccount(ctx, cfg, readings[i], dry)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("учётка %s: %w", r.Account.Name, err))
+			errs = append(errs, fmt.Errorf("учётка %s: %w", name, err))
 		}
 		stale = stale || consumed
 	}
