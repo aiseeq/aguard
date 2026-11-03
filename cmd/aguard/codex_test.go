@@ -27,10 +27,10 @@ func TestCodexRoundRetriesUnsent(t *testing.T) {
 	now := time.Now()
 	used := 99.0
 	noArming(a)
-	a.codexRead = func(_ context.Context, _ string, at time.Time) (codexwatch.Reading, error) {
+	a.codexRead = func(_ context.Context, _, _ string, at time.Time) (codexwatch.Reading, error) {
 		return codexwatch.Reading{At: at, Used: used, ResetsAt: now.Add(5 * 24 * time.Hour), Allowed: true, Available: 1}, nil
 	}
-	cfg := codexwatch.Default(dir)
+	cfg := oneAccount(dir)
 	cfg.Lead = "lead"
 	ctx := context.Background()
 	if err := a.codexRound(ctx, &cfg, false); err != nil {
@@ -91,10 +91,10 @@ func TestCodexFakeAppServer(t *testing.T) {
 			t.Setenv("FAKE_CODEX_ANSWER", answer)
 			at := start
 			noArming(a)
-			a.codexRead = func(ctx context.Context, codex string, _ time.Time) (codexwatch.Reading, error) {
-				return readCodex(ctx, codex, at)
+			a.codexRead = func(ctx context.Context, codex, home string, _ time.Time) (codexwatch.Reading, error) {
+				return readCodex(ctx, codex, home, at)
 			}
-			cfg := codexwatch.Default(dir)
+			cfg := oneAccount(dir)
 			cfg.Mode, cfg.Codex, cfg.Lead = codexwatch.ModeLog, fake, "lead"
 			for ; at.Before(start.Add(8 * time.Hour)); at = at.Add(10 * time.Minute) {
 				used := min(100, float64(int(70+tc.perHour*at.Sub(start).Hours())))
@@ -132,7 +132,7 @@ func TestCodexFakeAppServer(t *testing.T) {
 // noArming — проход без взвода: одобрений нет, consume и тикет — ошибка теста.
 func noArming(a *app) {
 	a.codexApproved = func(string, time.Time) (string, error) { return "", nil }
-	a.codexConsume = func(context.Context, string, string) (string, error) {
+	a.codexConsume = func(context.Context, string, string, string) (string, error) {
 		panic("consume без взвода")
 	}
 	a.codexNote = func(context.Context, string, string, string, string) error { panic("тикет без взвода") }
@@ -168,16 +168,16 @@ func TestCodexArmedFakeAppServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 11, 2, 19, 0, 0, 0, time.UTC)
-	a.codexRead = func(ctx context.Context, codex string, _ time.Time) (codexwatch.Reading, error) {
-		return readCodex(ctx, codex, at)
+	a.codexRead = func(ctx context.Context, codex, home string, _ time.Time) (codexwatch.Reading, error) {
+		return readCodex(ctx, codex, home, at)
 	}
 	var notes []string
 	a.codexNote = func(_ context.Context, _, _, ticket, text string) error {
 		notes = append(notes, ticket+": "+text)
 		return nil
 	}
-	cfg := codexwatch.Default(dir)
-	cfg.Codex, cfg.Approvals, cfg.Lead = fake, approvals, "lead"
+	cfg := oneAccount(dir)
+	cfg.Codex, cfg.Accounts[0].Approvals, cfg.Lead = fake, approvals, "lead"
 	ctx := context.Background()
 	if err := a.codexRound(ctx, &cfg, false); err != nil { // consume без ответа
 		t.Fatal(err)
@@ -197,7 +197,7 @@ func TestCodexArmedFakeAppServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	st, err := codexwatch.LoadState(filepath.Join(a.dir("codex"), "state.json"))
+	st, err := codexwatch.LoadState(filepath.Join(a.dir("codex"), "work.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,10 +243,10 @@ func TestCodexDryRunNoSideEffects(t *testing.T) {
 	noArming(a)
 	a.codexApproved = func(string, time.Time) (string, error) { return "x", nil } // взведено, но dry не зовёт consume
 	now := time.Now()
-	a.codexRead = func(_ context.Context, _ string, at time.Time) (codexwatch.Reading, error) {
+	a.codexRead = func(_ context.Context, _, _ string, at time.Time) (codexwatch.Reading, error) {
 		return codexwatch.Reading{At: at, Used: 100, ResetsAt: now.Add(5 * 24 * time.Hour), Available: 1}, nil
 	}
-	statePath := filepath.Join(a.dir("codex"), "state.json")
+	statePath := filepath.Join(a.dir("codex"), "work.json")
 	before := codexwatch.State{ResetsAt: now.Add(5 * 24 * time.Hour), Warned: true}
 	if err := before.Save(statePath); err != nil {
 		t.Fatal(err)
@@ -255,7 +255,7 @@ func TestCodexDryRunNoSideEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := codexwatch.Default(dir)
+	cfg := oneAccount(dir)
 	cfg.Lead = "lead"
 	if err := a.codexRound(context.Background(), &cfg, true); err != nil {
 		t.Fatal(err)
@@ -283,10 +283,10 @@ func armedApp(t *testing.T) (*app, *strings.Builder, codexwatch.Config) {
 	noArming(a)
 	a.codexApproved = func(string, time.Time) (string, error) { return "e7192203:278", nil }
 	resets := time.Now().Add(5 * 24 * time.Hour)
-	a.codexRead = func(_ context.Context, _ string, at time.Time) (codexwatch.Reading, error) {
+	a.codexRead = func(_ context.Context, _, _ string, at time.Time) (codexwatch.Reading, error) {
 		return codexwatch.Reading{At: at, Used: 100, ResetsAt: resets, Available: 1}, nil
 	}
-	cfg := codexwatch.Default(dir)
+	cfg := oneAccount(dir)
 	cfg.Lead = "lead"
 	return a, logs, cfg
 }
@@ -306,7 +306,7 @@ func TestCodexLogModeNoConsume(t *testing.T) {
 // m2: проход берёт блокировку состояния — при занятой (ручной tick идёт) consume не зовётся.
 func TestCodexRoundTakesLock(t *testing.T) {
 	a, _, cfg := armedApp(t)
-	release, err := codexLock(filepath.Join(a.dir("codex"), "state.json.lock"))
+	release, err := codexLock(filepath.Join(a.dir("codex"), "pass.lock"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,9 +321,9 @@ func TestCodexRoundTakesLock(t *testing.T) {
 func TestCodexOutcomeDelivered(t *testing.T) {
 	a, logs, cfg := armedApp(t)
 	got := liveLead(t, a)
-	statePath := filepath.Join(a.dir("codex"), "state.json")
+	statePath := filepath.Join(a.dir("codex"), "work.json")
 	consumes := 0
-	a.codexConsume = func(_ context.Context, _, key string) (string, error) {
+	a.codexConsume = func(_ context.Context, _, _, key string) (string, error) {
 		consumes++
 		st, err := codexwatch.LoadState(statePath)
 		if err != nil || !st.Reset.Called || st.Reset.Key != key || key == "" {
@@ -391,5 +391,194 @@ func TestApprovedCodexAcrossMinute(t *testing.T) {
 		if got != c.want {
 			t.Errorf("approvedCodex(%s) = %q, want %q", c.at.Format(time.RFC3339), got, c.want)
 		}
+	}
+}
+
+// oneAccount — настройки с одной учёткой work: проходы, где важна логика окна, а не учётки.
+func oneAccount(dir string) codexwatch.Config {
+	cfg := codexwatch.Default(dir)
+	cfg.Accounts = cfg.Accounts[:1]
+	return cfg
+}
+
+// twoAccounts — проход по work и personal с подставным замером по CODEX_HOME и живым лидом в письмах.
+func twoAccounts(t *testing.T, read map[string]func(time.Time) (codexwatch.Reading, error)) (*app, *strings.Builder, codexwatch.Config) {
+	t.Helper()
+	a, logs, _ := armedApp(t)
+	cfg := codexwatch.Default(a.home)
+	cfg.Mode, cfg.Lead = codexwatch.ModeLog, "lead"
+	a.codexApproved = func(string, time.Time) (string, error) { return "", nil }
+	a.codexRead = func(_ context.Context, _, home string, at time.Time) (codexwatch.Reading, error) {
+		for _, acc := range cfg.Accounts {
+			if acc.Home == home {
+				return read[acc.Name](at)
+			}
+		}
+		t.Fatalf("замер неизвестной учётки CODEX_HOME=%s", home)
+		return codexwatch.Reading{}, nil
+	}
+	return a, logs, cfg
+}
+
+func limit(used float64, reset time.Time, credits int) func(time.Time) (codexwatch.Reading, error) {
+	return func(at time.Time) (codexwatch.Reading, error) {
+		return codexwatch.Reading{At: at, Used: used, ResetsAt: reset, Allowed: used < 100, Available: credits}, nil
+	}
+}
+
+// app-server каждой учётки запускается со своим CODEX_HOME, в чтении и в consume: иначе чужой лимит и чужой кредит.
+func TestCodexHomeReachesAppServer(t *testing.T) {
+	dir := t.TempDir()
+	seen := filepath.Join(dir, "home")
+	fake := filepath.Join(dir, "codex")
+	script := "#!/bin/bash\nprintf '%s\\n' \"$CODEX_HOME\" >> " + seen + "\nexit 3\n"
+	if err := os.WriteFile(fake, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := readCodex(ctx, fake, "/h/personal", time.Now()); err == nil || !strings.Contains(err.Error(), "CODEX_HOME=/h/personal") {
+		t.Fatalf("readCodex: %v", err)
+	}
+	if _, err := consumeCodex(ctx, fake, "/h/work", "k"); err == nil || !strings.Contains(err.Error(), "CODEX_HOME=/h/work") {
+		t.Fatalf("consumeCodex: %v", err)
+	}
+	got, err := os.ReadFile(seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "/h/personal\n/h/work\n" {
+		t.Fatalf("CODEX_HOME у app-server: %q", got)
+	}
+}
+
+// Взвод одной учётки: consume — только её домом и своим «да»; у второй 100% и кредит, но «да» нет — письмо, не consume.
+func TestCodexArmedOnlyOwnAccount(t *testing.T) {
+	reset := time.Now().Add(5 * 24 * time.Hour)
+	a, logs, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
+		"work": limit(100, reset, 1), "personal": limit(100, reset, 1),
+	})
+	cfg.Mode = codexwatch.ModeAlert
+	liveLead(t, a)
+	personal := cfg.Accounts[1]
+	a.codexApproved = func(path string, _ time.Time) (string, error) {
+		if path == personal.Approvals {
+			return "да на personal", nil
+		}
+		return "", nil
+	}
+	var homes []string
+	a.codexConsume = func(_ context.Context, _, home, _ string) (string, error) {
+		homes = append(homes, home)
+		return "reset", nil
+	}
+	a.codexNote = func(_ context.Context, _, _, _, _ string) error { return nil }
+	if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(homes) != 1 || homes[0] != personal.Home {
+		t.Fatalf("consume: %q, журнал:\n%s", homes, logs.String())
+	}
+	out := logs.String() // письма — в журнале; «все без лимита» нет: замер снят до сброса
+	for _, want := range []string{"учётка work (CODEX_HOME=" + cfg.Accounts[0].Home + ")", "пора", "Другие учётки: personal 100%",
+		"учётка personal (CODEX_HOME=" + personal.Home + ")", "outcome=reset"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("нет %q в письмах:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "все учётки") {
+		t.Fatalf("письмо «все без лимита» в проходе с consume:\n%s", out)
+	}
+}
+
+// Сбой замера одной учётки не мешает второй: её письмо уходит с «замера нет», проход возвращает ошибку с именем, письма
+// «все без лимита» нет — про первую неизвестно.
+func TestCodexReadFailureIsolated(t *testing.T) {
+	reset := time.Now().Add(5 * 24 * time.Hour)
+	a, logs, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
+		"work": func(time.Time) (codexwatch.Reading, error) {
+			return codexwatch.Reading{}, fmt.Errorf("app-server упал")
+		},
+		"personal": limit(100, reset, 1),
+	})
+	err := a.codexRound(context.Background(), &cfg, false)
+	if err == nil || !strings.Contains(err.Error(), "учётки work") {
+		t.Fatalf("ошибка прохода: %v", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "учётка personal") || !strings.Contains(out, "work — замера нет") || strings.Contains(out, "все учётки") {
+		t.Fatalf("журнал:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(a.dir("codex"), "work.json")); !os.IsNotExist(err) {
+		t.Fatalf("состояние учётки без замера: %v", err)
+	}
+	if st, err := codexwatch.LoadState(filepath.Join(a.dir("codex"), "personal.json")); err != nil || !st.Full {
+		t.Fatalf("состояние personal: %+v, %v", st, err)
+	}
+}
+
+// Письмо «все без лимита» — один раз на переход; лимит появился и снова кончился — снова. Шаг — меньший из учёток.
+func TestCodexAllOutOncePerTransition(t *testing.T) {
+	reset := time.Now().Add(5 * 24 * time.Hour)
+	personal := 100.0
+	a, logs, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
+		"work": limit(100, reset, 0),
+		"personal": func(at time.Time) (codexwatch.Reading, error) {
+			return limit(personal, reset.Add(time.Hour), 0)(at)
+		},
+	})
+	ctx := context.Background()
+	count := func() int { return strings.Count(logs.String(), "все учётки Codex без лимита") }
+	for _, step := range []struct {
+		used float64
+		want int
+	}{{100, 1}, {100, 1}, {10, 1}, {100, 2}} {
+		personal = step.used
+		if err := a.codexRound(ctx, &cfg, false); err != nil {
+			t.Fatal(err)
+		}
+		if count() != step.want {
+			t.Fatalf("used %v: писем %d, ждали %d, журнал:\n%s", step.used, count(), step.want, logs.String())
+		}
+	}
+}
+
+// Письмо лиду не ушло (лида нет): следующий проход пробует снова, а не молчит до следующего перехода.
+func TestCodexAllOutRetriedWhenUnsent(t *testing.T) {
+	reset := time.Now().Add(5 * 24 * time.Hour)
+	a, logs, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
+		"work": limit(100, reset, 0), "personal": limit(100, reset, 0),
+	})
+	cfg.Mode = codexwatch.ModeAlert
+	for range 2 {
+		if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(logs.String(), "kind=all_out"); n != 2 {
+		t.Fatalf("попыток письма %d, журнал:\n%s", n, logs.String())
+	}
+}
+
+// Шаг прохода — меньший из учёток: близкая к 100% учётка держит шаг fast, хотя другая спокойна.
+func TestCodexStepIsShortest(t *testing.T) {
+	reset := time.Now().Add(5 * 24 * time.Hour)
+	used := 90.0
+	a, _, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
+		"work": limit(5, reset, 0),
+		"personal": func(at time.Time) (codexwatch.Reading, error) {
+			return limit(used, reset, 1)(at)
+		},
+	})
+	statePath := filepath.Join(a.dir("codex"), "personal.json")
+	seed := codexwatch.State{ResetsAt: reset, Samples: []codexwatch.Sample{{At: time.Now().Add(-time.Hour), Used: 70}}}
+	if err := seed.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	used = 99
+	if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	if a.codexEvery(&cfg) != cfg.Fast.D() {
+		t.Fatalf("шаг: %v", a.codexEvery(&cfg))
 	}
 }

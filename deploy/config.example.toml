@@ -254,9 +254,11 @@ near = "30m"
 warn = "2h"
 min_idle = "24h"
 codex = "~/.npm/bin/codex"
-# Взвод: строка «да» на окно в approvals (`<resetsAt RFC3339><TAB><источник>`) — при 100% consume вызывает сам демон
+# Учётки — в коде (codexwatch.Default), как hostAccounts в worker: work (~/.codex) и personal (~/.codex-personal); у каждой
+# свои лимит, состояние (codex/<имя>.json) и файл «да» (~/.claude/improve/state/codex-reset-approved.tsv и
+# …-approved-personal.tsv). Лимит кончился на всех — письмо лиду один раз на переход (codex/fleet.json).
+# Взвод: строка «да» на окно в файле учётки (`<resetsAt RFC3339><TAB><источник>`) — при 100% consume вызывает сам демон
 # (ключ идемпотентности окна — в состоянии до вызова), исход — письмом лиду и строкой в ticket через tk.
-approvals = "~/.claude/improve/state/codex-reset-approved.tsv"
 tk = "~/bin/tk"
 ticket_root = "~/git"
 ticket = "codex-limit-reset"

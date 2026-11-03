@@ -1,4 +1,4 @@
-// Package codexwatch — сторож недельного лимита Codex: письмо лиду за ~2 ч до 100%, когда 100% наступит раньше
+// Package codexwatch — сторож недельного лимита Codex по каждой учётке отдельно (Account): письмо лиду за ~2 ч до 100%, когда 100% наступит раньше
 // планового сброса с простоем больше суток и есть досрочный сброс, и второе — при 100%. Без «да» на окно сброс не
 // делает: исполнитель consume — лид (решение пользователя codex-reset-on-approval в ~/.claude/decisions.md, 02.11,
 // `tl e7192203:147`, `:264`); с «да» на окно — «взвод» (reset.go): consume при 100% вызывает сам.
@@ -40,6 +40,16 @@ const keep = 2 * time.Hour
 // windowDrop — падение расхода между замерами, после которого окно считается новым: больше погрешности целого процента.
 const windowDrop = 5
 
+// Account — учётка OpenAI на хосте: свои CODEX_HOME, лимит и окно, состояние и файл «да». Список — как hostAccounts в
+// worker (llmark tool/cmd/worker/codexaccounts.go; лид 03.11 по слову пользователя о второй подписке, decisions.md
+// openai-luna-only). Файл «да» у каждой свой: строка на окно одной учётки не взводит другую, даже если их resetsAt
+// сошлись ближе допуска минуты, а кредит тратится всерьёз.
+type Account struct {
+	Name      string // имя в письмах и файле состояния; как в job.json worker
+	Home      string // CODEX_HOME app-server: чтение и consume
+	Approvals string // «да» пользователя на окно: строка `<resetsAt RFC3339><TAB><источник>` (формат Сна, dream 0a3b072)
+}
+
 // Config — раздел [codex] конфига aguard.
 type Config struct {
 	Mode     string          `toml:"mode"`
@@ -49,13 +59,13 @@ type Config struct {
 	Warn     policy.Duration `toml:"warn"`     // письмо 1: прогноз 100% ближе этого
 	MinIdle  policy.Duration `toml:"min_idle"` // простой до планового сброса, с которого сброс стоит предлагать
 	Codex    string          `toml:"codex"`    // путь к codex (app-server)
-	// Approvals — «да» пользователя на окно: строка `<resetsAt RFC3339><TAB><источник>` (формат Сна, dream 0a3b072).
-	Approvals  string `toml:"approvals"`
-	Tk         string `toml:"tk"`          // путь к tk: исход взвода — строкой в тикет
-	TicketRoot string `toml:"ticket_root"` // папка, где tk ищет тикет
-	Ticket     string `toml:"ticket"`      // тикет исходов взвода
-	Lead       string `toml:"-"`
-	SendAuth   bool   `toml:"-"`
+	// Accounts — не из файла: BurntSushi кладёт массив поверх умолчания, и незаданный approvals достался бы от другой учётки.
+	Accounts   []Account `toml:"-"`
+	Tk         string    `toml:"tk"`          // путь к tk: исход взвода — строкой в тикет
+	TicketRoot string    `toml:"ticket_root"` // папка, где tk ищет тикет
+	Ticket     string    `toml:"ticket"`      // тикет исходов взвода
+	Lead       string    `toml:"-"`
+	SendAuth   bool      `toml:"-"`
 }
 
 // Default — шаг 10 мин: одно чтение ~1,5 с CPU и 230 МБ RSS на 8 с (замер 02.11), 144 в сутки; при темпе 02.11
@@ -64,7 +74,11 @@ type Config struct {
 func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(10 * time.Minute), Fast: policy.Duration(2 * time.Minute),
 		Near: policy.Duration(30 * time.Minute), Warn: policy.Duration(2 * time.Hour), MinIdle: policy.Duration(24 * time.Hour),
-		Codex: home + "/.npm/bin/codex", Approvals: home + "/.claude/improve/state/codex-reset-approved.tsv",
+		Codex: home + "/.npm/bin/codex",
+		Accounts: []Account{
+			{Name: "work", Home: home + "/.codex", Approvals: home + "/.claude/improve/state/codex-reset-approved.tsv"},
+			{Name: "personal", Home: home + "/.codex-personal", Approvals: home + "/.claude/improve/state/codex-reset-approved-personal.tsv"},
+		},
 		Tk: home + "/bin/tk", TicketRoot: home + "/git", Ticket: "codex-limit-reset"}
 }
 
@@ -79,17 +93,19 @@ func (c *Config) Validate(home string) error {
 	if c.Near.D() <= 0 || c.Warn.D() < c.Near.D() || c.MinIdle.D() <= 0 {
 		return errors.New("codex.near > 0, codex.warn >= codex.near, codex.min_idle > 0")
 	}
-	for _, p := range []*string{&c.Codex, &c.Approvals, &c.Tk, &c.TicketRoot} {
+	for _, p := range []*string{&c.Codex, &c.Tk, &c.TicketRoot} {
 		*p = policy.ExpandHome(*p, home)
 	}
-	if c.Codex == "" || c.Approvals == "" || c.Tk == "" || c.TicketRoot == "" || c.Ticket == "" {
-		return errors.New("codex.codex, codex.approvals, codex.tk, codex.ticket_root и codex.ticket не пусты")
+	if c.Codex == "" || c.Tk == "" || c.TicketRoot == "" || c.Ticket == "" {
+		return errors.New("codex.codex, codex.tk, codex.ticket_root и codex.ticket не пусты")
 	}
 	return nil
 }
 
 // Reading — один замер лимита.
 type Reading struct {
+	Account   Account
+	Others    string // запас других учёток для писем: " Другие учётки: …" (Others); пусто — других нет
 	At        time.Time
 	Used      float64   // usedPercent недельного окна
 	ResetsAt  time.Time // плановый сброс окна
@@ -117,23 +133,28 @@ type State struct {
 	Pending []Delivery `json:"pending,omitempty"`
 }
 
-func LoadState(path string) (State, error) {
+func LoadState(path string) (State, error) { return load[State](path) }
+
+func (s *State) Save(path string) error { return save(path, s) }
+
+// load — JSON из path; файла нет — нулевое значение.
+func load[T any](path string) (T, error) {
+	var v T
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return State{}, nil
+		return v, nil
 	}
 	if err != nil {
-		return State{}, fmt.Errorf("состояние codex: %w", err)
+		return v, fmt.Errorf("состояние codex: %w", err)
 	}
-	var s State
-	if err := json.Unmarshal(b, &s); err != nil {
-		return s, fmt.Errorf("состояние codex %s: %w", path, err)
+	if err := json.Unmarshal(b, &v); err != nil {
+		return v, fmt.Errorf("состояние codex %s: %w", path, err)
 	}
-	return s, nil
+	return v, nil
 }
 
-func (s *State) Save(path string) error {
-	b, err := json.Marshal(s)
+func save(path string, v any) error {
+	b, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("сериализация состояния codex: %w", err)
 	}
@@ -188,6 +209,9 @@ func (s *State) Apply(r Reading, c *Config) (Forecast, []Notice, bool) {
 	s.record(r)
 	f := s.forecast(r)
 	out, consume := s.decide(r, f, c)
+	for i := range out { // решение о сбросе — с запасом других учёток: простой этой не значит простой бойцов
+		out[i].Message += r.Others
+	}
 	return f, out, consume
 }
 
@@ -203,8 +227,8 @@ func (s *State) record(r Reading) {
 	if !sameReset || r.Used < last-windowDrop {
 		pending := s.Pending
 		if s.Reset.Key != "" && s.Reset.Called && s.Reset.Outcome == "" {
-			pending = append(pending, Delivery{Message: lostText(s.ResetsAt, r.ResetsAt, last, r.Used, s.Reset.Key), At: r.At,
-				Note: "aguard: consume вызывался без ответа, затем окно сменилось — сброс, видимо, прошёл; idempotencyKey " +
+			pending = append(pending, Delivery{Message: lostText(r.Account, s.ResetsAt, r.ResetsAt, last, r.Used, s.Reset.Key), At: r.At,
+				Note: "aguard: consume учётки " + r.Account.Name + " вызывался без ответа, затем окно сменилось — сброс, видимо, прошёл; idempotencyKey " +
 					s.Reset.Key})
 		}
 		var keep Reset
@@ -334,39 +358,44 @@ func local(t time.Time) string { return t.Local().Format("02.01 15:04 MST") }
 
 func days(d time.Duration) string { return fmt.Sprintf("%.1f сут", d.Hours()/24) }
 
+// who — учётка в письме: и какое окно, и каким CODEX_HOME лиду звать consume.
+func who(a Account) string {
+	return fmt.Sprintf("aguard codex: учётка %s (CODEX_HOME=%s):", a.Name, a.Home)
+}
+
 func warnText(r Reading, f Forecast) string {
-	head := fmt.Sprintf("aguard codex: недельный лимит Codex — %.0f%%, при темпе %.1f %%/ч 100%% около %s; плановый сброс %s, "+
-		"простой %s; досрочных сбросов доступно: %d.", r.Used, f.Rate, local(f.At), local(r.ResetsAt),
+	head := fmt.Sprintf("%s недельный лимит Codex — %.0f%%, при темпе %.1f %%/ч 100%% около %s; плановый сброс %s, "+
+		"простой %s; досрочных сбросов доступно: %d.", who(r.Account), r.Used, f.Rate, local(f.At), local(r.ResetsAt),
 		days(r.ResetsAt.Sub(f.At)), r.Available)
 	if r.Armed != "" {
 		return head + fmt.Sprintf(" Сброс взведён («да» на окно: %s): consume при 100%% вызову я, исход пришлю; "+
 			"сам не вызывай.", r.Armed)
 	}
-	return head + fmt.Sprintf(" Вопрос пользователю и consume при 100%% — твои (или «да» строкой в файл одобрений — тогда "+
-		"сброшу сам); %s. Письмо «100%%» пришлю, когда дойдёт.", ref)
+	return head + fmt.Sprintf(" Вопрос пользователю и consume при 100%% — твои (или «да» строкой в %s — тогда "+
+		"сброшу сам); %s. Письмо «100%%» пришлю, когда дойдёт.", r.Account.Approvals, ref)
 }
 
 func fullText(r Reading, idle time.Duration) string {
 	if r.Available == 0 && r.Armed != "" {
-		return fmt.Sprintf("aguard codex: недельный лимит Codex — %.0f%%, сброс взведён («да»: %s), но досрочных сбросов нет "+
-			"— consume не вызываю; плановый сброс %s, простой %s.", r.Used, r.Armed, local(r.ResetsAt), days(idle))
+		return fmt.Sprintf("%s недельный лимит Codex — %.0f%%, сброс взведён («да»: %s), но досрочных сбросов нет "+
+			"— consume не вызываю; плановый сброс %s, простой %s.", who(r.Account), r.Used, r.Armed, local(r.ResetsAt), days(idle))
 	}
 	if r.Available == 0 {
-		return fmt.Sprintf("aguard codex: недельный лимит Codex — %.0f%%, но досрочных сбросов больше нет (после прошлого "+
-			"письма кредит пропал); плановый сброс %s, простой %s. consume не поможет.", r.Used, local(r.ResetsAt), days(idle))
+		return fmt.Sprintf("%s недельный лимит Codex — %.0f%%, но досрочных сбросов больше нет (после прошлого "+
+			"письма кредит пропал); плановый сброс %s, простой %s. consume не поможет.", who(r.Account), r.Used, local(r.ResetsAt), days(idle))
 	}
-	return fmt.Sprintf("aguard codex: недельный лимит Codex — %.0f%%, пора: плановый сброс %s, простой %s; досрочных "+
-		"сбросов доступно: %d. consume — твой, после «да» пользователя, один раз; %s.", r.Used, local(r.ResetsAt), days(idle),
+	return fmt.Sprintf("%s недельный лимит Codex — %.0f%%, пора: плановый сброс %s, простой %s; досрочных "+
+		"сбросов доступно: %d. consume — твой, после «да» пользователя, один раз; %s.", who(r.Account), r.Used, local(r.ResetsAt), days(idle),
 		r.Available, ref)
 }
 
 func blockedText(r Reading) string {
-	return fmt.Sprintf("aguard codex: обычная работа Codex запрещена (ordinaryUsageAllowed=false), хотя недельный лимит — "+
+	return fmt.Sprintf("%s обычная работа Codex запрещена (ordinaryUsageAllowed=false), хотя недельный лимит — "+
 		"%.0f%%, не 100%%; плановый сброс %s. Это не случай досрочного сброса: consume по решению — только при 100%%.",
-		r.Used, local(r.ResetsAt))
+		who(r.Account), r.Used, local(r.ResetsAt))
 }
 
 func noCreditText(r Reading, f Forecast) string {
-	return fmt.Sprintf("недельный лимит Codex кончится около %s (%.0f%%, %.1f %%/ч), раньше планового сброса %s, но досрочных "+
-		"сбросов нет", local(f.At), r.Used, f.Rate, local(r.ResetsAt))
+	return fmt.Sprintf("учётка %s: недельный лимит Codex кончится около %s (%.0f%%, %.1f %%/ч), раньше планового сброса %s, но досрочных "+
+		"сбросов нет", r.Account.Name, local(f.At), r.Used, f.Rate, local(r.ResetsAt))
 }

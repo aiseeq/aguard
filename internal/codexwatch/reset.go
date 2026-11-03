@@ -44,7 +44,7 @@ func (s *State) Calling() { s.Reset.Called = true }
 func (s *State) Done(outcome string, r Reading) {
 	s.Reset.Outcome, s.Reset.At = outcome, r.At
 	s.Pending = append(s.Pending, Delivery{Message: outcomeText(outcome, r, s.Reset.Key), At: r.At,
-		Note: fmt.Sprintf("aguard: consume при %.0f%% — outcome=%s (%s); idempotencyKey %s; «да»: %s", r.Used, outcome,
+		Note: fmt.Sprintf("aguard: consume учётки %s при %.0f%% — outcome=%s (%s); idempotencyKey %s; «да»: %s", r.Account.Name, r.Used, outcome,
 			outcomeWhat[outcome], s.Reset.Key, r.Armed)})
 }
 
@@ -77,8 +77,8 @@ var outcomeWhat = map[string]string{
 }
 
 func outcomeText(outcome string, r Reading, key string) string {
-	return fmt.Sprintf("aguard codex: досрочный сброс Codex вызван при %.0f%% (взвод, «да»: %s): outcome=%s — %s; плановый сброс "+
-		"был %s; idempotencyKey %s.", r.Used, r.Armed, outcome, outcomeWhat[outcome], local(r.ResetsAt), key)
+	return fmt.Sprintf("%s досрочный сброс Codex вызван при %.0f%% (взвод, «да»: %s): outcome=%s — %s; плановый сброс "+
+		"был %s; idempotencyKey %s.", who(r.Account), r.Used, r.Armed, outcome, outcomeWhat[outcome], local(r.ResetsAt), key)
 }
 
 // spentText — чем израсходован взвод окна: нашим вызовом (исход или без ответа) или сбросом не через aguard.
@@ -92,8 +92,8 @@ func spentText(r Reset) string {
 	return fmt.Sprintf("Взвод этого окна уже израсходован: outcome=%s, idempotencyKey %s.", r.Outcome, r.Key)
 }
 
-func lostText(old, cur time.Time, wasUsed, used float64, key string) string {
-	return fmt.Sprintf("aguard codex: досрочный сброс Codex вызывался (idempotencyKey %s), ответа не было, а окно сменилось: "+
-		"плановый сброс был %s, теперь %s, расход был %.0f%%, теперь %.0f%% — сброс, видимо, прошёл.", key, local(old),
+func lostText(a Account, old, cur time.Time, wasUsed, used float64, key string) string {
+	return fmt.Sprintf("%s досрочный сброс Codex вызывался (idempotencyKey %s), ответа не было, а окно сменилось: "+
+		"плановый сброс был %s, теперь %s, расход был %.0f%%, теперь %.0f%% — сброс, видимо, прошёл.", who(a), key, local(old),
 		local(cur), wasUsed, used)
 }

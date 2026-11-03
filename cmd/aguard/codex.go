@@ -18,11 +18,11 @@ import (
 // codexReadTimeout — срок одного вызова app-server: отвечает меньше чем за 8 с (замер 02.11), как в dreamstats.
 const codexReadTimeout = 20 * time.Second
 
-// codexReader — один замер лимита Codex через app-server по пути codex.
-type codexReader func(ctx context.Context, codex string, now time.Time) (codexwatch.Reading, error)
+// codexReader — один замер лимита учётки с CODEX_HOME=home через app-server по пути codex.
+type codexReader func(ctx context.Context, codex, home string, now time.Time) (codexwatch.Reading, error)
 
-// codexConsumer — досрочный сброс окна (account/rateLimitResetCredit/consume) с ключом идемпотентности; ответ — outcome.
-type codexConsumer func(ctx context.Context, codex, key string) (string, error)
+// codexConsumer — досрочный сброс окна учётки (account/rateLimitResetCredit/consume) с ключом идемпотентности; ответ — outcome.
+type codexConsumer func(ctx context.Context, codex, home, key string) (string, error)
 
 // codexApprovals — «да» пользователя на окно с плановым сбросом resetsAt из файла одобрений; "" — нет.
 type codexApprovals func(path string, resetsAt time.Time) (string, error)
@@ -30,26 +30,32 @@ type codexApprovals func(path string, resetsAt time.Time) (string, error)
 // codexNoter — строка в тикет ~/git через tk.
 type codexNoter func(ctx context.Context, tk, root, ticket, text string) error
 
+// appServer — `codex app-server` учётки home: без CODEX_HOME codex взял бы ~/.codex, чужой лимит и чужой кредит.
+func appServer(ctx context.Context, codex, home string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, codex, "app-server")
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+home)
+	return cmd
+}
+
 // readCodex — замер через `codex app-server` (akit/codexlimit, общий с dreamstats).
-func readCodex(ctx context.Context, codex string, now time.Time) (codexwatch.Reading, error) {
+func readCodex(ctx context.Context, codex, home string, now time.Time) (codexwatch.Reading, error) {
 	ctx, cancel := context.WithTimeout(ctx, codexReadTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, codex, "app-server")
-	l, err := codexlimit.Read(ctx, cmd)
+	l, err := codexlimit.Read(ctx, appServer(ctx, codex, home))
 	if err != nil {
-		return codexwatch.Reading{}, fmt.Errorf("%s app-server: %w", codex, err)
+		return codexwatch.Reading{}, fmt.Errorf("%s app-server (CODEX_HOME=%s): %w", codex, home, err)
 	}
 	return codexwatch.Reading{At: now, Used: l.UsedPercent, ResetsAt: l.ResetsAt, Allowed: l.OrdinaryUsageAllowed,
 		Available: l.Resets.Available}, nil
 }
 
 // consumeCodex — досрочный сброс через `codex app-server` (akit/codexlimit); кредит выбирает сервер.
-func consumeCodex(ctx context.Context, codex, key string) (string, error) {
+func consumeCodex(ctx context.Context, codex, home, key string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, codexReadTimeout)
 	defer cancel()
-	out, err := codexlimit.Consume(ctx, exec.CommandContext(ctx, codex, "app-server"), key, "")
+	out, err := codexlimit.Consume(ctx, appServer(ctx, codex, home), key, "")
 	if err != nil {
-		return "", fmt.Errorf("%s app-server consume: %w", codex, err)
+		return "", fmt.Errorf("%s app-server consume (CODEX_HOME=%s): %w", codex, home, err)
 	}
 	return string(out), nil
 }
@@ -113,8 +119,9 @@ func codexLock(path string) (release func(), err error) {
 	}, nil
 }
 
-// codexRound — замер лимита Codex, решение, при взводе — consume, затем письма и доставка исходов. Шаг до следующего
-// прохода — в a.codexStep: у самых 100% и при неудачном consume он короче.
+// codexRound — проход по учёткам: замер каждой, затем по каждой решение, при взводе — consume, письма и доставка
+// исходов; сбой одной не мешает другой. Шаг до следующего прохода — в a.codexStep, меньший из шагов учёток: у самых 100%
+// и при неудачном consume он короче.
 func (a *app) codexRound(ctx context.Context, cfg *codexwatch.Config, dry bool) error {
 	a.codexStep = 0
 	if cfg.Mode == codexwatch.ModeOff {
@@ -123,55 +130,115 @@ func (a *app) codexRound(ctx context.Context, cfg *codexwatch.Config, dry bool) 
 	if a.codexRead == nil || a.codexConsume == nil || a.codexApproved == nil || a.codexNote == nil {
 		return errors.New("замер, сброс, одобрения или тикет codex не подключены")
 	}
-	statePath := filepath.Join(a.dir("codex"), "state.json")
 	if !dry {
-		release, err := codexLock(statePath + ".lock")
+		release, err := codexLock(filepath.Join(a.dir("codex"), "pass.lock"))
 		if err != nil {
 			return err
 		}
 		defer release()
 	}
-	st, err := codexwatch.LoadState(statePath)
+	readings, failed, errs := a.codexReadAll(ctx, cfg)
+	stale := false // consume в этом проходе: замер снят до сброса, про лимит учётки он уже ничего не говорит
+	for _, r := range readings {
+		r.Others = codexwatch.Others(readings, failed, r.Account.Name)
+		consumed, err := a.codexAccount(ctx, cfg, r, dry)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("учётка %s: %w", r.Account.Name, err))
+		}
+		stale = stale || consumed
+	}
+	if !stale {
+		if err := a.codexFleet(cfg, readings, failed, dry); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// codexReadAll — замер и «да» на окно каждой учётки; не вышел — имя в failed и ошибка, остальные идут дальше.
+func (a *app) codexReadAll(ctx context.Context, cfg *codexwatch.Config) ([]codexwatch.Reading, []string, []error) {
+	var readings []codexwatch.Reading
+	var failed []string
+	var errs []error
+	for _, acc := range cfg.Accounts {
+		r, err := a.codexRead(ctx, cfg.Codex, acc.Home, time.Now())
+		if err != nil {
+			failed = append(failed, acc.Name)
+			errs = append(errs, fmt.Errorf("замер лимита учётки %s: %w", acc.Name, err))
+			continue
+		}
+		r.Account = acc
+		if r.Armed, err = a.codexApproved(acc.Approvals, r.ResetsAt); err != nil {
+			// явный отказ от взвода: без «да» consume не зовётся, письма лиду идут как без взвода
+			a.warn("codex", "файл одобрений не прочитан — взвод не действует", "account", acc.Name, "file", acc.Approvals, "err", err)
+			r.Armed = ""
+		}
+		readings = append(readings, r)
+	}
+	return readings, failed, errs
+}
+
+// codexFleet — письмо «все учётки без лимита» при переходе; не ушло — следующий проход пробует снова.
+func (a *app) codexFleet(cfg *codexwatch.Config, readings []codexwatch.Reading, failed []string, dry bool) error {
+	path := filepath.Join(a.dir("codex"), "fleet.json")
+	fleet, err := codexwatch.LoadFleet(path)
 	if err != nil {
 		return err
 	}
-	r, err := a.codexRead(ctx, cfg.Codex, time.Now())
-	if err != nil {
-		return fmt.Errorf("замер лимита: %w", err)
+	msg := fleet.Apply(readings, failed)
+	if dry {
+		if msg != "" {
+			fmt.Fprintf(a.out, "все учётки: %s\n", msg)
+		}
+		return nil
 	}
-	if r.Armed, err = a.codexApproved(cfg.Approvals, r.ResetsAt); err != nil {
-		// явный отказ от взвода: без «да» consume не зовётся, письма лиду идут как без взвода
-		a.warn("codex", "файл одобрений не прочитан — взвод не действует", "file", cfg.Approvals, "err", err)
-		r.Armed = ""
+	if msg != "" {
+		if err := a.codexSend(cfg, msg); err != nil {
+			a.warn("codex", "письмо не отправлено", "session", cfg.Lead, "kind", "all_out", "err", err)
+			a.note("codex", "send_failed", "all_out", cfg.Lead, 1, "")
+			fleet.AllOut = false
+		} else {
+			a.note("codex", "sent", "all_out", cfg.Lead, 1, "")
+		}
+	}
+	return fleet.Save(path)
+}
+
+// codexAccount — решение по одной учётке, при взводе — consume, письма и доставка исходов; true — решение было consume.
+func (a *app) codexAccount(ctx context.Context, cfg *codexwatch.Config, r codexwatch.Reading, dry bool) (bool, error) {
+	statePath := filepath.Join(a.dir("codex"), r.Account.Name+".json")
+	st, err := codexwatch.LoadState(statePath)
+	if err != nil {
+		return false, err
 	}
 	f, notices, consume := st.Apply(r, cfg)
 	step := st.Step(r, f, cfg)
 	if dry {
 		a.codexDry(r, f, &st, step, notices, consume)
-		return nil
+		return consume, nil
 	}
-	a.codexStep = step
-	a.log.Info("aguard codex: замер", "used", r.Used, "allowed", r.Allowed, "credits", r.Available, "rate", f.Rate,
-		"full_at", f.At, "resets_at", r.ResetsAt, "armed", r.Armed)
+	a.codexShorten(step)
+	a.log.Info("aguard codex: замер", "account", r.Account.Name, "used", r.Used, "allowed", r.Allowed, "credits", r.Available,
+		"rate", f.Rate, "full_at", f.At, "resets_at", r.ResetsAt, "armed", r.Armed)
 	// флаги и ключ — до письма и вызова: падение демона после них не повторит письмо и не заведёт другой ключ
 	if err := st.Save(statePath); err != nil {
-		return err
+		return consume, err
 	}
 	if consume {
 		if err := a.codexConsumeNow(ctx, cfg, &st, r, statePath); err != nil {
-			a.warn("codex", "consume не вышел — повтор тем же ключом", "key", st.Reset.Key, "err", err)
-			a.note("codex", "consume_failed", "", "", 1, "")
-			a.codexStep = cfg.Fast.D() // бойцы стоят: повтор скоро, а не через interval
+			a.warn("codex", "consume не вышел — повтор тем же ключом", "account", r.Account.Name, "key", st.Reset.Key, "err", err)
+			a.note("codex", "consume_failed", "", r.Account.Name, 1, "")
+			a.codexShorten(cfg.Fast.D()) // бойцы стоят: повтор скоро, а не через interval
 		}
 	}
 	for _, n := range notices {
 		if n.Kind == codexwatch.KindNoCredit { // сброса нет — лиду нечего делать: строка журнала, не письмо
 			a.log.Info("aguard codex: " + n.Message)
-			a.note("codex", string(n.Kind), "", "", 0, "")
+			a.note("codex", string(n.Kind), "", r.Account.Name, 0, "")
 			continue
 		}
 		if err := a.codexSend(cfg, n.Message); err != nil {
-			a.warn("codex", "письмо не отправлено", "session", cfg.Lead, "kind", n.Kind, "err", err)
+			a.warn("codex", "письмо не отправлено", "account", r.Account.Name, "session", cfg.Lead, "kind", n.Kind, "err", err)
 			a.note("codex", "send_failed", string(n.Kind), cfg.Lead, 1, "")
 			st.Unsent(n.Kind)
 			continue
@@ -183,27 +250,27 @@ func (a *app) codexRound(ctx context.Context, cfg *codexwatch.Config, dry bool) 
 		a.note("codex", sent, string(n.Kind), cfg.Lead, 1, "")
 	}
 	a.codexDeliver(ctx, cfg, &st)
-	return st.Save(statePath)
+	return consume, st.Save(statePath)
 }
 
 // codexConsumeNow — consume с ключом окна; false — ответа нет, повтор на следующем проходе. mode=log — только строка.
 func (a *app) codexConsumeNow(ctx context.Context, cfg *codexwatch.Config, st *codexwatch.State, r codexwatch.Reading,
 	statePath string) error {
 	if cfg.Mode == codexwatch.ModeLog {
-		a.log.Info("aguard codex: вызвал бы consume", "key", st.Reset.Key, "armed", r.Armed)
-		a.note("codex", "would_consume", "", "", 1, "")
+		a.log.Info("aguard codex: вызвал бы consume", "account", r.Account.Name, "key", st.Reset.Key, "armed", r.Armed)
+		a.note("codex", "would_consume", "", r.Account.Name, 1, "")
 		return nil
 	}
 	st.Calling()
 	if err := st.Save(statePath); err != nil {
 		return fmt.Errorf("состояние до вызова не сохранено, consume отложен: %w", err)
 	}
-	outcome, err := a.codexConsume(ctx, cfg.Codex, st.Reset.Key)
+	outcome, err := a.codexConsume(ctx, cfg.Codex, r.Account.Home, st.Reset.Key)
 	if err != nil {
 		return fmt.Errorf("consume без ответа: %w", err)
 	}
-	a.log.Info("aguard codex: consume", "outcome", outcome, "key", st.Reset.Key)
-	a.note("codex", "consume", outcome, "", 1, "")
+	a.log.Info("aguard codex: consume", "account", r.Account.Name, "outcome", outcome, "key", st.Reset.Key)
+	a.note("codex", "consume", outcome, r.Account.Name, 1, "")
 	st.Done(outcome, r)
 	if err := st.Save(statePath); err != nil {
 		a.warn("codex", "исход consume не сохранён — сохраню в конце прохода", "outcome", outcome, "err", err)
@@ -238,7 +305,7 @@ func (a *app) codexDeliver(ctx context.Context, cfg *codexwatch.Config, st *code
 
 func (a *app) codexDry(r codexwatch.Reading, f codexwatch.Forecast, st *codexwatch.State, step time.Duration,
 	notices []codexwatch.Notice, consume bool) {
-	fmt.Fprintf(a.out, "%s used=%.0f%% allowed=%v сбросов=%d плановый сброс %s взвод=%q\n", r.At.Local().Format("02.01 15:04"),
+	fmt.Fprintf(a.out, "%s %s used=%.0f%% allowed=%v сбросов=%d плановый сброс %s взвод=%q\n", r.Account.Name, r.At.Local().Format("02.01 15:04"),
 		r.Used, r.Allowed, r.Available, r.ResetsAt.Local().Format("02.01 15:04"), r.Armed)
 	if f.At.IsZero() {
 		fmt.Fprintf(a.out, "  темп %.1f %%/ч, прогноза нет; замеров окна %d; шаг %v\n", f.Rate, len(st.Samples), step)
@@ -272,6 +339,13 @@ func (a *app) codexSend(cfg *codexwatch.Config, msg string) error {
 	}
 	a.log.Info("aguard codex: написал", "session", cfg.Lead, "msg", msg)
 	return nil
+}
+
+// codexShorten — шаг следующего прохода не длиннее step.
+func (a *app) codexShorten(step time.Duration) {
+	if a.codexStep == 0 || step < a.codexStep {
+		a.codexStep = step
+	}
 }
 
 // codexEvery — шаг наблюдателя codex: выбранный прошлым проходом, без него — interval.
