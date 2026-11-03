@@ -474,3 +474,31 @@ func TestStrayLiveSessionInTree(t *testing.T) {
 		t.Fatalf("дерево без claude: %+v", got)
 	}
 }
+
+// tmux потомком: живая сессия пользователя, совет снимать дерево недопустим.
+func TestStrayTmuxInTree(t *testing.T) {
+	ps := []Proc{{Pid: 7, PPid: 1, Age: 2 * time.Hour, Comm: "bash"}, {Pid: 9, PPid: 7, Age: 2 * time.Hour, Comm: "tmux: server"}}
+	var w StrayWatch
+	if got := w.Judge(time.Now(), ps, []Detail{{Pid: 7, Start: 1, Cgroup: sessionCg}}, strayCfg()); len(got) != 0 {
+		t.Fatalf("дерево с tmux: %+v", got)
+	}
+}
+
+// Живая сессия вне session scope: вкладка терминала с claude в дереве и сам корень-claude в agents.slice — не сироты.
+func TestStrayLiveSessionOutsideSessionScope(t *testing.T) {
+	const tab = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-org.kde.konsole-3681109.scope/tab(3681264).scope"
+	const ag = "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-x-1-r3.scope"
+	at := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	var w, w2 StrayWatch
+	for i := range 10 {
+		now := at.Add(time.Duration(i) * 5 * time.Minute)
+		ps := []Proc{{Pid: 7, PPid: 1, Age: time.Hour, CPU: float64(i) * 300, Comm: "bash"}, {Pid: 8, PPid: 7, Age: time.Hour, Comm: "bash"}, {Pid: 9, PPid: 8, Age: time.Hour, Comm: "claude"}}
+		if got := w.Judge(now, ps, []Detail{{Pid: 7, Start: 1, Cgroup: tab}}, strayCfg()); len(got) != 0 {
+			t.Fatalf("вкладка с claude на проходе %d: %+v", i, got)
+		}
+		root := []Proc{{Pid: 7, PPid: 1, Age: time.Hour, CPU: float64(i) * 300, Comm: "claude"}}
+		if got := w2.Judge(now, root, []Detail{{Pid: 7, Start: 1, Cgroup: ag}}, strayCfg()); len(got) != 0 {
+			t.Fatalf("корень claude на проходе %d: %+v", i, got)
+		}
+	}
+}

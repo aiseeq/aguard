@@ -26,7 +26,8 @@ import (
 // ssh нет. Правило — два случая: остаток сессии ssh или входа (session-*.scope) старше After при любой загрузке, и
 // другой scope, где законные процессы без родителя бывают (контейнеры, фон): дерево занимает не меньше Hot ядра на
 // каждом проходе подряд After. Не считаются: главный процесс приложения сеанса (его запускает desktop, родитель init по
-// замыслу) и дерево с живой сессией агента (занятость — её работа, снимать нельзя; 03.11 konsole со всеми мастерами).
+// замыслу) и дерево с живой сессией агента или законным фоном (tmux) внутри (занятость — их работа, снимать нельзя;
+// 03.11 konsole со всеми мастерами).
 // Только письмо, ничего не снимает.
 
 // StrayConfig — раздел [cpu.strays].
@@ -232,7 +233,7 @@ func (w *StrayWatch) Judge(now time.Time, procs []Proc, details []Detail, c *Str
 		agent := false
 		for _, pid := range tree(d.Pid, kids) {
 			q := byPid[pid]
-			agent = agent || q.Comm == agentComm
+			agent = agent || q.Comm == agentComm || exclude.MatchString(q.Comm)
 			s.CPU += q.CPU
 			if prev, ok := w.cpu[pid]; ok {
 				grew += max(0, q.CPU-prev)
