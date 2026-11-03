@@ -7,10 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -272,12 +272,7 @@ func (s *State) Apply(events []Event, owners []string, lead string, now time.Tim
 		out = append(out, s.applyEvent(e, owner, lead, now, repeat, newOwner)...)
 		byHost[e.Host] = true
 	}
-	hosts := make([]string, 0, len(byHost))
-	for host := range byHost {
-		hosts = append(hosts, host)
-	}
-	slices.Sort(hosts)
-	for _, host := range hosts {
+	for _, host := range slices.Sorted(maps.Keys(byHost)) {
 		if n, ok := s.applySummary(host, newOwner[host], lead, now); ok {
 			out = append(out, n)
 		}
@@ -330,12 +325,7 @@ func (s *State) applySummary(host string, newOwner bool, lead string, now time.T
 	if len(x.Owners) < 2 || !newOwner || !x.At.IsZero() { // один мастер, повтор владельца или сводка этого окна уже ушла
 		return Notice{}, false
 	}
-	list := make([]string, 0, len(x.Owners))
-	for n := range x.Owners {
-		list = append(list, n)
-	}
-	sort.Strings(list)
-	msg := fmt.Sprintf("%s: путь сломан у %d мастеров (%s), первая в %s, причина %s", strings.ToUpper(host), len(x.Owners), joinNames(list), x.First.Local().Format("15:04"), x.Reason)
+	msg := fmt.Sprintf("%s: путь сломан у %d мастеров (%s), первая в %s, причина %s", strings.ToUpper(host), len(x.Owners), joinNames(slices.Sorted(maps.Keys(x.Owners))), x.First.Local().Format("15:04"), x.Reason)
 	x.At = now
 	s.Summaries[host] = x
 	return Notice{To: lead, Key: "summary:" + host, Message: msg, Count: len(x.Owners), Summary: true}, true

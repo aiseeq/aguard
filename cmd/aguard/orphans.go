@@ -9,9 +9,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -140,12 +141,7 @@ func (a *app) orphansAct(ctx context.Context, cfg *orphans.Config, trees []orpha
 		}
 	}
 	a.appendJournal(lines)
-	names := make([]string, 0, len(byTo))
-	for to := range byTo {
-		names = append(names, to)
-	}
-	sort.Strings(names)
-	for _, to := range names {
+	for _, to := range slices.Sorted(maps.Keys(byTo)) {
 		if err := a.sendSocket(alive[to].Pid, alive[to].Name, alive[to].SocketPath, cfg.SendAuth, a.orphansMessage(cfg, byTo[to])); err != nil {
 			a.log.Warn("aguard orphans: сводка не доставлена", "to", to, "err", err)
 			a.note("orphans", "send_failed", "", to, int64(len(byTo[to])), "trees")
