@@ -1153,6 +1153,10 @@ func TestKernelOverWithoutMainOrForeign(t *testing.T) {
 	if !c.KernelOver() {
 		t.Fatalf("фон ядра без cgroup не распознан: %+v", c)
 	}
+	small := Culprit{KernelWrite: 500 << 20, Foreign: Ranked{Name: "docker", Value: 1 << 20}} // чужая мала: фон не теряется
+	if !small.KernelOver() {
+		t.Fatalf("фон ядра 500 МБ при чужой 1 МБ без главной: %+v", small)
+	}
 	c.Main = "/user.slice/agent-old.scope" // старый случай с неизвестной мерой главной сохраняет прежнее поведение
 	if c.KernelOver() {
 		t.Fatalf("старый случай с главной и нулевой MainValue изменил поведение: %+v", c)
