@@ -41,6 +41,8 @@ type Culprit struct {
 	From           time.Time                 `json:"from"`
 	Main           string                    `json:"main,omitempty"`       // путь cgroup с наибольшим I/O
 	MainValue      int64                     `json:"main_value,omitempty"` // мера, по которой главная cgroup выбрана главной
+	MainWrite      int64                     `json:"main_write,omitempty"` // запись процессов главной cgroup
+	MainRead       int64                     `json:"main_read,omitempty"`  // чтение главной cgroup
 	ProcWrite      []Ranked                  `json:"proc_write,omitempty"`
 	ProcRead       []Ranked                  `json:"proc_read,omitempty"`
 	ProcMajflt     []Ranked                  `json:"proc_majflt,omitempty"`
@@ -64,9 +66,12 @@ type Culprit struct {
 	CleanerMS   int64 `json:"cleaner_ms,omitempty"`
 }
 
-// KernelOver — запись вне cgroup перевешивает главную cgroup и не меньше чужой.
+// ReadMostly — главная cgroup читала больше, чем писали её процессы.
+func (c *Culprit) ReadMostly() bool { return c != nil && c.MainRead > c.MainWrite }
+
+// KernelOver — запись вне cgroup перевешивает главную cgroup и не меньше чужой; без обеих мер любой фон ядра виден.
 func (c *Culprit) KernelOver() bool {
-	return c != nil && (c.MainValue > 0 && c.KernelWrite > c.MainValue || c.Foreign.Value > 0 && c.KernelWrite > c.Foreign.Value) && c.KernelWrite >= c.Foreign.Value
+	return c != nil && (c.MainValue > 0 && c.KernelWrite > c.MainValue || c.Foreign.Value > 0 && c.KernelWrite > c.Foreign.Value || c.Main == "" && c.MainValue == 0 && c.Foreign.Value == 0 && c.KernelWrite > 0) && c.KernelWrite >= c.Foreign.Value
 }
 
 // cleanerBusyMS — CPU btrfs-cleaner за окно, с которого он виновник фона ядра: за 17 дней (до 03.11) поток набрал
@@ -282,7 +287,7 @@ func (r *Recorder) finish(c *Case) {
 		}
 	}
 	main := sum.MainCgroup()
-	c.Culprits = &Culprit{From: from, Main: main, MainValue: sum.cgroupTotal[main],
+	c.Culprits = &Culprit{From: from, Main: main, MainValue: sum.cgroupTotal[main], MainWrite: sum.cgroupWrite[main], MainRead: sum.cgroupRead[main],
 		ProcWrite: procWrite, ProcRead: procRead, ProcMajflt: Rank(sum.ProcMajflt, caseTop),
 		ProcessDetails: processDetails,
 		CgroupWrite:    Rank(sum.CgroupWrite, caseTop), CgroupRead: Rank(sum.CgroupRead, caseTop),

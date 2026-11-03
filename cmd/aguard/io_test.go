@@ -519,6 +519,76 @@ func TestIOCaseCleanerAttributionAndAlertRecipient(t *testing.T) {
 	}
 }
 
+func TestIOCaseAttributionWithoutMainAndReadMostlyAlert(t *testing.T) {
+	base := time.Date(2026, 11, 3, 1, 20, 0, 0, time.Local)
+	c := alertCase(base, 2100)
+	c.Culprits.Main = ""
+	c.Culprits.MainValue = 0
+	c.Culprits.KernelWrite = 500 << 20
+	if got, want := ioCaseAttribution(&c), "фон ядра (writeback, коммит btrfs): 500 МБ, 0% записи устройства"; got != want {
+		t.Fatalf("подпись фона ядра без главной: %q, want %q", got, want)
+	}
+	alertText, _ := ioAlertText([]iowatch.Case{c}, time.Second)
+	if strings.Contains(alertText, "главная cgroup") {
+		t.Fatal("текст без главной содержит пустую подпись главной")
+	}
+	c.Culprits.KernelWrite = 0
+	c.Culprits.CgroupSwapIn = []iowatch.Ranked{{Name: "victim-a", Value: 30}, {Name: "victim-b", Value: 20}, {Name: "victim-c", Value: 10}, {Name: "victim-d", Value: 1}}
+	if got, want := ioCaseAttribution(&c), "главной нет, жертвы вытеснения: victim-a, victim-b, victim-c"; got != want {
+		t.Fatalf("подпись жертв вытеснения: %q, want %q", got, want)
+	}
+	c.Culprits.CgroupSwapIn = nil
+	if got := ioCaseAttribution(&c); got != "" {
+		t.Fatalf("без главной и признаков виновника ожидалась пустая подпись, получено %q", got)
+	}
+	c.Culprits.KernelWrite, c.Culprits.CleanerMS = 500<<20, 100
+	if got := ioCaseAttribution(&c); !strings.HasPrefix(got, "удаление снапшотов btrfs (") || strings.Contains(got, "главная cgroup") {
+		t.Fatalf("снапшоты без главной: %q", got)
+	}
+
+	c = alertCase(base, 2100)
+	c.Culprits.MainRead, c.Culprits.MainWrite = 200, 100
+	if got, want := ioCaseAttribution(&c), "главная cgroup sess7 (в основном чтение)"; got != want {
+		t.Fatalf("подпись читающей главной: %q, want %q", got, want)
+	}
+	a, _ := testIOApp(t)
+	var logged bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logged, nil))
+	cfg := iowatch.Default()
+	cfg.Mode, cfg.Lead = iowatch.ModeLog, "lead"
+	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logged.String(), "to=lead ") || strings.Contains(logged.String(), "to=lead,sess7") {
+		t.Fatalf("читающей главной отправлено письмо сессии:\n%s", logged.String())
+	}
+	c.Culprits.MainWrite = 200 // запись равна чтению — адресат сессии сохраняется
+	logged.Reset()
+	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logged.String(), "to=lead,sess7") {
+		t.Fatalf("пишущей главной не отправлено письмо сессии:\n%s", logged.String())
+	}
+}
+
+func TestIOCaseSwapInLabelsIdentifyVictims(t *testing.T) {
+	c := alertCase(time.Now(), 2100)
+	c.Culprits.CgroupSwapIn = []iowatch.Ranked{{Name: "victim", Value: 25}}
+	var detail strings.Builder
+	writeIOCase(&detail, &c, 3)
+	if !strings.Contains(detail.String(), "жертвы вытеснения (своп cgroup): victim 25 стр") {
+		t.Fatalf("разбор не обозначает swap-in как жертву вытеснения:\n%s", detail.String())
+	}
+	var report strings.Builder
+	writeIOReport(&report, &iowatch.Summary{Total: 1, Cases: []iowatch.Case{c}, Culprits: iowatch.SumCulprit{
+		CgroupSwapIn: []iowatch.RankedCases{{Name: "victim", Value: 25, Cases: 1}},
+	}})
+	if !strings.Contains(report.String(), "жертвы вытеснения (своп cgroup): victim") {
+		t.Fatalf("сводка не обозначает swap-in как жертву вытеснения:\n%s", report.String())
+	}
+}
+
 func TestIOCaseAttribution(t *testing.T) {
 	base := time.Date(2026, 10, 30, 12, 15, 12, 0, time.Local)
 	t.Run("ядро больше главной", func(t *testing.T) {
