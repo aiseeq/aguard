@@ -424,17 +424,55 @@ func TestPassGrewOnDailyWalk(t *testing.T) {
 	// обход задержан дольше history (машина спала): база — всё тот же прошлый обход, срок виден в Since
 	sizes[farm] = 13 * gb
 	late := at.Add(30 * time.Hour)
-	s.Told = map[string]time.Time{}
 	recs, _, err = s.Pass(c, late, 300*gb, list, fakeMeasure(sizes, late), owner)
 	if err != nil || len(recs) != 1 || recs[0].Kind != KindGrew || recs[0].Delta != 6*gb || !recs[0].Since.Equal(at) {
 		t.Fatalf("рост после задержки: %+v, %v", recs, err)
+	}
+	// ровно сутки спустя: повтор не глотается
+	sizes[farm] = 19 * gb
+	day := late.Add(24 * time.Hour)
+	recs, _, err = s.Pass(c, day, 300*gb, list, fakeMeasure(sizes, day), owner)
+	if err != nil || len(recs) != 1 || recs[0].Kind != KindGrew || recs[0].Delta != 6*gb || !recs[0].Since.Equal(late) {
+		t.Fatalf("повтор через сутки: %+v, %v", recs, err)
 	}
 	// новая запись: прошлого замера нет, роста нет
 	s.Sizes = map[string][]Point{}
 	sizes[farm] = 20 * gb
 	s.Told = map[string]time.Time{}
-	last := late.Add(25 * time.Hour)
+	last := day.Add(25 * time.Hour)
 	if recs, _, err := s.Pass(c, last, 300*gb, list, fakeMeasure(sizes, last), owner); err != nil || len(recs) != 0 {
 		t.Fatalf("новая запись: %+v, %v", recs, err)
+	}
+}
+
+// При обходе раз в час база — самый ранний замер за сутки, а окно сдвигается: рост копится от него, а не от прошлого обхода.
+func TestPassGrewHourlyWalkWindow(t *testing.T) {
+	home := "/home/u"
+	c := testConfig(t, home)
+	farm := home + "/.cache/farm-hard"
+	list := func() ([]string, error) { return []string{farm}, nil }
+	owner := func(string) (string, string) { return "x", "test" }
+	t0 := time.Date(2026, 10, 25, 4, 0, 0, 0, time.UTC)
+	s := &State{Sizes: map[string][]Point{}, Told: map[string]time.Time{}}
+	var grew []Record
+	for h := range 30 { // запись растёт на 1 ГБ в час, свободное тает на 3 ГБ в час: обход идёт каждый час
+		at := t0.Add(time.Duration(h) * time.Hour)
+		sizes := map[string]int64{farm: int64(h) * gb}
+		recs, _, err := s.Pass(c, at, 300*gb-int64(h)*3*gb, list, fakeMeasure(sizes, at), owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		grew = append(grew, recs...)
+	}
+	if len(grew) != 2 {
+		t.Fatalf("сигналы роста: %+v", grew)
+	}
+	// первый — на пятом часу от начала; повтор — через сутки, база уже сдвинулась на сутки назад от него
+	first, second := grew[0], grew[1]
+	if first.Kind != KindGrew || first.Delta != 5*gb || !first.Since.Equal(t0) || !first.At.Equal(t0.Add(5*time.Hour)) {
+		t.Fatalf("первый: %+v", first)
+	}
+	if second.Kind != KindGrew || second.Delta != 24*gb || !second.Since.Equal(t0.Add(5*time.Hour)) || !second.At.Equal(t0.Add(29*time.Hour)) {
+		t.Fatalf("повтор: %+v", second)
 	}
 }
