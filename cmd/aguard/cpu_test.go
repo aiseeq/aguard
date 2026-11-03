@@ -255,8 +255,8 @@ func TestCpuRoundContinuesActiveSeriesAfterRestart(t *testing.T) {
 	if err := loadCPUState(state, &onDisk); err != nil {
 		t.Fatal(err)
 	}
-	if got := onDisk.State(); !got.Since.Equal(since) || len(got.Sent) == 0 {
-		t.Fatalf("активная серия и отметка письма не на диске: %+v", got)
+	if got := onDisk.State(); !got.Since.Equal(since) || got.Sent[leadKey+"lead"].IsZero() {
+		t.Fatalf("активная серия и отметка сводки лиду не на диске: %+v", got)
 	}
 	if !strings.Contains(logs.String(), "написал бы") {
 		t.Fatalf("первый проход после after сверх 10 минут пишет лиду:\n%s", logs.String())
