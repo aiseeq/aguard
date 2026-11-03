@@ -1,5 +1,5 @@
 // Package record описывает общие для обеих частей tmpguard форматы:
-// журнал владельцев owners.jsonl (пишет tmpguard-track, читает tmpguard)
+// журнал владельцев owners.jsonl (пишет слежение, читает aguard tmp)
 // и снимок живых записей state.json.
 package record
 

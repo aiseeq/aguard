@@ -50,7 +50,7 @@ type Trace struct {
 	Class    string `json:"class"` // scratchpad, worktree или dir класса каталога
 	Kind     string `json:"kind"`
 	Producer string `json:"producer,omitempty"` // сессия, ветка или боец
-	Command  string `json:"command,omitempty"`  // команда создателя по tmpguard-track
+	Command  string `json:"command,omitempty"`  // команда создателя по слежению
 	Note     string `json:"note,omitempty"`     // подробность: вердикт graft и т. п.
 	Owner    string `json:"owner"`
 	Why      string `json:"why"`
@@ -65,7 +65,7 @@ type Trace struct {
 	Outlived bool          `json:"outlived,omitempty"` // старше срока уборки хозяина: уборка не сработала
 }
 
-// Creator — создатель записи по tmpguard-track.
+// Creator — создатель записи по слежению.
 type Creator struct {
 	Session, Command string
 	Born             time.Time

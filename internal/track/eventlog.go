@@ -47,19 +47,19 @@ func (l *eventLog) write(e record.Event) {
 	}
 	b, err := json.Marshal(e)
 	if err != nil {
-		l.log.Error("tmpguard-track: журнал, строка пропущена", "err", err)
+		l.log.Error("aguard слежение: журнал, строка пропущена", "err", err)
 		return
 	}
 	b = append(b, '\n')
 	n, err := l.f.Write(b)
 	l.size += int64(n)
 	if err != nil {
-		l.log.Error("tmpguard-track: журнал, запись", "err", err)
+		l.log.Error("aguard слежение: журнал, запись", "err", err)
 	}
 	if l.rotate > 0 && l.size >= l.rotate {
 		_ = l.f.Close()
 		if err := os.Rename(l.path, filepath.Join(filepath.Dir(l.path), record.RotatedOwner)); err != nil {
-			l.log.Error("tmpguard-track: ротация журнала, пишу дальше в тот же файл", "err", err)
+			l.log.Error("aguard слежение: ротация журнала, пишу дальше в тот же файл", "err", err)
 		}
 		if err := l.open(); err != nil {
 			l.err = fmt.Errorf("журнал после ротации: %w", err)

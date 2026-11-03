@@ -221,8 +221,9 @@ func procUID(pid int) int {
 	return -1
 }
 
+// Демон работает от пользователя: реестры других учёток ему закрыты, и у их процессов сессии не ищем.
 func (r *Resolver) home(uid int) string {
-	if uid < 0 {
+	if uid < 0 || uid != os.Geteuid() {
 		return ""
 	}
 	if h, ok := r.homes[uid]; ok {
@@ -244,7 +245,7 @@ func (r *Resolver) sessionAt(pid int, start string, uid int) *record.Session {
 	}
 	in, err := session.ForHome(h).Get(pid)
 	if err != nil {
-		r.log.Warn("tmpguard-track: сессия не проверена", "pid", pid, "err", err)
+		r.log.Warn("aguard слежение: сессия не проверена", "pid", pid, "err", err)
 		return nil //nolint:log-and-return-zero // нечитаемая запись реестра для цепочки — то же, что «не сессия»: идём к следующему предку и к cgroup
 	}
 	if in == nil || in.ProcStart != start {
@@ -268,7 +269,7 @@ func (r *Resolver) byCgroup(cg string, uid int) *record.Session {
 		reg := session.ForHome(home)
 		all, err := reg.List()
 		if err != nil { //nolint:fallback-return // List отдаёт прочитанную часть реестра вместе с ошибкой о нечитаемых записях
-			r.log.Warn("tmpguard-track: реестр сессий, проверяю прочитанную часть", "err", err)
+			r.log.Warn("aguard слежение: реестр сессий, проверяю прочитанную часть", "err", err)
 		}
 		for i := range all {
 			in := &all[i]
@@ -330,7 +331,7 @@ func (r *Resolver) cgPath(id uint64) string {
 		return nil
 	})
 	if err != nil {
-		r.log.Warn("tmpguard-track: обход /sys/fs/cgroup", "id", id, "err", err)
+		r.log.Warn("aguard слежение: обход /sys/fs/cgroup", "id", id, "err", err)
 	}
 	return found
 }

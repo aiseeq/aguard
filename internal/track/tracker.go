@@ -160,7 +160,7 @@ func (t *Tracker) loop(ctx context.Context) error {
 	defer tick.Stop()
 	hourly := time.NewTicker(time.Hour)
 	defer hourly.Stop()
-	t.log.Info(fmt.Sprintf("tmpguard-track: следим за %v, контейнеры %v, записей при старте %d", t.cfg.Roots, t.cfg.Containers, len(t.entries)))
+	t.log.Info(fmt.Sprintf("aguard слежение: следим за %v, контейнеры %v, записей при старте %d", t.cfg.Roots, t.cfg.Containers, len(t.entries)))
 	t.startMeasure(doneCh, true)
 	for {
 		select {
@@ -177,7 +177,7 @@ func (t *Tracker) loop(ctx context.Context) error {
 		case <-hourly.C:
 			t.logStats()
 		case <-ctx.Done():
-			t.log.Info("tmpguard-track: остановка, сохраняю снимок", "name", t.cfg.Name)
+			t.log.Info("aguard слежение: остановка, сохраняю снимок", "name", t.cfg.Name)
 			t.save(true)
 			return nil
 		}
@@ -254,7 +254,7 @@ func (t *Tracker) handle(fe *fevent) {
 	t.st.events++
 	if fe.ovf {
 		t.st.overflow++
-		t.log.Warn("tmpguard-track: переполнение очереди fanotify, полная сверка на следующем тике")
+		t.log.Warn("aguard слежение: переполнение очереди fanotify, полная сверка на следующем тике")
 		t.lastFull = time.Time{}
 		return
 	}
@@ -286,7 +286,7 @@ func (t *Tracker) handleRename(fe *fevent, owner func() *record.Owner, now time.
 	od, ow, oerr := t.dirOf(fe.old)
 	nd, nw, nerr := t.dirOf(fe.new)
 	if oerr != nil && nerr != nil {
-		t.log.Warn("tmpguard-track: переименование без папок", "old", oerr, "new", nerr)
+		t.log.Warn("aguard слежение: переименование без папок", "old", oerr, "new", nerr)
 		return
 	}
 	op, np := "", ""
@@ -320,7 +320,7 @@ func (t *Tracker) handleRename(fe *fevent, owner func() *record.Owner, now time.
 func (t *Tracker) handleCreateDelete(fe *fevent, owner func() *record.Owner, now time.Time) {
 	d, w, err := t.dirOf(fe.dn)
 	if err != nil {
-		t.log.Warn("tmpguard-track: событие без папки", "err", err)
+		t.log.Warn("aguard слежение: событие без папки", "err", err)
 		return
 	}
 	if !w {
@@ -350,7 +350,7 @@ func (t *Tracker) handleCreateDelete(fe *fevent, owner func() *record.Owner, now
 // попробует снова.
 func (t *Tracker) markLogged(dir string) {
 	if err := t.mark(dir); err != nil {
-		t.log.Warn("tmpguard-track: метка контейнера", "err", err)
+		t.log.Warn("aguard слежение: метка контейнера", "err", err)
 	}
 }
 
@@ -550,7 +550,7 @@ func (t *Tracker) restore() {
 	for _, dir := range []string{t.cfg.RunDir, t.cfg.StateDir} {
 		s, err := record.ReadState(filepath.Join(dir, record.StateFile))
 		if err != nil {
-			t.log.Warn("tmpguard-track: снимок не прочитан", "dir", dir, "err", err)
+			t.log.Warn("aguard слежение: снимок не прочитан", "dir", dir, "err", err)
 			continue
 		}
 		if st == nil || s.Updated.After(st.Updated) {
@@ -583,11 +583,11 @@ func (t *Tracker) save(persist bool) {
 	t.dirty = false
 	fill := func(w io.Writer) error { return writeState(w, &s, es) }
 	if err := record.WriteFileAtomicFunc(filepath.Join(t.cfg.RunDir, record.StateFile), 0o644, fill); err != nil {
-		t.log.Error("tmpguard-track: снимок", "err", err)
+		t.log.Error("aguard слежение: снимок", "err", err)
 	}
 	if persist {
 		if err := record.WriteFileAtomicFunc(filepath.Join(t.cfg.StateDir, record.StateFile), 0o644, fill); err != nil {
-			t.log.Error("tmpguard-track: снимок на диск", "err", err)
+			t.log.Error("aguard слежение: снимок на диск", "err", err)
 		}
 		t.lastSave = now
 	}
@@ -595,7 +595,7 @@ func (t *Tracker) save(persist bool) {
 
 func (t *Tracker) logStats() {
 	s := t.st
-	t.log.Info(fmt.Sprintf("tmpguard-track: за час событий %d (создано %d, удалено %d, переименовано %d, переполнений %d); "+
+	t.log.Info(fmt.Sprintf("aguard слежение: за час событий %d (создано %d, удалено %d, переименовано %d, переполнений %d); "+
 		"создатель: жив %d, восстановлен %d, неизвестен %d; сессия по ppid %d, по cgroup %d, нет %d; "+
 		"потерь proc connector %d; записей %d",
 		s.events, s.creates, s.deletes, s.renames, s.overflow, s.procOK, s.procReaped, s.procUnknown,

@@ -298,6 +298,33 @@ func TestHandleClosesPidfdWithoutOwner(t *testing.T) {
 	}
 }
 
+// Процесс другой учётки: закрытый реестр её сессий не повод для предупреждения на каждое событие.
+func TestSessionAtForeignUIDSilent(t *testing.T) {
+	logs := &bytes.Buffer{}
+	lg := slog.New(slog.NewTextHandler(logs, nil))
+	r := newResolver(newTombs(time.Minute, lg), lg)
+	foreign := os.Geteuid() + 1
+	closed := filepath.Join(t.TempDir(), ".claude", "sessions")
+	if err := os.MkdirAll(closed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(closed, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(closed, 0o755); err != nil {
+			t.Error(err)
+		}
+	})
+	r.homes[foreign] = filepath.Dir(filepath.Dir(closed))
+	if s := r.sessionAt(1, "1", foreign); s != nil {
+		t.Fatalf("сессия чужой учётки: %+v", s)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("предупреждение о чужом реестре: %s", logs.String())
+	}
+}
+
 func TestReadProcForeignWithoutCwd(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("под root все процессы свои")

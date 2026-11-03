@@ -86,7 +86,7 @@ func (t *Tombs) recvOnce(conn *os.File, buf []byte) (more bool) {
 		t.overrun.Add(1) // события потеряны: число идёт в часовую сводку
 		return true
 	default:
-		t.log.Warn("tmpguard-track: proc connector, чтение", "err", err)
+		t.log.Warn("aguard слежение: proc connector, чтение", "err", err)
 		return true
 	}
 	t.messages(buf[:n])
@@ -121,7 +121,7 @@ func (t *Tombs) expireOnce() {
 // стеком, а не роняет сторож.
 func recovered(lg *slog.Logger, what string) {
 	if r := recover(); r != nil {
-		lg.Error("tmpguard-track: паника: "+what, "panic", r, "stack", string(debug.Stack()))
+		lg.Error("aguard слежение: паника: "+what, "panic", r, "stack", string(debug.Stack()))
 	}
 }
 

@@ -277,7 +277,7 @@ func errText(err error) string {
 const graftTimeout = 2 * time.Minute
 
 // diskFacts — что известно о записях помимо замера: живые сессии, имена сессий по транскриптам (waits), создатели
-// по снимку tmpguard-track-home, вердикты graft о worktree, время создания по statx.
+// по снимку слежения track-home, вердикты graft о worktree, время создания по statx.
 func (a *app) diskFacts(cfg *config.Config, owners *disk.Owners, list []string) *disk.Facts {
 	f := &disk.Facts{Live: map[string]bool{}, Names: map[string]string{}, Created: map[string]disk.Creator{},
 		Verdicts: map[string]disk.Verdict{}}
@@ -331,13 +331,13 @@ func (a *app) diskFacts(cfg *config.Config, owners *disk.Owners, list []string) 
 	return f
 }
 
-// diskCreators — создатели записей по самому свежему снимку tmpguard-track-home; снимка нет — создатели неизвестны.
+// diskCreators — создатели записей по самому свежему снимку слежения track-home; снимка нет — создатели неизвестны.
 func (a *app) diskCreators(cfg *config.Config, f *disk.Facts) {
 	var best *record.State
 	for _, path := range cfg.Disk.Track {
 		s, err := record.ReadState(path)
 		if err != nil {
-			a.warn("disk", "снимок tmpguard-track "+path, "err", err)
+			a.warn("disk", "снимок слежения "+path, "err", err)
 			continue
 		}
 		if best == nil || s.Updated.After(best.Updated) {
