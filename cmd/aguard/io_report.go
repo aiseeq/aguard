@@ -55,6 +55,9 @@ func ioCaseAttribution(c *iowatch.Case) string {
 		case k.KernelOver():
 			return fmt.Sprintf("фон ядра (writeback, коммит btrfs): %.0f МБ, %d%% записи устройства",
 				megabytes(k.KernelWrite), k.KernelPercent())
+		case k.Foreign.Value > 0:
+			return fmt.Sprintf("чужая cgroup %s (чужой uid, I/O по io.stat): %.0f МБ",
+				k.Foreign.Name, megabytes(k.Foreign.Value))
 		case len(k.CgroupSwapIn) > 0:
 			names := make([]string, 0, 3)
 			for _, g := range k.CgroupSwapIn[:min(3, len(k.CgroupSwapIn))] {
@@ -107,7 +110,7 @@ func writeIOCase(w io.Writer, c *iowatch.Case, names int) {
 	}
 	writeIOCgroupWrite(w, top(k.CgroupWrite), k.CgroupOwn)
 	writeIOTop(w, "чтение cgroup", top(k.CgroupRead), ioBytes)
-	writeIOTop(w, "жертвы вытеснения (своп cgroup)", top(k.CgroupSwapIn), ioPages)
+	writeIOTop(w, "жертвы вытеснения", top(k.CgroupSwapIn), ioPages)
 	writeIOTop(w, "простой IO cgroup", top(k.CgroupIdle), ioMillis)
 }
 
@@ -257,7 +260,7 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 		unit  int
 	}{
 		{"запись процессов", k.ProcWrite, ioBytes}, {"чтение процессов", k.ProcRead, ioBytes}, {"своп процессов (majflt)", k.ProcMajflt, ioMajflt},
-		{"запись cgroup", k.CgroupWrite, ioBytes}, {"чтение cgroup", k.CgroupRead, ioBytes}, {"жертвы вытеснения (своп cgroup)", k.CgroupSwapIn, ioPages},
+		{"запись cgroup", k.CgroupWrite, ioBytes}, {"чтение cgroup", k.CgroupRead, ioBytes}, {"жертвы вытеснения", k.CgroupSwapIn, ioPages},
 		{"простой IO cgroup", k.CgroupIdle, ioMillis},
 	} {
 		fmt.Fprintf(w, "%s: %s\n", row.label, ioRankedCases(row.list, row.unit))

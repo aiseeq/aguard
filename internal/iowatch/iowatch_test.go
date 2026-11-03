@@ -1115,8 +1115,8 @@ func TestCulpritsKernelWrite(t *testing.T) {
 	}
 }
 
-// Чужая cgroup сверх главной — по всему I/O io.stat (docker: чтение 45 меньше 50 главной, с записью 55 — больше); имя и в system.slice, и в
-// user@<uid> — не своё: своя запись неизвестна; главной нет — пометки нет (проверка 30.10).
+// Чужая cgroup сверх главной — по всему I/O io.stat (docker: чтение 45 меньше 50 главной, с записью 55 — больше); имя и в
+// user@<uid> — не своё: своя запись неизвестна; без главной берётся наибольшая чужая с ненулевым io.stat.
 func TestCulpritsForeignOver(t *testing.T) {
 	user := fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/", os.Getuid(), os.Getuid())
 	sess := user + "agents.slice/agent-sess9-1.scope"
@@ -1135,8 +1135,8 @@ func TestCulpritsForeignOver(t *testing.T) {
 	if c.Readable["dbus-broker.service"] || !c.Readable["sess9"] || !c.Readable["session-3.scope"] {
 		t.Fatalf("своё по имени: %+v", c.Readable)
 	}
-	if f, ok := c.ForeignOver(""); ok {
-		t.Fatalf("без главной: %+v", f)
+	if f, ok := c.ForeignOver(""); !ok || f != (Ranked{"docker-0123456789ab", 55 << 20}) {
+		t.Fatalf("без главной не выбрана чужая cgroup с наибольшим I/O: %+v %v", f, ok)
 	}
 	// чужая не больше меры главной (запись её процессов, 50 МБ) — не названа: шапка старых случаев опирается на это
 	for _, foreignMB := range []int64{50, 30} {
@@ -1166,7 +1166,7 @@ func TestSumCulpritsExcludesSwapInFromMainAndForeignMeasures(t *testing.T) {
 	service := "/system.slice/foreign.service"
 	c := SumCulprits([]Step{{
 		Processes: []Process{{PID: 1, Start: 1, Comm: "writer", WriteBytes: 1 << 20, Cgroup: a}},
-		Cgroups:   []Cgroup{{Path: b, SwapIn: 100}, {Path: service, SwapIn: 25}},
+		Cgroups:   []Cgroup{{Path: b, SwapIn: 25_600}, {Path: service, SwapIn: 25}},
 	}})
 	if got := c.MainCgroup(); got != a {
 		t.Fatalf("swap-in вытеснил пишущую главную cgroup: %q", got)
@@ -1180,6 +1180,25 @@ func TestSumCulpritsExcludesSwapInFromMainAndForeignMeasures(t *testing.T) {
 	c = SumCulprits([]Step{{Cgroups: []Cgroup{{Path: b, SwapIn: 25}}}})
 	if c.MainCgroup() != "" {
 		t.Fatalf("cgroup только со swap-in стала главной: %q", c.MainCgroup())
+	}
+}
+
+func TestForeignIOIgnoresSwapInWithoutMain(t *testing.T) {
+	user := fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/", os.Getuid(), os.Getuid())
+	main := user + "agents.slice/agent-a-1.scope"
+	foreign := "/system.slice/foreign.service"
+	c := SumCulprits([]Step{{
+		Processes: []Process{{PID: 1, Start: 1, Comm: "writer", WriteBytes: 1 << 20, Cgroup: main}},
+		Cgroups:   []Cgroup{{Path: foreign, SwapIn: 25_000}},
+	}})
+	if got := c.MainCgroup(); got != main {
+		t.Fatalf("главная cgroup = %q, ожидалась пишущая %q", got, main)
+	}
+	if c.foreignIO["foreign.service"] != 0 {
+		t.Fatalf("swap-in попал в меру чужой cgroup: %+v", c.foreignIO)
+	}
+	if got, ok := c.ForeignOver(""); ok {
+		t.Fatalf("чужая cgroup только со swap-in стала Foreign без главной: %+v", got)
 	}
 }
 
