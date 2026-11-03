@@ -179,10 +179,64 @@ func TestCpuRoundPersistsWindow(t *testing.T) {
 		t.Fatalf("удачный проход не сохранил окно: %+v", got)
 	}
 
+	if err := os.WriteFile(state, []byte("{"), 0o600); err != nil { // битый файл: окно с нуля и запись в журнал
+		t.Fatal(err)
+	}
+	logs.Reset()
+	broken := *a
+	broken.cpu = map[string]*cpuHost{}
+	if got := broken.cpuHosts(&cfg)[0].win.State(); !got.Since.IsZero() || !strings.Contains(logs.String(), "не прочитано") {
+		t.Fatalf("битое состояние: окно %+v, журнал:\n%s", got, logs.String())
+	}
+
 	cfg.Hosts = []string{"pc"} // у машины по ssh своё окно: файлы не перемешиваются
 	remote := next.cpuHosts(&cfg)
 	if want := filepath.Join(a.dir("cpu"), "host-pc.json"); remote[len(remote)-1].state != want {
 		t.Errorf("файл окна pc: %q, хотим %q", remote[len(remote)-1].state, want)
+	}
+}
+
+// Рестарт на 9-й минуте: письмо мастеру и сводка лиду уходят на 10-й от начала, следующие — не раньше repeat.
+func TestCpuLetterAfterRestart(t *testing.T) {
+	var logs strings.Builder
+	a := cpuApp(t, &logs)
+	cfg := cpuwatch.Default(a.home)
+	cfg.Mode, cfg.Lead = cpuwatch.ModeLog, "lead"
+	path := filepath.Join(a.dir("cpu"), "local.json")
+	start := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
+	heavy := map[string]int{"glint-master": 10}
+	h := cpuwatch.Host{Name: cpuwatch.HostLocal, Every: time.Minute}
+	round := func(i int) string {
+		at := start.Add(time.Duration(i) * time.Minute)
+		logs.Reset()
+		v := h.Judge(cpuSample(at, 30, 30, heavy), cpuOwner)
+		a.cpuAct(&cfg, &h, &v, at)
+		return logs.String()
+	}
+	for i := range 10 { // минуты 0–9: серия ещё короче after
+		if out := round(i); strings.Contains(out, "написал бы") {
+			t.Fatalf("минута %d: письмо раньше after:\n%s", i, out)
+		}
+	}
+	if err := saveCPUState(path, &h); err != nil {
+		t.Fatal(err)
+	}
+	h = cpuwatch.Host{Name: cpuwatch.HostLocal, Every: time.Minute} // новый процесс
+	if err := loadCPUState(path, &h); err != nil {
+		t.Fatal(err)
+	}
+	if out := round(10); !strings.Contains(out, "session=glint-master") || !strings.Contains(out, "session=lead") {
+		t.Fatalf("после рестарта отсчёт идёт от начала серии, письма на 10-й минуте:\n%s", out)
+	}
+	if err := saveCPUState(path, &h); err != nil {
+		t.Fatal(err)
+	}
+	h = cpuwatch.Host{Name: cpuwatch.HostLocal, Every: time.Minute} // второй рестарт: отметки писем тоже с диска
+	if err := loadCPUState(path, &h); err != nil {
+		t.Fatal(err)
+	}
+	if out := round(11); strings.Contains(out, "написал бы") {
+		t.Fatalf("письмо раньше repeat после рестарта:\n%s", out)
 	}
 }
 
