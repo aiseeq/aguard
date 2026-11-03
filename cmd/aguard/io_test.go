@@ -591,8 +591,8 @@ func TestIOCaseAttributionWithoutMainAndReadMostlyAlert(t *testing.T) {
 		t.Fatalf("подпись фона ядра без главной: %q, want %q", got, want)
 	}
 	alertText, _ := ioAlertText([]iowatch.Case{c}, time.Second)
-	if strings.Contains(alertText, "главная cgroup") {
-		t.Fatal("текст без главной содержит пустую подпись главной")
+	if !strings.Contains(alertText, "фон ядра (writeback, коммит btrfs)") || strings.Contains(alertText, "главная cgroup") {
+		t.Fatalf("текст письма без главной не содержит подпись ядра или содержит пустую главную: %q", alertText)
 	}
 	c.Culprits.KernelWrite = 0
 	c.Culprits.CgroupSwapIn = []iowatch.Ranked{{Name: "victim-a", Value: 30}, {Name: "victim-b", Value: 20}, {Name: "victim-c", Value: 10}, {Name: "victim-d", Value: 1}}
@@ -606,6 +606,28 @@ func TestIOCaseAttributionWithoutMainAndReadMostlyAlert(t *testing.T) {
 	c.Culprits.KernelWrite, c.Culprits.CleanerMS = 500<<20, 100
 	if got := ioCaseAttribution(&c); !strings.HasPrefix(got, "удаление снапшотов btrfs (") || strings.Contains(got, "главная cgroup") {
 		t.Fatalf("снапшоты без главной: %q", got)
+	}
+	alertText, _ = ioAlertText([]iowatch.Case{c}, time.Second)
+	if !strings.Contains(alertText, "удаление снапшотов btrfs (") || strings.Contains(alertText, "главная cgroup") {
+		t.Fatalf("текст письма о снапшотах без главной: %q", alertText)
+	}
+	kernelCase := alertCase(base.Add(time.Second), 1800)
+	kernelCase.Culprits.Main, kernelCase.Culprits.MainValue = "", 0
+	kernelCase.Culprits.KernelWrite, kernelCase.Culprits.CleanerMS = 200<<20, 0
+	alertText, _ = ioAlertText([]iowatch.Case{c, kernelCase}, time.Second)
+	if !strings.Contains(alertText, "удаление снапшотов btrfs (") || !strings.Contains(alertText, "фон ядра (writeback, коммит btrfs)") || strings.Contains(alertText, "главная cgroup") {
+		t.Fatalf("письмо без главных не содержит обе подписи или содержит пустую главную: %q", alertText)
+	}
+	snapApp, _ := testIOApp(t)
+	var noMainLog bytes.Buffer
+	snapApp.log = slog.New(slog.NewTextHandler(&noMainLog, nil))
+	snapCfg := iowatch.Default()
+	snapCfg.Mode, snapCfg.Lead = iowatch.ModeLog, "lead"
+	if err := snapApp.alertIO(snapCfg, []iowatch.Case{c}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(noMainLog.String(), "to=lead ") || strings.Contains(noMainLog.String(), "to=lead,sess7") {
+		t.Fatalf("снапшоты без главной отправлены не только лиду:\n%s", noMainLog.String())
 	}
 
 	c = alertCase(base, 2100)
@@ -632,6 +654,63 @@ func TestIOCaseAttributionWithoutMainAndReadMostlyAlert(t *testing.T) {
 	if !strings.Contains(logged.String(), "to=lead,sess7") {
 		t.Fatalf("пишущей главной не отправлено письмо сессии:\n%s", logged.String())
 	}
+	c.Culprits.MainWrite = 201 // запись строго больше чтения
+	logged.Reset()
+	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logged.String(), "to=lead,sess7") {
+		t.Fatalf("главной с записью больше чтения не отправлено письмо сессии:\n%s", logged.String())
+	}
+}
+
+func TestIOCaseForeignWithoutMainAttributionAndRecipient(t *testing.T) {
+	c := alertCase(time.Now(), 2100)
+	c.Culprits.Main = ""
+	c.Culprits.MainValue = 0
+	c.Culprits.Foreign = iowatch.Ranked{Name: "postgresql.service", Value: 12 << 20}
+	c.Culprits.CgroupSwapIn = []iowatch.Ranked{{Name: "victim", Value: 25_600}}
+	want := "чужая cgroup postgresql.service (чужой uid, I/O по io.stat): 12 МБ"
+	if got := ioCaseAttribution(&c); got != want {
+		t.Fatalf("подпись чужой cgroup без главной: %q, want %q", got, want)
+	}
+	a, _ := testIOApp(t)
+	var logged bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logged, nil))
+	cfg := iowatch.Default()
+	cfg.Mode, cfg.Lead = iowatch.ModeLog, "lead"
+	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logged.String(), "to=lead ") || strings.Contains(logged.String(), "to=lead,sess7") {
+		t.Fatalf("чужая cgroup без главной отправлена не только лиду:\n%s", logged.String())
+	}
+}
+
+func TestIOCaseOldJSONWithoutMainMeasures(t *testing.T) {
+	const data = `{"main":"/user.slice/agent-old-1.scope","main_value":1048576}`
+	var culprit iowatch.Culprit
+	if err := json.Unmarshal([]byte(data), &culprit); err != nil {
+		t.Fatal(err)
+	}
+	c := iowatch.Case{Culprits: &culprit}
+	if got, want := ioCaseAttribution(&c), "главная cgroup old"; got != want {
+		t.Fatalf("подпись старого случая: %q, want %q", got, want)
+	}
+	encoded, err := json.Marshal(&culprit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["main_write"]; ok {
+		t.Fatalf("повторная сериализация добавила main_write: %s", encoded)
+	}
+	if _, ok := fields["main_read"]; ok {
+		t.Fatalf("повторная сериализация добавила main_read: %s", encoded)
+	}
 }
 
 func TestIOCaseSwapInLabelsIdentifyVictims(t *testing.T) {
@@ -639,14 +718,14 @@ func TestIOCaseSwapInLabelsIdentifyVictims(t *testing.T) {
 	c.Culprits.CgroupSwapIn = []iowatch.Ranked{{Name: "victim", Value: 25}}
 	var detail strings.Builder
 	writeIOCase(&detail, &c, 3)
-	if !strings.Contains(detail.String(), "жертвы вытеснения (своп cgroup): victim 25 стр") {
+	if !strings.Contains(detail.String(), "жертвы вытеснения: victim 25 стр") || strings.Contains(detail.String(), "своп cgroup") {
 		t.Fatalf("разбор не обозначает swap-in как жертву вытеснения:\n%s", detail.String())
 	}
 	var report strings.Builder
 	writeIOReport(&report, &iowatch.Summary{Total: 1, Cases: []iowatch.Case{c}, Culprits: iowatch.SumCulprit{
 		CgroupSwapIn: []iowatch.RankedCases{{Name: "victim", Value: 25, Cases: 1}},
 	}})
-	if !strings.Contains(report.String(), "жертвы вытеснения (своп cgroup): victim") {
+	if !strings.Contains(report.String(), "жертвы вытеснения: victim") || strings.Contains(report.String(), "своп cgroup") {
 		t.Fatalf("сводка не обозначает swap-in как жертву вытеснения:\n%s", report.String())
 	}
 }

@@ -134,18 +134,15 @@ func (c *Culprits) MainCgroup() string {
 	return best
 }
 
-// ForeignOver — cgroup чужого uid (не Readable, не главная) с наибольшим I/O по io.stat (запись, чтение, своп), если
-// он больше всей меры главной: своя запись её процессов не видна, и главная выбрана без неё. Это может быть и коммит
-// btrfs по её fsync (postgres 30.10 12:15), и настоящая запись (контейнеры docker) — отличить нечем, поэтому главная
-// остаётся, а случай помечается неточным (проверка 30.10). Главной нет — нечего и помечать.
+// ForeignOver — cgroup чужого uid (не Readable, не главная) с наибольшим I/O по io.stat (запись и чтение), если
+// он больше всей меры главной: своя запись её процессов не видна, и главная выбрана без неё. Без главной возвращает
+// наибольшую чужую cgroup с ненулевым I/O. Это может быть и коммит btrfs по её fsync (postgres 30.10 12:15), и
+// настоящая запись (контейнеры docker) — отличить нечем, поэтому случай помечается неточным (проверка 30.10).
 func (c *Culprits) ForeignOver(main string) (Ranked, bool) {
 	var best Ranked
-	if main == "" {
-		return best, false
-	}
 	for _, name := range slices.Sorted(maps.Keys(c.foreignIO)) {
 		v := c.foreignIO[name]
-		if name != CgroupName(main) && v > c.cgroupTotal[main] && v > best.Value {
+		if name != CgroupName(main) && v > 0 && (main == "" || v > c.cgroupTotal[main]) && v > best.Value {
 			best = Ranked{name, v}
 		}
 	}
