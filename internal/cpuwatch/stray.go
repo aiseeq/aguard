@@ -24,8 +24,10 @@ import (
 // заметил пользователь в htop; живой образец от git-admin — та же сирота с CPU 0 %). Перегрузка машины такого не видит:
 // одно ядро из 32 не даёт порога Over; сторож orphans — только на ноуте и только по CLAUDE_PID, которого у процессов из
 // ssh нет. Правило — два случая: остаток сессии ssh или входа (session-*.scope) старше After при любой загрузке, и
-// другой scope, где законные процессы без родителя бывают (окна, контейнеры): дерево занимает не меньше Hot ядра на
-// каждом проходе подряд After. Только письмо, ничего не снимает.
+// другой scope, где законные процессы без родителя бывают (контейнеры, фон): дерево занимает не меньше Hot ядра на
+// каждом проходе подряд After. Не считаются: главный процесс приложения сеанса (его запускает desktop, родитель init по
+// замыслу) и дерево с живой сессией агента (занятость — её работа, снимать нельзя; 03.11 konsole со всеми мастерами).
+// Только письмо, ничего не снимает.
 
 // StrayConfig — раздел [cpu.strays].
 type StrayConfig struct {
@@ -198,6 +200,13 @@ type StrayWatch struct {
 // sessionScope — сессия logind: номер или, без места, c1, c2.
 var sessionScope = regexp.MustCompile(`/session-[^/]+\.scope$`)
 
+// desktopApp — главный процесс приложения сеанса: app-<id>.scope, у терминала — его main.scope. Вкладки терминала
+// (tab(N).scope) сюда не входят: орфан в них остаётся под правилом занятости.
+var desktopApp = regexp.MustCompile(`/app-[^/]+\.scope(?:/main\.scope)?$`)
+
+// agentComm — имя процесса сессии агента; по нему, а не по реестру сессий: реестр знает только свою машину, а PC — по ssh.
+const agentComm = "claude"
+
 // Judge — процессы, о которых пора писать, по замеру машины.
 func (w *StrayWatch) Judge(now time.Time, procs []Proc, details []Detail, c *StrayConfig) []Stray {
 	exclude := regexp.MustCompile("^(?:" + c.Exclude + ")$") // проверен Validate
@@ -215,19 +224,24 @@ func (w *StrayWatch) Judge(now time.Time, procs []Proc, details []Detail, c *Str
 	for i := range details {
 		d := &details[i]
 		p := byPid[d.Pid]
-		if p == nil || exclude.MatchString(p.Comm) { // ушёл между строками или законный фон
+		if p == nil || exclude.MatchString(p.Comm) || desktopApp.MatchString(d.Cgroup) { // ушёл между строками или законный фон
 			continue
 		}
 		s := Stray{Detail: *d, Comm: p.Comm, Age: p.Age}
 		var grew float64
+		agent := false
 		for _, pid := range tree(d.Pid, kids) {
 			q := byPid[pid]
+			agent = agent || q.Comm == agentComm
 			s.CPU += q.CPU
 			if prev, ok := w.cpu[pid]; ok {
 				grew += max(0, q.CPU-prev)
 			} else if !first { // родился между проходами: весь его процессор — за этот проход
 				grew += q.CPU
 			}
+		}
+		if agent {
+			continue
 		}
 		s.Descend = len(tree(d.Pid, kids)) - 1
 		if !first && dt > 0 {

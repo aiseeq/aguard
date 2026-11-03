@@ -172,7 +172,7 @@ func TestStrayAddress(t *testing.T) {
 // Спокойный процесс тоже держит отметку: иначе дерево, занятое рывками, писало бы каждые 30 мин, а не раз в repeat.
 func TestStrayRestartKeepsLiveMark(t *testing.T) {
 	a, logs, cfg := strayApp(t)
-	const other = "##procs\n 7 1 7200 3600 bash\n##strays\n7\t555\t/user.slice/user-1000.slice/user@1000.service/app.slice/app-x.scope\t/home/u/git/graft\t\t\tbash -c x\n##end\n"
+	const other = "##procs\n 7 1 7200 3600 bash\n##strays\n7\t555\t/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1.scope\t/home/u/git/graft\t\t\tbash -c x\n##end\n"
 	a.strayRead = func(_ context.Context, h *cpuHost) ([]byte, error) {
 		if h.ssh == "" {
 			return []byte("##procs\n##strays\n##end\n"), nil

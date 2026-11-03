@@ -14,7 +14,7 @@ import (
 
 const (
 	sessionCg = "/user.slice/user-1000.slice/session-24104.scope"
-	otherCg   = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-x.scope"
+	otherCg   = "/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1.scope"
 )
 
 func strayCfg() *StrayConfig {
@@ -430,5 +430,47 @@ func TestStrayScriptCgroupFilter(t *testing.T) {
 		if len(ds) != want {
 			t.Errorf("%s: %+v, ждали %d", cg, ds, want)
 		}
+	}
+}
+
+// Главный процесс приложения сеанса — не сирота: его родитель init по замыслу (ложное срабатывание 03.11 на konsole со
+// всеми мастерами в дереве). Орфан во вкладке терминала — другое дело: он в tab(N).scope, правило занятости его видит.
+func TestStrayDesktopApp(t *testing.T) {
+	const app = "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+	busy := func(i int) (float64, float64) { return float64(i) * 300, 0 }
+	for _, cg := range []string{
+		app + "app-org.kde.konsole-5028.scope/main.scope",
+		app + "app-com.google.Chrome-2748777.scope",
+		app + "app-flatpak-org.telegram.desktop-1378863977.scope",
+	} {
+		if got := busyRun(t, 10, cg, busy); got != -1 {
+			t.Errorf("%s: письмо на проходе %d", cg, got)
+		}
+	}
+	for _, cg := range []string{
+		app + "app-org.kde.konsole-3681109.scope/tab(3681264).scope",
+		app + "aguard-stray-probe.scope",
+		"/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-x-1-r3.scope",
+	} {
+		if got := busyRun(t, 10, cg, busy); got != 6 {
+			t.Errorf("%s: письмо на проходе %d", cg, got)
+		}
+	}
+}
+
+// Живая сессия в дереве: занятость — её работа, снимать дерево нельзя; ни по занятости, ни как остаток сессии письма нет.
+// Тот же корень без неё — письмо: проверка не отсекает всё подряд.
+func TestStrayLiveSessionInTree(t *testing.T) {
+	at := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	tree := func(comm string) []Proc {
+		return []Proc{{Pid: 7, PPid: 1, Age: time.Hour, Comm: "bash"}, {Pid: 8, PPid: 7, Age: time.Hour, Comm: "bash"}, {Pid: 9, PPid: 8, Age: time.Hour, Comm: comm}}
+	}
+	d := []Detail{{Pid: 7, Start: 1, Cgroup: sessionCg}}
+	var w StrayWatch
+	if got := w.Judge(at, tree("claude"), d, strayCfg()); len(got) != 0 {
+		t.Fatalf("дерево с claude: %+v", got)
+	}
+	if got := w.Judge(at, tree("sleep"), d, strayCfg()); len(got) != 1 {
+		t.Fatalf("дерево без claude: %+v", got)
 	}
 }
