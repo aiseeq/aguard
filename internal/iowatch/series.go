@@ -84,7 +84,8 @@ func NewSeries(keep time.Duration) *Series {
 }
 
 // seriesSpreadMax — шаг длиннее этого и без простоя — пропуск, а не задержка цикла: в ряд пустыми секундами он не
-// ложится, дыра остаётся дырой. Шаг с простоем размазывается при любой длине: секунда не показывает простой больше себя.
+// ложится, дыра остаётся дырой, в секунду At идёт только её доля PSI. Шаг с простоем размазывается при любой длине:
+// секунда не показывает простой больше себя.
 const seriesSpreadMax = time.Minute
 
 // step распределяет интервальные значения длинного шага по пересекаемым секундам; короткие шаги
@@ -116,10 +117,16 @@ func (s *Series) step(st *Step, stallUS int64, interval time.Duration) {
 		}
 	} else {
 		c := s.acc(st.At.Unix())
-		c.ioFull += st.IOFullUS
-		c.ioSome += st.IOSomeUS
-		c.memFull += st.MemFullUS
-		c.cpuSome += st.CPUSomeUS
+		share := func(v int64) int64 {
+			if interval <= time.Second {
+				return v
+			}
+			return int64(float64(v) * float64(time.Second) / float64(interval))
+		}
+		c.ioFull += share(st.IOFullUS)
+		c.ioSome += share(st.IOSomeUS)
+		c.memFull += share(st.MemFullUS)
+		c.cpuSome += share(st.CPUSomeUS)
 		c.stall += stallUS
 	}
 	c := s.acc(st.At.Unix())

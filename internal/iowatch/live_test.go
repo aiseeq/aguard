@@ -55,6 +55,22 @@ func TestSeriesLongGapStaysGap(t *testing.T) {
 	}
 }
 
+// Длинный шаг ниже порога простоя: 50 с PSI за 120 с не ложатся в одну секунду, в ней — её доля.
+func TestSeriesLongGapKeepsSecondShare(t *testing.T) {
+	series := NewSeries(time.Hour)
+	at := time.Date(2026, 10, 29, 21, 2, 0, 0, time.Local)
+	series.step(&Step{At: at, IOFullUS: 50_000_000, IOSomeUS: 60_000_000, MemFullUS: 12_000_000, CPUSomeUS: 24_000_000}, 0, 2*time.Minute)
+	series.step(&Step{At: at.Add(time.Second)}, 0, time.Second) // закрывает секунду
+	rows := series.Rows(at.Add(-time.Hour)).Seconds()
+	if len(rows) != 1 {
+		t.Fatalf("пропуск лёг в ряд: %d секунд", len(rows))
+	}
+	r := rows[0]
+	if r.IOFullMS != 416 || r.MemFullMS != 100 || r.CPUSomeMS != 200 {
+		t.Fatalf("доля секунды: %+v", r)
+	}
+}
+
 func TestSeriesFoldsStepsIntoSeconds(t *testing.T) {
 	r := NewRecorder(Default())
 	series := NewSeries(time.Hour)
