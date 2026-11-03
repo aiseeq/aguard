@@ -229,22 +229,12 @@ func (w *StrayWatch) Judge(now time.Time, procs []Proc, details []Detail, c *Str
 			continue
 		}
 		s := Stray{Detail: *d, Comm: p.Comm, Age: p.Age}
-		var grew float64
-		agent := false
-		for _, pid := range tree(d.Pid, kids) {
-			q := byPid[pid]
-			agent = agent || q.Comm == agentComm || exclude.MatchString(q.Comm)
-			s.CPU += q.CPU
-			if prev, ok := w.cpu[pid]; ok {
-				grew += max(0, q.CPU-prev)
-			} else if !first { // родился между проходами: весь его процессор — за этот проход
-				grew += q.CPU
-			}
-		}
-		if agent {
+		use := w.treeUse(d.Pid, byPid, kids, first, exclude)
+		if use.live {
 			continue
 		}
-		s.Descend = len(tree(d.Pid, kids)) - 1
+		s.CPU, s.Descend = use.cpu, use.count-1
+		grew := use.grew
 		if !first && dt > 0 {
 			s.Rate = grew / dt
 		}
@@ -271,6 +261,29 @@ func (w *StrayWatch) Judge(now time.Time, procs []Proc, details []Detail, c *Str
 		w.cpu[procs[i].Pid] = procs[i].CPU
 	}
 	return out
+}
+
+// treeUse — итог дерева за проход.
+type treeUse struct {
+	cpu, grew float64 // процессора за жизнь живых и прирост за проход, секунд
+	count     int
+	live      bool // внутри живая сессия агента или законный фон
+}
+
+func (w *StrayWatch) treeUse(root int, byPid map[int]*Proc, kids map[int][]int, first bool, exclude *regexp.Regexp) treeUse {
+	var u treeUse
+	for _, pid := range tree(root, kids) {
+		q := byPid[pid]
+		u.count++
+		u.live = u.live || q.Comm == agentComm || exclude.MatchString(q.Comm)
+		u.cpu += q.CPU
+		if prev, ok := w.cpu[pid]; ok {
+			u.grew += max(0, q.CPU-prev)
+		} else if !first { // родился между проходами: весь его процессор — за этот проход
+			u.grew += q.CPU
+		}
+	}
+	return u
 }
 
 // tree — pid и все потомки; seen — снимок ps не атомарен, петля по ppid не должна его подвесить.
