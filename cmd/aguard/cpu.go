@@ -12,7 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
+
 	"strings"
 	"time"
 
@@ -260,21 +260,19 @@ func (a *app) cpuDry(ctx context.Context, cfg *cpuwatch.Config) error {
 		for _, l := range cpuwatch.Owners(s.Tasks, owner) { // владельцы готовых потоков и у свободной машины
 			fmt.Fprintf(a.out, "  %-20s %-8s %-40s %d %v\n", l.Owner.Master, l.Owner.Kind, l.Owner.Label, l.N, l.Comms)
 		}
-		var win cpuwatch.Host // своя перегрузка: окно демона пробой не трогается; письма — какими были бы через after
+		win := cpuwatch.Host{Name: h.win.Name} // своя перегрузка: окно демона пробой не трогается; письма — какими были бы через after
 		if v := win.Judge(s, owner); v.Over {
-			cpuDryLetters(a.out, cfg, h.win.Name, &v, now)
+			cpuDryLetters(a.out, cfg, &win, &v, now)
 		}
 	}
 	return r.Err()
 }
 
 // cpuDryLetters — письма перегрузки такими, какими они ушли бы: в сводке лиду — те, кому написано строкой выше.
-func cpuDryLetters(w io.Writer, cfg *cpuwatch.Config, host string, v *cpuwatch.Verdict, now time.Time) {
-	var told []string
+func cpuDryLetters(w io.Writer, cfg *cpuwatch.Config, win *cpuwatch.Host, v *cpuwatch.Verdict, now time.Time) {
 	for _, m := range v.Recipients(cfg.Notify) {
-		fmt.Fprintf(w, "  → %s: %s\n", m.Name, cpuwatch.MasterMessage(host, v, &m, now, true))
-		told = append(told, m.Name)
+		fmt.Fprintf(w, "  → %s: %s\n", m.Name, cpuwatch.MasterMessage(win.Name, v, &m, now, true))
+		win.Sent(m.Name, now) // отметка та же, что у настоящей отправки: список лиду даёт Host.Told
 	}
-	slices.Sort(told) // как Host.Told
-	fmt.Fprintf(w, "  → %s: %s\n", cfg.Lead, cpuwatch.LeadMessage(host, v, told, now))
+	fmt.Fprintf(w, "  → %s: %s\n", cfg.Lead, cpuwatch.LeadMessage(win.Name, v, win.Told(), now))
 }

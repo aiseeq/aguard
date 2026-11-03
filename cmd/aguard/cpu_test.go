@@ -116,10 +116,10 @@ func TestCpuDryLettersLeadNamesRecipients(t *testing.T) {
 	cfg := cpuwatch.Default(t.TempDir())
 	cfg.Lead = "lead"
 	now := time.Date(2026, 10, 31, 15, 3, 0, 0, time.UTC)
-	var h cpuwatch.Host
+	h := cpuwatch.Host{Name: "pc"}
 	v := h.Judge(cpuSample(now, 33.9, 43, map[string]int{"sc2go-master": 20, "demu-master": 10, "chooks-master": 1}), cpuOwner)
 	var out strings.Builder
-	cpuDryLetters(&out, &cfg, "pc", &v, now)
+	cpuDryLetters(&out, &cfg, &h, &v, now)
 	if !strings.Contains(out.String(), "Написал за перегрузку: demu-master, sc2go-master") {
 		t.Fatalf("сводка лиду без адресатов:\n%s", out.String())
 	}
