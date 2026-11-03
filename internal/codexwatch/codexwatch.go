@@ -210,7 +210,7 @@ func (s *State) Apply(r Reading, c *Config) (Forecast, []Notice, bool) {
 	f := s.forecast(r)
 	out, consume := s.decide(r, f, c)
 	for i := range out { // решение о сбросе — с запасом других учёток: простой этой не значит простой бойцов
-		out[i].Message += r.Others
+		out[i] = Notice{out[i].Kind, out[i].Message + r.Others}
 	}
 	return f, out, consume
 }
