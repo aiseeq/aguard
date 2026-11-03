@@ -219,6 +219,21 @@ func (p fakeProc) set(pid, ppid int, start uint64, comm string, read, write, maj
 	writeFile(p.t, filepath.Join(dir, "cgroup"), "0::/user.slice/agent-s-"+strconv.Itoa(pid)+".scope\n")
 }
 
+func (p fakeProc) setThreadStat(pid, ppid int, start uint64, comm string, flags uint64, utime, stime int64) {
+	fields := make([]string, 21)
+	for i := range fields {
+		fields[i] = "0"
+	}
+	fields[0] = "S"
+	fields[1] = strconv.Itoa(ppid)
+	fields[6] = strconv.FormatUint(flags, 10)
+	fields[9] = "0"
+	fields[11] = strconv.FormatInt(utime, 10)
+	fields[12] = strconv.FormatInt(stime, 10)
+	fields[19] = strconv.FormatUint(start, 10)
+	writeFile(p.t, filepath.Join(p.root, strconv.Itoa(pid), "stat"), strconv.Itoa(pid)+" ("+comm+") "+strings.Join(fields, " ")+"\n")
+}
+
 func (p fakeProc) remove(pid int) {
 	if err := os.RemoveAll(filepath.Join(p.root, strconv.Itoa(pid))); err != nil {
 		p.t.Fatal(err)
@@ -262,6 +277,66 @@ func TestDeltaProcessNewReusedAndGone(t *testing.T) {
 	if got = readPass(t, r, now.Add(3*time.Second)); len(got) != 0 {
 		t.Fatalf("исчезнувший процесс: %+v", got)
 	}
+}
+
+func TestCleanerCPUAndPIDChange(t *testing.T) {
+	fp := fakeProc{t, t.TempDir()}
+	fp.set(10, 2, 100, "btrfs-cleaner", 0, 0, 0)
+	fp.setThreadStat(10, 2, 100, "btrfs-cleaner", 0, 0, 5)
+	fp.set(20, 1, 200, "btrfs-cleaner", 0, 0, 0)
+	fp.setThreadStat(20, 1, 200, "btrfs-cleaner", 0, 0, 5) // тот же comm, но не поток ядра
+	fp.set(21, 1, 210, "btrfs-cleaner", 0, 0, 0)
+	fp.setThreadStat(21, 1, 210, "btrfs-cleaner", kernelThreadFlag, 0, 5)
+	r := newProcessReader(fp.root)
+	defer r.close()
+	now := time.Now()
+	pass := func(at time.Time) Step {
+		t.Helper()
+		s := Step{At: at}
+		if skipped, err := r.read(&s); err != nil || skipped != nil {
+			t.Fatal(err, skipped)
+		}
+		return s
+	}
+	if got := pass(now).CleanerMS; got != 0 {
+		t.Fatalf("первый проход — точка отсчёта: cleaner %d мс", got)
+	}
+	fp.setThreadStat(10, 2, 100, "btrfs-cleaner", 0, 0, 25)
+	fp.setThreadStat(20, 1, 200, "btrfs-cleaner", 0, 0, 25)
+	fp.setThreadStat(21, 1, 210, "btrfs-cleaner", kernelThreadFlag, 0, 25)
+	if got := pass(now.Add(time.Second)).CleanerMS; got != 400 {
+		t.Fatalf("дельта stime для ppid=2 и PF_KTHREAD, обычный процесс исключён: cleaner %d мс", got)
+	}
+	fp.remove(10)
+	fp.set(11, 2, 101, "btrfs-cleaner", 0, 0, 0)
+	fp.setThreadStat(11, 2, 101, "btrfs-cleaner", 0, 0, 500)
+	if got := pass(now.Add(2 * time.Second)).CleanerMS; got != 0 {
+		t.Fatalf("новый pid должен начать с нуля: cleaner %d мс", got)
+	}
+}
+
+func TestCleanerStatErrorKeepsOtherProcesses(t *testing.T) {
+	fp := fakeProc{t, t.TempDir()}
+	fp.set(10, 2, 100, "btrfs-cleaner", 0, 0, 0)
+	fp.setThreadStat(10, 2, 100, "btrfs-cleaner", 0, 0, 1)
+	fp.set(30, 1, 300, "dd", 0, 100, 0)
+	r := newProcessReader(fp.root)
+	defer r.close()
+	now := time.Now()
+	readPass(t, r, now)
+	writeFile(t, filepath.Join(fp.root, "10", "stat"), "malformed\n")
+	fp.set(30, 1, 300, "dd", 0, 500, 0)
+	s := Step{At: now.Add(time.Second)}
+	skipped, err := r.read(&s)
+	if err != nil || skipped == nil {
+		t.Fatalf("stat ошибка должна быть skipped: %v %v", err, skipped)
+	}
+	for _, p := range s.Processes {
+		if p.PID == 30 && p.WriteBytes == 400 {
+			return
+		}
+	}
+	t.Fatalf("ошибка cleaner повредила запись другого процесса: %+v", s.Processes)
 }
 
 // Два dd подряд из одного bash: у каждого свой I/O под своим pid; скачок родителя при wait() —
@@ -649,7 +724,7 @@ func TestCaseStallsMergeAcrossShortCalmAndGetCulprits(t *testing.T) {
 	idle := make([]int64, 20)
 	idle[1], idle[2], idle[3], idle[4] = 10_000, 60_000, 20_000, 70_000 // 10 мс — не простой; 20 мс между простоями входит в случай
 	got := feed(r, base, idle, func(at time.Time) Step {
-		return Step{At: at, Dirty: 5 << 20, Processes: []Process{{PID: 1, Start: 3, Comm: "dd", WriteBytes: 7 << 20, Cgroup: "/user.slice/agent-sess7-1.scope"}},
+		return Step{At: at, Dirty: 5 << 20, CleanerMS: 120, Processes: []Process{{PID: 1, Start: 3, Comm: "dd", WriteBytes: 7 << 20, Cgroup: "/user.slice/agent-sess7-1.scope"}},
 			Cgroups: []Cgroup{{Path: "/user.slice/agent-sess7-1.scope", WriteBytes: 7 << 20, IOFullUS: 90_000}}}
 	})
 	if len(got) != 1 {
@@ -661,7 +736,7 @@ func TestCaseStallsMergeAcrossShortCalmAndGetCulprits(t *testing.T) {
 		t.Fatalf("сводка: %+v", c)
 	}
 	k := c.Culprits
-	if k == nil || k.Main != "/user.slice/agent-sess7-1.scope" || len(k.ProcWrite) != 1 || k.ProcWrite[0] != (Ranked{"dd(1)", 14 << 20}) ||
+	if k == nil || k.Main != "/user.slice/agent-sess7-1.scope" || k.CleanerMS != 240 || len(k.ProcWrite) != 1 || k.ProcWrite[0] != (Ranked{"dd(1)", 14 << 20}) ||
 		k.CgroupWrite[0].Name != "sess7" || k.CgroupIdle[0].Value != 180 || !k.From.Equal(c.Start.Add(-5*time.Second)) {
 		t.Fatalf("виновники (детальные 0 и 1 с в окне): %+v", k)
 	}
@@ -1011,6 +1086,21 @@ func BenchmarkReadLive(b *testing.B) {
 }
 
 // Фон ядра: запись устройства 11 МиБ за окно, листья cgroup — 2 МиБ: 9 МиБ писали потоки ядра в корневую cgroup.
+func TestSummarizeCleanerAsMain(t *testing.T) {
+	base := time.Date(2026, 11, 3, 1, 20, 0, 0, time.Local)
+	cases := []Case{{Start: base, DurMS: 2000, Culprits: &Culprit{Main: "/user.slice/agent-sess7-1.scope", MainValue: 100,
+		DeviceWrite: 1000, KernelWrite: 500, CleanerMS: 200}}, {Start: base.Add(time.Minute), DurMS: 2000,
+		Culprits: &Culprit{Main: "/user.slice/agent-sess8-1.scope", MainValue: 100, KernelWrite: 500}}}
+	s := Summarize(cases, base, base.Add(time.Hour), time.Second)
+	got := map[string]int{}
+	for _, item := range s.Main {
+		got[item.Name] = item.Cases
+	}
+	if len(got) != 2 || got["btrfs-cleaner"] != 1 || got["sess8"] != 1 {
+		t.Fatalf("главные виновники сводки: %+v", s.Main)
+	}
+}
+
 func TestCulpritsKernelWrite(t *testing.T) {
 	cfg := Default()
 	cfg.CaseMin = policy.Duration(200 * time.Millisecond)

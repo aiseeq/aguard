@@ -259,7 +259,11 @@ func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary 
 			continue
 		}
 		if c.Culprits.Main != "" {
-			countCase(main, CgroupName(c.Culprits.Main), c.DurMS)
+			name := CgroupName(c.Culprits.Main)
+			if c.Culprits.SnapshotDeletion() {
+				name = "btrfs-cleaner"
+			}
+			countCase(main, name, c.DurMS)
 		}
 		acc.add(c.Culprits)
 	}

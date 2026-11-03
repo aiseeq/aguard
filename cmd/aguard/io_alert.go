@@ -21,7 +21,7 @@ func (a *app) alertIO(cfg iowatch.Config, cases []iowatch.Case) error {
 	}
 	message, main := ioAlertText(cases, cfg.AlertMin.D())
 	owner := ""
-	if main.Culprits != nil {
+	if main.Culprits != nil && !main.Culprits.SnapshotDeletion() {
 		if name, _, ok := proc.SessionScope(main.Culprits.Main); ok {
 			owner = name
 		}

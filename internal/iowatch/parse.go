@@ -324,17 +324,23 @@ func parseProcIO(data []byte) (readBytes, writeBytes int64, err error) {
 
 // procStat — нужные поля /proc/<pid>/stat.
 type procStat struct {
-	comm  []byte // ссылается на буфер чтения
-	ppid  int
-	start uint64
-	maj   int64
+	comm        []byte // ссылается на буфер чтения
+	ppid        int
+	start       uint64
+	maj         int64
+	flags       uint64
+	userTicks   int64
+	systemTicks int64
 }
 
 // Номера полей stat после «pid (comm)»: state — 0.
 const (
-	statPPID      = 1
-	statMajflt    = 9
-	statStartTime = 19
+	statPPID        = 1
+	statFlags       = 6
+	statMajflt      = 9
+	statUserTicks   = 11
+	statSystemTicks = 12
+	statStartTime   = 19
 )
 
 // parseProcStat разбирает /proc/<pid>/stat; comm может содержать пробелы и скобки, режем по последней ')'.
@@ -357,8 +363,14 @@ func parseProcStat(s []byte) (procStat, error) {
 			var n int64
 			n, err = parseIntBytes(field)
 			st.ppid = int(n)
+		case statFlags:
+			st.flags, err = parseUintBytes(field)
 		case statMajflt:
 			st.maj, err = parseIntBytes(field)
+		case statUserTicks:
+			st.userTicks, err = parseIntBytes(field)
+		case statSystemTicks:
+			st.systemTicks, err = parseIntBytes(field)
 		case statStartTime:
 			st.start, err = parseUintBytes(field)
 		}

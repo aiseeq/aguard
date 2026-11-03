@@ -16,11 +16,14 @@ import (
 )
 
 const (
-	topProcesses   = 5                // в запись — до стольких процессов по каждой мере
-	deniedRetry    = 10               // чужой процесс (EACCES) перепроверяется раз в столько проходов: pid мог смениться
-	exitedPasses   = 3                // столько проходов ждём скачка у родителя после ухода ребёнка
-	cgroupRecheck  = 10 * time.Second // cgroup процесса из топа перечитывается не чаще
-	direntNameSkip = 19               // смещение d_name в linux_dirent64
+	topProcesses     = 5                // в запись — до стольких процессов по каждой мере
+	deniedRetry      = 10               // чужой процесс (EACCES) перепроверяется раз в столько проходов: pid мог смениться
+	exitedPasses     = 3                // столько проходов ждём скачка у родителя после ухода ребёнка
+	cgroupRecheck    = 10 * time.Second // cgroup процесса из топа перечитывается не чаще
+	direntNameSkip   = 19               // смещение d_name в linux_dirent64
+	cleanerRecheck   = 100              // полный поиск потоков cleaner раз в столько проходов
+	kernelThreadFlag = 0x00200000       // PF_KTHREAD
+	procClockTicks   = 100              // USER_HZ в Linux ABI
 )
 
 // processReader — дельты I/O (/proc/<pid>/io) и majflt (/proc/<pid>/stat) всех своих процессов за
@@ -46,6 +49,13 @@ type processReader struct {
 	buf      []byte
 	all      []Process
 	readlink func(string) (string, error)
+	cleaners map[int]*cleanerEntry
+}
+
+type cleanerEntry struct {
+	stat  cachedFile
+	start uint64
+	ticks int64
 }
 
 type procEntry struct {
@@ -77,6 +87,10 @@ func (r *processReader) close() {
 	for pid, e := range r.procs {
 		e.close()
 		delete(r.procs, pid)
+	}
+	for pid, e := range r.cleaners {
+		e.stat.close()
+		delete(r.cleaners, pid)
 	}
 	if r.dir != nil {
 		_ = r.dir.Close()
@@ -140,12 +154,93 @@ func (r *processReader) read(s *Step) (skipped, err error) {
 			delete(r.denied, pid)
 		}
 	}
+	r.readCleaner(pids, s, fail)
 	r.applyExited()
 	r.selectTop(s, fail)
 	if failed > 0 {
 		skipped = fmt.Errorf("пропущено процессов: %d, первая ошибка: %w", failed, first)
 	}
 	return skipped, nil
+}
+
+// readCleaner считает CPU потоков btrfs-cleaner, не читая их недоступный /proc/<pid>/io.
+// Известные pid проверяются каждый проход; полный поиск по comm — раз в cleanerRecheck проходов.
+func (r *processReader) readCleaner(pids []int, s *Step, fail func(error)) {
+	if r.cleaners == nil {
+		r.cleaners = map[int]*cleanerEntry{}
+	}
+	search := r.pass == 1 || r.pass%cleanerRecheck == 0
+	refresh := false
+	present := make(map[int]bool, len(pids))
+	for _, pid := range pids {
+		present[pid] = true
+	}
+	for pid, e := range r.cleaners {
+		if !present[pid] {
+			e.stat.close()
+			delete(r.cleaners, pid)
+			refresh = true
+			continue
+		}
+		st, err := r.readCleanerStat(e)
+		if processGone(err) {
+			e.stat.close()
+			delete(r.cleaners, pid)
+			refresh = true
+			continue
+		}
+		if err != nil {
+			fail(err)
+			continue
+		}
+		if st.start != e.start || string(st.comm) != "btrfs-cleaner" || !kernelThread(st) {
+			e.stat.close()
+			delete(r.cleaners, pid)
+			refresh = true
+			continue
+		}
+		s.CleanerMS += advance(&e.ticks, st.userTicks+st.systemTicks) * 1000 / procClockTicks
+	}
+	if !search && !refresh {
+		return
+	}
+	for _, pid := range pids {
+		if r.cleaners[pid] != nil {
+			continue
+		}
+		e := &cleanerEntry{stat: cachedFile{path: filepath.Join(r.root, strconv.Itoa(pid), "stat")}}
+		st, err := r.readCleanerStat(e)
+		if processGone(err) {
+			e.stat.close()
+			continue
+		}
+		if err != nil {
+			fail(err)
+			e.stat.close()
+			continue
+		}
+		if string(st.comm) != "btrfs-cleaner" || !kernelThread(st) {
+			e.stat.close()
+			continue
+		}
+		e.start, e.ticks = st.start, st.userTicks+st.systemTicks
+		r.cleaners[pid] = e
+	}
+}
+
+func kernelThread(st procStat) bool { return st.ppid == 2 || st.flags&kernelThreadFlag != 0 }
+
+func (r *processReader) readCleanerStat(e *cleanerEntry) (procStat, error) {
+	var data []byte
+	var err error
+	if r.buf, data, err = e.stat.read(r.buf); err != nil {
+		return procStat{}, err
+	}
+	st, err := parseProcStat(data)
+	if err != nil {
+		return procStat{}, fmt.Errorf("разобрать %s: %w", e.stat.path, err)
+	}
+	return st, nil
 }
 
 func (r *processReader) collect(p Process) {

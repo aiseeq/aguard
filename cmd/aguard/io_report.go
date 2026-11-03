@@ -41,17 +41,14 @@ func ioCaseAttribution(c *iowatch.Case) string {
 	}
 	k := c.Culprits
 	main := iowatch.CgroupName(k.Main)
-	// Foreign задан, только когда его I/O больше меры главной (ForeignOver), — так и в случаях до MainValue (31.10):
-	// у них граница для ядра — сам Foreign.
-	kernelOver := k.MainValue > 0 && k.KernelWrite > k.MainValue || k.Foreign.Value > 0 && k.KernelWrite > k.Foreign.Value
+	// Foreign задан, только когда его I/O больше меры главной (ForeignOver), включая старые случаи без MainValue.
 	switch {
-	case kernelOver && k.KernelWrite >= k.Foreign.Value:
-		percent := int64(0)
-		if k.DeviceWrite > 0 {
-			percent = (100*k.KernelWrite + k.DeviceWrite/2) / k.DeviceWrite
-		}
+	case k.SnapshotDeletion():
+		return fmt.Sprintf("удаление снапшотов btrfs (btrfs-cleaner, CPU %d мс за окно): фон ядра %.0f МБ, %d%% записи устройства; главная cgroup %s",
+			k.CleanerMS, megabytes(k.KernelWrite), k.KernelPercent(), main)
+	case k.KernelOver():
 		return fmt.Sprintf("фон ядра (writeback, коммит btrfs): %.0f МБ, %d%% записи устройства; главная cgroup %s",
-			megabytes(k.KernelWrite), percent, main)
+			megabytes(k.KernelWrite), k.KernelPercent(), main)
 	case k.Foreign.Value > 0:
 		return fmt.Sprintf("чужая cgroup %s (чужой uid, I/O по io.stat): %.0f МБ; главная cgroup %s",
 			k.Foreign.Name, megabytes(k.Foreign.Value), main)
@@ -69,6 +66,9 @@ func writeIOCase(w io.Writer, c *iowatch.Case, names int) {
 		return
 	}
 	fmt.Fprintf(w, "виновники с %s:\n", k.From.Format("15:04:05"))
+	if k.CleanerMS > 0 {
+		fmt.Fprintf(w, "CPU btrfs-cleaner за окно: %d мс\n", k.CleanerMS)
+	}
 	if k.DeviceWrite > 0 {
 		fmt.Fprintf(w, "запись диска за окно %.0f МБ, из них фон ядра %.0f МБ (writeback, коммит и метаданные btrfs вне cgroup — "+
 			"порождает их запись процессов ниже)\n", megabytes(k.DeviceWrite), megabytes(k.KernelWrite))

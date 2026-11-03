@@ -482,6 +482,43 @@ func TestIOCaseFsyncAndKernel(t *testing.T) {
 	}
 }
 
+func TestIOCaseCleanerAttributionAndAlertRecipient(t *testing.T) {
+	base := time.Date(2026, 11, 3, 1, 20, 0, 0, time.Local)
+	c := alertCase(base, 2100)
+	c.Culprits.MainValue = 100 << 20
+	c.Culprits.DeviceWrite, c.Culprits.KernelWrite, c.Culprits.CleanerMS = 1000<<20, 960<<20, 2000
+	want := "удаление снапшотов btrfs (btrfs-cleaner, CPU 2000 мс за окно): фон ядра 960 МБ, 96% записи устройства; главная cgroup sess7"
+	if got := ioCaseAttribution(&c); got != want {
+		t.Fatalf("подпись cleaner: %s", got)
+	}
+	c.Culprits.CleanerMS = 0
+	if got := ioCaseAttribution(&c); !strings.HasPrefix(got, "фон ядра (writeback, коммит btrfs)") {
+		t.Fatalf("без CPU cleaner должен остаться фон ядра: %s", got)
+	}
+	c.Culprits.CleanerMS, c.Culprits.MainValue = 2000, 970<<20
+	if got := ioCaseAttribution(&c); got != "главная cgroup sess7" {
+		t.Fatalf("без перевеса ядра должна остаться главная cgroup: %s", got)
+	}
+	c.Culprits.MainValue = 100 << 20
+	var detail strings.Builder
+	writeIOCase(&detail, &c, 3)
+	if !strings.Contains(detail.String(), "CPU btrfs-cleaner за окно: 2000 мс") {
+		t.Fatalf("разбор не содержит CPU cleaner:\n%s", detail.String())
+	}
+
+	a, _ := testIOApp(t)
+	var logged bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logged, nil))
+	cfg := iowatch.Default()
+	cfg.Mode, cfg.Lead = iowatch.ModeLog, "lead"
+	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logged.String(), "to=lead ") || strings.Contains(logged.String(), "to=lead,sess7") {
+		t.Fatalf("письмо cleaner адресовано только лиду:\n%s", logged.String())
+	}
+}
+
 func TestIOCaseAttribution(t *testing.T) {
 	base := time.Date(2026, 10, 30, 12, 15, 12, 0, time.Local)
 	t.Run("ядро больше главной", func(t *testing.T) {

@@ -29,6 +29,7 @@ type Step struct {
 	SwapIn     int64     `json:"swapin,omitempty"`
 	SwapOut    int64     `json:"swapout,omitempty"`
 	Majflt     int64     `json:"majflt,omitempty"`
+	CleanerMS  int64     `json:"cleaner_ms,omitempty"` // CPU btrfs-cleaner за детальный интервал
 	ReadBytes  int64     `json:"rd_b,omitempty"`
 	WriteBytes int64     `json:"wr_b,omitempty"`
 	IOTicks    int64     `json:"io_ticks,omitempty"` // мс занятости устройства

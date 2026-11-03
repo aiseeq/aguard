@@ -61,6 +61,28 @@ type Culprit struct {
 	// коммит и метаданные btrfs) в корневой cgroup.
 	DeviceWrite int64 `json:"device_wr,omitempty"`
 	KernelWrite int64 `json:"kernel_wr,omitempty"`
+	CleanerMS   int64 `json:"cleaner_ms,omitempty"`
+}
+
+// KernelOver — запись вне cgroup перевешивает главную cgroup и не меньше чужой.
+func (c *Culprit) KernelOver() bool {
+	return c != nil && (c.MainValue > 0 && c.KernelWrite > c.MainValue || c.Foreign.Value > 0 && c.KernelWrite > c.Foreign.Value) && c.KernelWrite >= c.Foreign.Value
+}
+
+// cleanerBusyMS — CPU btrfs-cleaner за окно, с которого он виновник фона ядра: за 17 дней (до 03.11) поток набрал
+// 498 с, в среднем ~1 мс на 10-секундное окно, а при удалении снапшотов 03.11 01:22 — 2,4 с за минуту.
+const cleanerBusyMS = 100
+
+// SnapshotDeletion — btrfs-cleaner (удаление снапшотов и subvolume) работал не меньше cleanerBusyMS, пока фон ядра
+// перевешивал cgroup.
+func (c *Culprit) SnapshotDeletion() bool { return c.KernelOver() && c.CleanerMS >= cleanerBusyMS }
+
+// KernelPercent — доля фона ядра в записи устройства за окно, округлённая; записи нет — 0.
+func (c *Culprit) KernelPercent() int64 {
+	if c.DeviceWrite <= 0 {
+		return 0
+	}
+	return (100*c.KernelWrite + c.DeviceWrite/2) / c.DeviceWrite
 }
 
 const caseTop = 5
@@ -267,6 +289,9 @@ func (r *Recorder) finish(c *Case) {
 		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
 		CgroupDirty: Rank(sum.CgroupDirty, caseTop), CgroupOwn: map[string]int64{}}
 	c.Culprits.Foreign, _ = sum.ForeignOver(c.Culprits.Main)
+	for i := range details {
+		c.Culprits.CleanerMS += details[i].CleanerMS
+	}
 	for _, g := range c.Culprits.CgroupWrite {
 		if sum.Readable[g.Name] {
 			c.Culprits.CgroupOwn[g.Name] = sum.CgroupDirty[g.Name]

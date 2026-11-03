@@ -1,13 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/aiseeq/akit v1.24.1 h1:6HaPsbHgjVIBKxBc5x7pmyDWrMjgcJvVfBROUZXdmTE=
-github.com/aiseeq/akit v1.24.1/go.mod h1:IU/iPvGlL9aO7rRMwUEN+GWNCof5b+eEg47q3e2XOIA=
-github.com/aiseeq/akit v1.25.0 h1:UDrxeWbEBWPvXsSDrQm+26pWaCo/pvipTq65FHlCqX8=
-github.com/aiseeq/akit v1.25.0/go.mod h1:IU/iPvGlL9aO7rRMwUEN+GWNCof5b+eEg47q3e2XOIA=
-github.com/aiseeq/akit v1.26.0 h1:HzRUhF2Naj+hu7Jr3b/e0nlN35b8g/WNuMc5rm6dFBY=
-github.com/aiseeq/akit v1.26.0/go.mod h1:IU/iPvGlL9aO7rRMwUEN+GWNCof5b+eEg47q3e2XOIA=
-github.com/aiseeq/akit v1.27.0 h1:W9fZjY7Z6ZHAd6V9ENrDskxx9/a2xzBieDesVO/Bnj8=
-github.com/aiseeq/akit v1.27.0/go.mod h1:IU/iPvGlL9aO7rRMwUEN+GWNCof5b+eEg47q3e2XOIA=
+github.com/aiseeq/akit v1.27.1 h1:fmkGsxnFNXvUrSyUGGAhnqOK9r3YH2nQaS3+aVfQyRg=
+github.com/aiseeq/akit v1.27.1/go.mod h1:IU/iPvGlL9aO7rRMwUEN+GWNCof5b+eEg47q3e2XOIA=
 github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
 github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/go-quicktest/qt v1.102.0 h1:HSQxCeh5YZH3EL3W39ixjtyaEhcWSXQHtHnMBzSs474=
