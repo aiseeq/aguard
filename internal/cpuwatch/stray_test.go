@@ -357,6 +357,19 @@ func TestStrayGapRestartsCount(t *testing.T) {
 	}
 }
 
+// Письмо об остатке сессии после пропуска замеров не выдаёт среднюю за пропуск за текущую занятость.
+func TestStrayGapRateUnknown(t *testing.T) {
+	var w StrayWatch
+	at := time.Date(2026, 11, 3, 14, 0, 0, 0, time.UTC)
+	pass := func(at time.Time, cpu float64) []Stray {
+		return w.Judge(at, []Proc{{Pid: 7, PPid: 1, Age: time.Hour, CPU: cpu, Comm: "bash"}}, []Detail{{Pid: 7, Start: 1, Cgroup: sessionCg}}, strayCfg())
+	}
+	pass(at, 0)
+	if got := pass(at.Add(35*time.Minute), 2100); len(got) != 1 || got[0].Rate != 0 {
+		t.Fatalf("после пропуска: %+v", got)
+	}
+}
+
 // Ключ различает машину, pid и starttime: pid переиспользуется, отметка чужому не достаётся.
 func TestStrayKeyIdentity(t *testing.T) {
 	a, b := Stray{Detail: Detail{Pid: 7, Start: 1}}, Stray{Detail: Detail{Pid: 7, Start: 2}}
@@ -369,6 +382,7 @@ func TestStrayKeyIdentity(t *testing.T) {
 func TestParseStraysMalformed(t *testing.T) {
 	for _, raw := range []string{
 		"##procs\n 7 1 bash\n##strays\n##end\n",
+		"##procs\n1 2 3\n##strays\n##end\n",
 		"##procs\n x 1 7200 0 bash\n##strays\n##end\n",
 		"##procs\n 7 1 7200 0 bash\n##strays\n7\t1\t/c\n##end\n",
 		"##procs\n 7 1 7200 0 bash\n##strays\nx\t1\t/c\t/w\t\t\tcmd\n##end\n",
