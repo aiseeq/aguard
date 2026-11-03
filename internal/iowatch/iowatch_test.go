@@ -1274,6 +1274,57 @@ func TestCulpritsForeignOver(t *testing.T) {
 	}
 }
 
+func TestKernelOverWithoutMainOrForeign(t *testing.T) {
+	c := Culprit{KernelWrite: 1}
+	if !c.KernelOver() {
+		t.Fatalf("фон ядра без cgroup не распознан: %+v", c)
+	}
+	c.Main = "/user.slice/agent-old.scope" // старый случай с неизвестной мерой главной сохраняет прежнее поведение
+	if c.KernelOver() {
+		t.Fatalf("старый случай с главной и нулевой MainValue изменил поведение: %+v", c)
+	}
+}
+
+func TestSumCulpritsExcludesSwapInFromMainAndForeignMeasures(t *testing.T) {
+	user := fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/", os.Getuid(), os.Getuid())
+	a := user + "agents.slice/agent-a-1.scope"
+	b := user + "agents.slice/agent-b-1.scope"
+	service := "/system.slice/foreign.service"
+	c := SumCulprits([]Step{{
+		Processes: []Process{{PID: 1, Start: 1, Comm: "writer", WriteBytes: 1 << 20, Cgroup: a}},
+		Cgroups:   []Cgroup{{Path: b, SwapIn: 100}, {Path: service, SwapIn: 25}},
+	}})
+	if got := c.MainCgroup(); got != a {
+		t.Fatalf("swap-in вытеснил пишущую главную cgroup: %q", got)
+	}
+	if c.cgroupTotal[b] != 0 || c.cgroupTotal[service] != 0 {
+		t.Fatalf("swap-in попал в меру главной: %+v", c.cgroupTotal)
+	}
+	if f, ok := c.ForeignOver(a); ok {
+		t.Fatalf("чужая cgroup только со swap-in стала Foreign: %+v", f)
+	}
+	c = SumCulprits([]Step{{Cgroups: []Cgroup{{Path: b, SwapIn: 25}}}})
+	if c.MainCgroup() != "" {
+		t.Fatalf("cgroup только со swap-in стала главной: %q", c.MainCgroup())
+	}
+}
+
+func TestFinishStoresMainWriteAndRead(t *testing.T) {
+	r := NewRecorder(Default())
+	main := "/user.slice/agent-main-1.scope"
+	r.ring.Add(Record{Kind: KindDetail, Step: Step{At: time.Now(),
+		Processes: []Process{{PID: 1, Start: 1, Comm: "writer", WriteBytes: 100, Cgroup: main}},
+		Cgroups:   []Cgroup{{Path: main, ReadBytes: 200}}}})
+	c := Case{Start: time.Now(), End: time.Now(), DurMS: 1000}
+	r.finish(&c)
+	if c.Culprits == nil || c.Culprits.Main != main || c.Culprits.MainWrite != 100 || c.Culprits.MainRead != 200 || c.Culprits.MainValue != 300 {
+		t.Fatalf("меры главной не сохранены: %+v", c.Culprits)
+	}
+	if !c.Culprits.ReadMostly() {
+		t.Fatalf("чтение больше записи, но ReadMostly=false: %+v", c.Culprits)
+	}
+}
+
 // Пустая команда на позднем шаге (процесс ушёл до чтения) не затирает прочитанную раньше.
 func TestSumCulpritsKeepsEarlierCommand(t *testing.T) {
 	c := SumCulprits([]Step{

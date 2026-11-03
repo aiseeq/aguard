@@ -36,24 +36,49 @@ func ioCaseLine(c *iowatch.Case) string {
 
 // ioCaseAttribution — одна подпись виновника для заголовка и кратких списков случаев.
 func ioCaseAttribution(c *iowatch.Case) string {
-	if c.Culprits == nil || c.Culprits.Main == "" {
+	if c.Culprits == nil {
 		return ""
 	}
 	k := c.Culprits
-	main := iowatch.CgroupName(k.Main)
+	main := ""
+	if k.Main != "" {
+		main = "главная cgroup " + iowatch.CgroupName(k.Main)
+		if k.ReadMostly() {
+			main += " (в основном чтение)"
+		}
+	}
+	if k.Main == "" {
+		switch {
+		case k.SnapshotDeletion():
+			return fmt.Sprintf("удаление снапшотов btrfs (btrfs-cleaner, CPU %d мс за окно): фон ядра %.0f МБ, %d%% записи устройства",
+				k.CleanerMS, megabytes(k.KernelWrite), k.KernelPercent())
+		case k.KernelOver():
+			return fmt.Sprintf("фон ядра (writeback, коммит btrfs): %.0f МБ, %d%% записи устройства",
+				megabytes(k.KernelWrite), k.KernelPercent())
+		case len(k.CgroupSwapIn) > 0:
+			names := make([]string, 0, 3)
+			for _, g := range k.CgroupSwapIn[:min(3, len(k.CgroupSwapIn))] {
+				names = append(names, g.Name)
+			}
+			if len(names) > 0 {
+				return "главной нет, жертвы вытеснения: " + strings.Join(names, ", ")
+			}
+		}
+		return ""
+	}
 	// Foreign задан, только когда его I/O больше меры главной (ForeignOver), включая старые случаи без MainValue.
 	switch {
 	case k.SnapshotDeletion():
-		return fmt.Sprintf("удаление снапшотов btrfs (btrfs-cleaner, CPU %d мс за окно): фон ядра %.0f МБ, %d%% записи устройства; главная cgroup %s",
+		return fmt.Sprintf("удаление снапшотов btrfs (btrfs-cleaner, CPU %d мс за окно): фон ядра %.0f МБ, %d%% записи устройства; %s",
 			k.CleanerMS, megabytes(k.KernelWrite), k.KernelPercent(), main)
 	case k.KernelOver():
-		return fmt.Sprintf("фон ядра (writeback, коммит btrfs): %.0f МБ, %d%% записи устройства; главная cgroup %s",
+		return fmt.Sprintf("фон ядра (writeback, коммит btrfs): %.0f МБ, %d%% записи устройства; %s",
 			megabytes(k.KernelWrite), k.KernelPercent(), main)
 	case k.Foreign.Value > 0:
-		return fmt.Sprintf("чужая cgroup %s (чужой uid, I/O по io.stat): %.0f МБ; главная cgroup %s",
+		return fmt.Sprintf("чужая cgroup %s (чужой uid, I/O по io.stat): %.0f МБ; %s",
 			k.Foreign.Name, megabytes(k.Foreign.Value), main)
 	}
-	return "главная cgroup " + main
+	return main
 }
 
 // writeIOCase — машина за случай и до names виновников на меру.
@@ -82,7 +107,7 @@ func writeIOCase(w io.Writer, c *iowatch.Case, names int) {
 	}
 	writeIOCgroupWrite(w, top(k.CgroupWrite), k.CgroupOwn)
 	writeIOTop(w, "чтение cgroup", top(k.CgroupRead), ioBytes)
-	writeIOTop(w, "своп cgroup", top(k.CgroupSwapIn), ioPages)
+	writeIOTop(w, "жертвы вытеснения (своп cgroup)", top(k.CgroupSwapIn), ioPages)
 	writeIOTop(w, "простой IO cgroup", top(k.CgroupIdle), ioMillis)
 }
 
@@ -232,7 +257,7 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 		unit  int
 	}{
 		{"запись процессов", k.ProcWrite, ioBytes}, {"чтение процессов", k.ProcRead, ioBytes}, {"своп процессов (majflt)", k.ProcMajflt, ioMajflt},
-		{"запись cgroup", k.CgroupWrite, ioBytes}, {"чтение cgroup", k.CgroupRead, ioBytes}, {"своп cgroup", k.CgroupSwapIn, ioPages},
+		{"запись cgroup", k.CgroupWrite, ioBytes}, {"чтение cgroup", k.CgroupRead, ioBytes}, {"жертвы вытеснения (своп cgroup)", k.CgroupSwapIn, ioPages},
 		{"простой IO cgroup", k.CgroupIdle, ioMillis},
 	} {
 		fmt.Fprintf(w, "%s: %s\n", row.label, ioRankedCases(row.list, row.unit))

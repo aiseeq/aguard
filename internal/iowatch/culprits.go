@@ -31,8 +31,10 @@ type Culprits struct {
 	// aguard читает, своя запись известна.
 	// У системных служб (postgres, journald) процессы чужого uid, их write_bytes не видны — ноль там не значит «не писал».
 	Readable    map[string]bool
-	cgroupTotal map[string]int64 // запись процессов + чтение + своп: главный виновник
-	foreignIO   map[string]int64 // по имени cgroup чужого uid: запись по io.stat + чтение + своп — мера, сравнимая с главной
+	cgroupWrite map[string]int64 // запись процессов по пути cgroup
+	cgroupRead  map[string]int64 // чтение cgroup по пути
+	cgroupTotal map[string]int64 // запись процессов + чтение: мера главной cgroup
+	foreignIO   map[string]int64 // по имени cgroup чужого uid: запись и чтение по io.stat — мера, сравнимая с главной
 }
 
 type procID struct {
@@ -47,7 +49,7 @@ func SumCulprits(details []Step) Culprits {
 	c := Culprits{ProcWrite: map[string]int64{}, ProcRead: map[string]int64{}, ProcMajflt: map[string]int64{},
 		CgroupWrite: map[string]int64{}, CgroupRead: map[string]int64{}, CgroupSwapIn: map[string]int64{},
 		CgroupIdle: map[string]int64{}, CgroupWriteOps: map[string]int64{}, CgroupDirty: map[string]int64{}, Readable: map[string]bool{},
-		cgroupTotal: map[string]int64{}, foreignIO: map[string]int64{}}
+		cgroupWrite: map[string]int64{}, cgroupRead: map[string]int64{}, cgroupTotal: map[string]int64{}, foreignIO: map[string]int64{}}
 	userTree := "/user-" + strconv.Itoa(os.Getuid()) + ".slice/"
 	foreign := map[string]bool{} // имя есть и вне user-<uid>.slice (dbus-broker.service и в system.slice): своя запись неизвестна
 	names := processNames(details)
@@ -64,6 +66,7 @@ func SumCulprits(details []Step) Culprits {
 			c.ProcMajflt[name] += p.Majflt
 			if p.Cgroup != "" && p.WriteBytes > 0 {
 				c.CgroupDirty[CgroupName(p.Cgroup)] += p.WriteBytes
+				c.cgroupWrite[p.Cgroup] += p.WriteBytes
 				c.cgroupTotal[p.Cgroup] += p.WriteBytes
 			}
 		}
@@ -74,12 +77,13 @@ func SumCulprits(details []Step) Culprits {
 			c.CgroupSwapIn[name] += g.SwapIn
 			c.CgroupIdle[name] += g.IOFullUS / 1000
 			c.CgroupWriteOps[name] += g.WriteOps
-			c.cgroupTotal[g.Path] += g.ReadBytes + g.SwapIn*4096
+			c.cgroupRead[g.Path] += g.ReadBytes
+			c.cgroupTotal[g.Path] += g.ReadBytes
 			if strings.Contains(g.Path, userTree) {
 				c.Readable[name] = true
 			} else {
 				foreign[name] = true
-				c.foreignIO[name] += g.WriteBytes + g.ReadBytes + g.SwapIn*4096
+				c.foreignIO[name] += g.WriteBytes + g.ReadBytes
 			}
 		}
 	}
@@ -119,7 +123,7 @@ func ProcBase(name string) string {
 	return name
 }
 
-// MainCgroup — путь cgroup с наибольшим I/O (запись её процессов, чтение, своп в байтах); "" — нет.
+// MainCgroup — путь cgroup с наибольшей суммой записи её процессов и чтения; "" — нет.
 func (c *Culprits) MainCgroup() string {
 	var best string
 	for path, v := range c.cgroupTotal {
