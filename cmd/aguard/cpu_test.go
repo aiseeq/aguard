@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
+	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/akit/pressure"
 	"github.com/aiseeq/akit/session"
 )
@@ -193,6 +194,76 @@ func TestCpuRoundPersistsWindow(t *testing.T) {
 	remote := next.cpuHosts(&cfg)
 	if want := filepath.Join(a.dir("cpu"), "host-pc.json"); remote[len(remote)-1].state != want {
 		t.Errorf("файл окна pc: %q, хотим %q", remote[len(remote)-1].state, want)
+	}
+}
+
+// Активная серия сквозь настоящие проходы: cpuRound сохраняет её, новый процесс читает через cpuHosts, продолжает и
+// пишет письмо, а третий процесс видит отметку письма и раньше repeat не пишет.
+func TestCpuRoundContinuesActiveSeriesAfterRestart(t *testing.T) {
+	var logs strings.Builder
+	a := cpuApp(t, &logs)
+	cfg := cpuwatch.Default(a.home)
+	cfg.Mode, cfg.Hosts, cfg.Lead = cpuwatch.ModeLog, nil, "lead"
+	root := filepath.Join(a.home, "proc")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"loadavg": "30.00 1.00 1.00 30/100 1\n",
+		"stat":    "cpu  1 1 1 1\ncpu0 1 1 1 1\ncpu1 1 1 1 1\nprocs_running 30\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := filepath.Join(a.dir("cpu"), "local.json")
+	now := time.Now().Truncate(time.Second)
+	since := now.Add(-11 * time.Minute)
+	first := &cpuHost{root: root, state: state, win: cpuwatch.Host{Name: cpuwatch.HostLocal}}
+	first.win.Restore(cpuwatch.State{Since: since, Last: now.Add(-time.Minute)})
+	a.cpu = map[string]*cpuHost{"": first}
+	want := cfg.After
+	cfg.After = policy.Duration(time.Hour) // до рестарта серия короче after: писем ещё нет
+	if err := a.cpuRound(context.Background(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := first.win.State(); !got.Since.Equal(since) || strings.Contains(logs.String(), "написал бы") {
+		t.Fatalf("проход оборвал серию или написал раньше after: %+v\n%s", got, logs.String())
+	}
+	cfg.After = want
+
+	restart := func() *cpuHost {
+		next := *a
+		next.cpu = map[string]*cpuHost{}
+		hosts := next.cpuHosts(&cfg)
+		if len(hosts) != 1 {
+			t.Fatalf("машины нового процесса: %+v", hosts)
+		}
+		hosts[0].root = root
+		next.cpu[""] = hosts[0]
+		logs.Reset()
+		if err := next.cpuRound(context.Background(), &cfg); err != nil {
+			t.Fatal(err)
+		}
+		return hosts[0]
+	}
+	saved := restart()
+	if got := saved.win.State(); !got.Since.Equal(since) {
+		t.Fatalf("новый процесс продолжает активную серию с её начала: %+v", got)
+	}
+	var onDisk cpuwatch.Host
+	if err := loadCPUState(state, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if got := onDisk.State(); !got.Since.Equal(since) || len(got.Sent) == 0 {
+		t.Fatalf("активная серия и отметка письма не на диске: %+v", got)
+	}
+	if !strings.Contains(logs.String(), "написал бы") {
+		t.Fatalf("первый проход после after сверх 10 минут пишет лиду:\n%s", logs.String())
+	}
+	restart()
+	if strings.Contains(logs.String(), "написал бы") {
+		t.Fatalf("после второго рестарта письмо раньше repeat:\n%s", logs.String())
 	}
 }
 
