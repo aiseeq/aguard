@@ -83,21 +83,47 @@ func NewSeries(keep time.Duration) *Series {
 	return &Series{rows: make([]secondRow, max(1, int(keep/time.Second))), keep: keep}
 }
 
-// step сворачивает быстрый шаг в его секунду (по At, как Window.Seconds); шаг следующей секунды
-// закрывает идущую. stallUS — длительность шага, если он с простоем, иначе 0.
-func (s *Series) step(st *Step, stallUS int64) {
-	sec := st.At.Unix()
-	if s.cur.at != 0 && sec != s.cur.at {
-		s.flush()
+// seriesSpreadMax — шаг длиннее этого и без простоя — пропуск, а не задержка цикла: в ряд пустыми секундами он не
+// ложится, дыра остаётся дырой. Шаг с простоем размазывается при любой длине: секунда не показывает простой больше себя.
+const seriesSpreadMax = time.Minute
+
+// step распределяет интервальные значения длинного шага по пересекаемым секундам; короткие шаги
+// сохраняют привязку к At. Моментальные значения и счётчики остаются в секунде At.
+func (s *Series) step(st *Step, stallUS int64, interval time.Duration) {
+	if interval > time.Second && (stallUS > 0 || interval <= seriesSpreadMax) {
+		from, to := st.At.Add(-interval), st.At
+		duration := to.Sub(from)
+		elapsed := time.Duration(0)
+		for cur := from; cur.Before(to); {
+			end := time.Unix(cur.Unix()+1, 0)
+			if end.After(to) {
+				end = to
+			}
+			part := end.Sub(cur)
+			c := s.acc(cur.Unix())
+			share := func(v int64) int64 {
+				before := int64(float64(v) * float64(elapsed) / float64(duration))
+				after := int64(float64(v) * float64(elapsed+part) / float64(duration))
+				return after - before
+			}
+			c.ioFull += share(st.IOFullUS)
+			c.ioSome += share(st.IOSomeUS)
+			c.memFull += share(st.MemFullUS)
+			c.cpuSome += share(st.CPUSomeUS)
+			c.stall += share(stallUS)
+			elapsed += part
+			cur = end
+		}
+	} else {
+		c := s.acc(st.At.Unix())
+		c.ioFull += st.IOFullUS
+		c.ioSome += st.IOSomeUS
+		c.memFull += st.MemFullUS
+		c.cpuSome += st.CPUSomeUS
+		c.stall += stallUS
 	}
-	c := &s.cur
-	c.at = sec
-	c.ioFull += st.IOFullUS
-	c.ioSome += st.IOSomeUS
-	c.memFull += st.MemFullUS
-	c.cpuSome += st.CPUSomeUS
+	c := s.acc(st.At.Unix())
 	c.runnable = max(c.runnable, st.Runnable)
-	c.stall += stallUS
 	c.rd += st.ReadBytes
 	c.wr += st.WriteBytes
 	c.wms += st.WMS
@@ -106,6 +132,15 @@ func (s *Series) step(st *Step, stallUS int64) {
 	c.flush += st.FIOS
 	c.swap += st.SwapIn
 	c.majflt += st.Majflt
+}
+
+// acc выбирает секунду накопления, закрывая предыдущую при переходе.
+func (s *Series) acc(sec int64) *secondAcc {
+	if s.cur.at != 0 && sec != s.cur.at {
+		s.flush()
+	}
+	s.cur.at = sec
+	return &s.cur
 }
 
 // detail — Dirty, Writeback, MemAvail и SwapUsed детального прохода: идут в секунды, закрытые после него.

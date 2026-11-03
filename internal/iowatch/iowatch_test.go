@@ -716,6 +716,119 @@ func feed(r *Recorder, base time.Time, idle []int64, detail func(at time.Time) S
 	return out
 }
 
+// Простой длинного шага связывает его с прошлым шагом: сплошной простой склеивается, а спокойный промежуток дольше
+// Gap перед длинным простоем делит случаи.
+func TestRecorderGapWithLongStalledStep(t *testing.T) {
+	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	cfg := Default()
+	cfg.CaseMin = policy.Duration(0)
+	stalled := Step{IOFullUS: 90_000}
+	run := func(at ...time.Duration) *Recorder {
+		r := NewRecorder(cfg)
+		for i, d := range at {
+			s := Step{At: base.Add(d)}
+			if i == 0 || i == len(at)-1 {
+				s.IOFullUS = stalled.IOFullUS
+				if i == len(at)-1 {
+					s.IOFullUS = int64(d-at[i-1]) / 1000
+				}
+			}
+			r.Step(s)
+		}
+		return r
+	}
+	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
+	if r := run(0, ms(100), ms(3100)); r.open == nil || !r.open.start.Equal(base.Add(-ms(100))) {
+		t.Fatalf("сплошной простой склеивается через длинный шаг: %+v", r.open)
+	}
+	r := run(0, ms(100), ms(200), ms(300), ms(400), ms(500), ms(600), ms(3600))
+	if r.open == nil || !r.open.start.Equal(base.Add(ms(600))) { // прежний случай закрыт: начало открытого — новое
+		t.Fatalf("спокойный промежуток 600 мс больше Gap делит случаи: открыт %+v", r.open)
+	}
+}
+
+func TestRecorderUsesWallClockStepIntervals(t *testing.T) {
+	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
+	steps := []time.Duration{0, 100 * time.Millisecond, 200 * time.Millisecond}
+	newRecorder := func() *Recorder {
+		r := NewRecorder(Default())
+		for _, elapsed := range steps {
+			r.Step(Step{At: base.Add(elapsed)})
+		}
+		return r
+	}
+
+	t.Run("delayed stalled interval", func(t *testing.T) {
+		r := newRecorder()
+		series, live := NewSeries(time.Hour), NewLive()
+		r.Attach(series, nil, live)
+		r.Step(Step{At: base.Add(3200 * time.Millisecond), IOFullUS: 2_900_000, ReadBytes: 600, WriteBytes: 300, WMS: 3000, WIOS: 30, FIOS: 3, SwapIn: 9, Majflt: 6})
+		if now, ok := live.Now(""); !ok || now.W1s.StallMS != 1000 || now.W1s.IOFullMS != 966 || now.W1s.ReadBps != 200 || now.W1s.WriteBps != 100 || now.W1s.Flushes != 1 || now.W1s.SwapIn != 3 || now.W1s.Majflt != 2 || now.W5s.StallMS != 3000 || now.W5s.ReadBps != 120 || !now.Open.Open || now.Open.MS != 3000 {
+			t.Fatalf("live после опоздавшего шага: %+v, есть=%t", now, ok)
+		}
+		r.Step(Step{At: base.Add(3300 * time.Millisecond)})
+		r.Step(Step{At: base.Add(4 * time.Second)}) // закрывает секунду ряда на отметке 3 с
+		rows := series.Rows(time.Time{}).Seconds()
+		var atThree *MachineSecond
+		for i := range rows {
+			if rows[i].At.Equal(base.Add(3 * time.Second)) {
+				atThree = &rows[i]
+			}
+		}
+		var stall, ioFull int64
+		for _, row := range rows {
+			stall += row.StallMS
+			ioFull += row.IOFullMS
+			if row.StallMS > 1000 || row.IOFullMS > 1000 {
+				t.Fatalf("невозможная длительность в секунде: %+v", row)
+			}
+		}
+		if atThree == nil || stall != 3000 || ioFull != 2898 {
+			t.Fatalf("распределение по секундам: %+v (stall=%d io=%d)", rows, stall, ioFull)
+		}
+		got := r.Close()
+		if len(got) != 1 || got[0].DurMS != 3000 || !got[0].Start.Equal(base.Add(200*time.Millisecond)) || got[0].IdleMS != 2900 {
+			t.Fatalf("случай: %+v", got)
+		}
+	})
+
+	t.Run("delayed interval without idle", func(t *testing.T) {
+		r := newRecorder()
+		r.Step(Step{At: base.Add(3200 * time.Millisecond)})
+		if got := r.Close(); len(got) != 0 {
+			t.Fatalf("случаи без простоя: %+v", got)
+		}
+	})
+
+	t.Run("idle below real interval threshold", func(t *testing.T) {
+		r := newRecorder()
+		r.Step(Step{At: base.Add(3200 * time.Millisecond), IOFullUS: 200_000})
+		if got := r.Close(); len(got) != 0 {
+			t.Fatalf("случаи при простое 200 мс из 3 с: %+v", got)
+		}
+	})
+
+	t.Run("delayed stalled interval continues open case", func(t *testing.T) {
+		r := NewRecorder(Default())
+		r.Step(Step{At: base, IOFullUS: 90_000})
+		r.Step(Step{At: base.Add(100 * time.Millisecond)})
+		r.Step(Step{At: base.Add(3200 * time.Millisecond), IOFullUS: 3_000_000})
+		got := r.Close()
+		if len(got) != 1 || got[0].DurMS != 3300 || !got[0].Start.Equal(base.Add(-100*time.Millisecond)) {
+			t.Fatalf("случай после опоздавшего продолжающего шага: %+v", got)
+		}
+	})
+
+	t.Run("short interval keeps nominal threshold", func(t *testing.T) {
+		r := NewRecorder(Default())
+		r.Step(Step{At: base})
+		r.Step(Step{At: base.Add(50 * time.Millisecond), IOFullUS: 30_000})
+		if got := r.Close(); len(got) != 0 {
+			t.Fatalf("дрожание ниже номинального порога открыло случай: %+v", got)
+		}
+	})
+}
+
 func TestCaseStallsMergeAcrossShortCalmAndGetCulprits(t *testing.T) {
 	cfg := Default()
 	cfg.CaseMin = policy.Duration(200 * time.Millisecond)
@@ -817,7 +930,7 @@ func TestCaseCloseOnStopAndDump(t *testing.T) {
 	if len(got) != 1 || got[0].MemFullMS != 90 || got[0].IdleMS != 90 || !got[0].Quiet {
 		t.Fatalf("закрытие при остановке (без обмена с диском — тихий): %+v", got)
 	}
-	r.Step(Step{At: base.Add(time.Second), IOFullUS: 90_000, WriteBytes: 2 << 20})
+	r.Step(Step{At: base.Add(100 * time.Millisecond), IOFullUS: 90_000, WriteBytes: 2 << 20})
 	if got := r.Close(); len(got) != 1 || got[0].Quiet {
 		t.Fatalf("с обменом 2 МиБ — не тихий: %+v", got)
 	}
