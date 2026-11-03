@@ -105,9 +105,11 @@ func (c *Config) validateLive() error {
 	return nil
 }
 
-// Stalled — шаг с простоем: PSI full не меньше доли шага.
-func Stalled(s Step, c Config) bool {
-	return Idle(s) >= int64(float64(c.Step.D().Microseconds())*c.Trigger)
+// Stalled — шаг с простоем: PSI full не меньше доли интервала. Частые шаги не
+// уменьшают порог ниже номинального шага.
+func Stalled(s Step, c Config, interval time.Duration) bool {
+	interval = max(interval, c.Step.D())
+	return Idle(s) >= int64(float64(interval.Microseconds())*c.Trigger)
 }
 
 // Idle — простой шага, мкс: больший из PSI full io и memory. Одна мера для случаев и окна `at`.

@@ -166,6 +166,8 @@ type Recorder struct {
 	cfg     Config
 	ring    *Ring
 	open    *openCase
+	lastAt  time.Time
+	hasStep bool
 	waiting []Case // закрыты, ждут детальной записи за свой конец
 	// Ряд, профили и живое состояние службы (Attach); у `aguard io record` и import их нет.
 	series   *Series
@@ -190,16 +192,30 @@ func (r *Recorder) Attach(series *Series, profiles *Profiles, live *Live) {
 func (r *Recorder) Step(s Step) []Case {
 	r.ring.Add(Record{Kind: KindStep, Step: s})
 	step := r.cfg.Step.D()
-	var closed liveCase
-	if r.open != nil && s.At.Sub(r.open.last) > r.cfg.Gap.D()+step {
-		closed = liveCase{start: r.open.start, end: r.open.last}
-		r.waiting = append(r.waiting, r.open.toCase())
-		r.open = nil
+	interval := step
+	if r.hasStep {
+		interval = max(s.At.Sub(r.lastAt), 0)
 	}
-	stalled := Stalled(s, r.cfg)
+	r.lastAt, r.hasStep = s.At, true
+	stalled := Stalled(s, r.cfg, interval)
+	var closed liveCase
+	if r.open != nil {
+		sinceLastStall := s.At.Sub(r.open.last)
+		closeAfter := r.cfg.Gap.D() + step
+		if stalled {
+			// Простой текущего интервала связывает его с предыдущим шагом, а не с At.
+			sinceLastStall -= interval
+			closeAfter = r.cfg.Gap.D()
+		}
+		if sinceLastStall > closeAfter {
+			closed = liveCase{start: r.open.start, end: r.open.last}
+			r.waiting = append(r.waiting, r.open.toCase())
+			r.open = nil
+		}
+	}
 	switch {
 	case stalled && r.open == nil:
-		r.open = &openCase{start: s.At.Add(-step), last: s.At}
+		r.open = &openCase{start: s.At.Add(-interval), last: s.At}
 		r.open.sum.add(s)
 	case stalled:
 		r.open.sum.merge(r.open.calm)
@@ -210,10 +226,10 @@ func (r *Recorder) Step(s Step) []Case {
 	}
 	var stallUS int64
 	if stalled {
-		stallUS = step.Microseconds()
+		stallUS = interval.Microseconds()
 	}
 	if r.series != nil {
-		r.series.step(&s, stallUS)
+		r.series.step(&s, stallUS, interval)
 	}
 	if r.profiles != nil {
 		r.profiles.step(&s)
@@ -223,7 +239,7 @@ func (r *Recorder) Step(s Step) []Case {
 		if r.open != nil {
 			open = r.open.start
 		}
-		r.live.step(&s, stallUS, open, closed)
+		r.live.step(&s, stallUS, interval, open, closed)
 	}
 	return r.ready(s.At.Add(-r.cfg.Detail.D() - step))
 }

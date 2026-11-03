@@ -55,8 +55,9 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case now := <-ticker.C:
-			s, err := fast.Read(now)
+		case <-ticker.C:
+			// Время шага — момент чтения: буфер тикера после задержки цикла отдаёт старый тик, а PSI уже за всю задержку.
+			s, err := fast.Read(time.Now())
 			if err != nil {
 				sink.sampleErr("fast", err)
 				continue
@@ -91,8 +92,9 @@ func runIODetail(ctx context.Context, interval time.Duration, r *iowatch.DetailR
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-ticker.C:
-			res := readIODetail(r, now)
+		case <-ticker.C:
+			// Детальный проход тоже снимает дельты, поэтому At должен быть временем чтения.
+			res := readIODetail(r, time.Now())
 			select {
 			case out <- res:
 			case <-ctx.Done():

@@ -35,7 +35,7 @@ const (
 )
 
 type liveStep struct {
-	at                                                       int64 // UnixNano
+	at, from                                                 int64 // UnixNano
 	ioFull, memFull, stall, rd, wr, wms, wios, flush, swapIn int64 // мкс и счётчики шага
 	cpuSome, majflt                                          int64
 	inflight, runnable                                       int64 // моментальные
@@ -47,7 +47,7 @@ func NewLive() *Live { return &Live{} }
 
 // step — быстрый шаг: stallUS — его длительность, если он с простоем; open — начало идущего случая
 // (ноль — нет); closed — случай, закрытый этим шагом (нулевой end — нет).
-func (l *Live) step(s *Step, stallUS int64, open time.Time, closed liveCase) {
+func (l *Live) step(s *Step, stallUS int64, interval time.Duration, open time.Time, closed liveCase) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	i := (l.head + l.count) % liveSteps
@@ -56,7 +56,7 @@ func (l *Live) step(s *Step, stallUS int64, open time.Time, closed liveCase) {
 	} else {
 		l.count++
 	}
-	l.steps[i] = liveStep{at: s.At.UnixNano(), ioFull: s.IOFullUS, memFull: s.MemFullUS, stall: stallUS, rd: s.ReadBytes,
+	l.steps[i] = liveStep{at: s.At.UnixNano(), from: s.At.Add(-interval).UnixNano(), ioFull: s.IOFullUS, memFull: s.MemFullUS, stall: stallUS, rd: s.ReadBytes,
 		wr: s.WriteBytes, wms: s.WMS, wios: s.WIOS, flush: s.FIOS, swapIn: s.SwapIn, cpuSome: s.CPUSomeUS, majflt: s.Majflt,
 		inflight: s.InFlight, runnable: s.Runnable}
 	l.open = open
@@ -229,10 +229,11 @@ func (l *Live) Now(kind string) (Now, bool) {
 	return n, true
 }
 
-// window — шаги с концом в (last − d, last]; байт/с — по d.
+// window — интервальные суммы пропорциональны пересечению шага с (last − d, last]; счётчики
+// неинтервальные учитываются целиком, если конец шага попал в окно. Байты/с считаются по d.
 func (l *Live) window(last int64, d time.Duration) NowWindow {
 	var w NowWindow
-	var stall, ioFull, memFull, cpuSome, rd, wr, wms, wios int64
+	var stall, ioFull, memFull, cpuSome, rd, wr, wms, wios, flush, swapIn, majflt int64
 	from := last - int64(d)
 	for i := l.count - 1; i >= 0; i-- {
 		s := &l.steps[(l.head+i)%liveSteps]
@@ -240,22 +241,40 @@ func (l *Live) window(last int64, d time.Duration) NowWindow {
 			break
 		}
 		w.Steps++
-		ioFull += s.ioFull
-		memFull += s.memFull
-		cpuSome += s.cpuSome
-		stall += s.stall
-		rd += s.rd
-		wr += s.wr
-		wms += s.wms
-		wios += s.wios
-		w.Flushes += s.flush
-		w.SwapIn += s.swapIn
-		w.Majflt += s.majflt
+		start, end := max(s.from, from), min(s.at, last)
+		if end > start && s.at > s.from {
+			ratio := float64(end-start) / float64(s.at-s.from)
+			scale := func(v int64) int64 { return int64(float64(v) * ratio) }
+			ioFull += scale(s.ioFull)
+			memFull += scale(s.memFull)
+			cpuSome += scale(s.cpuSome)
+			stall += scale(s.stall)
+			rd += scale(s.rd)
+			wr += scale(s.wr)
+			wms += scale(s.wms)
+			wios += scale(s.wios)
+			flush += scale(s.flush)
+			swapIn += scale(s.swapIn)
+			majflt += scale(s.majflt)
+		} else if s.at > from {
+			ioFull += s.ioFull
+			memFull += s.memFull
+			cpuSome += s.cpuSome
+			stall += s.stall
+			rd += s.rd
+			wr += s.wr
+			wms += s.wms
+			wios += s.wios
+			flush += s.flush
+			swapIn += s.swapIn
+			majflt += s.majflt
+		}
 		w.InFlightMax = max(w.InFlightMax, s.inflight)
 		w.RunnableMax = max(w.RunnableMax, s.runnable)
 	}
 	w.IOFullMS, w.MemFullMS, w.CPUSomeMS, w.StallMS = ioFull/1000, memFull/1000, cpuSome/1000, stall/1000
 	w.ReadBps, w.WriteBps = perSecond(rd, d), perSecond(wr, d)
 	w.WAwaitMS = AwaitMS(wms, wios)
+	w.Flushes, w.SwapIn, w.Majflt = flush, swapIn, majflt
 	return w
 }

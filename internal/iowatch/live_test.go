@@ -13,6 +13,48 @@ import (
 // секунда; идущая секунда в ряд не попадает. Stall — мс шагов с простоем, WAwait — WMS/WIOS секунды,
 // CPUSome — сумма, RunnableMax — наибольшее; Dirty, Writeback, MemAvail и SwapUsed — последние из
 // детального прохода.
+// Задержка цикла на 2 минуты с простоем: простой размазан по секундам, ни одна не показывает больше секунды.
+func TestSeriesLongStallSpreads(t *testing.T) {
+	r := NewRecorder(Default())
+	series := NewSeries(time.Hour)
+	r.Attach(series, nil, nil)
+	base := time.Date(2026, 10, 29, 21, 0, 0, 0, time.Local)
+	r.Step(Step{At: base})
+	end := base.Add(2 * time.Minute)
+	r.Step(Step{At: end, IOFullUS: 110_000_000})
+	r.Step(Step{At: end.Add(2 * time.Second)})
+	rows := series.Rows(base.Add(-time.Second)).Seconds()
+	if len(rows) < 120 {
+		t.Fatalf("простой за 2 минуты не размазан: %d секунд", len(rows))
+	}
+	var total int64
+	for _, row := range rows {
+		if row.StallMS > 1000 {
+			t.Fatalf("секунда показывает простой %d мс", row.StallMS)
+		}
+		total += int64(row.StallMS)
+	}
+	if total < 119_000 || total > 120_000 {
+		t.Fatalf("простой всего %d мс, хотим 120 с", total)
+	}
+}
+
+// Сон машины в ряд пустыми секундами не ложится: дыра остаётся дырой, значения шага — в секунде At.
+func TestSeriesLongGapStaysGap(t *testing.T) {
+	r := NewRecorder(Default())
+	series := NewSeries(time.Hour)
+	r.Attach(series, nil, nil)
+	base := time.Date(2026, 10, 29, 21, 0, 0, 0, time.Local)
+	r.Step(Step{At: base.Add(100 * time.Millisecond)})
+	wake := base.Add(10 * time.Minute)
+	r.Step(Step{At: wake, CPUSomeUS: 5000})
+	r.Step(Step{At: wake.Add(2 * time.Second)})
+	rows := series.Rows(base.Add(-time.Second))
+	if n := len(rows); n > 3 {
+		t.Fatalf("сон лёг в ряд: %d секунд", n)
+	}
+}
+
 func TestSeriesFoldsStepsIntoSeconds(t *testing.T) {
 	r := NewRecorder(Default())
 	series := NewSeries(time.Hour)

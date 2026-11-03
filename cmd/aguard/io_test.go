@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,6 +31,67 @@ func testIOApp(t *testing.T) (*app, *bytes.Buffer) {
 	out := &bytes.Buffer{}
 	return &app{home: dir, cfgPath: filepath.Join(dir, "нет.toml"), stateDir: filepath.Join(dir, "state"), out: out,
 		act: activity.New(filepath.Join(dir, "activity"), time.Now()), log: slog.New(slog.NewTextHandler(io.Discard, nil))}, out
+}
+
+// delaySink держит цикл на первом шаге и запоминает время шагов.
+type delaySink struct {
+	delay  time.Duration
+	at     []time.Time
+	enough func()
+}
+
+func (s *delaySink) step(st iowatch.Step) {
+	s.at = append(s.at, st.At)
+	if len(s.at) == 1 {
+		time.Sleep(s.delay)
+	}
+	if len(s.at) == 2 {
+		s.enough()
+	}
+}
+func (s *delaySink) detail(iowatch.Step)           {}
+func (s *delaySink) sampleErr(_ string, err error) { panic(err) }
+
+// Цикл задержан дольше шага: буфер тикера отдаёт старый тик, а время шага — момент чтения, иначе простой
+// за всю задержку лёг бы на 100 мс и случай вышел бы короче стены.
+func TestIOSamplingStepTimeIsReadTime(t *testing.T) {
+	dir := t.TempDir()
+	proc, block := filepath.Join(dir, "proc"), filepath.Join(dir, "block")
+	for name, body := range map[string]string{
+		"pressure/io":     "some avg10=0 total=1\nfull avg10=0 total=1\n",
+		"pressure/memory": "some avg10=0 total=1\nfull avg10=0 total=1\n",
+		"pressure/cpu":    "some avg10=0 total=1\n",
+		"loadavg":         "1.00 2.00 3.00 1/5201 77\n",
+		"vmstat":          "pswpin 0\npswpout 0\npgmajfault 0\n",
+		"diskstats":       "259 0 nvme0n1 0 0 0 0 0 0 0 0 0 0 0\n",
+	} {
+		path := filepath.Join(proc, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(block, "nvme0n1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(block, "nvme0n1", "dev"), []byte("259:0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := iowatch.Default()
+	cfg.Device, cfg.Step, cfg.Detail = "nvme0n1", policy.Duration(20*time.Millisecond), policy.Duration(time.Hour)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const delay = 300 * time.Millisecond
+	sink := &delaySink{delay: delay, enough: cancel}
+	err := runIOSampling(ctx, cfg, iowatch.Roots{Proc: proc, Cgroup: filepath.Join(dir, "cgroup"), Block: block}, sink, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("цикл: %v", err)
+	}
+	if len(sink.at) < 2 || sink.at[1].Sub(sink.at[0]) < delay {
+		t.Fatalf("второй шаг после задержки %v: времена %v", delay, sink.at)
+	}
 }
 
 // recordFreeze — тот же Recorder, что у службы: секунда тишины с детальной записью, 3 шага по 60 мс
