@@ -746,7 +746,11 @@ func TestRecorderGapWithLongStalledStep(t *testing.T) {
 		t.Fatalf("спокойный промежуток 600 мс больше Gap делит случаи: открыт %+v", r.open)
 	}
 	// спокойно 400 мс: спокойный шаг случай ещё не закрыл (400 не больше Gap+step), закрывает длинный шаг с простоем (400 больше Gap)
-	r = run(0, ms(100), ms(200), ms(300), ms(400))
+	r = NewRecorder(cfg)
+	r.Step(Step{At: base, IOFullUS: stalled.IOFullUS})
+	for _, d := range []int{100, 200, 300, 400} {
+		r.Step(Step{At: base.Add(ms(d))})
+	}
 	if r.open == nil || !r.open.start.Equal(base.Add(-ms(100))) {
 		t.Fatalf("спокойный шаг закрыл случай раньше длинного: %+v", r.open)
 	}
