@@ -3,7 +3,6 @@ package track
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"runtime/debug"
@@ -54,78 +53,56 @@ const (
 	procEvExec = 0x2
 	procEvExit = 0x80000000
 
-	// cnListenLen — подписка на proc connector: nlmsghdr(16) + cn_msg(20) + op(4).
-	cnListenLen = 16 + 20 + 4
 	// expireEvery — как часто чистить надгробия старше keep.
 	expireEvery = 30 * time.Second
 )
 
-// listen подписывается на proc connector и разбирает события до ошибки сокета.
-// Нужен CAP_NET_ADMIN.
-func (t *Tombs) listen() error {
-	s, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_DGRAM, unix.NETLINK_CONNECTOR)
-	if err != nil {
-		return fmt.Errorf("proc connector socket: %w", err)
-	}
-	pid := uint32(os.Getpid())
-	if err := unix.Bind(s, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: 1, Pid: pid}); err != nil {
-		return fmt.Errorf("proc connector bind: %w", err)
-	}
-	msg := make([]byte, cnListenLen)
-	binary.LittleEndian.PutUint32(msg[0:], cnListenLen)
-	binary.LittleEndian.PutUint16(msg[4:], unix.NLMSG_DONE)
-	binary.LittleEndian.PutUint32(msg[12:], pid)
-	binary.LittleEndian.PutUint32(msg[16:], 1) // CN_IDX_PROC
-	binary.LittleEndian.PutUint32(msg[20:], 1) // CN_VAL_PROC
-	binary.LittleEndian.PutUint16(msg[32:], 4)
-	binary.LittleEndian.PutUint32(msg[36:], 1) // PROC_CN_MCAST_LISTEN
-	if err := unix.Sendto(s, msg, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
-		return fmt.Errorf("proc connector listen: %w", err)
-	}
-	if err := unix.SetsockoptInt(s, unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, 8<<20); err != nil {
-		return fmt.Errorf("proc connector rcvbuf: %w", err)
-	}
-	go t.expire()
-	go t.recvLoop(s)
-	return nil
+// listen разбирает события уже подписанного сокета (его открывает помощник), пока файл не закрыт.
+func (t *Tombs) listen(conn *os.File, done <-chan struct{}) {
+	go t.expire(done)
+	go t.recvLoop(conn)
 }
 
-func (t *Tombs) recvLoop(s int) {
+func (t *Tombs) recvLoop(conn *os.File) {
 	buf := make([]byte, 64<<10)
 	for {
-		t.recvOnce(s, buf)
+		if !t.recvOnce(conn, buf) {
+			return
+		}
 	}
 }
 
 // recvOnce читает и разбирает одну датаграмму; паника в разборе пишется в
 // лог, и цикл чтения продолжается.
-func (t *Tombs) recvOnce(s int, buf []byte) {
+func (t *Tombs) recvOnce(conn *os.File, buf []byte) (more bool) {
+	more = true
 	defer recovered(t.log, "разбор proc connector")
-	n, _, err := unix.Recvfrom(s, buf, 0)
+	n, err := conn.Read(buf)
 	switch {
 	case err == nil:
+	case errors.Is(err, os.ErrClosed):
+		return false
 	case errors.Is(err, unix.ENOBUFS):
 		t.overrun.Add(1) // события потеряны: число идёт в часовую сводку
-		return
-	case errors.Is(err, unix.EINTR):
-		return
+		return true
 	default:
 		t.log.Warn("tmpguard-track: proc connector, чтение", "err", err)
-		return
+		return true
 	}
-	for b := buf[:n]; len(b) >= 16; {
-		l := int(binary.LittleEndian.Uint32(b))
-		if l < 16 || l > len(b) {
-			break
-		}
-		t.handle(b[16:l])
-		b = b[min((l+3)&^3, len(b)):]
-	}
+	t.messages(buf[:n])
+	return true
 }
 
-func (t *Tombs) expire() {
-	for range time.Tick(expireEvery) {
-		t.expireOnce()
+func (t *Tombs) expire(done <-chan struct{}) {
+	tick := time.NewTicker(expireEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-tick.C:
+			t.expireOnce()
+		}
 	}
 }
 

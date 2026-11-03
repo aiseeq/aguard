@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/user"
@@ -66,7 +67,8 @@ func readProc(pid int) (procData, error) {
 		return d, fmt.Errorf("процесс %d: cmdline: %w", pid, err)
 	}
 	d.args = truncate(strings.ReplaceAll(strings.TrimRight(string(cmdline), "\x00"), "\x00", " "), argsMax)
-	if d.cwd, err = os.Readlink(ps + "/cwd"); err != nil {
+	// Чужой процесс (root) пользовательскому демону cwd не показывает: остальное о нём известно, cwd пуст.
+	if d.cwd, err = os.Readlink(ps + "/cwd"); err != nil && !errors.Is(err, fs.ErrPermission) {
 		return d, fmt.Errorf("процесс %d: cwd: %w", pid, err)
 	}
 	fi, err := os.Stat(ps)
@@ -126,7 +128,8 @@ func (r *Resolver) live(o *record.Owner, pid, pidfd int) (proc.Stat, error) {
 	if pidfd < 0 {
 		return proc.Stat{}, errors.New("нет pidfd: процесс ушёл до чтения события")
 	}
-	if err := unix.PidfdSendSignal(pidfd, 0, nil, 0); err != nil {
+	// EPERM — процесс жив, но чужой (root): сигнал 0 проверяет и права.
+	if err := unix.PidfdSendSignal(pidfd, 0, nil, 0); err != nil && !errors.Is(err, unix.EPERM) {
 		return proc.Stat{}, fmt.Errorf("pidfd процесса %d: %w", pid, err)
 	}
 	st, err := proc.ReadStat("/proc", pid)

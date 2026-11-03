@@ -71,7 +71,7 @@ func (a *app) snapshot(cfg *policy.Config) (*record.State, error) {
 		}
 	}
 	if best.Updated.IsZero() {
-		return nil, errors.New("снимка tmpguard-track нет: проверьте system-службу tmpguard-track")
+		return nil, errors.New("снимка слежения нет: проверьте aguard-track-helper и строки «слежение» в журнале aguard")
 	}
 	return best, nil
 }
@@ -169,7 +169,7 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 		return err
 	}
 	if age := now.Sub(snap.Updated); age > 3*cfg.Interval.D() {
-		a.warn("tmp", "снимок трекера старый: tmpguard-track жив?", "age", policy.HumanAge(age))
+		a.warn("tmp", "снимок трекера старый: есть ли строки «слежение: простой» в журнале, жив ли aguard-track-helper?", "age", policy.HumanAge(age))
 	}
 	live, err := a.live()
 	if err != nil {

@@ -9,7 +9,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -25,6 +24,7 @@ import (
 	"github.com/aiseeq/aguard/internal/night"
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/remotebroken"
 	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/aguard/internal/said"
@@ -71,7 +71,7 @@ func Default(home string) Config {
 		Orphans:    orphans.Default(home),
 		Tmp:        policy.Default(home),
 		Memory:     memwatch.Default(),
-		Restart:    restart.Default(home, runtimeDir()),
+		Restart:    restart.Default(home, record.RuntimeDir()),
 		Waits:      waits.Default(),
 		Agentwaits: agentwait.Default(),
 		Compact:    restart.DefaultCompact(),
@@ -90,7 +90,7 @@ func Default(home string) Config {
 // ioDefault — раздел [io] по умолчанию с сокетом в $XDG_RUNTIME_DIR.
 func ioDefault() iowatch.Config {
 	c := iowatch.Default()
-	c.Socket = iowatch.DefaultSocket(runtimeDir())
+	c.Socket = iowatch.DefaultSocket(record.RuntimeDir())
 	return c
 }
 
@@ -186,12 +186,4 @@ func (c *Config) finish(home string, uid int) error {
 		return err
 	}
 	return c.Compact.Validate()
-}
-
-// runtimeDir — $XDG_RUNTIME_DIR; без него (запуск не из сеанса) — /run/user/<uid>, как его ставит systemd.
-func runtimeDir() string {
-	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
-		return d
-	}
-	return filepath.Join("/run/user", strconv.Itoa(os.Getuid()))
 }

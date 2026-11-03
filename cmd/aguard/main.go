@@ -4,7 +4,7 @@
 //
 //   - orphans — процессы умерших сессий Claude Code (бывший procguard);
 //
-//   - tmp — записи в /tmp по снимку tmpguard-track и сводки владельцам (бывший tmpguard);
+//   - tmp — записи в /tmp по снимку слежения и сводки владельцам (бывший tmpguard); слежение (internal/track) — тоже здесь;
 //
 //   - memory — пики памяти сессий для выбора мягкого потолка;
 //
@@ -64,6 +64,8 @@ import (
 	"github.com/aiseeq/aguard/internal/journal"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/aguard/internal/track"
+	"github.com/aiseeq/aguard/internal/trackfd"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -81,17 +83,18 @@ type app struct {
 	reg            session.Registry
 	uid            int
 	log            *slog.Logger
-	out            io.Writer           // вывод команд для человека и агента (dry-run, report)
-	act            *activity.Recorder  // учёт срабатываний; только у демона, у команд nil
-	cpu            map[string]*cpuHost // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
-	strayRead      strayReader         // замер процессов без родителя; подменяется в тестах
-	diskState      *disk.State         // состояние наблюдателя disk; загружается один раз демоном
-	diskWalkLoaded bool                // sizes и traces загружены до первого обхода
-	codexStep      time.Duration       // шаг codex, выбранный прошлым проходом; 0 — interval
-	codexRead      codexReader         // замер лимита Codex; подменяется в тестах
-	codexConsume   codexConsumer       // досрочный сброс Codex; подменяется в тестах
-	codexApproved  codexApprovals      // «да» на окно из файла одобрений
-	codexNote      codexNoter          // строка исхода в тикет
+	out            io.Writer                    // вывод команд для человека и агента (dry-run, report)
+	act            *activity.Recorder           // учёт срабатываний; только у демона, у команд nil
+	cpu            map[string]*cpuHost          // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
+	strayRead      strayReader                  // замер процессов без родителя; подменяется в тестах
+	trackFetch     func() (trackfd.Pair, error) // пара дескрипторов слежения; подменяется в тестах
+	diskState      *disk.State                  // состояние наблюдателя disk; загружается один раз демоном
+	diskWalkLoaded bool                         // sizes и traces загружены до первого обхода
+	codexStep      time.Duration                // шаг codex, выбранный прошлым проходом; 0 — interval
+	codexRead      codexReader                  // замер лимита Codex; подменяется в тестах
+	codexConsume   codexConsumer                // досрочный сброс Codex; подменяется в тестах
+	codexApproved  codexApprovals               // «да» на окно из файла одобрений
+	codexNote      codexNoter                   // строка исхода в тикет
 }
 
 func main() {
@@ -139,6 +142,8 @@ func (a *app) dispatch(ctx context.Context, cmd string, args []string) error {
 		return a.orphansCmd(ctx, args)
 	case "tmp":
 		return a.tmpCmd(args)
+	case "track":
+		return a.trackCmd(args)
 	case "memory":
 		return a.memoryCmd(args)
 	case "restart":
@@ -180,6 +185,7 @@ func usage() {
   aguard run
   aguard orphans tick [-dry-run] [-min-dead 0s]
   aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
+  aguard track check
   aguard memory tick [-dry-run] | report [-since 168h]
   aguard restart ask -pid N [-name имя]
   aguard waits tick [-dry-run] | report [-since 24h]
@@ -263,6 +269,10 @@ func (a *app) run(ctx context.Context) error {
 	wg.Go(func() { a.restartServe(ctx, judge) })
 	wg.Go(func() { a.ioLoop(ctx, usr1, usr2) })
 	wg.Go(func() { a.guiLoop(ctx) })
+	insts := track.Instances(a.home)
+	for i := range insts {
+		wg.Go(func() { a.trackLoop(ctx, &insts[i]) }) //nolint:unbounded-goroutine-fanout // экземпляров два, список задан в track.Instances
+	}
 	for _, w := range ws {
 		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей семь, список задан в watchers
 	}

@@ -3,7 +3,6 @@ package track
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 	"strconv"
 	"unsafe"
 
@@ -16,9 +15,8 @@ const fanMask = uint64(unix.FAN_CREATE | unix.FAN_DELETE | unix.FAN_RENAME | uni
 
 // dirName — папка (по file handle) и имя записи в ней.
 type dirName struct {
-	key    string
-	handle unix.FileHandle
-	name   string
+	key  string
+	name string
 }
 
 // fevent — разобранное событие fanotify.
@@ -35,13 +33,6 @@ type fevent struct {
 func (e *fevent) isDir() bool { return e.mask&unix.FAN_ONDIR != 0 }
 
 func handleKey(t int32, b []byte) string { return strconv.Itoa(int(t)) + ":" + fmt.Sprintf("%x", b) }
-
-// fanInit открывает группу уведомлений. Нужен CAP_SYS_ADMIN.
-func fanInit() (int, error) {
-	flags := uint(unix.FAN_CLASS_NOTIF | unix.FAN_CLOEXEC | unix.FAN_UNLIMITED_QUEUE |
-		unix.FAN_REPORT_DFID_NAME_TARGET | unix.FAN_REPORT_PIDFD)
-	return unix.FanotifyInit(flags, unix.O_RDONLY|unix.O_LARGEFILE)
-}
 
 // fanMark ставит метку на папку и возвращает ключ её file handle.
 func fanMark(fd int, dir string) (string, error) {
@@ -123,16 +114,5 @@ func parseDirName(body []byte) *dirName {
 			break
 		}
 	}
-	return &dirName{key: handleKey(ht, h), handle: unix.NewFileHandle(ht, h), name: string(name)}
-}
-
-// resolveHandle находит путь папки по handle (для переименований из
-// непомеченных папок). mountFD — открытый корень той же файловой системы.
-func resolveHandle(mountFD int, h unix.FileHandle) (string, error) {
-	fd, err := unix.OpenByHandleAt(mountFD, h, unix.O_PATH)
-	if err != nil {
-		return "", fmt.Errorf("open_by_handle_at: %w", err)
-	}
-	defer unix.Close(fd)
-	return os.Readlink("/proc/self/fd/" + strconv.Itoa(fd))
+	return &dirName{key: handleKey(ht, h), name: string(name)}
 }

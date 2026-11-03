@@ -1,34 +1,35 @@
-// Package track — root-часть tmpguard: следит за прямыми потомками /tmp и
-// папок-контейнеров (/tmp/claude-tmp) через fanotify, в момент создания
-// выясняет создателя (proc connector, цепочка ppid до сессии Claude Code,
-// cgroup) и пишет журнал owners.jsonl и снимок размеров state.json.
+// Package track — слежение за записями в демоне aguard: следит за прямыми потомками /tmp и папок-контейнеров
+// (/tmp/claude-tmp) через fanotify, в момент создания выясняет создателя (proc connector, цепочка ppid до сессии Claude
+// Code, cgroup) и пишет журнал owners.jsonl и снимок размеров state.json. Дескрипторы, требующие root, даёт
+// aguard-track-helper (internal/trackfd). Без root недоступны: cwd root-процессов, размер закрытых папок и исходная папка
+// переименования из непомеченной (open_by_handle_at), — такая запись заводится как новая.
 package track
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/trackfd"
 )
 
-// Config — настройки сторожа (флаги system-сервиса).
+// Config — настройки одного экземпляра слежения.
 type Config struct {
+	Name        string        // для журнала
 	Roots       []string      // помечаемые папки; их прямые потомки — записи
 	Containers  []string      // папки-контейнеры: сами не запись, их потомки — записи
-	Mount       string        // папка файловой системы для open_by_handle_at; пусто — первая из Roots
 	StateDir    string        // журнал и долговременный снимок (диск)
-	RunDir      string        // частый снимок (tmpfs /run)
+	RunDir      string        // частый снимок (tmpfs)
 	Full        time.Duration // полный замер и сверка с диском
 	Young       time.Duration // моложе этого — замер чаще
 	YoungEvery  time.Duration // частота замера молодых записей
@@ -45,8 +46,9 @@ type counters struct {
 // Tracker — состояние сторожа. Все поля меняет только главная горутина.
 type Tracker struct {
 	cfg        Config
-	fd         int
-	mountFD    int
+	fd         int      // группа fanotify: fanotify_mark
+	fan        *os.File // она же: чтение через опрос среды, Close будит читателя
+	done       chan struct{}
 	res        *Resolver
 	tombs      *Tombs
 	owners     *eventLog // owners.jsonl
@@ -76,13 +78,48 @@ type measureDone struct {
 	listing map[string][]string
 }
 
-// Run запускает сторож и работает до SIGTERM/SIGINT. Ошибка — сторож не
-// поднялся или дальше работать не может (чтение fanotify, журнал после ротации).
-func Run(cfg Config, lg *slog.Logger) error {
+// pollable — дескриптор как файл с опросом: Read просыпается при Close, горутины чтения не остаются.
+func pollable(fd int, name string) (*os.File, error) {
+	if err := unix.SetNonblock(fd, true); err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+// lockWriter — один писатель снимка и журнала: второй экземпляр затёр бы снимок своей неполной таблицей.
+func lockWriter(dir string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dir, "writer.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("блокировка писателя: %w", err)
+	}
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("в %s уже пишет другой экземпляр: %w", dir, err)
+	}
+	return f, nil
+}
+
+// Run работает на паре дескрипторов до отмены ctx и закрывает её. Ошибка — сторож не поднялся или дальше работать не
+// может (чтение fanotify, журнал после ротации); вызывающий берёт новую пару.
+func Run(ctx context.Context, cfg Config, pair trackfd.Pair, lg *slog.Logger) error {
+	fan, err := pollable(pair.Fan, "fanotify")
+	if err != nil {
+		pair.Close()
+		return err
+	}
+	defer fan.Close()
+	conn, err := pollable(pair.Conn, "proc connector")
+	if err != nil {
+		_ = unix.Close(pair.Conn)
+		return err
+	}
+	defer conn.Close()
 	t := &Tracker{
 		cfg: cfg, log: lg, entries: map[string]*record.Entry{}, watchKey: map[string]string{},
 		watched: map[string]string{}, containers: map[string]bool{}, started: time.Now(),
+		fd: pair.Fan, fan: fan, done: make(chan struct{}),
 	}
+	defer close(t.done)
 	for _, c := range cfg.Containers {
 		t.containers[c] = true
 	}
@@ -92,43 +129,33 @@ func Run(cfg Config, lg *slog.Logger) error {
 	if err := os.MkdirAll(cfg.RunDir, 0o755); err != nil {
 		return fmt.Errorf("папка частого снимка: %w", err)
 	}
-	var err error
+	lock, err := lockWriter(cfg.RunDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	if t.owners, err = openEventLog(filepath.Join(cfg.StateDir, record.OwnersFile), cfg.RotateBytes, lg); err != nil {
 		return err
 	}
 	defer t.owners.close()
 	t.tombs = newTombs(2*time.Minute, lg)
-	if err := t.tombs.listen(); err != nil {
-		return err
-	}
+	t.tombs.listen(conn, t.done)
 	t.res = newResolver(t.tombs, lg)
-	if t.fd, err = fanInit(); err != nil {
-		return fmt.Errorf("fanotify_init: %w", err)
-	}
-	mount := cfg.Mount
-	if mount == "" {
-		mount = cfg.Roots[0]
-	}
-	if t.mountFD, err = unix.Open(mount, unix.O_RDONLY|unix.O_DIRECTORY, 0); err != nil {
-		return fmt.Errorf("open %s: %w", mount, err)
-	}
 	for _, d := range append(append([]string{}, cfg.Roots...), cfg.Containers...) {
 		if err := t.mark(d); err != nil && !t.containers[d] {
 			return err
 		}
 	}
 	t.restore()
-	return t.loop()
+	return t.loop(ctx)
 }
 
 // loop — главная горутина: события, замеры, снимки и сводка.
-func (t *Tracker) loop() error {
+func (t *Tracker) loop(ctx context.Context) error {
 	evCh := make(chan []fevent, 64)
 	readErr := make(chan error, 1)
 	go t.readLoop(evCh, readErr)
 	doneCh := make(chan measureDone, 1)
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	tick := time.NewTicker(t.cfg.YoungEvery)
 	defer tick.Stop()
 	hourly := time.NewTicker(time.Hour)
@@ -149,8 +176,8 @@ func (t *Tracker) loop() error {
 			t.startMeasure(doneCh, time.Since(t.lastFull) >= t.cfg.Full)
 		case <-hourly.C:
 			t.logStats()
-		case s := <-sig:
-			t.log.Info(fmt.Sprintf("tmpguard-track: %v, сохраняю снимок", s))
+		case <-ctx.Done():
+			t.log.Info("tmpguard-track: остановка, сохраняю снимок", "name", t.cfg.Name)
 			t.save(true)
 			return nil
 		}
@@ -190,10 +217,14 @@ func (t *Tracker) readLoop(ch chan<- []fevent, errCh chan<- error) {
 	for {
 		evs, err := t.readOnce(buf)
 		if err != nil {
-			errCh <- err
+			errCh <- err // в канале место на одну ошибку, а отправитель один: запись не ждёт
 			return
 		}
-		ch <- evs
+		select {
+		case ch <- evs:
+		case <-t.done:
+			return
+		}
 	}
 }
 
@@ -201,19 +232,14 @@ func (t *Tracker) readLoop(ch chan<- []fevent, errCh chan<- error) {
 // а чтение продолжается.
 func (t *Tracker) readOnce(buf []byte) ([]fevent, error) {
 	defer recovered(t.log, "разбор событий fanotify")
-	n, err := unix.Read(t.fd, buf)
-	switch {
-	case err == nil:
-		return parseEvents(buf[:n]), nil
-	case errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN):
-		return nil, nil
-	default:
+	n, err := t.fan.Read(buf)
+	if err != nil {
 		return nil, fmt.Errorf("read fanotify: %w", err)
 	}
+	return parseEvents(buf[:n]), nil
 }
 
-// dirOf — путь папки события: помеченная папка или (для переименований
-// из чужих папок) разрешённый handle. watched=false для непомеченной.
+// dirOf — путь помеченной папки события; непомеченная — ошибка: по handle её путь без root не узнать (open_by_handle_at).
 func (t *Tracker) dirOf(dn *dirName) (path string, watched bool, err error) {
 	if dn == nil {
 		return "", false, errors.New("в событии нет папки")
@@ -221,11 +247,7 @@ func (t *Tracker) dirOf(dn *dirName) (path string, watched bool, err error) {
 	if p, ok := t.watchKey[dn.key]; ok {
 		return p, true, nil
 	}
-	p, err := resolveHandle(t.mountFD, dn.handle)
-	if err != nil {
-		return "", false, fmt.Errorf("папка по handle: %w", err)
-	}
-	return p, false, nil
+	return "", false, errors.New("папка не помечена")
 }
 
 func (t *Tracker) handle(fe *fevent) {

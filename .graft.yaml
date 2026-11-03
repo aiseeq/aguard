@@ -13,7 +13,7 @@ tasks:
     run:
       - go test -p {threads} -json {args} ./...
   build:
-    desc: aguard, cl и tmpguard-track в bin/
+    desc: aguard, cl и aguard-track-helper в bin/
     run:
       - go build -o bin/ ./cmd/...
   # Запущенные консоли держат старый cl, новые получат новый. Конфиги кладутся, только если их ещё нет.
@@ -28,14 +28,16 @@ tasks:
       - sh: '[ -f ~/.config/aguard/config.toml ] || install -D -m 0644 deploy/config.example.toml ~/.config/aguard/config.toml'
       - sh: '[ -f ~/.config/cl/config.json ] || install -D -m 0644 cmd/cl/config.json ~/.config/cl/config.json'
       - sh: systemctl --user daemon-reload && systemctl --user enable aguard.service && systemctl --user restart aguard.service
-  # Root-службы (fanotify и proc connector требуют root): шаг {install} пишет от пользователя, сюда — sudo.
-  install-track:
-    desc: tmpguard-track в /usr/local/sbin и его system-службы (sudo)
+  # Один раз с отпечатком: помощник с дескрипторами root; им же снимаются старые root-службы, снимки переходят пользователю.
+  # Проверка «aguard track check» идёт до снятия: не прошла — старые службы работают как работали. Дальше — обычный graft install.
+  install-helper:
+    desc: aguard-track-helper в /usr/local/sbin и его system-служба (один раз, sudo)
     deps: [build]
     run:
-      - sh: sudo install -m 0755 bin/tmpguard-track /usr/local/sbin/tmpguard-track
-      - sh: for unit in tmpguard-track tmpguard-track-home; do sed "s#@HOME@#$HOME#g" "deploy/$unit.service" > "bin/$unit.service" && sudo install -m 0644 "bin/$unit.service" "/etc/systemd/system/$unit.service"; done
-      - sh: sudo systemctl daemon-reload && sudo systemctl enable tmpguard-track.service tmpguard-track-home.service && sudo systemctl restart tmpguard-track.service tmpguard-track-home.service
+      - sh: sudo sh deploy/track-helper-install.sh "$USER" "$PWD/bin"
+      - sh: mkdir -p ~/.local/state/aguard/track ~/.local/state/aguard/track-home
+      - sh: cp -n /var/lib/tmpguard/state.json /var/lib/tmpguard/owners.jsonl* ~/.local/state/aguard/track/
+      - sh: cp -n /var/lib/tmpguard-home/state.json /var/lib/tmpguard-home/owners.jsonl* ~/.local/state/aguard/track-home/
   # glint падает кодом выхода на находке high (умолчание fail_on); остальные проверяет tk done.
   # remote: при занятом ноуте graft шлёт его на pc (вывод там и тут побайтно один, glint-gate-remote).
   glint:

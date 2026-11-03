@@ -33,7 +33,7 @@ comm = "catatonit"
 reason = "pause-процесс rootless podman: держит namespace всех контейнеров"
 
 # ── tmp: записи в /tmp и их владельцы (бывший tmpguard, user-часть) ──────────
-# Снимок пишет system-служба tmpguard-track (root: fanotify и proc connector).
+# Снимок пишет сам демон; дескрипторы fanotify и proc connector даёт root-служба aguard-track-helper.
 [tmp]
 # observe — ничего не шлёт, пишет в журнал, кому и что отправил бы;
 # alert   — шлёт сводки в сессии Claude Code.
@@ -132,8 +132,8 @@ lasting = ["~/.cache/go-build", "~/.cache/gopls", "~/.cache/goimports", "~/.cach
   "~/.cache/pip", "~/.cache/ms-playwright", "~/.cache/puppeteer", "~/.cache/google-chrome*"]
 keep = "1440h"         # 60 дней
 trace_min = "1G"       # scratchpad умершей сессии и копии транскриптов — следы от этого; находка по классу — от него
-# снимки tmpguard-track-home: кто создал след; первый свежий из списка
-track = ["/run/tmpguard-home/state.json", "/var/lib/tmpguard-home/state.json"]
+# снимки слежения за следами: кто создал след; первый свежий из списка
+track = ["/run/user/1000/aguard/track-home/state.json", "~/.local/state/aguard/track-home/state.json"]
 # На /home свободно меньше free_min — письмо лиду и free_tell сразу и раз в сутки, пока не поднимется (не зависит от mode).
 free_min = "150G"
 free_mode = "alert"    # off | log (только журнал «написал бы») | alert

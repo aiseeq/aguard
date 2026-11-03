@@ -2,9 +2,12 @@ package track
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +17,8 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/trackfd"
+	"golang.org/x/sys/unix"
 )
 
 func TestApplyUsageIntegral(t *testing.T) {
@@ -154,5 +159,114 @@ func BenchmarkSave(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		tr.save(false)
+	}
+}
+
+// unprivPair — пара без root: fanotify без pidfd (свой pid ядро показывает) и труба вместо proc connector; остальное — как
+// на настоящей паре от помощника.
+func unprivPair(t *testing.T) trackfd.Pair {
+	t.Helper()
+	fan, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_CLOEXEC|unix.FAN_REPORT_DFID_NAME_TARGET, unix.O_RDONLY|unix.O_LARGEFILE)
+	if err != nil {
+		t.Fatalf("fanotify без root: %v", err)
+	}
+	var p [2]int
+	if err := unix.Pipe2(p[:], unix.O_CLOEXEC); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(p[1]) })
+	return trackfd.Pair{Fan: fan, Conn: p[0]}
+}
+
+func runConfig(t *testing.T, root string) Config {
+	t.Helper()
+	dir := t.TempDir()
+	return Config{Name: "t", Roots: []string{root}, StateDir: filepath.Join(dir, "state"), RunDir: filepath.Join(dir, "run"),
+		Full: time.Hour, Young: time.Minute, YoungEvery: 10 * time.Millisecond, Persist: time.Hour, RotateBytes: 1 << 20}
+}
+
+// Весь путь внутри демона: запись создана — в снимке; отмена — снимок на диске и Run выходит, горутины чтения не держат
+// его; второй экземпляр на те же папки — ошибка, а не затёртый снимок.
+func TestRunStopsOnCancelAndSingleWriter(t *testing.T) {
+	root := t.TempDir()
+	cfg := runConfig(t, root)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res := make(chan error, 1)
+	go func() { res <- Run(ctx, cfg, unprivPair(t), slog.New(slog.DiscardHandler)) }()
+	lock := filepath.Join(cfg.RunDir, "writer.lock")
+	for end := time.Now().Add(10 * time.Second); ; {
+		if _, err := os.Stat(filepath.Join(cfg.StateDir, record.OwnersFile)); err == nil {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("сторож не поднялся")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run(ctx, cfg, unprivPair(t), slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "другой экземпляр") {
+		t.Fatalf("второй писатель: %v", err)
+	}
+	entry := filepath.Join(root, "created")
+	if err := os.WriteFile(entry, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(10 * time.Second); ; {
+		b, err := os.ReadFile(filepath.Join(cfg.StateDir, record.OwnersFile))
+		if err == nil && strings.Contains(string(b), "created") {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("создание не в журнале: %q, %v", b, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-res:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run не вышел по отмене")
+	}
+	s, err := record.ReadState(filepath.Join(cfg.StateDir, record.StateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for i := range s.Entries {
+		found = found || s.Entries[i].Path == entry
+	}
+	if !found {
+		t.Fatalf("в снимке при остановке нет записи: %+v", s.Entries)
+	}
+}
+
+// Переименование из непомеченной папки: новая запись заводится, ошибки в обработке нет (open_by_handle_at без root нет).
+func TestDirOfUnmarked(t *testing.T) {
+	tr := &Tracker{watchKey: map[string]string{"k": "/tmp"}}
+	if p, w, err := tr.dirOf(&dirName{key: "k"}); p != "/tmp" || !w || err != nil {
+		t.Fatalf("%q %v %v", p, w, err)
+	}
+	if _, w, err := tr.dirOf(&dirName{key: "другая"}); w || err == nil {
+		t.Fatalf("непомеченная: %v %v", w, err)
+	}
+}
+
+// Чужой процесс (root) cwd не показывает: остальное о нём известно. Проверяется на настоящем pid 1, если он чужой.
+func TestReadProcForeignWithoutCwd(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("под root все процессы свои")
+	}
+	if _, err := os.Readlink("/proc/1/cwd"); !errors.Is(err, fs.ErrPermission) {
+		t.Skipf("pid 1 показывает cwd: %v", err)
+	}
+	d, err := readProc(1)
+	if err != nil || d.comm == "" || d.cwd != "" {
+		t.Fatalf("%+v, %v", d, err)
 	}
 }

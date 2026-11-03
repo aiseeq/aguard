@@ -1,0 +1,23 @@
+[Unit]
+Description=aguard-track-helper: дескрипторы fanotify и proc connector для слежения aguard за записями
+After=local-fs.target
+
+[Service]
+Type=simple
+# Метка UID в собаках — uid ставящего, её подставляет deploy/track-helper-install.sh.
+ExecStart=/usr/local/sbin/aguard-track-helper -uid @UID@
+Restart=always
+RestartSec=5
+RuntimeDirectory=aguard-track
+RuntimeDirectoryMode=0755
+# Память очереди fanotify заряжается на эту службу, хотя читает демон.
+MemoryMax=512M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+# fanotify_init (SYS_ADMIN), подписка proc connector и SO_RCVBUFFORCE (NET_ADMIN)
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 // Режимы работы.
@@ -123,8 +125,8 @@ func Default(home string) Config {
 	return Config{
 		Mode:     ModeObserve,
 		Interval: Duration(5 * time.Minute),
-		TrackDir: "/var/lib/tmpguard",
-		RunDir:   "/run/tmpguard",
+		TrackDir: record.TrackStateDir(home, "track"),
+		RunDir:   record.TrackRunDir("track"),
 		Lead:     "lead",
 		Fighters: []string{"opencode", "opencode.exe", "codex", "claude"},
 		Ignore:   []string{"/tmp/.X11-unix", "/tmp/.ICE-unix", "/tmp/.font-unix", "/tmp/cc-socks"},

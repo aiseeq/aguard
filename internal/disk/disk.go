@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 // Config — раздел [disk].
@@ -43,7 +44,7 @@ type Config struct {
 	Traces []TraceClass `toml:"traces"`
 	// TraceMin — scratchpad умершей сессии и копии транскриптов — следы от этого размера; находка по классу — от него.
 	TraceMin policy.Size `toml:"trace_min"`
-	// Track — снимки tmpguard-track по ~/.cache и ~/.local/state (служба tmpguard-track-home): кто создал запись.
+	// Track — снимки слежения aguard по ~/.cache и ~/.local/state (экземпляр track-home): кто создал запись.
 	// Первый свежий из списка; нет ни одного — создатель неизвестен.
 	Track []string `toml:"track"`
 	// FreeMin — нижняя граница свободного места на /home: ниже — письмо лиду и FreeTell раз в сутки, пока не поднимется
@@ -84,7 +85,7 @@ func Default() Config {
 			"~/.cache/typescript", "~/.cache/JetBrains", "~/.cache/mozilla"},
 		Keep:     policy.Duration(60 * 24 * time.Hour),
 		TraceMin: 1 << 30,
-		Track:    []string{"/run/tmpguard-home/state.json", "/var/lib/tmpguard-home/state.json"},
+		Track:    []string{filepath.Join(record.TrackRunDir("track-home"), record.StateFile), "~/.local/state/aguard/track-home/" + record.StateFile},
 		FreeMin:  defaultFreeMin, FreeMode: FreeAlert, FreeTell: []string{"git-admin"},
 	}
 }

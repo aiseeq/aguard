@@ -11,12 +11,28 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
-// Пути по умолчанию: общая папка состояния, её создаёт system-сервис.
+// RuntimeDir — $XDG_RUNTIME_DIR; без него (запуск не из сеанса) — /run/user/<uid>, как его ставит systemd.
+func RuntimeDir() string {
+	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join("/run/user", strconv.Itoa(os.Getuid()))
+}
+
+// TrackStateDir — журнал и долговременный снимок экземпляра слежения.
+func TrackStateDir(home, name string) string {
+	return filepath.Join(home, ".local", "state", "aguard", name)
+}
+
+// TrackRunDir — частый снимок экземпляра слежения: tmpfs сеанса.
+func TrackRunDir(name string) string { return filepath.Join(RuntimeDir(), "aguard", name) }
+
+// Имена файлов слежения в его папках (StateDir, RunDir).
 const (
-	DefaultDir   = "/var/lib/tmpguard"
 	OwnersFile   = "owners.jsonl"
 	StateFile    = "state.json"
 	RotatedOwner = "owners.jsonl.1"
