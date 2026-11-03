@@ -25,9 +25,12 @@ const sshTimeout = 10 * time.Second
 
 // cpuHost — машина под наблюдением и её перегрузка.
 type cpuHost struct {
-	ssh  string // "" — своя машина
-	root string // откуда читать load average: /proc или папка с файлами, снятыми по ssh
-	win  cpuwatch.Host
+	ssh      string // "" — своя машина
+	root     string // откуда читать load average: /proc или папка с файлами, снятыми по ssh
+	win      cpuwatch.Host
+	strays   cpuwatch.StrayWatch
+	strayAt  time.Time // когда смотрели процессы без родителя
+	strayBad bool      // прошлый замер не удался: о сбое пишется раз
 }
 
 func (a *app) cpuCmd(ctx context.Context, args []string) error {
@@ -172,6 +175,7 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 		v := h.win.Judge(s, owner)
 		a.cpuAct(cfg, &h.win, &v, now)
 	}
+	a.strayRound(ctx, cfg, r)
 	if err := r.Err(); err != nil { // поток без найденного владельца идёт без мастера: в сводке лиду он виден
 		a.warn("cpu", "владельцы найдены не все", "err", err)
 	}
@@ -257,6 +261,7 @@ func (a *app) cpuDry(ctx context.Context, cfg *cpuwatch.Config) error {
 		}
 		fmt.Fprintf(a.out, "%s: load average за минуту %.2f, готовых сейчас %d при %d потоках, перегружена: %v\n",
 			h.win.Name, s.Load.Avg1, s.Runnable, s.Threads, s.Over())
+		a.strayDry(ctx, cfg, r, h)
 		for _, l := range cpuwatch.Owners(s.Tasks, owner) { // владельцы готовых потоков и у свободной машины
 			fmt.Fprintf(a.out, "  %-20s %-8s %-40s %d %v\n", l.Owner.Master, l.Owner.Kind, l.Owner.Label, l.N, l.Comms)
 		}

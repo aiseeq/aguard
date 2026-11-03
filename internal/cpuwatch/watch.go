@@ -31,6 +31,7 @@ type Config struct {
 	Notify   float64         `toml:"notify"`   // мастеру — если его готовых задач в снимке не меньше этой доли потоков машины
 	Hosts    []string        `toml:"hosts"`    // машины по ssh сверх своей
 	Workers  string          `toml:"workers"`  // папка заданий worker
+	Strays   StrayConfig     `toml:"strays"`   // процессы без родителя (stray.go)
 	Lead     string          `toml:"-"`
 	SendAuth bool            `toml:"-"`
 }
@@ -41,6 +42,7 @@ func Default(home string) Config {
 	return Config{
 		Mode: ModeAlert, Interval: policy.Duration(time.Minute), After: policy.Duration(10 * time.Minute),
 		Repeat: policy.Duration(30 * time.Minute), Notify: 0.25, Hosts: []string{"pc"}, Workers: home + "/.local/state/worker",
+		Strays: DefaultStrays(),
 	}
 }
 
@@ -56,7 +58,7 @@ func (c *Config) Validate(home string) error {
 		return errors.New("cpu.notify в (0, 1]")
 	}
 	c.Workers = policy.ExpandHome(c.Workers, home)
-	return nil
+	return c.Strays.Validate()
 }
 
 // Host — перегрузка одной машины: с какого замера длится и кому уже писали.

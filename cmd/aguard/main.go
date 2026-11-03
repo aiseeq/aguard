@@ -84,6 +84,7 @@ type app struct {
 	out            io.Writer           // вывод команд для человека и агента (dry-run, report)
 	act            *activity.Recorder  // учёт срабатываний; только у демона, у команд nil
 	cpu            map[string]*cpuHost // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
+	strayRead      strayReader         // замер процессов без родителя; подменяется в тестах
 	diskState      *disk.State         // состояние наблюдателя disk; загружается один раз демоном
 	diskWalkLoaded bool                // sizes и traces загружены до первого обхода
 	codexStep      time.Duration       // шаг codex, выбранный прошлым проходом; 0 — interval
@@ -115,6 +116,7 @@ func main() {
 		codexApproved: approvedCodex,
 		codexNote:     noteTicket,
 	}
+	a.strayRead = a.readStrays
 	if len(os.Args) < 2 {
 		usage()
 	}

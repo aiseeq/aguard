@@ -136,6 +136,39 @@ func (j *Jobs) ByTree(tree string) ([]*Job, error) {
 	return out, err
 }
 
+// ByPath — самое новое задание, чьё дерево (база dir) — папка пути path, живое или завершённое: на PC дерево лежит по
+// другому пути (~/run/<дерево>). Папка задания — <дата-время>-<имя>; ищется по имени, все 3,5 тыс. job.json не читаются.
+func (j *Jobs) ByPath(path string) (*Job, error) {
+	ents, err := os.ReadDir(j.Dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("задания worker: %w", err)
+	}
+	var best *Job
+	var errs []error
+	for part := range strings.SplitSeq(path, "/") {
+		if part == "" {
+			continue
+		}
+		for _, e := range ents {
+			if !strings.HasSuffix(e.Name(), "-"+part) {
+				continue
+			}
+			v, err := j.get(e.Name())
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if v != nil && filepath.Base(v.Dir) == part && (best == nil || v.Created.After(best.Created)) {
+				best = v
+			}
+		}
+	}
+	return best, errors.Join(errs...)
+}
+
 // readLive — задания папки, чей unit сейчас работает.
 func (j *Jobs) readLive() error {
 	units, err := os.ReadDir(j.Units)
@@ -255,6 +288,32 @@ func (r *Resolver) RemoteOwner(t *Task) Owner {
 		}
 	}
 	return other(t)
+}
+
+// projectDir — проект по пути: ~/git/<проект>, ~/work/<проект>; мастер проекта — <проект>-master.
+var projectDir = regexp.MustCompile(`^/home/[^/]+/(?:git|work)/([^/]+)`)
+
+// StrayOwner — чей процесс без родителя: владелец по scope и окружению, как у потока; его сессия ssh умерла — боец по
+// дереву в cwd, и завершённый: сирота переживает задание; затем мастер проекта по cwd.
+func (r *Resolver) StrayOwner(remote bool, d *Detail, comm string) Owner {
+	t := &Task{Pid: d.Pid, Comm: comm, Cgroup: d.Cgroup, Claude: d.Claude, SSH: d.SSH}
+	var o Owner
+	if remote {
+		o = r.RemoteOwner(t)
+	} else {
+		o = r.Owner(t)
+	}
+	if o.Master != "" {
+		return o
+	}
+	v, err := r.Jobs.ByPath(d.Cwd)
+	if !r.fail(err) && v != nil {
+		return Owner{Master: v.Master, Kind: KindWorker, Label: v.Task}
+	}
+	if m := projectDir.FindStringSubmatch(d.Cwd); m != nil {
+		return Owner{Master: m[1] + "-master", Kind: KindOther, Label: comm}
+	}
+	return o
 }
 
 // sshClient — процесс ssh на ноуте, чьё соединение — SSH_CONNECTION «адрес порт адрес порт» (порт клиента второй);
