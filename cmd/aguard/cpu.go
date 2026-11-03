@@ -1,10 +1,11 @@
-// Наблюдатель cpu: перегрузка процессора ноута и PC и чья она (internal/cpuwatch). Раз в интервал — load average за
-// минуту и готовые задачи; оба не меньше потоков — снимок готовых потоков, а подряд дольше after — письмо мастерам,
-// чьих готовых задач больше всего, и сводка лиду, пока длится — не чаще repeat. Ничего не снимает и не понижает.
+// Наблюдатель cpu: серия перегрузки ноута и PC длится, пока load average за минуту не ниже числа потоков. В текущем
+// замере готовые задачи дают снимок владельцев и входят в письмо. После after — письмо мастерам и сводка лиду, повторы
+// не чаще repeat. Окно и отметки писем хранятся в состоянии aguard; наблюдатель ничего не снимает и не понижает.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
+	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -23,9 +25,10 @@ const sshTimeout = 10 * time.Second
 
 // cpuHost — машина под наблюдением и её перегрузка.
 type cpuHost struct {
-	ssh  string // "" — своя машина
-	root string // откуда читать load average: /proc или папка с файлами, снятыми по ssh
-	win  cpuwatch.Host
+	ssh   string // "" — своя машина
+	root  string // откуда читать load average: /proc или папка с файлами, снятыми по ssh
+	state string // файл сохранённого окна
+	win   cpuwatch.Host
 }
 
 func (a *app) cpuCmd(ctx context.Context, args []string) error {
@@ -57,9 +60,15 @@ func (a *app) cpuHosts(cfg *cpuwatch.Config) []*cpuHost {
 	for _, n := range names {
 		h := a.cpu[n]
 		if h == nil {
+			stateName := "local.json"
 			h = &cpuHost{ssh: n, root: procRoot, win: cpuwatch.Host{Name: cpuwatch.HostLocal}}
 			if n != "" {
 				h.root, h.win.Name = filepath.Join(a.dir("cpu"), "proc-"+n), n
+				stateName = "host-" + n + ".json"
+			}
+			h.state = filepath.Join(a.dir("cpu"), stateName)
+			if err := loadCPUState(h.state, &h.win); err != nil {
+				a.warn("cpu", "состояние окна не прочитано, начинаю с нуля", "host", h.win.Name, "err", err)
 			}
 			a.cpu[n] = h
 		}
@@ -93,7 +102,7 @@ func (a *app) cpuSample(ctx context.Context, h *cpuHost, now time.Time, all bool
 		// часть процессов не прочиталась — замер всё равно идёт: load average от этого не зависит
 		a.warn("cpu", "процессы прочитаны не все", "err", err)
 	}
-	// готовые задачи — в момент снимка, а не минутой раньше: «есть ли сейчас» решает снимок
+	// готовые задачи — в момент снимка, а не минутой раньше: письмо говорит о тех же потоках, что и разбор владельцев
 	if err = s.ReadLoad(h.root); err != nil {
 		return nil, err
 	}
@@ -157,6 +166,9 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 			}
 			h.win.Down = true
 			h.win.Break()
+			if err := saveCPUState(h.state, &h.win); err != nil {
+				a.warn("cpu", "состояние окна не сохранено", "host", h.win.Name, "err", err)
+			}
 			continue
 		}
 		if h.win.Down {
@@ -169,6 +181,9 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 		}
 		v := h.win.Judge(s, owner)
 		a.cpuAct(cfg, &h.win, &v, now)
+		if err := saveCPUState(h.state, &h.win); err != nil {
+			a.warn("cpu", "состояние окна не сохранено", "host", h.win.Name, "err", err)
+		}
 	}
 	if err := r.Err(); err != nil { // поток без найденного владельца идёт без мастера: в сводке лиду он виден
 		a.warn("cpu", "владельцы найдены не все", "err", err)
@@ -179,7 +194,8 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 // cpuAct — журнал начала и конца перегрузки и письма по ней.
 func (a *app) cpuAct(cfg *cpuwatch.Config, h *cpuwatch.Host, v *cpuwatch.Verdict, now time.Time) {
 	if !v.Ended.IsZero() {
-		a.log.Info("aguard cpu: перегрузка кончилась", "host", h.Name, "lasted", v.Lasted.Round(time.Second).String())
+		a.log.Info("aguard cpu: перегрузка кончилась", "host", h.Name, "lasted", v.Lasted.Round(time.Second).String(),
+			"load1", v.Avg1, "runnable", v.Runnable, "threads", v.Threads)
 		a.note("cpu", "overload_end", h.Name, "", int64(v.Lasted.Minutes()), "min")
 	}
 	if !v.Over {
@@ -214,6 +230,42 @@ func (a *app) cpuAct(cfg *cpuwatch.Config, h *cpuwatch.Host, v *cpuwatch.Verdict
 		}
 		h.Sent(leadKey+cfg.Lead, now)
 	}
+}
+
+type cpuStateFile struct {
+	Version int            `json:"version"`
+	Window  cpuwatch.State `json:"window"`
+}
+
+func loadCPUState(path string, h *cpuwatch.Host) error {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("чтение %s: %w", path, err)
+	}
+	var saved cpuStateFile
+	if err := json.Unmarshal(b, &saved); err != nil {
+		return fmt.Errorf("разбор %s: %w", path, err)
+	}
+	if saved.Version != 1 || !saved.Window.Since.IsZero() &&
+		(saved.Window.Last.IsZero() || saved.Window.Last.Before(saved.Window.Since)) {
+		return fmt.Errorf("неверная версия или окно состояния")
+	}
+	h.Restore(saved.Window)
+	return nil
+}
+
+func saveCPUState(path string, h *cpuwatch.Host) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("папка состояния: %w", err)
+	}
+	b, err := json.Marshal(cpuStateFile{Version: 1, Window: h.State()})
+	if err != nil {
+		return fmt.Errorf("кодирование состояния: %w", err)
+	}
+	return record.WriteFileAtomic(path, append(b, '\n'), 0o600)
 }
 
 // leadKey — служебный ключ отметки сводки лиду (с «:» — не сессия): лид бывает и мастером — это другое письмо.

@@ -59,7 +59,7 @@ func (c *Config) Validate(home string) error {
 	return nil
 }
 
-// Host — перегрузка одной машины: с какого замера длится и кому уже писали.
+// Host — серия высокого минутного load average одной машины и кому уже писали.
 type Host struct {
 	Name  string               // как машину называть в письмах: «ноут», «pc»
 	since time.Time            // начало перегрузки: первый из замеров подряд с перегрузкой; нуль — не перегружена
@@ -70,6 +70,25 @@ type Host struct {
 	broken bool            // после него замер не удался
 	Every  time.Duration   // интервал замеров: пропуск дольше двух — серия прервана
 	Down   bool            // прошлый замер не удался: о сбое пишется раз, а не каждый проход
+}
+
+// State — сохраняемая часть окна перегрузки.
+type State struct {
+	Since  time.Time            `json:"since,omitzero"`
+	Last   time.Time            `json:"last,omitzero"`
+	Sent   map[string]time.Time `json:"sent,omitempty"`
+	Told   map[string]bool      `json:"told,omitempty"`
+	Broken bool                 `json:"broken,omitempty"`
+}
+
+// State возвращает копию состояния окна для сохранения.
+func (h *Host) State() State {
+	return State{Since: h.since, Last: h.last, Sent: maps.Clone(h.sent), Told: maps.Clone(h.told), Broken: h.broken}
+}
+
+// Restore восстанавливает окно из ранее сохранённого состояния.
+func (h *Host) Restore(s State) {
+	h.since, h.last, h.sent, h.told, h.broken = s.Since, s.Last, maps.Clone(s.Sent), maps.Clone(s.Told), s.Broken
 }
 
 // Break — замер не удался: перегрузка «подряд» прервана, следующая считается с нуля (иначе после получаса без ssh
@@ -89,9 +108,7 @@ type Comm struct {
 	N    int
 }
 
-// Verdict — перегрузка машины на момент замера: load average за минуту и готовые задачи снимка не меньше потоков,
-// длительность — сколько замеров подряд это держится (лид 28.10 ~00:05 CET по слову пользователя; прежние LA за 5 минут
-// с порогом конца 0.9 потоков запаздывали: нагрузка уже кончилась, а письмо получал тот, кто крутился в момент снимка).
+// Verdict — перегрузка машины на момент замера по минутному load average; runnable — снимок для разбора владельцев.
 type Verdict struct {
 	Over     bool          // перегружена в этот замер
 	Started  bool          // перегрузка началась в этот замер
@@ -109,7 +126,7 @@ func (v *Verdict) Long(now time.Time, after time.Duration) bool {
 	return v.Over && now.Sub(v.Since) >= after
 }
 
-// Judge — перегрузка по замеру s; в перегрузку — владельцы готовых потоков снимка s.Tasks. Кончилась — забывается,
+// Judge — серия перегрузки по минутному load average замера s; владельцы берутся из текущего снимка s.Tasks. Кончилась — забывается,
 // кому писали в эту перегрузку; когда писали — помнится (repeat).
 func (h *Host) Judge(s *Sample, owner func(*Task) Owner) Verdict {
 	v := Verdict{Over: s.Over(), Avg1: s.Load.Avg1, Runnable: s.Runnable, Threads: s.Threads}
