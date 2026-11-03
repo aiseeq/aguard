@@ -1,6 +1,7 @@
 #!/bin/sh
 # Один раз под sudo: ставит помощника, проверяет передачу дескрипторов и только потом снимает старые root-службы.
-# Проверка не прошла — старые службы работают как работали. Вызов: graft install-helper.
+# Проверка не прошла — старые службы работают как работали. Повторный запуск и машина без старых служб — то же самое,
+# снимать просто нечего. Вызов: graft install-helper.
 set -eu
 user=$1
 bin=$2
@@ -18,8 +19,14 @@ until [ -S /run/aguard-track/fds.sock ]; do
 	sleep 0.1
 done
 runuser -u "$user" -- "$bin/aguard" track check
-systemctl disable --now tmpguard-track.service tmpguard-track-home.service
-rm -f /etc/systemd/system/tmpguard-track.service /etc/systemd/system/tmpguard-track-home.service /usr/local/sbin/tmpguard-track
+for unit in tmpguard-track tmpguard-track-home; do
+	[ -f "/etc/systemd/system/$unit.service" ] || continue
+	systemctl disable --now "$unit.service"
+	rm -f "/etc/systemd/system/$unit.service"
+done
+rm -f /usr/local/sbin/tmpguard-track
 systemctl daemon-reload
 # Снимки и журнал читает и забирает пользователь; пустые папки /var/lib останутся у него, sudo на их уборку не нужен.
-chown -R "$user" /var/lib/tmpguard /var/lib/tmpguard-home
+for dir in /var/lib/tmpguard /var/lib/tmpguard-home; do
+	[ ! -d "$dir" ] || chown -R "$user" "$dir"
+done

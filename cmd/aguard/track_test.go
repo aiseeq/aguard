@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,20 +18,22 @@ import (
 func TestTrackLoopLogsOncePerCause(t *testing.T) {
 	logs := &syncBuilder{}
 	a := &app{home: t.TempDir(), log: slog.New(slog.NewTextHandler(logs, nil))}
-	calls := make(chan struct{}, 8)
+	var calls atomic.Int32
 	a.trackFetch = func() (trackfd.Pair, error) {
-		calls <- struct{}{}
-		return trackfd.Pair{}, errors.New("помощника нет")
+		if calls.Add(1) <= 3 {
+			return trackfd.Pair{}, errors.New("помощника нет")
+		}
+		return trackfd.Pair{}, errors.New("другая причина")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var wg sync.WaitGroup
-	wg.Go(func() { a.trackLoop(ctx, &track.Config{Name: "track"}) })
-	<-calls
-	for end := time.Now().Add(5 * time.Second); !strings.Contains(logs.String(), "помощника нет"); {
+	wg.Go(func() { a.trackLoop(ctx, &track.Config{Name: "track"}, time.Millisecond) })
+	for end := time.Now().Add(5 * time.Second); calls.Load() < 6; {
 		if time.Now().After(end) {
-			t.Fatal("причина не записана")
+			t.Fatalf("заходов %d, ждали 6", calls.Load())
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
 	cancel()
 	done := make(chan struct{})
@@ -40,8 +43,10 @@ func TestTrackLoopLogsOncePerCause(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("отмена не завершила цикл")
 	}
-	if n := strings.Count(logs.String(), "помощника нет"); n != 1 {
-		t.Fatalf("строк %d:\n%s", n, logs.String())
+	for _, cause := range []string{"помощника нет", "другая причина"} {
+		if n := strings.Count(logs.String(), cause); n != 1 {
+			t.Fatalf("%q: строк %d:\n%s", cause, n, logs.String())
+		}
 	}
 }
 

@@ -26,7 +26,7 @@ func (a *app) fetchPair() (trackfd.Pair, error) {
 }
 
 // trackLoop ведёт один экземпляр до отмены ctx. Причина простоя пишется один раз на смену: помощника может не быть часами.
-func (a *app) trackLoop(ctx context.Context, cfg *track.Config) {
+func (a *app) trackLoop(ctx context.Context, cfg *track.Config, retry time.Duration) {
 	last := ""
 	for ctx.Err() == nil {
 		err := a.trackOnce(ctx, cfg)
@@ -34,13 +34,13 @@ func (a *app) trackLoop(ctx context.Context, cfg *track.Config) {
 			return
 		}
 		if text := fmt.Sprint(err); text != last {
-			a.log.Error("aguard слежение: простой", "name", cfg.Name, "err", err, "retry", trackRetry.String())
+			a.log.Error("aguard слежение: простой", "name", cfg.Name, "err", err, "retry", retry.String())
 			last = text
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(trackRetry):
+		case <-time.After(retry):
 		}
 	}
 }

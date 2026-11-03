@@ -258,6 +258,46 @@ func TestDirOfUnmarked(t *testing.T) {
 }
 
 // Чужой процесс (root) cwd не показывает: остальное о нём известно. Проверяется на настоящем pid 1, если он чужой.
+// Живой чужой процесс (pid 1): на сигнал 0 ядро отвечает EPERM, это не «процесс ушёл».
+func TestLiveForeignRootProcess(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("под root все процессы свои")
+	}
+	if _, err := os.Readlink("/proc/1/cwd"); !errors.Is(err, fs.ErrPermission) {
+		t.Skipf("pid 1 здесь не чужой: %v", err)
+	}
+	pidfd, err := unix.PidfdOpen(1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(pidfd)
+	lg := slog.New(slog.DiscardHandler)
+	r := newResolver(newTombs(time.Minute, lg), lg)
+	o := &record.Owner{}
+	if _, err := r.live(o, 1, pidfd); err != nil {
+		t.Fatalf("живой чужой процесс принят за ушедший: %v", err)
+	}
+	if o.Proc.State != record.ProcOK || o.Proc.Comm == "" || o.Proc.Cwd != "" {
+		t.Fatalf("живой чужой процесс: %+v", o.Proc)
+	}
+}
+
+// Удаление незнакомой записи: создатель не нужен, а pidfd события всё равно закрывается.
+func TestHandleClosesPidfdWithoutOwner(t *testing.T) {
+	var p [2]int
+	if err := unix.Pipe2(p[:], 0); err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(p[1])
+	tr := &Tracker{log: slog.New(slog.DiscardHandler), entries: map[string]*record.Entry{},
+		watchKey: map[string]string{"k": "/tmp"}, watched: map[string]string{"/tmp": "k"}, containers: map[string]bool{}}
+	ev := fevent{mask: unix.FAN_DELETE, pidfd: p[0], dn: &dirName{key: "k", name: "aguard-review-no-such-entry"}}
+	tr.handle(&ev)
+	if _, err := unix.FcntlInt(uintptr(p[0]), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("pidfd события не закрыт: %v", err)
+	}
+}
+
 func TestReadProcForeignWithoutCwd(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("под root все процессы свои")

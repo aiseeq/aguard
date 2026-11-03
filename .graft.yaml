@@ -35,9 +35,7 @@ tasks:
     deps: [build]
     run:
       - sh: sudo sh deploy/track-helper-install.sh "$USER" "$PWD/bin"
-      - sh: mkdir -p ~/.local/state/aguard/track ~/.local/state/aguard/track-home
-      - sh: cp -n /var/lib/tmpguard/state.json /var/lib/tmpguard/owners.jsonl* ~/.local/state/aguard/track/
-      - sh: cp -n /var/lib/tmpguard-home/state.json /var/lib/tmpguard-home/owners.jsonl* ~/.local/state/aguard/track-home/
+      - sh: sh deploy/track-migrate.sh
   # glint падает кодом выхода на находке high (умолчание fail_on); остальные проверяет tk done.
   # remote: при занятом ноуте graft шлёт его на pc (вывод там и тут побайтно один, glint-gate-remote).
   glint:

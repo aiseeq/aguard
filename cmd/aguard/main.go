@@ -271,7 +271,7 @@ func (a *app) run(ctx context.Context) error {
 	wg.Go(func() { a.guiLoop(ctx) })
 	insts := track.Instances(a.home)
 	for i := range insts {
-		wg.Go(func() { a.trackLoop(ctx, &insts[i]) }) //nolint:unbounded-goroutine-fanout // экземпляров два, список задан в track.Instances
+		wg.Go(func() { a.trackLoop(ctx, &insts[i], trackRetry) }) //nolint:unbounded-goroutine-fanout // экземпляров два, список задан в track.Instances
 	}
 	for _, w := range ws {
 		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей семь, список задан в watchers

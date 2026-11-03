@@ -21,7 +21,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now aguard
 ```
 
-The project’s [graft install task](.graft.yaml) also builds the tools and installs the user service; it preserves an existing configuration. `tmpguard-track`, which records `/tmp` ownership and requires root, is a separate optional system service and is not installed by the commands above.
+The project’s [graft install task](.graft.yaml) also builds the tools and installs the user service; it preserves an existing configuration. `/tmp` ownership tracking runs inside the daemon; its fanotify and proc connector descriptors come from a small root helper, `aguard-track-helper`, installed once with `graft install-helper` (sudo). Later daemon updates need no sudo.
 
 ## Commands
 
@@ -77,7 +77,7 @@ Nested tables configure observer details: `[orphans.mute_until]` and `[[orphans.
 
 - Linux only; the daemon requires a systemd user manager and cgroup v2.
 - Session discovery, transcript parsing, and session messages target Claude Code. `agentwaits` also reads Codex transcripts.
-- `/tmp` ownership tracking depends on the separate root `tmpguard-track` service.
+- `/tmp` ownership tracking depends on the root helper `aguard-track-helper`: without it the daemon logs the idle state once and retries. The daemon cannot read the working directory of root processes or measure directories closed to its user.
 - I/O attribution accounts for filesystem writeback, including btrfs metadata and transaction work; disk usage uses FIEMAP where available.
 - GUI sampling targets KDE Plasma (`kwin`, `plasmashell`) and Chrome processes, and collects matching user journal entries. Restart checks can read terminal content from tmux or KDE Konsole.
 - Shared process and session support depends on [`github.com/aiseeq/akit`](go.mod).

@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -164,13 +165,32 @@ func serveOne(c *net.UnixConn, uid int, open func() (Pair, error), lg *slog.Logg
 	}
 }
 
+// fetchTimeout — ответ помощника: он только открывает дескрипторы, десять секунд — с запасом и под нагрузкой.
+const fetchTimeout = 10 * time.Second
+
 // Fetch получает пару у помощника. serverUID — кем должен быть помощник (root): чужой сокет не источник событий.
 func Fetch(path string, serverUID int) (Pair, error) {
-	c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
+	return fetch(path, serverUID, fetchTimeout)
+}
+
+// fetch — Fetch со сроком: зависший помощник не должен держать ни демон на остановке, ни установку под sudo.
+func fetch(path string, serverUID int, timeout time.Duration) (Pair, error) {
+	c, err := net.DialTimeout("unix", path, timeout)
 	if err != nil {
 		return Pair{}, fmt.Errorf("помощник слежения: %w", err)
 	}
 	defer c.Close()
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return Pair{}, fmt.Errorf("помощник слежения: %s не unix-сокет: %T", path, c)
+	}
+	return readPair(uc, path, serverUID, timeout)
+}
+
+func readPair(c *net.UnixConn, path string, serverUID int, timeout time.Duration) (Pair, error) {
+	if err := c.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return Pair{}, fmt.Errorf("помощник слежения: срок: %w", err)
+	}
 	got, err := peerUID(c)
 	if err != nil {
 		return Pair{}, err
@@ -189,7 +209,7 @@ func Fetch(path string, serverUID int) (Pair, error) {
 	return parseRights(oob[:oobn])
 }
 
-// parseRights — ровно два дескриптора; лишние не остаются открытыми, CLOEXEC — на случай дочерних ssh и ps демона.
+// parseRights — ровно два дескриптора; лишние не остаются открытыми. CLOEXEC на них ставит сам ReadMsgUnix (MSG_CMSG_CLOEXEC).
 func parseRights(oob []byte) (Pair, error) {
 	msgs, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
@@ -202,9 +222,6 @@ func parseRights(oob []byte) (Pair, error) {
 			return Pair{}, fmt.Errorf("помощник слежения: дескрипторы: %w", err)
 		}
 		fds = append(fds, got...)
-	}
-	for _, fd := range fds {
-		unix.CloseOnExec(fd)
 	}
 	if len(fds) != 2 {
 		for _, fd := range fds {

@@ -2,7 +2,9 @@ package trackfd
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +107,46 @@ func TestFetchRefusesWrongServer(t *testing.T) {
 }
 
 // Помощника нет — ошибка, а не тишина.
+// Зависший помощник принял подключение и молчит: срок вместо вечного ожидания демона и установки под sudo.
+func TestFetchSilentHelperTimesOut(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.sock")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	res := make(chan error, 1)
+	go func() {
+		_, err := fetch(path, os.Getuid(), 50*time.Millisecond)
+		res <- err
+	}()
+	select {
+	case err := <-res:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("молчащий помощник: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("молчащий помощник держит Fetch без срока")
+	}
+}
+
+// Один дескриптор вместо двух — отказ, а не пара с мусором.
+func TestParseRightsRefusesOneFD(t *testing.T) {
+	var p [2]int
+	if err := unix.Pipe(p[:]); err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(p[1])
+	pair, err := parseRights(unix.UnixRights(p[0]))
+	if err == nil {
+		pair.Close()
+		t.Fatal("принял один дескриптор как пару")
+	}
+	if _, err := unix.FcntlInt(uintptr(p[0]), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("лишний дескриптор остался открытым: %v", err)
+	}
+}
+
 func TestFetchNoHelper(t *testing.T) {
 	if _, err := Fetch(filepath.Join(t.TempDir(), "нет.sock"), 0); err == nil {
 		t.Fatal("нет ошибки")
