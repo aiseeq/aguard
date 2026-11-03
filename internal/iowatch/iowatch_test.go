@@ -745,6 +745,15 @@ func TestRecorderGapWithLongStalledStep(t *testing.T) {
 	if r.open == nil || !r.open.start.Equal(base.Add(ms(600))) { // прежний случай закрыт: начало открытого — новое
 		t.Fatalf("спокойный промежуток 600 мс больше Gap делит случаи: открыт %+v", r.open)
 	}
+	// спокойно 400 мс: спокойный шаг случай ещё не закрыл (400 не больше Gap+step), закрывает длинный шаг с простоем (400 больше Gap)
+	r = run(0, ms(100), ms(200), ms(300), ms(400))
+	if r.open == nil || !r.open.start.Equal(base.Add(-ms(100))) {
+		t.Fatalf("спокойный шаг закрыл случай раньше длинного: %+v", r.open)
+	}
+	r = run(0, ms(100), ms(200), ms(300), ms(400), ms(3400))
+	if r.open == nil || !r.open.start.Equal(base.Add(ms(400))) {
+		t.Fatalf("длинный шаг с простоем после 400 мс покоя не закрыл прежний случай: %+v", r.open)
+	}
 }
 
 func TestRecorderUsesWallClockStepIntervals(t *testing.T) {
