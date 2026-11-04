@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/names"
 	"github.com/aiseeq/aguard/internal/queue"
 )
 
@@ -48,10 +49,7 @@ func TestQueueExternalTickets(t *testing.T) {
 	b := newQueueBench(t, "[]", "[]")
 	b.externalTk(t, extHigh)
 	var state queue.State
-	ts, err := b.a.queueExternal(context.Background(), b.c, &state, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
+	ts := b.a.queueExternal(context.Background(), b.c, &state, time.Now())
 	if len(ts) != 1 || ts[0].Key != "p/TRK-1" || !ts[0].External || ts[0].Status != "открыт" || ts[0].Dir != filepath.Join(b.dir, "git", "p") {
 		t.Fatalf("%+v", ts)
 	}
@@ -64,17 +62,15 @@ func TestQueueExternalCadence(t *testing.T) {
 	var state queue.State
 	now := time.Now()
 	for _, later := range []time.Duration{0, 30 * time.Second, 4*time.Minute + 59*time.Second} {
-		ts, err := b.a.queueExternal(context.Background(), b.c, &state, now.Add(later))
-		if err != nil || len(ts) != 1 {
-			t.Fatalf("+%v: %+v %v", later, ts, err)
+		ts := b.a.queueExternal(context.Background(), b.c, &state, now.Add(later))
+		if len(ts) != 1 {
+			t.Fatalf("+%v: %+v", later, ts)
 		}
 	}
 	if n := callCount(t, calls); n != 1 {
 		t.Fatalf("запросов до 5 мин: %d", n)
 	}
-	if _, err := b.a.queueExternal(context.Background(), b.c, &state, now.Add(5*time.Minute)); err != nil {
-		t.Fatal(err)
-	}
+	b.a.queueExternal(context.Background(), b.c, &state, now.Add(5*time.Minute))
 	if n := callCount(t, calls); n != 2 {
 		t.Fatalf("запросов к 5 мин: %d", n)
 	}
@@ -100,15 +96,10 @@ func TestQueueExternalFailureKeepsList(t *testing.T) {
 			log := b.captureLog()
 			var state queue.State
 			now := time.Now()
-			if _, err := b.a.queueExternal(context.Background(), b.c, &state, now); err != nil {
-				t.Fatal(err)
-			}
+			b.a.queueExternal(context.Background(), b.c, &state, now)
 			first := state.External[filepath.Join(b.dir, "git", "p")][0].FirstSeen
 			breakIt(t, answer)
-			ts, err := b.a.queueExternal(context.Background(), b.c, &state, now.Add(5*time.Minute))
-			if err != nil {
-				t.Fatal(err)
-			}
+			ts := b.a.queueExternal(context.Background(), b.c, &state, now.Add(5*time.Minute))
 			if len(ts) != 1 || !ts[0].Created.Equal(first) {
 				t.Fatalf("список после сбоя: %+v", ts)
 			}
@@ -125,9 +116,7 @@ func TestQueueExternalSurvivesRestart(t *testing.T) {
 	answer, _ := b.externalTk(t, extHigh)
 	var state queue.State
 	now := time.Now()
-	if _, err := b.a.queueExternal(context.Background(), b.c, &state, now); err != nil {
-		t.Fatal(err)
-	}
+	b.a.queueExternal(context.Background(), b.c, &state, now)
 	data, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
@@ -140,10 +129,7 @@ func TestQueueExternalSurvivesRestart(t *testing.T) {
 	if err := os.WriteFile(answer+".fail", nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ts, err := b.a.queueExternal(context.Background(), b.c, &loaded, now.Add(time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
+	ts := b.a.queueExternal(context.Background(), b.c, &loaded, now.Add(time.Minute))
 	if len(ts) != 1 || ts[0].Key != "p/TRK-1" {
 		t.Fatalf("после рестарта: %+v", ts)
 	}
@@ -160,18 +146,91 @@ func TestQueueExternalLeftConfig(t *testing.T) {
 			_, calls := b.externalTk(t, extHigh)
 			var state queue.State
 			now := time.Now()
-			if _, err := b.a.queueExternal(context.Background(), b.c, &state, now); err != nil {
-				t.Fatal(err)
-			}
+			b.a.queueExternal(context.Background(), b.c, &state, now)
 			change(b)
-			ts, err := b.a.queueExternal(context.Background(), b.c, &state, now.Add(5*time.Minute))
-			if err != nil {
-				t.Fatal(err)
-			}
+			ts := b.a.queueExternal(context.Background(), b.c, &state, now.Add(5*time.Minute))
 			if len(ts) != 0 || len(state.External) != 0 || callCount(t, calls) != 1 {
 				t.Fatalf("%+v %+v", ts, state.External)
 			}
 		})
+	}
+}
+
+// Служба стартует с коротким PATH, а источник зовёт tk по имени: папка tk должна быть в PATH потомка (проверка 04.11: код 2, command not found).
+func TestQueueExternalSeesTkDir(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{"tk": "#!/bin/sh\nexec tk-sibling\n", "tk-sibling": "#!/bin/sh\necho '[]'\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", "/usr/bin:/bin")
+	if _, err := readQueueExternal(context.Background(), filepath.Join(dir, "tk"), dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Проверка 04.11: сбой таблицы имён не останавливает проход, внешние остаются прошлым списком, причина в журнале.
+func TestQueueExternalBrokenNames(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	b.externalTk(t, extHigh)
+	log := b.captureLog()
+	var state queue.State
+	now := time.Now()
+	b.a.queueExternal(context.Background(), b.c, &state, now)
+	table := filepath.Join(b.a.home, names.File)
+	if err := os.MkdirAll(filepath.Dir(table), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(table, []byte("строка без табуляции\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ts := b.a.queueExternal(context.Background(), b.c, &state, now.Add(time.Minute))
+	if len(ts) != 1 || ts[0].Key != "p/TRK-1" {
+		t.Fatalf("при сломанной таблице: %+v", ts)
+	}
+	if !strings.Contains(log.String(), "внешний трекер") {
+		t.Fatalf("журнал: %s", log.String())
+	}
+}
+
+// Проверка 04.11: сбой одной папки не трогает другие проекты; его причину показывает опрос, а список этой папки цел.
+func TestQueueExternalBadDir(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	b.externalTk(t, extHigh)
+	loop := filepath.Join(b.dir, "git", "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	b.c.Queue.Live = []string{"loop", "p"}
+	log := b.captureLog()
+	var state queue.State
+	state.External = map[string][]queue.ExternalTask{loop: {{Key: "TRK-2", Prio: "HIGH", Status: "To Do"}}}
+	ts := b.a.queueExternal(context.Background(), b.c, &state, time.Now())
+	if len(ts) != 2 {
+		t.Fatalf("%+v", ts)
+	}
+	if !strings.Contains(log.String(), "внешний трекер") || !strings.Contains(log.String(), loop) {
+		t.Fatalf("журнал: %s", log.String())
+	}
+}
+
+// Проверка 04.11: обход идёт до писем, поэтому срок общий; зависший потомок с открытыми трубами срок не отменяет.
+func TestQueueExternalSweepBudget(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	hung := filepath.Join(b.dir, "tk-hung")
+	if err := os.WriteFile(hung, []byte("#!/bin/sh\nsleep 8\necho '[]'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := b.captureLog()
+	var state queue.State
+	started := time.Now()
+	b.a.pollQueueExternal(context.Background(), hung, []string{b.dir, filepath.Join(b.dir, "git")}, &state, started, 200*time.Millisecond)
+	if took := time.Since(started); took > 6*time.Second {
+		t.Fatalf("обход шёл %v", took)
+	}
+	if got := strings.Count(log.String(), "внешний трекер"); got != 2 {
+		t.Fatalf("сбоев в журнале %d: %s", got, log.String())
 	}
 }
 

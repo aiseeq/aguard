@@ -474,12 +474,7 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		a.warn("queue", "tk ls", "err", err)
 		return nil
 	}
-	external, err := a.queueExternal(ctx, c, &before, now)
-	if err != nil {
-		a.warn("queue", "внешний трекер", "err", err)
-		return nil
-	}
-	tickets = append(slices.Clip(tickets), external...)
+	tickets = append(slices.Clip(tickets), a.queueExternal(ctx, c, &before, now)...)
 	alive, err := a.reg.Alive()
 	if err != nil {
 		a.warn("queue", "реестр сессий", "err", err)

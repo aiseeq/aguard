@@ -52,6 +52,45 @@ func TestDueWaitOncePerDay(t *testing.T) {
 	}
 }
 
+// Проверка 04.11, ворота: письмо не зависит от сложности и от того, какие пары открыты.
+func TestDueWaitAnyGates(t *testing.T) {
+	for name, diff := range map[string]string{"без сложности": "", "со сложностью": "HUNT"} {
+		t.Run(name, func(t *testing.T) {
+			w := dueWorld()
+			w.open = []string{"LOW-DO"}
+			s := seeded(w)
+			task := dueTick("LOW")
+			task.Diff = diff
+			if ns := step(s, []Ticket{task}, w); count(ns, KindMorning) != 1 {
+				t.Fatalf("%+v", ns)
+			}
+		})
+	}
+}
+
+// Проверка 04.11: письмо мёртвому не доставится, повтор шёл бы каждые 30 с.
+func TestDueWaitDeadMaster(t *testing.T) {
+	w := dueWorld()
+	w.live["m-master"] = false
+	s := seeded(w)
+	if ns := step(s, []Ticket{dueTick("MED")}, w); len(ns) != 0 {
+		t.Fatalf("%+v", ns)
+	}
+}
+
+// Проверка 04.11: раз в день считается на мастера, а не на всех.
+func TestDueWaitPerMaster(t *testing.T) {
+	w := dueWorld()
+	w.live["n-master"], w.free["n-master"] = true, true
+	s := seeded(w)
+	a, b := dueTick("MED"), dueTick("MED")
+	b.Key, b.Project, b.Master = "n/20261104-0951-y", "n", "n-master"
+	ns := step(s, []Ticket{a, b}, w)
+	if count(ns, KindMorning) != 2 || !has(ns, KindMorning, "m-master") || !has(ns, KindMorning, "n-master") {
+		t.Fatalf("%+v", ns)
+	}
+}
+
 // Заведён сегодня после границы, срок наступил днём: письмо сегодня, дата создания его не держит.
 func TestDueWaitCreatedToday(t *testing.T) {
 	w := dueWorld()
