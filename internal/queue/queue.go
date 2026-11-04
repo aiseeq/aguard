@@ -311,6 +311,37 @@ func Compute(t Table, ovs []Override, claude Supply, openai *Supply, now time.Ti
 	return
 }
 
+// MaxSpaceShift — от LOW до HIGH две ступени: больше сдвигать некуда, такое значение в конфиге — ошибка.
+const MaxSpaceShift = 2
+
+// SpaceOpen — планка каждого корня из общих ворот: пара открыта, если открыта пара того же DIFF на shift приоритетов выше.
+// Выше MED — HIGH: он открыт всегда. Корень со сдвигом 0 тоже в ответе: tk видит, что планка посчитана.
+func SpaceOpen(t Table, open []string, spaces map[string]int) map[string][]string {
+	out := make(map[string][]string, len(spaces))
+	for root, shift := range spaces {
+		pairs := []string{}
+		for _, r := range t {
+			if shiftedOpen(r.Pair, open, shift) {
+				pairs = append(pairs, r.Pair)
+			}
+		}
+		out[root] = pairs
+	}
+	return out
+}
+
+func shiftedOpen(pair string, open []string, shift int) bool {
+	prio, diff, ok := strings.Cut(pair, "-")
+	if !ok {
+		return slices.Contains(open, pair)
+	}
+	rank := map[string]int{"MED": 0, "LOW": 1}[prio] - shift
+	if rank < 0 {
+		return true
+	}
+	return slices.Contains(open, []string{"MED", "LOW"}[rank]+"-"+diff)
+}
+
 func supplierValue(row TableRow, supply Supply) string {
 	if supply.Burning {
 		return "да"
@@ -333,6 +364,8 @@ type Gate struct {
 	OpenAI *float64  `json:"openai"`
 	Open   []string  `json:"open"`
 	Lane   []string  `json:"lane"`
+	// OpenByRoot — планка папок пространства: tk берёт самый длинный корень, куда входит проект, иначе Open.
+	OpenByRoot map[string][]string `json:"open_by_root"`
 }
 
 func ReadGate(path string) (Gate, error) {
@@ -356,6 +389,9 @@ func (g Gate) Write(path string) error {
 	}
 	if g.Lane == nil {
 		g.Lane = []string{}
+	}
+	if g.OpenByRoot == nil {
+		g.OpenByRoot = map[string][]string{}
 	}
 	g.Claude = math.Round(g.Claude*100) / 100
 	if g.OpenAI != nil {
@@ -384,6 +420,8 @@ type Ticket struct {
 	Dir                                                                string
 	Executor                                                           string // для «в работе»: tk next показывает его только исполнителю
 	WaitDue                                                            bool   // для «ждёт»: срок наступил, tk next его показывает
+	Journal                                                            bool   // журнал, а не задача: вне tk next, кроме наступившего wait
+	Transfer                                                           string // перенесён во внешний трекер: ключ и адрес; файла тикета больше нет
 	Created                                                            time.Time
 }
 
@@ -407,6 +445,7 @@ type View struct {
 	Morning              time.Duration
 	Serious, Alive, Free func(string) bool
 	WeekendCrit          []string // папки проектов: в субботу и воскресенье из строк идут только CRIT
+	OpenByRoot           map[string][]string
 
 	restingSessions map[string]bool // сессии этих папок в такой день, считает Step
 }
@@ -416,6 +455,9 @@ type Notice struct {
 }
 
 const highWait = 4 * time.Hour
+
+// StatusTransferred — состояние строки .transferred.jsonl: тикет ушёл во внешний трекер, у него только заказчик и ключ.
+const StatusTransferred = "перенесён"
 
 type mark struct {
 	At   time.Time `json:"at"`
@@ -482,12 +524,15 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 	if closedTicket {
 		return s.backNotices(t, st, v)
 	}
+	if t.Journal {
+		return nil
+	}
 	if t.Prio == "CRIT" && t.Status == "открыт" {
 		return s.critNotices(t, st, v)
 	}
 	if t.Prio == "HIGH" {
 		if t.Status == "открыт" && restingDir(t.Dir, v) {
-			st.Seen, st.Taken = v.Now, false // срок 4 ч пойдёт с понедельника
+			st.Seen, st.Taken = restEnd(v.Now), false // срок 4 ч пойдёт с понедельника; значение одно на выходные, state.json не переписывается
 			return nil
 		}
 		return s.highNotices(t, st, v)
@@ -500,9 +545,31 @@ func restingDir(dir string, v View) bool {
 	if day := v.Now.Weekday(); day != time.Saturday && day != time.Sunday {
 		return false
 	}
-	return slices.ContainsFunc(v.WeekendCrit, func(root string) bool {
-		return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
-	})
+	return slices.ContainsFunc(v.WeekendCrit, func(root string) bool { return underRoot(dir, root) })
+}
+
+// restEnd — понедельник 00:00 после субботы или воскресенья now.
+func restEnd(now time.Time) time.Time {
+	days := 2
+	if now.Weekday() == time.Sunday {
+		days = 1
+	}
+	return time.Date(now.Year(), now.Month(), now.Day()+days, 0, 0, 0, 0, now.Location())
+}
+
+func underRoot(dir, root string) bool {
+	return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
+}
+
+// openFor — планка папки: самый длинный корень, куда она входит, иначе общие ворота. Как у tk next.
+func openFor(dir string, v View) []string {
+	best, open := "", v.Open
+	for root, pairs := range v.OpenByRoot {
+		if underRoot(dir, root) && len(root) > len(best) {
+			best, open = root, pairs
+		}
+	}
+	return open
 }
 
 // restingSessions — мастера и админы папок на выходном: строка о закрытом им ждёт понедельника. Лиду идёт всегда.
@@ -613,12 +680,19 @@ func (s *State) backNotices(t Ticket, st *ticketState, v View) []Notice {
 	if t.Back == "" || st.BackSent || st.BackLost {
 		return nil
 	}
+	if v.restingSessions[t.Back] {
+		st.Closed = restEnd(v.Now) // срок 7 суток не идёт, пока получатель на выходном
+		return nil
+	}
 	line := fmt.Sprintf("aguard: закрыт %s/%s (%s) — %s", t.Project, t.Slug, t.Status, t.Title)
+	if t.Transfer != "" {
+		line = fmt.Sprintf("aguard: перенесён %s/%s → %s", t.Project, t.Slug, t.Transfer)
+	}
 	if v.Now.Sub(st.Closed) >= 7*24*time.Hour {
 		st.BackLost = true
 		return []Notice{notice(t, v, KindBackLost, "", line)}
 	}
-	if !v.restingSessions[t.Back] && alive(v, t.Back) && v.Free != nil && v.Free(t.Back) {
+	if alive(v, t.Back) && v.Free != nil && v.Free(t.Back) {
 		return []Notice{notice(t, v, KindBack, t.Back, line)}
 	}
 	return nil
@@ -635,7 +709,7 @@ func (s *State) morningNotices(ts []Ticket, v View) []Notice {
 		if !morningTicket(*t, boundary, v) {
 			continue
 		}
-		if !morningOpen(*t, NormPrio(t.Prio), v.Open) {
+		if !morningOpen(*t, NormPrio(t.Prio), openFor(t.Dir, v)) {
 			continue
 		}
 		seriousByMaster[t.Master] = seriousByMaster[t.Master] || (v.Serious != nil && v.Serious(t.Project))
@@ -662,6 +736,9 @@ func morningTicket(t Ticket, boundary time.Time, v View) bool {
 
 // visibleInNext — статус тикета, который tk next покажет мастеру: иначе строка «есть работа» придёт при пустом tk next.
 func visibleInNext(t Ticket) bool {
+	if t.Journal {
+		return t.Status == "ждёт" && t.WaitDue
+	}
 	switch t.Status {
 	case "открыт":
 		return true
@@ -700,7 +777,9 @@ func (s *State) cleanup(active map[string]bool, now time.Time) {
 		}
 	}
 }
-func closed(s string) bool        { return s == "готово" || s == "отклонён" }
+func closed(s string) bool {
+	return s == "готово" || s == "отклонён" || s == StatusTransferred
+}
 func alive(v View, n string) bool { return n != "" && v.Alive != nil && v.Alive(n) }
 func firstAlive(v View, names ...string) string {
 	for _, name := range names {

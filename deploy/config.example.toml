@@ -285,6 +285,7 @@ git_roots = ["~/git", "~/work"]
 dirs = ["~/docs"]
 skip = [] # папки проектов, которые очередь не читает: список — только в конфиге машины
 weekend_crit = [] # папки проектов, где в субботу и воскресенье из строк идут только CRIT
+spaces = {} # корень пространства и сдвиг его планки, ступеней приоритета 0..2: {"~/x" = 1}. Папки вне корней — по общим воротам
 table = "~/.config/queue/gate.tsv"
 override = "~/.config/queue/override.tsv"
 gate = "~/.local/state/queue/gate.json"

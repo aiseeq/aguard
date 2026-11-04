@@ -19,11 +19,13 @@ type Config struct {
 	Skip      []string        `toml:"skip"`
 	// WeekendCrit — папки проектов, где в субботу и воскресенье из строк идут только CRIT. Список — в конфиге машины.
 	WeekendCrit []string `toml:"weekend_crit"`
-	Table       string   `toml:"table"`
-	Override    string   `toml:"override"`
-	Gate        string   `toml:"gate"`
-	History     string   `toml:"history"`
-	Tk          string   `toml:"tk"`
+	// Spaces — корень пространства и сдвиг его планки в ступенях приоритета; вне корней планка общих ворот. Список — в конфиге машины.
+	Spaces   map[string]int `toml:"spaces"`
+	Table    string         `toml:"table"`
+	Override string         `toml:"override"`
+	Gate     string         `toml:"gate"`
+	History  string         `toml:"history"`
+	Tk       string         `toml:"tk"`
 }
 
 func Default(home string) Config {
@@ -54,6 +56,14 @@ func (c *Config) Validate(home string) error {
 			ps[i] = policy.ExpandHome(ps[i], home)
 		}
 	}
+	spaces := make(map[string]int, len(c.Spaces))
+	for root, shift := range c.Spaces {
+		if shift < 0 || shift > MaxSpaceShift {
+			return fmt.Errorf("queue.spaces[%s]: сдвиг 0..%d, а не %d", root, MaxSpaceShift, shift)
+		}
+		spaces[filepath.Clean(policy.ExpandHome(root, home))] = shift
+	}
+	c.Spaces = spaces
 	for _, p := range []*string{&c.Table, &c.Override, &c.Gate, &c.History, &c.Tk} {
 		*p = policy.ExpandHome(*p, home)
 	}

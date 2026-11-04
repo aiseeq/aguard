@@ -140,3 +140,48 @@ func TestWeekendCritConfigExpanded(t *testing.T) {
 		t.Fatal("умолчание должно быть пустым: список — в конфиге машины")
 	}
 }
+
+// Журнал (`journal:true` от tk) — не задача: открытый не даёт строк, закрытый с заказчиком даёт, в утренней строке — только наступивший wait.
+func TestJournalNoLines(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.free["m-master"] = true
+	s := seeded(w)
+	for _, prio := range []string{"CRIT", "HIGH"} {
+		j := tick(prio, "открыт")
+		j.Key, j.Journal = "m/"+prio, true
+		if ns := step(s, []Ticket{j}, w); len(ns) != 0 {
+			t.Fatalf("%s открытый журнал: %+v", prio, ns)
+		}
+	}
+	w.now = w.now.Add(5 * time.Hour)
+	high := tick("HIGH", "открыт")
+	high.Key, high.Journal = "m/HIGH", true
+	if ns := step(s, []Ticket{high}, w); len(ns) != 0 {
+		t.Fatalf("журнал старше 4 ч: %+v", ns)
+	}
+	closedJournal := tick("HIGH", "готово")
+	closedJournal.Key, closedJournal.Journal, closedJournal.Back = "m/closed", true, "lead"
+	w.free["lead"] = true
+	if ns := step(s, []Ticket{closedJournal}, w); !has(ns, KindBack, "lead") {
+		t.Fatalf("закрытый журнал заказчику: %+v", ns)
+	}
+}
+
+func TestJournalMorningOnlyWaitDue(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.free["m-master"], w.open = true, []string{"MED-DO"}
+	med := func(status string, due bool) Ticket {
+		j := tick("MED", status)
+		j.Diff, j.Journal, j.WaitDue = "DO", true, due
+		return j
+	}
+	if ns := step(seeded(w), []Ticket{med("открыт", false)}, w); has(ns, KindMorning, "m-master") {
+		t.Fatalf("открытый журнал: %+v", ns)
+	}
+	if ns := step(seeded(w), []Ticket{med("ждёт", false)}, w); has(ns, KindMorning, "m-master") {
+		t.Fatalf("срок не наступил: %+v", ns)
+	}
+	if ns := step(seeded(w), []Ticket{med("ждёт", true)}, w); !has(ns, KindMorning, "m-master") {
+		t.Fatalf("наступивший wait: %+v", ns)
+	}
+}

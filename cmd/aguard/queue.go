@@ -36,6 +36,7 @@ type queueTicketJSON struct {
 	Title    string `json:"title"`
 	Executor string `json:"executor"`
 	Overdue  bool   `json:"overdue"`
+	Journal  bool   `json:"journal"`
 }
 
 func (a *app) queueCmd(ctx context.Context, args []string) error {
@@ -136,17 +137,17 @@ func (a *app) queueRound(ctx context.Context, c *config.Config, judge *restart.J
 		return nil
 	}
 	now := time.Now()
-	open, err := a.queueGatePass(c, now, dry)
+	gate, err := a.queueGatePass(c, now, dry)
 	if err != nil {
 		return err
 	}
-	return a.queueNotices(ctx, c, judge, open, dry, now)
+	return a.queueNotices(ctx, c, judge, gate, dry, now)
 }
 
 // queueGatePass считает ворота и пишет gate.json; возвращает open для писем. Письма считают по самому файлу, как tk next:
 // иначе при незаписанном или устаревшем файле мастеру придёт «есть работа» при пустом tk next. Сухой прогон файл не пишет
 // и показывает расчёт.
-func (a *app) queueGatePass(c *config.Config, now time.Time, dry bool) ([]string, error) {
+func (a *app) queueGatePass(c *config.Config, now time.Time, dry bool) (queue.Gate, error) {
 	inputs := a.readQueueInputs(&c.Queue, now)
 	openai, openaiErr := a.queueOpenAI(&c.Codex, now, dry)
 	if openaiErr != nil {
@@ -154,14 +155,15 @@ func (a *app) queueGatePass(c *config.Config, now time.Time, dry bool) ([]string
 	}
 	if inputs.err == nil {
 		open, lane := queue.Compute(inputs.table, inputs.overrides, inputs.claude, openai, now)
-		if err := a.writeQueueGate(&c.Queue, now, inputs.claude, openai, open, lane, inputs.overrides, dry); err != nil {
-			return nil, err
+		gate := queue.Gate{Open: open, Lane: lane, OpenByRoot: queue.SpaceOpen(inputs.table, open, c.Queue.Spaces)}
+		if err := a.writeQueueGate(&c.Queue, now, inputs.claude, openai, gate, inputs.overrides, dry); err != nil {
+			return queue.Gate{}, err
 		}
 		if dry {
-			return open, nil
+			return gate, nil
 		}
 	}
-	return a.previousQueueOpen(c.Queue.Gate, now), nil
+	return a.previousQueueGate(c.Queue.Gate, now), nil
 }
 
 type queueInputs struct {
@@ -241,12 +243,12 @@ func readQueueOverrides(path string, overrides *[]queue.Override) error {
 	return parseErr
 }
 
-func (a *app) writeQueueGate(cfg *queue.Config, now time.Time, claude queue.Supply, openai *queue.Supply, open, lane []string, overrides []queue.Override, dry bool) error {
+func (a *app) writeQueueGate(cfg *queue.Config, now time.Time, claude queue.Supply, openai *queue.Supply, gate queue.Gate, overrides []queue.Override, dry bool) error {
 	live := slices.Clone(cfg.Live)
 	if cfg.Mode == queue.ModeLog {
 		live = []string{}
 	}
-	gate := queue.Gate{At: now, Live: live, Claude: claude.Margin, OpenAI: supplyMargin(openai), Open: open, Lane: lane}
+	gate.At, gate.Live, gate.Claude, gate.OpenAI = now, live, claude.Margin, supplyMargin(openai)
 	if dry {
 		if err := json.NewEncoder(a.out).Encode(gate); err != nil {
 			return fmt.Errorf("печать ворот: %w", err)
@@ -255,7 +257,8 @@ func (a *app) writeQueueGate(cfg *queue.Config, now time.Time, claude queue.Supp
 	}
 	old, oldErr := queue.ReadGate(cfg.Gate)
 	stat, statErr := os.Stat(cfg.Gate)
-	changed := oldErr != nil || !slices.Equal(old.Live, gate.Live) || !slices.Equal(old.Open, gate.Open) || !slices.Equal(old.Lane, gate.Lane)
+	changed := oldErr != nil || !slices.Equal(old.Live, gate.Live) || !slices.Equal(old.Open, gate.Open) || !slices.Equal(old.Lane, gate.Lane) ||
+		old.OpenByRoot == nil || !maps.EqualFunc(old.OpenByRoot, gate.OpenByRoot, slices.Equal[[]string])
 	stale := statErr != nil || old.At.After(now) || now.Sub(stat.ModTime()) > time.Hour
 	if !changed && !stale {
 		return nil
@@ -292,12 +295,12 @@ func supplyMargin(s *queue.Supply) *float64 {
 	return &margin
 }
 
-func (a *app) previousQueueOpen(path string, now time.Time) []string {
+func (a *app) previousQueueGate(path string, now time.Time) queue.Gate {
 	old, err := queue.ReadGate(path)
 	if err == nil && !old.At.After(now) && now.Sub(old.At) <= 26*time.Hour {
-		return old.Open
+		return old
 	}
-	return nil
+	return queue.Gate{}
 }
 
 func (a *app) queueOpenAI(cfg *codexwatch.Config, now time.Time, dry bool) (*queue.Supply, error) {
@@ -443,7 +446,7 @@ func queueDaily(a *app) daily.Store[queueRecord] {
 	return daily.Store[queueRecord]{Dir: filepath.Join(a.stateDir, "queue"), What: "журнал очереди", At: func(r *queueRecord) time.Time { return r.At }}
 }
 
-func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart.Judge, open []string, dry bool, now time.Time) error {
+func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart.Judge, gate queue.Gate, dry bool, now time.Time) error {
 	statePath := filepath.Join(a.dir("queue"), "state.json")
 	before, oldBytes, err := a.queueNoticeState(statePath, dry, now)
 	if err != nil {
@@ -460,7 +463,7 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		a.warn("queue", "реестр сессий", "err", err)
 		return nil
 	}
-	view := queueView(c, alive, judge, open, now, a)
+	view := queueView(c, alive, judge, gate, now, a)
 	notices := before.Step(tickets, view)
 	if dry {
 		for _, n := range notices {
@@ -548,7 +551,7 @@ func (a *app) cachedQueueTickets(ctx context.Context, c *config.Config, now time
 	return tickets, nil
 }
 
-func queueView(c *config.Config, alive map[string]session.Info, judge *restart.Judge, open []string, now time.Time, a *app) queue.View {
+func queueView(c *config.Config, alive map[string]session.Info, judge *restart.Judge, gate queue.Gate, now time.Time, a *app) queue.View {
 	cfg := &c.Queue
 	morning, err := cfg.MorningOffset()
 	if err != nil {
@@ -573,7 +576,7 @@ func queueView(c *config.Config, alive map[string]session.Info, judge *restart.J
 		freeCache[name] = state
 		return state
 	}
-	return queue.View{Now: now, Lead: c.Lead, Open: open, Morning: morning, WeekendCrit: cfg.WeekendCrit,
+	return queue.View{Now: now, Lead: c.Lead, Open: gate.Open, OpenByRoot: gate.OpenByRoot, Morning: morning, WeekendCrit: cfg.WeekendCrit,
 		Serious: func(project string) bool { return slices.Contains(live, project) },
 		Alive:   func(name string) bool { _, ok := alive[name]; return ok }, Free: free}
 }
@@ -766,7 +769,7 @@ func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticke
 				continue
 			}
 			master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
-			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Diff: r.Diff, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, WaitDue: r.Overdue})
+			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Diff: r.Diff, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, WaitDue: r.Overdue, Journal: r.Journal})
 		}
 		return nil
 	}
@@ -780,8 +783,78 @@ func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticke
 			return nil, err
 		}
 	}
+	out = append(out, a.queueTransfers(c, table)...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
+}
+
+// queueTransferLine — строка .transferred.jsonl, которую tk дописывает до удаления перенесённого тикета.
+type queueTransferLine struct {
+	Slug string `json:"slug"`
+	Stem string `json:"stem"`
+	Back string `json:"back"`
+	Key  string `json:"key"`
+	URL  string `json:"url"`
+}
+
+// queueTransfers — перенесённые во внешний трекер тикеты с заказчиком как закрытые: доставка, однократность и потеря — те же, что у строки о закрытом.
+// Файл читается с тикетами: tk удаляет файл тикета, папка меняется, отпечаток видит перенос.
+func (a *app) queueTransfers(c *config.Config, table map[string]string) []queue.Ticket {
+	cfg := &c.Queue
+	dirs, err := queueFingerprintDirs(cfg)
+	if err != nil {
+		a.warn("queue", "папки переносов", "err", err)
+		return nil
+	}
+	var out []queue.Ticket
+	for _, tasks := range dirs {
+		project := queueTasksProject(tasks, cfg.Dirs)
+		for _, line := range a.readQueueTransfers(filepath.Join(tasks, ".transferred.jsonl")) {
+			key := queueKey(filepath.Base(project), line.Slug, line.Stem)
+			if key == "" {
+				a.warn("queue", "строка переноса", "stem", line.Stem)
+				continue
+			}
+			master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
+			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: line.Slug, Status: queue.StatusTransferred,
+				Back: line.Back, Master: master, Admin: admin, Transfer: strings.TrimSpace(line.Key + " " + line.URL)})
+		}
+	}
+	return out
+}
+
+// queueTasksProject — папка проекта по папке тикетов: <проект>/docs/tasks, у папок из dirs — <папка>/tasks.
+func queueTasksProject(tasks string, dirs []string) string {
+	parent := filepath.Dir(tasks)
+	if filepath.Base(parent) == "docs" && !slices.Contains(dirs, parent) {
+		return filepath.Dir(parent)
+	}
+	return parent
+}
+
+func (a *app) readQueueTransfers(path string) []queueTransferLine {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			a.warn("queue", "чтение переносов", "path", path, "err", err)
+		}
+		return nil
+	}
+	var out []queueTransferLine
+	for raw := range strings.SplitSeq(string(b), "\n") {
+		if raw == "" {
+			continue
+		}
+		var line queueTransferLine
+		if err := json.Unmarshal([]byte(raw), &line); err != nil || line.Stem == "" || line.Key == "" {
+			a.warn("queue", "битая строка переноса", "path", path, "err", err)
+			continue
+		}
+		if line.Back != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 type queueRecord struct {

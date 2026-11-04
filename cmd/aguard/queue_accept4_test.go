@@ -477,7 +477,7 @@ func TestQueueLettersReadGateFile(t *testing.T) {
 			t.Fatal(err)
 		}
 		b.c.Queue.Gate = filepath.Join(block, "gate.json")
-		open, err := b.a.queueGatePass(b.c, time.Now(), false)
+		open, err := gateOpen(b.a.queueGatePass(b.c, time.Now(), false))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -487,7 +487,7 @@ func TestQueueLettersReadGateFile(t *testing.T) {
 	})
 	t.Run("файл свежий", func(t *testing.T) {
 		b := newQueueBench(t, "[]", "[]")
-		open, err := b.a.queueGatePass(b.c, time.Now(), false)
+		open, err := gateOpen(b.a.queueGatePass(b.c, time.Now(), false))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -503,7 +503,7 @@ func TestQueueLettersReadGateFile(t *testing.T) {
 		b := newQueueBench(t, "[]", "[]")
 		b.round(t)
 		b.writeHistory(t, map[string]time.Duration{"a": 25 * time.Hour})
-		open, err := b.a.queueGatePass(b.c, time.Now().Add(27*time.Hour), false)
+		open, err := gateOpen(b.a.queueGatePass(b.c, time.Now().Add(27*time.Hour), false))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -513,7 +513,7 @@ func TestQueueLettersReadGateFile(t *testing.T) {
 	})
 	t.Run("сухой прогон показывает расчёт и не пишет", func(t *testing.T) {
 		b := newQueueBench(t, "[]", "[]")
-		open, err := b.a.queueGatePass(b.c, time.Now(), true)
+		open, err := gateOpen(b.a.queueGatePass(b.c, time.Now(), true))
 		if err != nil {
 			t.Fatal(err)
 		}
