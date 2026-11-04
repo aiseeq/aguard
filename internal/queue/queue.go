@@ -422,6 +422,8 @@ type Ticket struct {
 	WaitDue                                                            bool   // для «ждёт»: срок наступил, tk next его показывает
 	Journal                                                            bool   // журнал, а не задача: вне tk next, кроме наступившего wait
 	Transfer                                                           string // перенесён во внешний трекер: ключ и адрес; файла тикета больше нет
+	External                                                           bool   // задача внешнего трекера: файла тикета нет
+	Started                                                            bool   // внешняя задача уже в работе: письмо мастеру есть, письма админу «не взят» нет
 	Created                                                            time.Time
 }
 
@@ -478,9 +480,10 @@ type ticketState struct {
 	Notes       []string  `json:"notes,omitempty"`
 }
 type State struct {
-	Seeded   bool                    `json:"seeded"`
-	Tickets  map[string]*ticketState `json:"tickets,omitempty"`
-	Mornings map[string]string       `json:"mornings,omitempty"`
+	Seeded   bool                      `json:"seeded"`
+	Tickets  map[string]*ticketState   `json:"tickets,omitempty"`
+	Mornings map[string]string         `json:"mornings,omitempty"`
+	External map[string][]ExternalTask `json:"external,omitempty"` // папка проекта → последний ответ трекера
 }
 
 func (s *State) init() {
@@ -610,7 +613,11 @@ func marked(m mark, serious, repeatLog bool) bool {
 
 func (s *State) critNotices(t Ticket, st *ticketState, v View) []Notice {
 	serious := v.Serious != nil && v.Serious(t.Project)
-	line := fmt.Sprintf("aguard: CRIT %s/%s — %s. Брось текущее, кроме другого CRIT: tk show %s", t.Project, t.Slug, t.Title, t.Slug)
+	show := "tk show " + t.Slug
+	if t.External {
+		show = "tk next"
+	}
+	line := fmt.Sprintf("aguard: CRIT %s/%s — %s. Брось текущее, кроме другого CRIT: %s", t.Project, t.Slug, t.Title, show)
 	to := firstAlive(v, t.Master, t.Admin, v.Lead)
 	var out []Notice
 	if to == "" {
@@ -634,7 +641,9 @@ func (s *State) highNotices(t Ticket, st *ticketState, v View) []Notice {
 		st.Taken = true
 		return nil
 	}
-	if st.Taken {
+	if t.Started {
+		st.Taken = true
+	} else if st.Taken {
 		st.Seen, st.Taken = v.Now, false
 	}
 	serious := v.Serious != nil && v.Serious(t.Project)
@@ -651,7 +660,7 @@ func (s *State) highNotices(t Ticket, st *ticketState, v View) []Notice {
 		line := fmt.Sprintf("aguard: HIGH %s/%s — %s. tk next", t.Project, t.Slug, t.Title)
 		out = append(out, notice(t, v, KindHigh, t.Master, line))
 	}
-	if age >= highWait {
+	if age >= highWait && !t.Started {
 		out = append(out, s.highAdminNotice(t, st, v, "не взят за 4 ч, мастер "+t.Master)...)
 	}
 	return out

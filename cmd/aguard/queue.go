@@ -474,6 +474,12 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		a.warn("queue", "tk ls", "err", err)
 		return nil
 	}
+	external, err := a.queueExternal(ctx, c, &before, now)
+	if err != nil {
+		a.warn("queue", "внешний трекер", "err", err)
+		return nil
+	}
+	tickets = append(slices.Clip(tickets), external...)
 	alive, err := a.reg.Alive()
 	if err != nil {
 		a.warn("queue", "реестр сессий", "err", err)
@@ -648,7 +654,7 @@ func (a *app) queueTicketNote(ctx context.Context, tk string, tickets []queue.Ti
 		if t.Key != n.Key {
 			continue
 		}
-		if t.Transfer != "" { // файла тикета больше нет, записывать некуда
+		if t.Transfer != "" || t.External { // файла тикета нет, записывать некуда
 			return nil
 		}
 		cmd := exec.CommandContext(ctx, tk, "note", t.Slug, n.Line, "--by", "aguard")

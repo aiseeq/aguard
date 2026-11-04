@@ -73,31 +73,32 @@ import (
 const procRoot = "/proc"
 
 type app struct {
-	home           string
-	cfgPath        string
-	stateDir       string          // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
-	nightSent      nightState      // отправленное ночным сторожем; nil — ещё не прочитано из state.json
-	nightLogged    map[string]bool // mode=log: ключи, о которых уже написал «написал бы»
-	nightFb        fallbackState   // запуски запасного Сна; nil — ещё не прочитано из fallback.json
-	units          unitRunner      // запуск запасного Сна отдельным unit; nil — запасной Сон не запускается (ошибка)
-	projects       string
-	reg            session.Registry
-	uid            int
-	log            *slog.Logger
-	out            io.Writer                    // вывод команд для человека и агента (dry-run, report)
-	act            *activity.Recorder           // учёт срабатываний; только у демона, у команд nil
-	cpu            map[string]*cpuHost          // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
-	strayRead      strayReader                  // замер процессов без родителя; подменяется в тестах
-	trackFetch     func() (trackfd.Pair, error) // пара дескрипторов слежения; подменяется в тестах
-	diskState      *disk.State                  // состояние наблюдателя disk; загружается один раз демоном
-	diskWalkLoaded bool                         // sizes и traces загружены до первого обхода
-	queueCache     queueTicketCache
-	queueUnsaved   *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
-	codexStep      time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval
-	codexRead      codexReader    // замер лимита Codex; подменяется в тестах
-	codexConsume   codexConsumer  // досрочный сброс Codex; подменяется в тестах
-	codexApproved  codexApprovals // «да» на окно из файла одобрений
-	codexNote      codexNoter     // строка исхода в тикет
+	home            string
+	cfgPath         string
+	stateDir        string          // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
+	nightSent       nightState      // отправленное ночным сторожем; nil — ещё не прочитано из state.json
+	nightLogged     map[string]bool // mode=log: ключи, о которых уже написал «написал бы»
+	nightFb         fallbackState   // запуски запасного Сна; nil — ещё не прочитано из fallback.json
+	units           unitRunner      // запуск запасного Сна отдельным unit; nil — запасной Сон не запускается (ошибка)
+	projects        string
+	reg             session.Registry
+	uid             int
+	log             *slog.Logger
+	out             io.Writer                    // вывод команд для человека и агента (dry-run, report)
+	act             *activity.Recorder           // учёт срабатываний; только у демона, у команд nil
+	cpu             map[string]*cpuHost          // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
+	strayRead       strayReader                  // замер процессов без родителя; подменяется в тестах
+	trackFetch      func() (trackfd.Pair, error) // пара дескрипторов слежения; подменяется в тестах
+	diskState       *disk.State                  // состояние наблюдателя disk; загружается один раз демоном
+	diskWalkLoaded  bool                         // sizes и traces загружены до первого обхода
+	queueCache      queueTicketCache
+	queueExternalAt time.Time      // последний обход внешнего трекера
+	queueUnsaved    *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
+	codexStep       time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval
+	codexRead       codexReader    // замер лимита Codex; подменяется в тестах
+	codexConsume    codexConsumer  // досрочный сброс Codex; подменяется в тестах
+	codexApproved   codexApprovals // «да» на окно из файла одобрений
+	codexNote       codexNoter     // строка исхода в тикет
 }
 
 func main() {
