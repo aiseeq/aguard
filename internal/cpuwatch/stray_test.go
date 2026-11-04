@@ -25,9 +25,113 @@ func strayCfg() *StrayConfig {
 	return &c
 }
 
+// Лид 04.11: демон, которого запустил вход, не сирота, пока сессия жива. Остальное идёт как прежде.
+func TestStrayLoginDaemon(t *testing.T) {
+	const hour = time.Hour
+	for _, c := range []struct {
+		name          string
+		login         bool
+		loginAge, age time.Duration
+		letters       int
+	}{
+		{"родился со входом", true, 7 * hour, 7 * hour, 0},
+		{"на 59 с позже входа", true, 7 * hour, 7*hour - 59*time.Second, 0},
+		{"раньше сессии: его поднял PAM", true, 7 * hour, 7*hour + time.Second, 0},
+		{"ровно на минуту позже входа", true, 7 * hour, 7*hour - time.Minute, 0},
+		{"на 61 с позже входа", true, 7 * hour, 7*hour - 61*time.Second, 1},
+		{"через час после входа", true, 8 * hour, 7 * hour, 1},
+		{"сессия закрывается или удалённая", false, 0, 7 * hour, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var w StrayWatch
+			got := w.Judge(time.Now(), []Proc{{Pid: 7, PPid: 1, Age: c.age, Comm: "ksecretd"}},
+				[]Detail{{Pid: 7, Start: 1, Cgroup: sessionCg, Login: c.login, LoginAge: c.loginAge}}, strayCfg())
+			if len(got) != c.letters {
+				t.Fatalf("%+v", got)
+			}
+		})
+	}
+}
+
+// Демон входа, крутящий ядро after подряд, — настоящая неполадка: он идёт под правилом занятости.
+func TestStrayLoginDaemonHot(t *testing.T) {
+	var w StrayWatch
+	c := strayCfg()
+	now := time.Now()
+	d := []Detail{{Pid: 7, Start: 1, Cgroup: sessionCg, Login: true, LoginAge: 7 * time.Hour}}
+	var got []Stray
+	for i := range 8 {
+		at := now.Add(time.Duration(i) * c.Every.D())
+		cpu := float64(i) * c.Every.D().Seconds()
+		got = w.Judge(at, []Proc{{Pid: 7, PPid: 1, Age: 7 * time.Hour, CPU: cpu, Comm: "ksecretd"}}, d, c)
+	}
+	if len(got) != 1 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// Настоящей оболочкой: cgroup ведёт к файлу той же сессии. Без этого правило молча не срабатывает и письмо возвращается.
+func TestSessionLookup(t *testing.T) {
+	dir := t.TempDir()
+	for name, realtime := range map[string]int64{"3": time.Now().Unix() - 3600, "c1": time.Now().Unix() - 7200, "1": time.Now().Unix() - 60} {
+		body := fmt.Sprintf("STATE=active\nREMOTE=0\nREALTIME=%d000000\n", realtime)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := strings.ReplaceAll(sessionLookup, "/run/systemd/sessions", dir) + `printf %s "$l"`
+	for g, want := range map[string]int{
+		"/user.slice/user-1000.slice/session-3.scope":                          3600,
+		"/user.slice/user-1000.slice/session-c1.scope":                         7200,
+		"/user.slice/user-1000.slice/session-9.scope":                          0,
+		"/user.slice/user-1000.slice/user@1000.service/app.slice/run-r1.scope": 0,
+	} {
+		out, err := exec.Command("sh", "-c", "g='"+g+"'\n"+script).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want == 0 {
+			if len(out) != 0 {
+				t.Fatalf("%s: %q", g, out)
+			}
+			continue
+		}
+		got, err := strconv.Atoi(string(out))
+		if err != nil || got < want || got > want+5 {
+			t.Fatalf("%s: %q %v, ждали %d", g, out, err, want)
+		}
+	}
+}
+
+func TestSessionAwk(t *testing.T) {
+	const now = 2000
+	for name, c := range map[string]struct{ file, want string }{
+		"active":        {"STATE=active\nREMOTE=0\nREALTIME=1000000000\n", "1000"},
+		"online":        {"STATE=online\nREMOTE=0\nREALTIME=1000000000\n", "1000"},
+		"closing":       {"STATE=closing\nREMOTE=0\nREALTIME=1000000000\n", ""},
+		"remote":        {"STATE=active\nREMOTE=1\nREALTIME=1000000000\n", ""},
+		"нет времени":   {"STATE=active\nREMOTE=0\n", ""},
+		"нет состояния": {"REMOTE=0\nREALTIME=1000000000\n", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "3")
+			if err := os.WriteFile(path, []byte(c.file), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.Command("awk", "-F=", "-v", fmt.Sprintf("now=%d", now), sessionAwk, path).Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != c.want {
+				t.Fatalf("%q, ждали %q", out, c.want)
+			}
+		})
+	}
+}
+
 func TestParseStrays(t *testing.T) {
 	raw := "##procs\n  400697       1  113760  113000 bash\n 12 400697 10 5 Web Content\n##strays\n" +
-		"400697\t555\t" + sessionCg + "\t/home/u/run/t\t\t10.0.0.1 1 10.0.0.2 22\tbash -c x\n##end\n"
+		"400697\t555\t" + sessionCg + "\t/home/u/run/t\t\t10.0.0.1 1 10.0.0.2 22\tbash -c x\t\n##end\n"
 	ps, ds, err := ParseStrays([]byte(raw))
 	if err != nil {
 		t.Fatal(err)
@@ -379,14 +483,26 @@ func TestStrayKeyIdentity(t *testing.T) {
 }
 
 // Битая строка замера — ошибка, не тишина: иначе сломанный ps выглядел бы как «процессов нет» и снимал отметки.
+func TestParseStraysLogin(t *testing.T) {
+	_, ds, err := ParseStrays([]byte("##procs\n 7 1 7200 0 bash\n8 1 7200 0 bash\n##strays\n7\t1\t/c\t/w\t\t\tcmd\t3600\n8\t1\t/c\t/w\t\t\tcmd\t\n##end\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ds[0].Login || ds[0].LoginAge != time.Hour || ds[1].Login {
+		t.Fatalf("%+v", ds)
+	}
+}
+
 func TestParseStraysMalformed(t *testing.T) {
 	for _, raw := range []string{
 		"##procs\n 7 1 bash\n##strays\n##end\n",
 		"##procs\n1 2 3\n##strays\n##end\n",
 		"##procs\n x 1 7200 0 bash\n##strays\n##end\n",
 		"##procs\n 7 1 7200 0 bash\n##strays\n7\t1\t/c\n##end\n",
-		"##procs\n 7 1 7200 0 bash\n##strays\nx\t1\t/c\t/w\t\t\tcmd\n##end\n",
-		"##procs\n 7 1 7200 0 bash\n##strays\n7\tx\t/c\t/w\t\t\tcmd\n##end\n",
+		"##procs\n 7 1 7200 0 bash\n##strays\nx\t1\t/c\t/w\t\t\tcmd\t\n##end\n",
+		"##procs\n 7 1 7200 0 bash\n##strays\n7\tx\t/c\t/w\t\t\tcmd\t\n##end\n",
+		"##procs\n 7 1 7200 0 bash\n##strays\n7\t1\t/c\t/w\t\t\tcmd\tx\n##end\n",
+		"##procs\n 7 1 7200 0 bash\n##strays\n7\t1\t/c\t/w\t\t\tcmd\n##end\n",
 		"##procs\n 7 1 7200 0 bash\n##strays\n",
 	} {
 		if _, _, err := ParseStrays([]byte(raw)); err == nil {

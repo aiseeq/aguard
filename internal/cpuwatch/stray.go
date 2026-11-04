@@ -27,7 +27,9 @@ import (
 // другой scope, где законные процессы без родителя бывают (контейнеры, фон): дерево занимает не меньше Hot ядра на
 // каждом проходе подряд After. Не считаются: главный процесс приложения сеанса (его запускает desktop, родитель init по
 // замыслу) и дерево с живой сессией агента или законным фоном (tmux) внутри (занятость — их работа, снимать нельзя;
-// 03.11 konsole со всеми мастерами).
+// 03.11 konsole со всеми мастерами). Демон входа (живая местная сессия, родился вместе с ней: лид 04.11, ksecretd от PAM,
+// снимать нельзя) не остаток: идёт под правилом занятости. Удалённая сессия так не считается: мультиплексор ssh держит
+// её долго, а первая команда в ней родилась вместе с сессией — это и есть сироты тестов.
 // Только письмо, ничего не снимает.
 
 // StrayConfig — раздел [cpu.strays].
@@ -76,7 +78,21 @@ type Detail struct {
 	Claude     int
 	SSH        string
 	Cmd        string
+	Login      bool          // процесс в живой местной сессии logind, а не в ушедшей и не в удалённой
+	LoginAge   time.Duration // возраст этой сессии
 }
+
+// sessionAwk — возраст сессии logind в секундах по её файлу, если она живая и местная; иначе пусто.
+const sessionAwk = `/^STATE=/{s=$2} /^REMOTE=/{r=$2} /^REALTIME=/{t=$2} END{if((s=="active"||s=="online")&&r=="0"&&t!="") printf "%d", now-t/1000000}`
+
+// sessionLookup — по cgroup в $g возраст сессии в $l: сессия без места — session-c1.scope, файл c1.
+const sessionLookup = `l=''
+	case "$g" in */session-*.scope)
+		n=${g##*/session-}
+		l=$(awk -F= -v now="$(date +%s)" '` + sessionAwk + `' "/run/systemd/sessions/${n%.scope}" 2>/dev/null)
+		;;
+	esac
+`
 
 // StrayScript — один замер машины: свои процессы и подробности тех, чей родитель — init или systemd --user, кроме служб
 // (systemd за ними следит сам). Поля — через табуляцию; разбирает ParseStrays. Без временных файлов: на PC идёт по ssh.
@@ -96,7 +112,7 @@ printf '%s\n' "$all" | awk '$5=="systemd"{m[$1]=1} {p[NR]=$1; q[NR]=$2} END{for(
 	cl=$(printf '%s\n' "$e" | sed -n 's/^CLAUDE_PID=//p')
 	ss=$(printf '%s\n' "$e" | sed -n 's/^SSH_CONNECTION=//p')
 	c=$(tr '\0\t\n' '   ' </proc/$p/cmdline 2>/dev/null | cut -c1-200)
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$st" "$g" "$w" "$cl" "$ss" "$c"
+	` + sessionLookup + `	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$st" "$g" "$w" "$cl" "$ss" "$c" "$l"
 done
 echo '##end'
 `
@@ -157,7 +173,7 @@ func parseDetails(s string) ([]Detail, error) {
 			continue
 		}
 		f := strings.Split(l, "\t")
-		if len(f) != 7 {
+		if len(f) != 8 {
 			return nil, fmt.Errorf("замер процессов: строка %q", l)
 		}
 		d := Detail{Cgroup: f[2], Cwd: f[3], SSH: f[5], Cmd: f[6]}
@@ -170,6 +186,13 @@ func parseDetails(s string) ([]Detail, error) {
 		}
 		if d.Claude, err = claudePid(f[4]); err != nil {
 			return nil, fmt.Errorf("замер процессов: %q: %w", l, err)
+		}
+		if f[7] != "" {
+			secs, err := strconv.Atoi(f[7])
+			if err != nil {
+				return nil, fmt.Errorf("замер процессов: %q: %w", l, err)
+			}
+			d.Login, d.LoginAge = true, time.Duration(secs)*time.Second
 		}
 		out = append(out, d)
 	}
@@ -204,6 +227,10 @@ var sessionScope = regexp.MustCompile(`/session-[^/]+\.scope$`)
 // desktopApp — главный процесс приложения сеанса: app-<id>.scope, у терминала — его main.scope. Вкладки терминала
 // (tab(N).scope) сюда не входят: орфан в них остаётся под правилом занятости.
 var desktopApp = regexp.MustCompile(`/app-[^/]+\.scope(?:/main\.scope)?$`)
+
+// loginWindow — насколько возраст демона входа отличается от возраста сессии: PAM поднял ksecretd за 0,04 с до её отметки
+// (замер 04.11), запас на медленный вход. Чем шире, тем дольше сирота первых секунд сеанса молчит.
+const loginWindow = time.Minute
 
 // agentComm — имя процесса сессии агента; по нему, а не по реестру сессий: реестр знает только свою машину, а PC — по ssh.
 const agentComm = "claude"
@@ -247,7 +274,7 @@ func (w *StrayWatch) Judge(now time.Time, procs []Proc, details []Detail, c *Str
 			busy[key] = since
 		}
 		_, hot := busy[key]
-		if sessionScope.MatchString(d.Cgroup) {
+		if sessionScope.MatchString(d.Cgroup) && !(d.Login && (d.LoginAge-p.Age).Abs() <= loginWindow) {
 			if p.Age >= c.After.D() {
 				out = append(out, s)
 			}
