@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -162,7 +165,10 @@ func TestQueueTransfers(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tasks, ".transferred.jsonl"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := b.a.queueTransfers(b.c, nil)
+	got, err := b.a.queueTransfers(b.c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 1 || got[0].Key != "p/20261104-1000-x" || got[0].Back != "lead" || got[0].Transfer != "TRK-7 https://x/TRK-7" ||
 		got[0].Status != queue.StatusTransferred || got[0].Dir != filepath.Join(b.dir, "git", "p") {
 		t.Fatalf("%+v", got)
@@ -180,5 +186,98 @@ func TestQueueTasksProject(t *testing.T) {
 		if got := queueTasksProject(tasks, dirs); got != want {
 			t.Errorf("%s: %s, нужно %s", tasks, got, want)
 		}
+	}
+}
+
+// Поля от демона доходят до View и списка тикетов: без этого правила молча не действуют при зелёных тестах логики.
+func TestQueueWiring(t *testing.T) {
+	b := newQueueBench(t, `[{"repo":"p","prio":"HIGH","status":"открыт","path":"docs/tasks/20261104-1000-HIGH-j.md","slug":"j","title":"журнал","journal":true}]`, "[]")
+	b.c.Queue.WeekendCrit = []string{"/h/work"}
+	gate := queue.Gate{Open: []string{"MED-DO"}, OpenByRoot: map[string][]string{"/h/work": {"MED-HUNT"}}}
+	v := queueView(b.c, nil, nil, gate, time.Now(), b.a)
+	if !slices.Equal(v.WeekendCrit, b.c.Queue.WeekendCrit) || !slices.Equal(v.Open, gate.Open) || !slices.Equal(v.OpenByRoot["/h/work"], []string{"MED-HUNT"}) {
+		t.Fatalf("View: %+v", v)
+	}
+	tasks := filepath.Join(b.dir, "git", "p", "docs", "tasks")
+	line := `{"slug":"x","stem":"20261104-1100-HIGH-x","back":"lead","key":"TRK-7","url":"https://x/TRK-7"}` + "\n"
+	if err := os.WriteFile(filepath.Join(tasks, ".transferred.jsonl"), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := b.a.queueTickets(context.Background(), b.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journal, transfer bool
+	for _, x := range ts {
+		journal = journal || x.Slug == "j" && x.Journal
+		transfer = transfer || x.Slug == "x" && x.Transfer != ""
+	}
+	if !journal || !transfer {
+		t.Fatalf("журнал %v, перенос %v: %+v", journal, transfer, ts)
+	}
+}
+
+// Файл переносов не прочитался: ошибка как у tk ls, список остаётся прошлым, отметки доставки не стираются и письма не повторяются.
+func TestQueueTransfersReadError(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	path := filepath.Join(b.dir, "git", "p", "docs", "tasks", ".transferred.jsonl")
+	if err := os.Mkdir(path, 0o755); err != nil { // каталог вместо файла: ошибка чтения и у root
+		t.Fatal(err)
+	}
+	_, err := b.a.queueTickets(context.Background(), b.c)
+	var listErr queueListError
+	if !errors.As(err, &listErr) {
+		t.Fatalf("ошибка: %v", err)
+	}
+}
+
+// Замороженный проект файл не читает, в том числе папка из dirs.
+func TestQueueTransfersSkip(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	line := `{"slug":"x","stem":"20261104-1100-HIGH-x","back":"lead","key":"TRK-7"}` + "\n"
+	path := filepath.Join(b.dir, "docs", "tasks", ".transferred.jsonl")
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.a.queueTransfers(b.c, nil)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("без skip: %+v %v", got, err)
+	}
+	b.c.Queue.Skip = []string{filepath.Join(b.dir, "docs")}
+	got, err = b.a.queueTransfers(b.c, nil)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("skip: %+v %v", got, err)
+	}
+}
+
+// Заметка о тикете, файл которого ушёл при переносе, закрыта: иначе tk note падал бы каждые 30 с навсегда.
+func TestQueueNoteTransferred(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	ts := []queue.Ticket{{Key: "p/x", Slug: "x", Dir: b.dir, Transfer: "TRK-7"}}
+	if err := b.a.queueTicketNote(context.Background(), filepath.Join(b.dir, "нет-такого-tk"), ts, queue.PendingNote{Key: "p/x", Line: "строка"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Файл старого формата при сломанном входе: новый tk покажет только CRIT и HIGH, письма считают так же.
+func TestQueuePreviousGateOldFormat(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	body := fmt.Sprintf(`{"at":%q,"live":[],"open":["MED-DO"],"lane":[]}`, time.Now().Format(time.RFC3339))
+	if err := os.WriteFile(b.c.Queue.Gate, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.a.previousQueueGate(b.c.Queue.Gate, time.Now()); len(got.Open) != 0 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// Смена только карты видна в журнале: иначе строка «ворота изменились» с теми же open и lane ничего не объясняет.
+func TestQueueGateJournalNamesRoots(t *testing.T) {
+	got := formatOpenByRoot(map[string][]string{"/h/b": {"MED-DO", "LOW-DO"}, "/h/a": {}})
+	if got != "; по корням: /h/a=-, /h/b=MED-DO,LOW-DO" {
+		t.Fatal(got)
+	}
+	if formatOpenByRoot(nil) != "" {
+		t.Fatal("без корней — без хвоста")
 	}
 }

@@ -56,12 +56,22 @@ func (c *Config) Validate(home string) error {
 			ps[i] = policy.ExpandHome(ps[i], home)
 		}
 	}
+	for i := range c.WeekendCrit {
+		c.WeekendCrit[i] = filepath.Clean(c.WeekendCrit[i])
+	}
 	spaces := make(map[string]int, len(c.Spaces))
 	for root, shift := range c.Spaces {
 		if shift < 0 || shift > MaxSpaceShift {
 			return fmt.Errorf("queue.spaces[%s]: сдвиг 0..%d, а не %d", root, MaxSpaceShift, shift)
 		}
-		spaces[filepath.Clean(policy.ExpandHome(root, home))] = shift
+		path := filepath.Clean(policy.ExpandHome(root, home))
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("queue.spaces[%s]: корень — полный путь или от ~", root)
+		}
+		if _, dup := spaces[path]; dup {
+			return fmt.Errorf("queue.spaces: корень %s записан дважды", path)
+		}
+		spaces[path] = shift
 	}
 	c.Spaces = spaces
 	for _, p := range []*string{&c.Table, &c.Override, &c.Gate, &c.History, &c.Tk} {

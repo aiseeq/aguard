@@ -268,10 +268,25 @@ func (a *app) writeQueueGate(cfg *queue.Config, now time.Time, claude queue.Supp
 		return nil
 	}
 	if changed {
-		line := fmt.Sprintf("ворота изменились: запас Claude %.2f, OpenAI %s; open=%s; lane=%s%s", gate.Claude, formatSupply(openai), strings.Join(gate.Open, ","), strings.Join(gate.Lane, ","), overrideSummary(overrides, now))
+		line := fmt.Sprintf("ворота изменились: запас Claude %.2f, OpenAI %s; open=%s; lane=%s%s", gate.Claude, formatSupply(openai), strings.Join(gate.Open, ","), strings.Join(gate.Lane, ","), formatOpenByRoot(gate.OpenByRoot)+overrideSummary(overrides, now))
 		a.queueJournal(queue.Notice{Kind: "gate", Line: line}, now)
 	}
 	return nil
+}
+
+func formatOpenByRoot(byRoot map[string][]string) string {
+	if len(byRoot) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(byRoot))
+	for _, root := range slices.Sorted(maps.Keys(byRoot)) {
+		pairs := "-"
+		if len(byRoot[root]) != 0 {
+			pairs = strings.Join(byRoot[root], ",")
+		}
+		parts = append(parts, root+"="+pairs)
+	}
+	return "; по корням: " + strings.Join(parts, ", ")
 }
 
 func overrideSummary(overrides []queue.Override, now time.Time) string {
@@ -297,7 +312,8 @@ func supplyMargin(s *queue.Supply) *float64 {
 
 func (a *app) previousQueueGate(path string, now time.Time) queue.Gate {
 	old, err := queue.ReadGate(path)
-	if err == nil && !old.At.After(now) && now.Sub(old.At) <= 26*time.Hour {
+	// Файл старого формата без карты: tk видит только CRIT и HIGH, письма считают так же.
+	if err == nil && old.OpenByRoot != nil && !old.At.After(now) && now.Sub(old.At) <= 26*time.Hour {
 		return old
 	}
 	return queue.Gate{}
@@ -632,6 +648,9 @@ func (a *app) queueTicketNote(ctx context.Context, tk string, tickets []queue.Ti
 		if t.Key != n.Key {
 			continue
 		}
+		if t.Transfer != "" { // файла тикета больше нет, записывать некуда
+			return nil
+		}
 		cmd := exec.CommandContext(ctx, tk, "note", t.Slug, n.Line, "--by", "aguard")
 		cmd.Dir = t.Dir
 		if output, err := cmd.CombinedOutput(); err != nil {
@@ -783,7 +802,11 @@ func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticke
 			return nil, err
 		}
 	}
-	out = append(out, a.queueTransfers(c, table)...)
+	transfers, err := a.queueTransfers(c, table)
+	if err != nil {
+		return nil, queueListError{err: err}
+	}
+	out = append(out, transfers...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
 }
@@ -798,18 +821,24 @@ type queueTransferLine struct {
 }
 
 // queueTransfers — перенесённые во внешний трекер тикеты с заказчиком как закрытые: доставка, однократность и потеря — те же, что у строки о закрытом.
-// Файл читается с тикетами: tk удаляет файл тикета, папка меняется, отпечаток видит перенос.
-func (a *app) queueTransfers(c *config.Config, table map[string]string) []queue.Ticket {
+// Файл читается с тикетами: tk удаляет файл тикета, папка меняется, отпечаток видит перенос. Ошибка чтения — как сбой tk ls: прошлый список цел, отметки доставки не стираются.
+func (a *app) queueTransfers(c *config.Config, table map[string]string) ([]queue.Ticket, error) {
 	cfg := &c.Queue
 	dirs, err := queueFingerprintDirs(cfg)
 	if err != nil {
-		a.warn("queue", "папки переносов", "err", err)
-		return nil
+		return nil, fmt.Errorf("папки переносов: %w", err)
 	}
 	var out []queue.Ticket
 	for _, tasks := range dirs {
 		project := queueTasksProject(tasks, cfg.Dirs)
-		for _, line := range a.readQueueTransfers(filepath.Join(tasks, ".transferred.jsonl")) {
+		if slices.ContainsFunc(cfg.Skip, func(p string) bool { return filepath.Clean(p) == project }) {
+			continue
+		}
+		lines, err := a.readQueueTransfers(filepath.Join(tasks, ".transferred.jsonl"))
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range lines {
 			key := queueKey(filepath.Base(project), line.Slug, line.Stem)
 			if key == "" {
 				a.warn("queue", "строка переноса", "stem", line.Stem)
@@ -820,7 +849,7 @@ func (a *app) queueTransfers(c *config.Config, table map[string]string) []queue.
 				Back: line.Back, Master: master, Admin: admin, Transfer: strings.TrimSpace(line.Key + " " + line.URL)})
 		}
 	}
-	return out
+	return out, nil
 }
 
 // queueTasksProject — папка проекта по папке тикетов: <проект>/docs/tasks, у папок из dirs — <папка>/tasks.
@@ -832,13 +861,13 @@ func queueTasksProject(tasks string, dirs []string) string {
 	return parent
 }
 
-func (a *app) readQueueTransfers(path string) []queueTransferLine {
+func (a *app) readQueueTransfers(path string) ([]queueTransferLine, error) {
 	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			a.warn("queue", "чтение переносов", "path", path, "err", err)
-		}
-		return nil
+		return nil, fmt.Errorf("чтение переносов: %w", err)
 	}
 	var out []queueTransferLine
 	for raw := range strings.SplitSeq(string(b), "\n") {
@@ -854,7 +883,7 @@ func (a *app) readQueueTransfers(path string) []queueTransferLine {
 			out = append(out, line)
 		}
 	}
-	return out
+	return out, nil
 }
 
 type queueRecord struct {
