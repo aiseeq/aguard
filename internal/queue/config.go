@@ -17,11 +17,13 @@ type Config struct {
 	GitRoots  []string        `toml:"git_roots"`
 	Dirs      []string        `toml:"dirs"`
 	Skip      []string        `toml:"skip"`
-	Table     string          `toml:"table"`
-	Override  string          `toml:"override"`
-	Gate      string          `toml:"gate"`
-	History   string          `toml:"history"`
-	Tk        string          `toml:"tk"`
+	// WeekendCrit — папки проектов, где в субботу и воскресенье из строк идут только CRIT. Список — в конфиге машины.
+	WeekendCrit []string `toml:"weekend_crit"`
+	Table       string   `toml:"table"`
+	Override    string   `toml:"override"`
+	Gate        string   `toml:"gate"`
+	History     string   `toml:"history"`
+	Tk          string   `toml:"tk"`
 }
 
 func Default(home string) Config {
@@ -47,7 +49,7 @@ func (c *Config) Validate(home string) error {
 	if _, err := time.Parse("15:04", c.Morning); err != nil {
 		return fmt.Errorf("queue.morning: %w", err)
 	}
-	for _, ps := range [][]string{c.GitRoots, c.Dirs, c.Skip} {
+	for _, ps := range [][]string{c.GitRoots, c.Dirs, c.Skip, c.WeekendCrit} {
 		for i := range ps {
 			ps[i] = policy.ExpandHome(ps[i], home)
 		}

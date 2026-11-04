@@ -573,7 +573,7 @@ func queueView(c *config.Config, alive map[string]session.Info, judge *restart.J
 		freeCache[name] = state
 		return state
 	}
-	return queue.View{Now: now, Lead: c.Lead, Open: open, Morning: morning,
+	return queue.View{Now: now, Lead: c.Lead, Open: open, Morning: morning, WeekendCrit: cfg.WeekendCrit,
 		Serious: func(project string) bool { return slices.Contains(live, project) },
 		Alive:   func(name string) bool { _, ok := alive[name]; return ok }, Free: free}
 }

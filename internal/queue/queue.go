@@ -406,6 +406,9 @@ type View struct {
 	Open                 []string
 	Morning              time.Duration
 	Serious, Alive, Free func(string) bool
+	WeekendCrit          []string // папки проектов: в субботу и воскресенье из строк идут только CRIT
+
+	restingSessions map[string]bool // сессии этих папок в такой день, считает Step
 }
 type Notice struct {
 	To, Kind, Key, Line string
@@ -448,6 +451,7 @@ func (s *State) init() {
 }
 func (s *State) Step(ts []Ticket, v View) []Notice {
 	s.init()
+	v.restingSessions = restingSessions(ts, v)
 	var out []Notice
 	wasSeed := s.Seeded
 	active := map[string]bool{}
@@ -482,9 +486,35 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 		return s.critNotices(t, st, v)
 	}
 	if t.Prio == "HIGH" {
+		if t.Status == "открыт" && restingDir(t.Dir, v) {
+			st.Seen, st.Taken = v.Now, false // срок 4 ч пойдёт с понедельника
+			return nil
+		}
 		return s.highNotices(t, st, v)
 	}
 	return nil
+}
+
+// restingDir — суббота или воскресенье, и папка проекта в weekend_crit.
+func restingDir(dir string, v View) bool {
+	if day := v.Now.Weekday(); day != time.Saturday && day != time.Sunday {
+		return false
+	}
+	return slices.ContainsFunc(v.WeekendCrit, func(root string) bool {
+		return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
+	})
+}
+
+// restingSessions — мастера и админы папок на выходном: строка о закрытом им ждёт понедельника. Лиду идёт всегда.
+func restingSessions(ts []Ticket, v View) map[string]bool {
+	out := map[string]bool{}
+	for i := range ts {
+		if restingDir(ts[i].Dir, v) {
+			out[ts[i].Master], out[ts[i].Admin] = true, true
+		}
+	}
+	delete(out, v.Lead)
+	return out
 }
 
 // seedTicket — первая встреча тикета при посеве: true, если он уже учтён и строки не будет.
@@ -588,7 +618,7 @@ func (s *State) backNotices(t Ticket, st *ticketState, v View) []Notice {
 		st.BackLost = true
 		return []Notice{notice(t, v, KindBackLost, "", line)}
 	}
-	if alive(v, t.Back) && v.Free != nil && v.Free(t.Back) {
+	if !v.restingSessions[t.Back] && alive(v, t.Back) && v.Free != nil && v.Free(t.Back) {
 		return []Notice{notice(t, v, KindBack, t.Back, line)}
 	}
 	return nil
@@ -627,7 +657,7 @@ func (s *State) morningNotices(ts []Ticket, v View) []Notice {
 func morningTicket(t Ticket, boundary time.Time, v View) bool {
 	p := NormPrio(t.Prio)
 	return (t.Created.IsZero() || !t.Created.After(boundary)) && t.Master != "" && alive(v, t.Master) &&
-		(p == "MED" || p == "LOW") && visibleInNext(t)
+		(p == "MED" || p == "LOW") && visibleInNext(t) && !restingDir(t.Dir, v)
 }
 
 // visibleInNext — статус тикета, который tk next покажет мастеру: иначе строка «есть работа» придёт при пустом tk next.
