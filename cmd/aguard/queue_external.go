@@ -19,27 +19,26 @@ import (
 )
 
 const (
-	queueExternalEvery   = 5 * time.Minute // запрос к трекеру идёт секунды на проект: каждые 30 с незачем, письмо о HIGH подождёт
-	queueExternalTimeout = 20 * time.Second
-	queueExternalSweep   = time.Minute // весь обход: он идёт до писем, местные не должны ждать дольше
+	queueExternalEvery   = 5 * time.Minute  // запрос к трекеру идёт секунды на проект: каждые 30 с незачем, письмо о HIGH подождёт
+	queueExternalTimeout = 10 * time.Second // сам tk держит источник 5 с
+	queueExternalSweep   = time.Minute      // весь обход: он идёт до писем, местные не должны ждать дольше
 	// После таймаута: потомок tk с открытыми трубами иначе держит Output до своего конца.
 	queueExternalKillWait = 2 * time.Second
 )
 
 // queueExternal — задачи внешнего трекера как тикеты: то же, что мастер видит в tk next. Правила отбора и доверие к источнику
 // остаются в tk. Сбой проекта — WARN и прошлый список: местные тикеты идут как шли, отметки о письмах целы.
-func (a *app) queueExternal(ctx context.Context, c *config.Config, state *queue.State, now time.Time) []queue.Ticket {
+func (a *app) queueExternal(ctx context.Context, c *config.Config, state *queue.State, now time.Time) ([]queue.Ticket, error) {
+	table, err := names.ReadTable(filepath.Join(a.home, names.File), a.home)
+	if err != nil {
+		return nil, err
+	}
 	projects := queueExternalProjects(&c.Queue)
 	if now.Sub(a.queueExternalAt) >= queueExternalEvery {
 		a.queueExternalAt = now
 		a.pollQueueExternal(ctx, c.Queue.Tk, projects, state, now, queueExternalSweep)
 	}
 	state.KeepExternal(projects)
-	table, err := names.ReadTable(filepath.Join(a.home, names.File), a.home)
-	if err != nil { // прошлый список: без него Step счёл бы задачи пропавшими и потом написал заново
-		a.warn("queue", "внешний трекер", "err", err)
-		return a.queueExternalTickets
-	}
 	var out []queue.Ticket
 	for _, dir := range projects {
 		master, admin := queueOwners(dir, a.home, c.Lead, table, c.Admins)
@@ -47,8 +46,7 @@ func (a *app) queueExternal(ctx context.Context, c *config.Config, state *queue.
 			out = append(out, task.Ticket(filepath.Base(dir), dir, master, admin))
 		}
 	}
-	a.queueExternalTickets = out
-	return out
+	return out, nil
 }
 
 func (a *app) pollQueueExternal(ctx context.Context, tk string, projects []string, state *queue.State, now time.Time, budget time.Duration) {

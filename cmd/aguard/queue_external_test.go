@@ -33,6 +33,15 @@ func (b *queueBench) externalTk(t *testing.T, answer string) (answerPath, calls 
 	return answerPath, calls
 }
 
+func (b *queueBench) external(t *testing.T, state *queue.State, now time.Time) []queue.Ticket {
+	t.Helper()
+	ts, err := b.a.queueExternal(context.Background(), b.c, state, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ts
+}
+
 func callCount(t *testing.T, path string) int {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -49,7 +58,7 @@ func TestQueueExternalTickets(t *testing.T) {
 	b := newQueueBench(t, "[]", "[]")
 	b.externalTk(t, extHigh)
 	var state queue.State
-	ts := b.a.queueExternal(context.Background(), b.c, &state, time.Now())
+	ts := b.external(t, &state, time.Now())
 	if len(ts) != 1 || ts[0].Key != "p/TRK-1" || !ts[0].External || ts[0].Status != "открыт" || ts[0].Dir != filepath.Join(b.dir, "git", "p") {
 		t.Fatalf("%+v", ts)
 	}
@@ -62,7 +71,7 @@ func TestQueueExternalCadence(t *testing.T) {
 	var state queue.State
 	now := time.Now()
 	for _, later := range []time.Duration{0, 30 * time.Second, 4*time.Minute + 59*time.Second} {
-		ts := b.a.queueExternal(context.Background(), b.c, &state, now.Add(later))
+		ts := b.external(t, &state, now.Add(later))
 		if len(ts) != 1 {
 			t.Fatalf("+%v: %+v", later, ts)
 		}
@@ -70,7 +79,7 @@ func TestQueueExternalCadence(t *testing.T) {
 	if n := callCount(t, calls); n != 1 {
 		t.Fatalf("запросов до 5 мин: %d", n)
 	}
-	b.a.queueExternal(context.Background(), b.c, &state, now.Add(5*time.Minute))
+	b.external(t, &state, now.Add(5*time.Minute))
 	if n := callCount(t, calls); n != 2 {
 		t.Fatalf("запросов к 5 мин: %d", n)
 	}
@@ -96,10 +105,10 @@ func TestQueueExternalFailureKeepsList(t *testing.T) {
 			log := b.captureLog()
 			var state queue.State
 			now := time.Now()
-			b.a.queueExternal(context.Background(), b.c, &state, now)
+			b.external(t, &state, now)
 			first := state.External[filepath.Join(b.dir, "git", "p")][0].FirstSeen
 			breakIt(t, answer)
-			ts := b.a.queueExternal(context.Background(), b.c, &state, now.Add(5*time.Minute))
+			ts := b.external(t, &state, now.Add(5*time.Minute))
 			if len(ts) != 1 || !ts[0].Created.Equal(first) {
 				t.Fatalf("список после сбоя: %+v", ts)
 			}
@@ -116,7 +125,7 @@ func TestQueueExternalSurvivesRestart(t *testing.T) {
 	answer, _ := b.externalTk(t, extHigh)
 	var state queue.State
 	now := time.Now()
-	b.a.queueExternal(context.Background(), b.c, &state, now)
+	b.external(t, &state, now)
 	data, err := json.Marshal(state)
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +138,7 @@ func TestQueueExternalSurvivesRestart(t *testing.T) {
 	if err := os.WriteFile(answer+".fail", nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ts := b.a.queueExternal(context.Background(), b.c, &loaded, now.Add(time.Minute))
+	ts := b.external(t, &loaded, now.Add(time.Minute))
 	if len(ts) != 1 || ts[0].Key != "p/TRK-1" {
 		t.Fatalf("после рестарта: %+v", ts)
 	}
@@ -146,9 +155,9 @@ func TestQueueExternalLeftConfig(t *testing.T) {
 			_, calls := b.externalTk(t, extHigh)
 			var state queue.State
 			now := time.Now()
-			b.a.queueExternal(context.Background(), b.c, &state, now)
+			b.external(t, &state, now)
 			change(b)
-			ts := b.a.queueExternal(context.Background(), b.c, &state, now.Add(5*time.Minute))
+			ts := b.external(t, &state, now.Add(5*time.Minute))
 			if len(ts) != 0 || len(state.External) != 0 || callCount(t, calls) != 1 {
 				t.Fatalf("%+v %+v", ts, state.External)
 			}
@@ -170,14 +179,19 @@ func TestQueueExternalSeesTkDir(t *testing.T) {
 	}
 }
 
-// Проверка 04.11: сбой таблицы имён не останавливает проход, внешние остаются прошлым списком, причина в журнале.
+// Проверка 04.11: при сбое таблицы имён проход пропускается целиком: внешние без мастера стёрли бы отметки о письмах.
 func TestQueueExternalBrokenNames(t *testing.T) {
 	b := newQueueBench(t, "[]", "[]")
 	b.externalTk(t, extHigh)
 	log := b.captureLog()
-	var state queue.State
-	now := time.Now()
-	b.a.queueExternal(context.Background(), b.c, &state, now)
+	b.round(t)
+	before, err := os.ReadFile(b.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(before), "TRK-1") {
+		t.Fatalf("state.json: %s", before)
+	}
 	table := filepath.Join(b.a.home, names.File)
 	if err := os.MkdirAll(filepath.Dir(table), 0o755); err != nil {
 		t.Fatal(err)
@@ -185,9 +199,13 @@ func TestQueueExternalBrokenNames(t *testing.T) {
 	if err := os.WriteFile(table, []byte("строка без табуляции\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ts := b.a.queueExternal(context.Background(), b.c, &state, now.Add(time.Minute))
-	if len(ts) != 1 || ts[0].Key != "p/TRK-1" {
-		t.Fatalf("при сломанной таблице: %+v", ts)
+	b.round(t)
+	after, err := os.ReadFile(b.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("состояние изменилось:\n%s\n%s", before, after)
 	}
 	if !strings.Contains(log.String(), "внешний трекер") {
 		t.Fatalf("журнал: %s", log.String())
@@ -206,7 +224,7 @@ func TestQueueExternalBadDir(t *testing.T) {
 	log := b.captureLog()
 	var state queue.State
 	state.External = map[string][]queue.ExternalTask{loop: {{Key: "TRK-2", Prio: "HIGH", Status: "To Do"}}}
-	ts := b.a.queueExternal(context.Background(), b.c, &state, time.Now())
+	ts := b.external(t, &state, time.Now())
 	if len(ts) != 2 {
 		t.Fatalf("%+v", ts)
 	}
