@@ -563,10 +563,10 @@ func underRoot(dir, root string) bool {
 
 // openFor — планка папки: самый длинный корень, куда она входит, иначе общие ворота. Как у tk next.
 func openFor(dir string, v View) []string {
-	best, open := "", v.Open
-	for root, pairs := range v.OpenByRoot {
-		if underRoot(dir, root) && len(root) > len(best) {
-			best, open = root, pairs
+	open := v.Open
+	for _, root := range slices.Sorted(maps.Keys(v.OpenByRoot)) { // корни папки — цепочка префиксов: длинный идёт последним
+		if underRoot(dir, root) {
+			open = v.OpenByRoot[root]
 		}
 	}
 	return open
