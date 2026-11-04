@@ -718,7 +718,7 @@ func (s *State) morningNotices(ts []Ticket, v View) []Notice {
 		if !morningTicket(*t, boundary, v) {
 			continue
 		}
-		if !morningOpen(*t, NormPrio(t.Prio), openFor(t.Dir, v)) {
+		if !dueWait(*t) && !morningOpen(*t, NormPrio(t.Prio), openFor(t.Dir, v)) {
 			continue
 		}
 		seriousByMaster[t.Master] = seriousByMaster[t.Master] || (v.Serious != nil && v.Serious(t.Project))
@@ -739,8 +739,18 @@ func (s *State) morningNotices(ts []Ticket, v View) []Notice {
 
 func morningTicket(t Ticket, boundary time.Time, v View) bool {
 	p := NormPrio(t.Prio)
-	return (t.Created.IsZero() || !t.Created.After(boundary)) && t.Master != "" && alive(v, t.Master) &&
-		(p == "MED" || p == "LOW") && visibleInNext(t) && !restingDir(t.Dir, v)
+	if t.Master == "" || !alive(v, t.Master) {
+		return false
+	}
+	if dueWait(t) { // другого пути нет: tk next покажет его, только когда мастер уже проснулся
+		return p == "CRIT" || !restingDir(t.Dir, v)
+	}
+	return (t.Created.IsZero() || !t.Created.After(boundary)) && (p == "MED" || p == "LOW") && visibleInNext(t) && !restingDir(t.Dir, v)
+}
+
+// dueWait — наступивший ждущий: tk next показывает его при любых воротах и любом приоритете.
+func dueWait(t Ticket) bool {
+	return t.Status == "ждёт" && t.WaitDue
 }
 
 // visibleInNext — статус тикета, который tk next покажет мастеру: иначе строка «есть работа» придёт при пустом tk next.
