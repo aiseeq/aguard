@@ -471,14 +471,7 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 	if st == nil {
 		st = &ticketState{Prio: t.Prio, Seen: v.Now}
 		s.Tickets[t.Key] = st
-		freshHigh := !seeded && t.Prio == "HIGH" && t.Status == "открыт" && !t.Created.IsZero() && v.Now.Sub(t.Created) < highWait
-		if freshHigh {
-			st.Seen = t.Created
-		} else if !seeded && closedTicket {
-			st.Closed, st.BackSent = v.Now, true
-			return nil
-		} else if !seeded && t.Prio == "HIGH" && t.Status == "открыт" {
-			st.High, st.Admin = mark{At: v.Now, Mode: ModeOn}, mark{At: v.Now, Mode: ModeOn}
+		if !seeded && seedTicket(t, st, v.Now) {
 			return nil
 		}
 	}
@@ -492,6 +485,22 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 		return s.highNotices(t, st, v)
 	}
 	return nil
+}
+
+// seedTicket — первая встреча тикета при посеве: true, если он уже учтён и строки не будет.
+func seedTicket(t Ticket, st *ticketState, now time.Time) bool {
+	switch {
+	case closed(t.Status):
+		st.Closed, st.BackSent = now, true
+		return true
+	case t.Prio != "HIGH" || t.Status != "открыт":
+		return false
+	case !t.Created.IsZero() && now.Sub(t.Created) < highWait:
+		st.Seen = t.Created
+		return false
+	}
+	st.High, st.Admin = mark{At: now, Mode: ModeOn}, mark{At: now, Mode: ModeOn}
+	return true
 }
 
 func notice(t Ticket, v View, kind, to, line string) Notice {
