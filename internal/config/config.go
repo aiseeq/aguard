@@ -24,6 +24,7 @@ import (
 	"github.com/aiseeq/aguard/internal/night"
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/remotebroken"
 	"github.com/aiseeq/aguard/internal/restart"
@@ -54,7 +55,8 @@ type Config struct {
 	GUI     guiwatch.Config       `toml:"gui"`    // потоки графического интерфейса
 	Remote  remotebroken.Config   `toml:"remote"` // сломанный путь graft на PC: письмо владельцу и сводка лиду
 	Codex   codexwatch.Config     `toml:"codex"`  // недельный лимит Codex: письмо лиду перед досрочным 100% и при нём
-	Night   night.Config          `toml:"night"`  // Сон, Дайджест и окна доверия
+	Queue   queue.Config          `toml:"queue"`
+	Night   night.Config          `toml:"night"` // Сон, Дайджест и окна доверия
 }
 
 // Path — путь конфига в домашней папке.
@@ -83,6 +85,7 @@ func Default(home string) Config {
 		GUI:        guiwatch.Default(),
 		Remote:     remotebroken.Default(home),
 		Codex:      codexwatch.Default(home),
+		Queue:      queue.Default(home),
 		Night:      night.Default(home),
 	}
 }
@@ -181,6 +184,9 @@ func (c *Config) finish(home string, uid int) error {
 	}
 	if err := c.Codex.Validate(home); err != nil {
 		return fmt.Errorf("codex: %w", err)
+	}
+	if err := c.Queue.Validate(home); err != nil {
+		return err
 	}
 	if err := c.Night.Validate(home); err != nil {
 		return err

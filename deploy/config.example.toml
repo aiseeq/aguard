@@ -274,6 +274,22 @@ tk = "~/bin/tk"
 ticket_root = "~/git"
 ticket = "codex-limit-reset"
 
+# Ворота очереди: серьёзными считаются только live проекты; остальные только журналируются.
+[queue]
+mode = "on"
+live = ["glint", "graft"]
+interval = "30s"
+free_after = "2m"
+morning = "07:00"
+git_roots = ["~/git", "~/work"]
+dirs = ["~/docs"]
+skip = [] # папки проектов, которые очередь не читает: список — только в конфиге машины
+table = "~/.config/queue/gate.tsv"
+override = "~/.config/queue/override.tsv"
+gate = "~/.local/state/queue/gate.json"
+history = "~/.local/state/chooks/limits-history.jsonl"
+tk = "~/bin/tk"
+
 # Сторож старта Сна и Дайджеста, а также зависшего окна доверия после перезапуска cl.
 # mode = log — только пишет «написал бы»; alert — письмо лиду и also_to (сигнал «лид не поднялся» лиду же не поможет).
 [night]

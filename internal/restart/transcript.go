@@ -12,13 +12,16 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/aiseeq/akit/transcript/waits"
 )
 
 // transcriptFacts — незакрытая работа процесса по его транскрипту (~/.claude/projects/<проект>/<сессия>.jsonl),
 // считая только записи с начала жизни процесса: задачи и таймеры прошлых процессов той же беседы уже мертвы.
 type transcriptFacts struct {
 	// Pending — вызовы инструментов без результата: инструмент идёт или ждёт ответа человека.
-	Pending []string
+	Pending      []string
+	PendingWaits int
 	// Tasks — фоновые команды, мониторы и суб-агенты без уведомления о завершении; Agents — суб-агенты и workflow
 	// среди них: держат и сброс набором /clear.
 	Tasks  []string
@@ -137,6 +140,7 @@ type toolUse struct {
 	name  string
 	input object
 	at    time.Time
+	wait  bool
 }
 
 var (
@@ -263,7 +267,8 @@ func (s *transcriptScan) calls(typ string, rec object, at time.Time) error {
 			if err != nil {
 				return err
 			}
-			s.uses[b.ID] = toolUse{name: b.Name, input: input, at: at}
+			cmd := input.str("command")
+			s.uses[b.ID] = toolUse{name: b.Name, input: input, at: at, wait: b.Name == "Bash" && waits.CommandHow(cmd) != ""}
 			s.pending[b.ID] = b.Name
 		case typ == "user" && b.Type == "tool_result":
 			if err := s.result(b, rec["toolUseResult"]); err != nil {
@@ -527,6 +532,9 @@ func (s *transcriptScan) facts(now time.Time) transcriptFacts {
 	var f transcriptFacts
 	for id, name := range s.pending {
 		f.Pending = append(f.Pending, name+" "+id)
+		if s.uses[id].wait {
+			f.PendingWaits++
+		}
 	}
 	for id, label := range s.tasks {
 		if s.closed[id] {

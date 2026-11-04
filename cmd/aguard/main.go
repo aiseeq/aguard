@@ -63,6 +63,7 @@ import (
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/journal"
 	"github.com/aiseeq/aguard/internal/memwatch"
+	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/aguard/internal/trackfd"
@@ -90,11 +91,13 @@ type app struct {
 	trackFetch     func() (trackfd.Pair, error) // пара дескрипторов слежения; подменяется в тестах
 	diskState      *disk.State                  // состояние наблюдателя disk; загружается один раз демоном
 	diskWalkLoaded bool                         // sizes и traces загружены до первого обхода
-	codexStep      time.Duration                // шаг codex, выбранный прошлым проходом; 0 — interval
-	codexRead      codexReader                  // замер лимита Codex; подменяется в тестах
-	codexConsume   codexConsumer                // досрочный сброс Codex; подменяется в тестах
-	codexApproved  codexApprovals               // «да» на окно из файла одобрений
-	codexNote      codexNoter                   // строка исхода в тикет
+	queueCache     queueTicketCache
+	queueUnsaved   *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
+	codexStep      time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval
+	codexRead      codexReader    // замер лимита Codex; подменяется в тестах
+	codexConsume   codexConsumer  // досрочный сброс Codex; подменяется в тестах
+	codexApproved  codexApprovals // «да» на окно из файла одобрений
+	codexNote      codexNoter     // строка исхода в тикет
 }
 
 func main() {
@@ -170,14 +173,23 @@ func (a *app) dispatch(ctx context.Context, cmd string, args []string) error {
 		return a.remoteCmd(args)
 	case "codex":
 		return a.codexCmd(ctx, args)
+	default:
+		return a.dispatchLate(ctx, cmd, args)
+	}
+}
+
+func (a *app) dispatchLate(ctx context.Context, cmd string, args []string) error {
+	switch cmd {
+	case "queue":
+		return a.queueCmd(ctx, args)
 	case "night":
 		return a.nightCmd(args)
 	case "report":
 		return a.reportCmd(args)
 	default:
 		usage()
+		return nil
 	}
-	return nil
 }
 
 func usage() {
@@ -202,6 +214,7 @@ func usage() {
   aguard io import [-dir папка] [-remove] [-out файл]   снимки событий прежнего наблюдателя — в сводки, при остановленной службе
   aguard night tick [-dry-run]
   aguard codex tick [-dry-run]
+  aguard queue tick [-dry-run] | replay -history путь -from дата -to дата [-hour 7] [-zone +02:00] | report [-since 168h] [-json]
   aguard report [-json] [-at время RFC3339]`)
 	os.Exit(2)
 }
@@ -254,7 +267,7 @@ func (a *app) run(ctx context.Context) error {
 	signal.Notify(usr2, syscall.SIGUSR2)
 	defer signal.Stop(usr1)
 	defer signal.Stop(usr2)
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "night", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -310,6 +323,8 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Remote.Interval.D() }},
 		{"codex", func(ctx context.Context, c *config.Config) error { return a.codexRound(ctx, &c.Codex, false) },
 			func(c *config.Config) time.Duration { return a.codexEvery(&c.Codex) }},
+		{"queue", func(ctx context.Context, c *config.Config) error { return a.queueRound(ctx, c, judge, false) },
+			func(c *config.Config) time.Duration { return c.Queue.Interval.D() }},
 		{"night", func(_ context.Context, c *config.Config) error { return a.nightRound(&c.Night, false) },
 			func(c *config.Config) time.Duration { return c.Night.Interval.D() }},
 	}
