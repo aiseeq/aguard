@@ -132,6 +132,10 @@ func main() {
 	defer stop()
 	cmd := os.Args[1]
 	err = a.dispatch(ctx, cmd, os.Args[2:])
+	if code, ok := exitStatus(err); ok {
+		stop()
+		os.Exit(code)
+	}
 	if err != nil {
 		lg.Error("aguard "+cmd, "err", err)
 		stop()
@@ -188,6 +192,8 @@ func (a *app) dispatchLate(ctx context.Context, cmd string, args []string) error
 		return a.nightCmd(args)
 	case "report":
 		return a.reportCmd(args)
+	case "limit-reset-check":
+		return a.limitResetCheck(args, time.Now())
 	default:
 		usage()
 		return nil
@@ -217,7 +223,8 @@ func usage() {
   aguard night tick [-dry-run]
   aguard codex tick [-dry-run]
   aguard queue tick [-dry-run] | replay -history путь -from дата -to дата [-hour 7] [-zone +02:00] | report [-since 168h] [-json]
-  aguard report [-json] [-at время RFC3339]`)
+  aguard report [-json] [-at время RFC3339]
+  aguard limit-reset-check --account почта --since время RFC3339 [--history путь]   сброс лимита учётки после постановки паузы: код 0 есть, 1 нет (причина в выводе), 2 ошибка входа`)
 	os.Exit(2)
 }
 
