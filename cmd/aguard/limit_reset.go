@@ -33,6 +33,10 @@ func (a *app) limitResetCheck(args []string, now time.Time) error {
 	since := fl.String("since", "", "момент постановки паузы, RFC3339 (date -Iseconds)")
 	history := fl.String("history", "", "JSONL истории лимитов; по умолчанию queue.history из конфига")
 	parse(fl, args)
+	if fl.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "aguard limit-reset-check: лишние аргументы: %v\n", fl.Args())
+		return resetBadArgs
+	}
 	check, err := a.runResetCheck(*account, *since, *history, now)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aguard limit-reset-check: %v\n", err)

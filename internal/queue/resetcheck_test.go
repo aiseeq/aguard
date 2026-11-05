@@ -84,7 +84,7 @@ func TestCheckResetThatNight(t *testing.T) {
 	if !late.Confirmed {
 		t.Fatalf("01:04 после сброса: %s", late.Reason)
 	}
-	hasAll(t, late, "сброс подтверждён", "окно до 2026-11-04T01:00:00+01:00", "новое окно до 2026-11-11T01:00:00+01:00", "расход 0 %")
+	hasAll(t, late, "сброс подтверждён", "окно до 2026-11-04T01:00:00+01:00", "текущее окно до 2026-11-11T01:00:00+01:00", "расход 0 %")
 }
 
 // Сценарий 3: активная в ту ночь active (её и показывал верхний sevenDayResetsAt) сбрасывается 09.11 — ответ по названной
@@ -162,6 +162,35 @@ func TestCheckResetUnknownAccount(t *testing.T) {
 	_, err := CheckReset(history(t, nightHistory, now), "waited", clock(t, pausedAt), now)
 	if err == nil || !strings.Contains(err.Error(), waited) || !strings.Contains(err.Error(), active) {
 		t.Fatalf("нужна ошибка со списком учёток, получено %v", err)
+	}
+}
+
+// Две смены окна после паузы: причина называет первую, а текущим окном — последнее.
+func TestCheckResetTwoWindowChanges(t *testing.T) {
+	got := check(t, nightHistory, waited, "2026-10-27T12:00:00+01:00", "2026-11-04T01:04:00+01:00")
+	if !got.Confirmed {
+		t.Fatalf("две смены окна: %s", got.Reason)
+	}
+	hasAll(t, got, "окно до 2026-10-28T01:00:00+01:00 сменилось", "текущее окно до 2026-11-11T01:00:00+01:00")
+}
+
+// Строка нового окна в ту же секунду, что и постановка паузы, замерена не после неё; секундой раньше паузы — тем более.
+func TestCheckResetSinceBoundary(t *testing.T) {
+	if got := check(t, nightHistory, waited, "2026-11-04T01:00:01+01:00", "2026-11-04T01:04:00+01:00"); got.Confirmed {
+		t.Fatalf("строка в момент постановки: %s", got.Reason)
+	}
+	if got := check(t, nightHistory, waited, "2026-11-04T01:00:00+01:00", "2026-11-04T01:04:00+01:00"); !got.Confirmed {
+		t.Fatalf("строка через секунду после постановки: %s", got.Reason)
+	}
+}
+
+// Время сброса сдвинулось назад — это не следующее окно: факта сброса нет.
+func TestCheckResetWindowMovedBack(t *testing.T) {
+	const body = `{"at":"2026-11-01T10:00:00+01:00","sevenDayUsedPercentage":40,"sevenDayResetsAt":"2026-11-07T09:00:00+01:00","account":"g"}
+{"at":"2026-11-02T10:00:00+01:00","sevenDayUsedPercentage":41,"sevenDayResetsAt":"2026-11-06T09:00:00+01:00","account":"g"}
+`
+	if got := check(t, body, "g", "2026-11-01T12:00:00+01:00", "2026-11-02T11:00:00+01:00"); got.Confirmed {
+		t.Fatalf("сдвиг назад: %s", got.Reason)
 	}
 }
 

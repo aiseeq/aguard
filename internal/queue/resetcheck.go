@@ -38,7 +38,7 @@ func CheckReset(rows []Row, account string, since, now time.Time) (ResetCheck, e
 		return ResetCheck{}, fmt.Errorf("нет строк учётки %q; известные: %s", account, strings.Join(Accounts(rows, now, 0), ", "))
 	}
 	if passed != nil {
-		return ResetCheck{Confirmed: true, Reason: fmt.Sprintf("сброс подтверждён: %s, окно до %s сменилось; новое окно до %s, расход %.0f %% (замер %s)",
+		return ResetCheck{Confirmed: true, Reason: fmt.Sprintf("сброс подтверждён: %s, окно до %s сменилось; текущее окно до %s, расход %.0f %% (замер %s)",
 			account, stamp(passed.ResetsAt, now), stamp(last.ResetsAt, now), last.Used, stamp(last.At, now))}, nil
 	}
 	reason := fmt.Sprintf("рано: %s, сброс %s, через %s, расход %.0f %% (замер %s)",

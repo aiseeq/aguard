@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -68,6 +70,55 @@ func TestLimitResetCheckBrokenLineNumber(t *testing.T) {
 	_, err := a.runResetCheck("waited@example.com", "2026-11-03T20:22:11+01:00", p, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "строка 4") {
 		t.Fatalf("нужна ошибка со строкой 4, получено %v", err)
+	}
+}
+
+// Таймер лида смотрит на код выхода процесса: проверяем его самого, через main() в дочернем процессе теста.
+func TestLimitResetCheckProcessExit(t *testing.T) {
+	if args := os.Getenv("AGUARD_TEST_MAIN_ARGS"); args != "" {
+		os.Args = append([]string{"aguard"}, strings.Split(args, "\x1f")...)
+		main()
+		return
+	}
+	now := time.Now()
+	stamp := func(d time.Duration) string { return now.Add(d).Format(time.RFC3339) }
+	row := func(at, resets time.Duration) string {
+		return fmt.Sprintf(`{"at":%q,"sevenDayResetsAt":%q,"sevenDayUsedPercentage":50,"account":"g"}`+"\n", stamp(at), stamp(resets))
+	}
+	home := t.TempDir()
+	hist := filepath.Join(home, "limits-history.jsonl")
+	if err := os.WriteFile(hist, []byte(row(-48*time.Hour, -24*time.Hour)+row(-time.Hour, 144*time.Hour)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check := func(since string, extra ...string) []string {
+		return append([]string{"limit-reset-check", "--account", "g", "--since", since, "--history", hist}, extra...)
+	}
+	for _, c := range []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"сброс есть", check(stamp(-72 * time.Hour)), 0},
+		{"сброса нет", check(stamp(-time.Minute)), 1},
+		{"нет --since", []string{"limit-reset-check", "--account", "g", "--history", hist}, 2},
+		{"лишний аргумент", check(stamp(-72*time.Hour), "хвост"), 2},
+		{"неизвестный флаг", []string{"limit-reset-check", "--nope"}, 2},
+		{"ошибка другой команды — как раньше", []string{"report", "-at", "nonsense"}, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestLimitResetCheckProcessExit$")
+			cmd.Env = append(os.Environ(), "HOME="+home, "AGUARD_TEST_MAIN_ARGS="+strings.Join(c.args, "\x1f"))
+			out, err := cmd.CombinedOutput()
+			got := 0
+			if ee, ok := errors.AsType[*exec.ExitError](err); ok {
+				got = ee.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got != c.want {
+				t.Fatalf("код %d, нужен %d; вывод: %s", got, c.want, out)
+			}
+		})
 	}
 }
 
