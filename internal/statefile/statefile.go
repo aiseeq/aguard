@@ -227,7 +227,7 @@ func compact(path string, journal *os.File, state []byte) error {
 func syncPath(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("open for sync: %w", err)
 	}
 	return errors.Join(f.Sync(), f.Close())
 }
