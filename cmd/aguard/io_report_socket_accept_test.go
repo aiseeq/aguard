@@ -63,7 +63,6 @@ func TestIOReportSocketAccept(t *testing.T) {
 	if sum := acceptSummary(t, out.Bytes()); sum.Total != 1 || sum.IdleMS != 2500 {
 		t.Fatalf("итог не из памяти службы: total %d, idle %d", sum.Total, sum.IdleMS)
 	}
-	time.Sleep(200 * time.Millisecond) // запись шла бы своей горутиной
 	after, err := os.ReadFile(s.path)
 	if err != nil {
 		t.Fatal(err)
