@@ -329,6 +329,9 @@ func SelfReadBytes(procRoot string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if !bytes.Contains(data, []byte("read_bytes:")) { // ядро без учёта IO: ноль соврал бы
+		return 0, fmt.Errorf("%s/self/io: нет read_bytes", procRoot)
+	}
 	read, _, err := parseProcIO(data)
 	return read, err
 }

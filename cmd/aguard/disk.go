@@ -230,7 +230,7 @@ func (a *app) diskRetro(ctx context.Context, cfg *config.Config, days int) error
 	from := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
 	var b strings.Builder
 	for _, e := range entries {
-		byDay, err := disk.ByDay(ctx, e, !cfg.Disk.IsLasting(e))
+		byDay, err := disk.ByDay(ctx, e, !cfg.Disk.IsLasting(e), int64(cfg.Disk.FiemapMin))
 		if err != nil { // нечитаемое в записи: прикидка по прочитанному
 			a.warn("disk", "retro: не прочиталось "+e, "err", err)
 		}

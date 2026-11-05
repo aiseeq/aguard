@@ -1374,4 +1374,10 @@ func TestSelfReadBytes(t *testing.T) {
 	if err != nil || got != 4096 {
 		t.Fatalf("SelfReadBytes = %d, %v", got, err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "self", "io"), []byte("write_bytes: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := SelfReadBytes(root); err == nil {
+		t.Fatalf("нет строки read_bytes: нужна ошибка, а не %d", got)
+	}
 }

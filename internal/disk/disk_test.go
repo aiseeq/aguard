@@ -2,6 +2,7 @@ package disk
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -257,9 +258,10 @@ func cacheTempDir(t *testing.T) string {
 // reflinkPair создаёт файл size байт и его reflink-копию; файловая система не умеет — пропуск теста.
 func reflinkPair(t *testing.T, dir, src, dst string, size int) {
 	t.Helper()
+	// Случайные данные: сжатый экстент (compress=zstd) занял бы на диске меньше длины, и соседние общие участки слились бы.
 	data := make([]byte, size)
-	for i := range data {
-		data[i] = byte(i * 7)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
 	}
 	path := filepath.Join(dir, src)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -299,6 +301,20 @@ func TestMeasureFiemapMin(t *testing.T) {
 	}
 	if got := cut.Bytes - exact.Bytes; got != small {
 		t.Errorf("порог прибавил %d байт, а должен reflink мелкого файла %d", got, small)
+	}
+	byDay := func(fiemapMin int64) int64 {
+		days, err := ByDay(t.Context(), dir, true, fiemapMin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sum int64
+		for _, n := range days {
+			sum += n
+		}
+		return sum
+	}
+	if got := byDay(64<<10) - byDay(0); got != small {
+		t.Errorf("ByDay: порог прибавил %d байт, а должен %d", got, small)
 	}
 	// Файл ровно на пороге — ещё по экстентам.
 	if at := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), true, small, nil); at.Bytes != exact.Bytes {

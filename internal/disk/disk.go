@@ -326,7 +326,7 @@ func Free(path string) (int64, error) {
 
 // ByDay — место записи по местным дням последнего изменения файлов (ctime; ключ — полночь дня): прикидка роста
 // задним числом. Видит только то, что лежит сейчас, и относит файл ко дню его последнего изменения.
-func ByDay(ctx context.Context, path string, exact bool) (map[time.Time]int64, error) {
+func ByDay(ctx context.Context, path string, exact bool, fiemapMin int64) (map[time.Time]int64, error) {
 	out := map[time.Time]int64{}
 	days := map[time.Time]*fileSpace{}
 	buf := new(fiemapBuf)
@@ -335,7 +335,7 @@ func ByDay(ctx context.Context, path string, exact bool) (map[time.Time]int64, e
 		day := time.Date(y, m, dd, 0, 0, 0, 0, time.Local)
 		f := days[day]
 		if f == nil {
-			f = &fileSpace{exact: exact, buf: buf}
+			f = &fileSpace{exact: exact, min: fiemapMin, buf: buf}
 			days[day] = f
 		}
 		n, err := f.add(p, d, st)
