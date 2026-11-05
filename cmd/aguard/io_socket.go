@@ -11,7 +11,7 @@ import (
 )
 
 // Сокет моментального состояния диска ([io] socket): now — снимком Live под его мьютексом, без похода
-// в цикл замера; series и profiles — через extra горутины цикла.
+// в цикл замера; series, profiles и cases — через extra горутины цикла.
 
 // ioAskTimeout — сколько соединение ждёт данные от горутины цикла: меньше срока соединения linesock.
 const ioAskTimeout = 1500 * time.Millisecond
@@ -60,6 +60,21 @@ func (s *ioService) answer(line []byte) any {
 			return fail(err)
 		}
 		return iowatch.Answer{V: iowatch.ProtoVersion, Series: rows.Seconds()}
+	case iowatch.QueryCases:
+		cases, err := ioAsk(s, func() []iowatch.Case {
+			kept := s.kept(time.Now())
+			filtered := make([]iowatch.Case, 0, len(kept))
+			for i := range kept {
+				if !kept[i].End.Before(since) {
+					filtered = append(filtered, kept[i])
+				}
+			}
+			return filtered
+		})
+		if err != nil {
+			return fail(err)
+		}
+		return iowatch.Answer{V: iowatch.ProtoVersion, Cases: cases}
 	default: // QueryProfiles: CheckRequest других не пропускает
 		profiles, err := ioAsk(s, func() []iowatch.Profile { return iowatch.FilterProfiles(s.ended, req.Kind, since) })
 		if err != nil {

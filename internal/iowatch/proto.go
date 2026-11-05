@@ -16,9 +16,10 @@ const (
 	QueryNow      = "now"      // моментальное состояние (Now); kind — ещё свод профилей вида
 	QuerySeries   = "series"   // посекундный ряд с since
 	QueryProfiles = "profiles" // профили вида kind (пусто — все) с концом не раньше since
+	QueryCases    = "cases"    // сводки случаев с концом не раньше since
 )
 
-// Request — запрос: {"v":1,"q":"now","kind":"worker:…"}, {"v":1,"q":"series","since":"RFC3339"}.
+// Request — запрос: `now`, `series`, `profiles` или `cases`; для последних трёх поддерживается `since` в RFC3339.
 type Request struct {
 	V     int    `json:"v"`
 	Q     string `json:"q"`
@@ -34,6 +35,7 @@ type Answer struct {
 	*Now
 	Series   []MachineSecond `json:"series,omitempty"`
 	Profiles []Profile       `json:"profiles,omitempty"`
+	Cases    []Case          `json:"cases,omitempty"`
 }
 
 // CheckRequest — версия и вид запроса; since — разобранное время (ноль — не задано).
@@ -42,9 +44,9 @@ func CheckRequest(req Request) (since time.Time, err error) {
 		return since, fmt.Errorf("версия протокола %d, служба знает %d", req.V, ProtoVersion)
 	}
 	switch req.Q {
-	case QueryNow, QuerySeries, QueryProfiles:
+	case QueryNow, QuerySeries, QueryProfiles, QueryCases:
 	default:
-		return since, fmt.Errorf("неизвестный запрос %q: now, series или profiles", req.Q)
+		return since, fmt.Errorf("неизвестный запрос %q: now, series, profiles или cases", req.Q)
 	}
 	if req.Since != "" {
 		if since, err = time.Parse(time.RFC3339, req.Since); err != nil {

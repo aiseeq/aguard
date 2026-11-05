@@ -36,10 +36,10 @@ type Config struct {
 	Keep       policy.Duration `toml:"keep"`        // срок файлов ручных снимков буфера
 	Device     string          `toml:"device"`      // диск в /proc/diskstats и /sys/block
 	// Посекундный ряд машины и профили завершившихся cgroup — в памяти службы; файлы — их копия при
-	// остановке и по SIGUSR1 (профили — и раз в час, как сводки).
+	// остановке (профили — и раз в час, как сводки).
 	SeriesKeep   policy.Duration `toml:"series_keep"`   // срок посекундного ряда в памяти
 	ProfilesKeep policy.Duration `toml:"profiles_keep"` // срок профилей cgroup
-	// Socket — сокет моментального состояния диска (запросы now, series, profiles); смена — с перезапуском
+	// Socket — сокет моментального состояния диска (запросы now, series, profiles, cases); смена — с перезапуском
 	// службы. По умолчанию $XDG_RUNTIME_DIR/io-state.sock (DefaultSocket).
 	Socket   string `toml:"socket"`
 	Lead     string `toml:"-"`

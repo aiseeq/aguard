@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/guiwatch"
@@ -175,8 +174,7 @@ func ioDecimal(x float64) string {
 	return strings.Replace(strconv.FormatFloat(x, 'f', 1, 64), ".", ",", 1)
 }
 
-// ioReport — итог случаев [since, until): из файла службы (live) — сначала служба пишет сводки из
-// памяти (SIGUSR1); не запущена — читается файл как есть.
+// ioReport — итог случаев [since, until): live запрашивает сводки из службы, без службы читает файл.
 func (a *app) ioReport(path string, live bool, since, until time.Time, minDur time.Duration, asJSON bool) error {
 	cfg, err := a.ioConfig()
 	if err != nil {
@@ -185,17 +183,24 @@ func (a *app) ioReport(path string, live bool, since, until time.Time, minDur ti
 	if minDur <= 0 {
 		minDur = cfg.CaseMin.D()
 	}
+	var cases []iowatch.Case
+	fromService := false
 	if live {
-		if err := ioRequestSave(path); err != nil {
-			if !errors.Is(err, errIONotRunning) {
-				return err
-			}
+		ans, err := askIO(cfg.Socket, iowatch.Request{Q: iowatch.QueryCases, Since: since.Format(time.RFC3339)})
+		if err == nil {
+			cases, fromService = ans.Cases, true
+		} else if errors.Is(err, errIONotRunning) {
 			a.log.Warn("aguard io report: служба не запущена, сводки — из файла как есть")
+		} else {
+			return err
 		}
 	}
-	cases, err := iowatch.LoadCases(path)
-	if err != nil {
-		return err
+	if !fromService {
+		var err error
+		cases, err = iowatch.LoadCases(path)
+		if err != nil {
+			return err
+		}
 	}
 	sum := iowatch.Summarize(cases, since, until, minDur)
 	if asJSON {
@@ -210,20 +215,6 @@ func (a *app) ioReport(path string, live bool, since, until time.Time, minDur ti
 	}
 	fmt.Fprintf(a.out, "срезов интерфейса: %d, самый длинный S по wchan: %s\n", len(gui.Slices), guiwatch.LongestSleep(gui))
 	return nil
-}
-
-// ioRequestSave — SIGUSR1 службе и ожидание обновления файла сводок (до 10 с).
-func ioRequestSave(path string) error {
-	requested := time.Now()
-	if err := ioSignal(syscall.SIGUSR1); err != nil {
-		return err
-	}
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		if info, err := os.Stat(path); err == nil && !info.ModTime().Before(requested) {
-			return nil
-		}
-	}
-	return fmt.Errorf("aguard io report: служба не обновила %s за 10 с — см. журнал службы", path)
 }
 
 // ioReportCases — сколько самых длинных случаев в тексте итога.

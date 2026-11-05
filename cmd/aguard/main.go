@@ -262,12 +262,10 @@ type watcher struct {
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
 	started := time.Now()
-	// io: SIGUSR1 — сводки случаев в файл, SIGUSR2 — ручной снимок буфера; подписка до всего, иначе
-	// сигнал убил бы демон
-	usr1, usr2 := make(chan os.Signal, 1), make(chan os.Signal, 1)
-	signal.Notify(usr1, syscall.SIGUSR1)
+	// SIGUSR1 игнорируется, SIGUSR2 делает ручной снимок буфера; подписка до старта наблюдателей.
+	usr2 := make(chan os.Signal, 1)
+	signal.Ignore(syscall.SIGUSR1)
 	signal.Notify(usr2, syscall.SIGUSR2)
-	defer signal.Stop(usr1)
 	defer signal.Stop(usr2)
 	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
@@ -282,7 +280,7 @@ func (a *app) run(ctx context.Context) error {
 	a.note("aguard", activity.KindStart, "", "", 0, "")
 	var wg sync.WaitGroup
 	wg.Go(func() { a.restartServe(ctx, judge) })
-	wg.Go(func() { a.ioLoop(ctx, usr1, usr2) })
+	wg.Go(func() { a.ioLoop(ctx, usr2) })
 	wg.Go(func() { a.guiLoop(ctx) })
 	insts := track.Instances(a.home)
 	for i := range insts {

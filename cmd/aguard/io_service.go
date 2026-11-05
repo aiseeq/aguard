@@ -178,10 +178,9 @@ const (
 )
 
 // ioLoop — наблюдатель io: mode=off — не замеряет совсем; паника или ошибка цикла — warn и перезапуск.
-// usr1 — SIGUSR1, сводки в файл (`aguard io report`), usr2 — SIGUSR2, ручной снимок буфера
-// (`aguard io dump`); подписка — в начале run демона, чтобы сигнал до старта наблюдателя не убил
-// процесс. При остановке сводки пишутся в файл.
-func (a *app) ioLoop(ctx context.Context, usr1, usr2 <-chan os.Signal) {
+// usr2 — SIGUSR2, ручной снимок буфера (`aguard io dump`); подписка — в начале run демона,
+// чтобы сигнал до старта наблюдателя не убил процесс. При остановке сводки пишутся в файл.
+func (a *app) ioLoop(ctx context.Context, usr2 <-chan os.Signal) {
 	s := newIOService(ctx, a)
 	s.load()
 	go s.serve()
@@ -191,8 +190,6 @@ func (a *app) ioLoop(ctx context.Context, usr1, usr2 <-chan os.Signal) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-usr1:
-				f = func() { s.save(true) }
 			case <-usr2:
 				f = s.dump
 			}
@@ -300,21 +297,13 @@ func (s *ioService) keptProfiles(now time.Time) []iowatch.Profile {
 	return s.ended
 }
 
-// save — копия сводок и профилей (withSeries — и ряда: он большой, только при остановке и по SIGUSR1)
-// в файлы своей горутиной; запрос `aguard io report` ждёт обновления файла сводок, он пишется первым.
-func (s *ioService) save(withSeries bool) {
+// save — часовая копия сводок и профилей в файлы своей горутиной.
+func (s *ioService) save() {
 	now := time.Now()
 	cases, profiles := slices.Clone(s.kept(now)), slices.Clone(s.keptProfiles(now))
-	var rows iowatch.SeriesRows
-	if withSeries {
-		rows = s.series.Rows(time.Time{})
-	}
 	go func() {
 		s.postWarn(s.ctx, time.Now(), "save", "сводки случаев", iowatch.SaveCases(s.path, cases))
 		s.postWarn(s.ctx, time.Now(), "save-profiles", "профили cgroup", iowatch.SaveProfiles(s.profilesPath, profiles))
-		if withSeries {
-			s.postWarn(s.ctx, time.Now(), "save-series", "ряд машины", iowatch.SaveSeries(s.seriesPath, rows.Seconds()))
-		}
 	}()
 }
 
@@ -409,7 +398,7 @@ func (s *ioService) housekeep(ctx context.Context, gen int, keep time.Duration) 
 		}
 		if now.After(saveAt) {
 			saveAt = now.Add(ioSaveEvery)
-			s.post(ctx, func() { s.save(false) })
+			s.post(ctx, s.save)
 		}
 		if now.After(cgroupsAt) {
 			cgroupsAt = now.Add(ioCgroupsEvery)
