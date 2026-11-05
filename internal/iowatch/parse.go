@@ -327,7 +327,7 @@ func parseProcIO(data []byte) (readBytes, writeBytes int64, err error) {
 func SelfReadBytes(procRoot string) (int64, error) {
 	data, err := os.ReadFile(filepath.Join(procRoot, "self", "io"))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("io своего процесса: %w", err)
 	}
 	if !bytes.Contains(data, []byte("read_bytes:")) { // ядро без учёта IO: ноль соврал бы
 		return 0, fmt.Errorf("%s/self/io: нет read_bytes", procRoot)

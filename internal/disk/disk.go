@@ -95,6 +95,31 @@ func Default() Config {
 
 // Validate раскрывает ~ в путях и проверяет пороги.
 func (c *Config) Validate(home string) error {
+	if err := c.validateThresholds(); err != nil {
+		return err
+	}
+
+	expand := func(ps []string) {
+		for i, p := range ps {
+			ps[i] = policy.ExpandHome(p, home)
+		}
+	}
+	expand(c.Roots)
+	expand(c.Containers)
+	expand(c.Lasting)
+	if err := c.validateTraces(home); err != nil {
+		return err
+	}
+	owners := make(map[string]string, len(c.Owners))
+	for k, v := range c.Owners {
+		owners[filepath.Clean(policy.ExpandHome(k, home))] = v
+	}
+	c.Owners = owners
+	return nil
+}
+
+// validateThresholds — режимы, сроки и пороги.
+func (c *Config) validateThresholds() error {
 	if c.Mode != ModeLog {
 		return fmt.Errorf("disk.mode = %q: есть только %q", c.Mode, ModeLog)
 	}
@@ -116,23 +141,6 @@ func (c *Config) Validate(home string) error {
 	if c.FreeMin <= 0 {
 		return errors.New("disk.free_min > 0")
 	}
-
-	expand := func(ps []string) {
-		for i, p := range ps {
-			ps[i] = policy.ExpandHome(p, home)
-		}
-	}
-	expand(c.Roots)
-	expand(c.Containers)
-	expand(c.Lasting)
-	if err := c.validateTraces(home); err != nil {
-		return err
-	}
-	owners := make(map[string]string, len(c.Owners))
-	for k, v := range c.Owners {
-		owners[filepath.Clean(policy.ExpandHome(k, home))] = v
-	}
-	c.Owners = owners
 	return nil
 }
 
