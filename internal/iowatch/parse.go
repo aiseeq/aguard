@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 )
 
 // Разборщики файлов /proc и cgroup — без копий строк: замер идёт 10 раз в секунду.
@@ -320,6 +321,16 @@ func parseProcIO(data []byte) (readBytes, writeBytes int64, err error) {
 		}
 	}
 	return readBytes, max(0, writeBytes-cancelled), nil
+}
+
+// SelfReadBytes — read_bytes своего процесса: сколько он прочитал с диска мимо кэша.
+func SelfReadBytes(procRoot string) (int64, error) {
+	data, err := os.ReadFile(filepath.Join(procRoot, "self", "io"))
+	if err != nil {
+		return 0, err
+	}
+	read, _, err := parseProcIO(data)
+	return read, err
 }
 
 // procStat — нужные поля /proc/<pid>/stat.

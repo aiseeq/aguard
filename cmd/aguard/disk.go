@@ -21,6 +21,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/disk"
+	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/names"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
@@ -138,9 +139,18 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	owners := a.diskOwners(cfg)
 	yield := a.diskYield(ctx)
 	measure := func(entries []string) map[string]disk.Usage {
+		readBefore, readErr := iowatch.SelfReadBytes(procRoot)
 		usage := cfg.Disk.MeasureAll(ctx, entries, yield.wait)
-		a.log.Info("aguard disk: обход", "entries", len(entries), "took", time.Since(now).Round(time.Second).String(),
-			"paused", yield.paused.String(), "pauses", yield.pauses, "interrupted", ctx.Err() != nil)
+		attrs := []any{"entries", len(entries), "took", time.Since(now).Round(time.Second).String(),
+			"paused", yield.paused.String(), "pauses", yield.pauses, "interrupted", ctx.Err() != nil}
+		// Цена обхода: read_bytes всего процесса за обход, тикет self-io-reads. Прочие наблюдатели — фон поверх.
+		readAfter, err := iowatch.SelfReadBytes(procRoot)
+		if readErr = errors.Join(readErr, err); readErr != nil {
+			a.warn("disk", "чтение диска за обход", "err", readErr)
+		} else {
+			attrs = append(attrs, "read_mb", (readAfter-readBefore)/1_000_000)
+		}
+		a.log.Info("aguard disk: обход", attrs...)
 		return usage
 	}
 	recs, usage, err := st.Pass(&cfg.Disk, now, free, cfg.Disk.Entries, measure, owners.Of)

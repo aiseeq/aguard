@@ -1358,3 +1358,20 @@ func TestSumCulpritsKeepsEarlierCommand(t *testing.T) {
 		t.Fatalf("команда затёрта: %+v", c.ProcessDetails)
 	}
 }
+
+func TestSelfReadBytes(t *testing.T) {
+	root := t.TempDir()
+	if _, err := SelfReadBytes(root); err == nil {
+		t.Fatal("нет файла io: нужна ошибка, а не ноль")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "self"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "self", "io"), []byte("rchar: 7\nread_bytes: 4096\nwrite_bytes: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := SelfReadBytes(root)
+	if err != nil || got != 4096 {
+		t.Fatalf("SelfReadBytes = %d, %v", got, err)
+	}
+}
