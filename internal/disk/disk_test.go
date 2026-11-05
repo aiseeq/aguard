@@ -232,9 +232,9 @@ func TestSpanBytes(t *testing.T) {
 // ficlone — FICLONE: _IOW(0x94, 9, int).
 const ficlone = 0x40049409
 
-// TestMeasureReflink — reflink-копия файла внутри записи не удваивает место. Папка — в кэше пользователя: временная
-// папка теста бывает на tmpfs, а reflink нужен btrfs или xfs; не умеет — пропуск.
-func TestMeasureReflink(t *testing.T) {
+// cacheTempDir — папка теста в кэше пользователя: временная папка теста бывает на tmpfs, а reflink нужен btrfs или xfs.
+func cacheTempDir(t *testing.T) string {
+	t.Helper()
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		t.Fatal(err)
@@ -251,20 +251,26 @@ func TestMeasureReflink(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	data := make([]byte, 1<<20)
+	return dir
+}
+
+// reflinkPair создаёт файл size байт и его reflink-копию; файловая система не умеет — пропуск теста.
+func reflinkPair(t *testing.T, dir, src, dst string, size int) {
+	t.Helper()
+	data := make([]byte, size)
 	for i := range data {
 		data[i] = byte(i * 7)
 	}
-	src := filepath.Join(dir, "a")
-	if err := os.WriteFile(src, data, 0o600); err != nil {
+	path := filepath.Join(dir, src)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	in, err := os.Open(src)
+	in, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer in.Close()
-	out, err := os.Create(filepath.Join(dir, "b"))
+	out, err := os.Create(filepath.Join(dir, dst))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,8 +283,43 @@ func TestMeasureReflink(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	exact := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), true, nil)
-	blocks := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), false, nil)
+}
+
+// TestMeasureFiemapMin — ниже порога файл считается по st_blocks: reflink мелкого считается дважды, FIEMAP на него
+// не зовётся; от порога reflink по-прежнему один раз. Тикет self-io-reads, выбор лида 05.11.
+func TestMeasureFiemapMin(t *testing.T) {
+	dir := cacheTempDir(t)
+	const small, big = 16 << 10, 1 << 20
+	reflinkPair(t, dir, "small-a", "small-b", small)
+	reflinkPair(t, dir, "big-a", "big-b", big)
+	exact := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), true, 0, nil)
+	cut := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), true, 64<<10, nil)
+	if exact.Fiemaps != 4 || cut.Fiemaps != 2 {
+		t.Errorf("вызовов FIEMAP: без порога %d, с порогом %d", exact.Fiemaps, cut.Fiemaps)
+	}
+	if got := cut.Bytes - exact.Bytes; got != small {
+		t.Errorf("порог прибавил %d байт, а должен reflink мелкого файла %d", got, small)
+	}
+	// Файл ровно на пороге — ещё по экстентам.
+	if at := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), true, small, nil); at.Bytes != exact.Bytes {
+		t.Errorf("файл на пороге: %d, по экстентам %d", at.Bytes, exact.Bytes)
+	}
+}
+
+func TestValidateFiemapMin(t *testing.T) {
+	c := testConfig(t, t.TempDir())
+	c.FiemapMin = -1
+	if err := c.Validate(t.TempDir()); err == nil {
+		t.Error("отрицательный fiemap_min принят")
+	}
+}
+
+// TestMeasureReflink — reflink-копия файла внутри записи не удваивает место.
+func TestMeasureReflink(t *testing.T) {
+	dir := cacheTempDir(t)
+	reflinkPair(t, dir, "a", "b", 1<<20)
+	exact := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), true, 0, nil)
+	blocks := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), false, 0, nil)
 	if exact.Files != 3 || blocks.Bytes < 2<<20 || exact.Bytes >= 3<<19 {
 		t.Errorf("по экстентам %d, по блокам %d, файлов %d", exact.Bytes, blocks.Bytes, exact.Files)
 	}
@@ -297,7 +338,7 @@ func TestMeasureCanceled(t *testing.T) {
 	if got := testConfig(t, dir).MeasureAll(ctx, []string{dir}, nil); len(got) != 0 {
 		t.Errorf("отменённый замер: %v", got)
 	}
-	if u := measure(ctx, dir, map[inode]bool{}, new(fiemapBuf), true, nil); !errors.Is(u.Err, context.Canceled) || u.Files != 0 {
+	if u := measure(ctx, dir, map[inode]bool{}, new(fiemapBuf), true, 0, nil); !errors.Is(u.Err, context.Canceled) || u.Files != 0 {
 		t.Errorf("обход после отмены: %+v", u)
 	}
 }

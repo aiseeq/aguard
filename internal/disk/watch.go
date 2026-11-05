@@ -307,7 +307,7 @@ func (c *Config) MeasureAll(ctx context.Context, entries []string, yield func())
 		if ctx.Err() != nil {
 			break
 		}
-		out[e] = measure(ctx, e, seen, buf, !c.IsLasting(e), tick)
+		out[e] = measure(ctx, e, seen, buf, !c.IsLasting(e), int64(c.FiemapMin), tick)
 	}
 	return out
 }

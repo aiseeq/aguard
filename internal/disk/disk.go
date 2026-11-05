@@ -37,6 +37,9 @@ type Config struct {
 	StaleMin   policy.Size     `toml:"stale_min"`   // остаток от этого размера
 	// Lasting — долгоживущие кэши инструментов (glob по пути записи): не остатки, сколько бы ни лежали.
 	Lasting []string `toml:"lasting"`
+	// FiemapMin — файл меньше этого места по st_blocks считается без FIEMAP (0 — FIEMAP на все): reflink мелких файлов
+	// считается в каждой копии. Причина и ошибка — docs/design.md, наблюдатель disk.
+	FiemapMin policy.Size `toml:"fiemap_min"`
 	// Owners — папка (запись или её предок) -> сессия-хозяин; остальных хозяин ищется по сессиям, иначе — лид.
 	Owners map[string]string `toml:"owners"`
 	Keep   policy.Duration   `toml:"keep"` // срок журнала
@@ -103,6 +106,9 @@ func (c *Config) Validate(home string) error {
 	}
 	if c.Grow <= 0 || c.Fast <= 0 || c.StaleMin <= 0 || c.TraceMin <= 0 || c.Stale.D() < time.Hour || c.Keep.D() < 24*time.Hour {
 		return errors.New("disk: grow, fast, stale_min, trace_min > 0, stale >= 1h, keep >= 24h")
+	}
+	if c.FiemapMin < 0 {
+		return errors.New("disk.fiemap_min >= 0")
 	}
 	if c.FreeMode != FreeOff && c.FreeMode != ModeLog && c.FreeMode != FreeAlert {
 		return fmt.Errorf("disk.free_mode = %q: off, log или alert", c.FreeMode)
@@ -193,6 +199,7 @@ type Usage struct {
 	Unread  int
 	Err     error
 	Copies  int64 // копии транскриптов Claude Code (copyName) по st_blocks
+	Fiemaps int64 // файлов, измеренных по экстентам
 }
 
 type inode struct{ dev, ino uint64 }
@@ -246,17 +253,21 @@ func walkEntry(ctx context.Context, path string, visit func(p string, d fs.DirEn
 }
 
 // fileSpace — место файла: по экстентам (своё и общие, дописанные в shared) или по st_blocks — у долгоживущего кэша
-// (exact = false), не обычного файла и на файловой системе без FIEMAP. Ошибка FIEMAP — место по st_blocks и ошибка.
+// (exact = false), не обычного файла, файла меньше min и на файловой системе без FIEMAP. Ошибка FIEMAP — место по
+// st_blocks и ошибка.
 type fileSpace struct {
-	exact  bool
-	buf    *fiemapBuf
-	shared []span
+	exact   bool
+	min     int64
+	buf     *fiemapBuf
+	shared  []span
+	fiemaps int64
 }
 
 func (f *fileSpace) add(p string, d fs.DirEntry, st *syscall.Stat_t) (int64, error) {
-	if !f.exact || !d.Type().IsRegular() || st.Blocks == 0 {
+	if !f.exact || !d.Type().IsRegular() || st.Blocks == 0 || st.Blocks*512 < f.min {
 		return st.Blocks * 512, nil
 	}
+	f.fiemaps++
 	own, more, err := extents(p, f.buf, f.shared)
 	if errors.Is(err, errNoFiemap) {
 		f.exact = false
@@ -271,10 +282,11 @@ func (f *fileSpace) add(p string, d fs.DirEntry, st *syscall.Stat_t) (int64, err
 
 // measure обходит запись. exact — место по экстентам; иначе по st_blocks: долгоживущий кэш инструмента (go-build —
 // 2,1 млн файлов 26.10) reflink-копий не делает, а экстенты — половина времени обхода.
-// tick — на каждый файл и папку (MeasureAll считает их на весь обход); nil — не считать.
-func measure(ctx context.Context, path string, seen map[inode]bool, buf *fiemapBuf, exact bool, tick func()) Usage {
+// fiemapMin — порог файла для экстентов (fileSpace.min). tick — на каждый файл и папку (MeasureAll считает их на весь
+// обход); nil — не считать.
+func measure(ctx context.Context, path string, seen map[inode]bool, buf *fiemapBuf, exact bool, fiemapMin int64, tick func()) Usage {
 	var u Usage
-	space := fileSpace{exact: exact, buf: buf}
+	space := fileSpace{exact: exact, min: fiemapMin, buf: buf}
 	u.Unread, u.Err = walkEntry(ctx, path, func(p string, d fs.DirEntry, st *syscall.Stat_t) error {
 		if tick != nil {
 			tick()
@@ -299,6 +311,7 @@ func measure(ctx context.Context, path string, seen map[inode]bool, buf *fiemapB
 		return err
 	})
 	u.Bytes += spanBytes(space.shared)
+	u.Fiemaps = space.fiemaps
 	return u
 }
 

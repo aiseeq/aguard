@@ -141,7 +141,12 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	measure := func(entries []string) map[string]disk.Usage {
 		readBefore, readErr := iowatch.SelfReadBytes(procRoot)
 		usage := cfg.Disk.MeasureAll(ctx, entries, yield.wait)
-		attrs := []any{"entries", len(entries), "took", time.Since(now).Round(time.Second).String(),
+		var files, fiemaps int64
+		for _, u := range usage {
+			files += u.Files
+			fiemaps += u.Fiemaps
+		}
+		attrs := []any{"entries", len(entries), "files", files, "fiemaps", fiemaps, "took", time.Since(now).Round(time.Second).String(),
 			"paused", yield.paused.String(), "pauses", yield.pauses, "interrupted", ctx.Err() != nil}
 		// Цена обхода: read_bytes всего процесса за обход, тикет self-io-reads. Прочие наблюдатели — фон поверх.
 		readAfter, err := iowatch.SelfReadBytes(procRoot)
