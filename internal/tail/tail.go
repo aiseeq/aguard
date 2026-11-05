@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/statefile"
 )
 
 // File — что известно о транскрипте между проходами.
@@ -66,10 +66,7 @@ type Tail[E any] struct {
 // LoadState — состояние из файла; нет файла — пустое (первый проход).
 func LoadState(path string) (*State, error) {
 	st := &State{Files: map[string]*File{}}
-	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return st, nil
-	}
+	b, err := statefile.Load(path)
 	if err != nil {
 		return nil, fmt.Errorf("смещения транскриптов: %w", err)
 	}
@@ -88,7 +85,7 @@ func (st *State) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("смещения транскриптов: %w", err)
 	}
-	if err := record.WriteFileAtomic(path, b, 0o600); err != nil {
+	if err := statefile.Save(path, b); err != nil {
 		return fmt.Errorf("смещения транскриптов: %w", err)
 	}
 	return nil

@@ -3,16 +3,14 @@ package said
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/aiseeq/akit/transcript"
 
-	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/statefile"
 	"github.com/aiseeq/aguard/internal/tail"
 )
 
@@ -115,15 +113,12 @@ type State struct {
 // LoadState — состояние из файла; нет файла — пустое.
 func LoadState(path string) (*State, error) {
 	st := &State{Last: map[string]string{}}
-	b, err := os.ReadFile(path)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-	case err != nil:
+	b, err := statefile.Load(path)
+	if err != nil {
 		return nil, fmt.Errorf("состояние said: %w", err)
-	default:
-		if err := json.Unmarshal(b, st); err != nil {
-			return nil, fmt.Errorf("состояние said %s: %w", path, err)
-		}
+	}
+	if err := json.Unmarshal(b, st); err != nil {
+		return nil, fmt.Errorf("состояние said %s: %w", path, err)
 	}
 	if st.Tail == nil {
 		st.Tail = &tail.State{Files: map[string]*tail.File{}}
@@ -143,7 +138,7 @@ func (st *State) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("состояние said: %w", err)
 	}
-	if err := record.WriteFileAtomic(path, b, 0o600); err != nil {
+	if err := statefile.Save(path, b); err != nil {
 		return fmt.Errorf("состояние said: %w", err)
 	}
 	return nil
