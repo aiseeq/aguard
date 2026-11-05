@@ -262,9 +262,11 @@ type watcher struct {
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
 	started := time.Now()
-	// SIGUSR1 игнорируется, SIGUSR2 делает ручной снимок буфера; подписка до старта наблюдателей.
-	usr2 := make(chan os.Signal, 1)
-	signal.Ignore(syscall.SIGUSR1)
+	// SIGUSR2 делает ручной снимок буфера; подписка до старта наблюдателей. SIGUSR1 ничего не значит, но и не
+	// убивает демон: канал без читателя, а не signal.Ignore — игнор унаследовали бы дочерние процессы.
+	usr1, usr2 := make(chan os.Signal, 1), make(chan os.Signal, 1)
+	signal.Notify(usr1, syscall.SIGUSR1)
+	defer signal.Stop(usr1)
 	signal.Notify(usr2, syscall.SIGUSR2)
 	defer signal.Stop(usr2)
 	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "activity"} {

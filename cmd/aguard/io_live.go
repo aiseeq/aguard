@@ -17,8 +17,8 @@ import (
 // Живые запросы к службе через сокет [io] socket: `aguard io now | series | profiles`. Службы нет —
 // ошибка, файлы не читаются.
 
-// ioLiveTimeout — срок обмена: ряд за сутки — около 10 МБ JSON.
-const ioLiveTimeout = 5 * time.Second
+// ioLiveTimeout — срок обмена: ряд за сутки — около 10 МБ JSON; больше срока службы, чтобы ошибку назвала она.
+const ioLiveTimeout = 6 * time.Second
 
 // ioLiveSince — запрос с since из аргумента (30m, 3d, ЧЧ:ММ, RFC3339).
 func (a *app) ioLiveSince(req iowatch.Request, since string, asJSON bool) error {

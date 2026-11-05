@@ -27,8 +27,8 @@ type Request struct {
 	Kind  string `json:"kind,omitempty"`
 }
 
-// Answer — ответ: версия, Error или данные запроса. Поля Now — в корне ответа; нет поля series или
-// profiles — пусто.
+// Answer — ответ: версия, Error или данные запроса. Поля Now — в корне ответа; нет поля series, profiles или
+// cases — пусто.
 type Answer struct {
 	V     int    `json:"v"`
 	Error string `json:"error,omitempty"`
