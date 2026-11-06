@@ -7,6 +7,9 @@ ExecStart=%h/.local/bin/aguard run
 Restart=on-failure
 RestartSec=30
 Nice=10
+# PATH своей строкой: демон стартует при входе раньше импорта окружения сессии, и said, graft worktree clean, podman
+# остались бы без команд (тикет daemon-path-after-boot: 04.11 09:45 PATH=/usr/local/bin:/usr/bin).
+Environment=PATH=%h/go/bin:%h/.npm/bin:%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
 
 [Install]
 WantedBy=default.target
