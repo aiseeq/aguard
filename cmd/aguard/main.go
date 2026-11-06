@@ -322,7 +322,7 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Compact.Interval.D() }},
 		{"disk", func(ctx context.Context, c *config.Config) error { return a.diskRound(ctx, c) },
 			func(c *config.Config) time.Duration { return c.Disk.Interval.D() }},
-		{"said", func(ctx context.Context, c *config.Config) error { return a.saidRound(ctx, &c.Said, false) },
+		{"said", func(ctx context.Context, c *config.Config) error { return a.saidRound(ctx, c, false) },
 			func(c *config.Config) time.Duration { return c.Said.Interval.D() }},
 		{"bgtask", func(_ context.Context, c *config.Config) error { return a.bgtaskRound(&c.Bgtask, false) },
 			func(c *config.Config) time.Duration { return c.Bgtask.Interval.D() }},

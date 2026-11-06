@@ -124,11 +124,12 @@ type Sample struct {
 type State struct {
 	ResetsAt time.Time `json:"resets_at"`
 	Samples  []Sample  `json:"samples"`
-	Warned   bool      `json:"warned"`    // письмо 1 ушло
-	Full     bool      `json:"full"`      // письмо «100%» ушло
-	Blocked  bool      `json:"blocked"`   // письмо «работа запрещена до 100%» ушло
-	NoCredit bool      `json:"no_credit"` // строка «сброса нет» записана
-	Reset    Reset     `json:"reset"`     // взвод: ключ consume и исход в этом окне
+	Warned   bool      `json:"warned"`           // письмо 1 ушло
+	Full     bool      `json:"full"`             // письмо «100%» ушло
+	Blocked  bool      `json:"blocked"`          // письмо «работа запрещена до 100%» ушло
+	NoCredit bool      `json:"no_credit"`        // строка «сброса нет» записана
+	Denied   bool      `json:"denied,omitempty"` // последний замер: обычная работа запрещена (said не берёт учётку)
+	Reset    Reset     `json:"reset"`            // взвод: ключ consume и исход в этом окне
 	// Pending — исходы взвода, ещё не доставленные лиду и в тикет; переживают смену окна.
 	Pending []Delivery `json:"pending,omitempty"`
 }
@@ -239,6 +240,7 @@ func (s *State) record(r Reading) {
 		*s = State{ResetsAt: r.ResetsAt, Pending: pending, Reset: keep}
 	}
 	s.Samples = append(s.Samples, Sample{At: r.At, Used: r.Used})
+	s.Denied = !r.Allowed
 	cut := 0
 	for cut < len(s.Samples) && r.At.Sub(s.Samples[cut].At) > keep {
 		cut++

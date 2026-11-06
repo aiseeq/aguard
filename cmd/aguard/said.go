@@ -10,8 +10,11 @@ import (
 	"flag"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/codexwatch"
+	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/names"
 	"github.com/aiseeq/aguard/internal/said"
 )
@@ -49,7 +52,7 @@ func (a *app) saidCmd(ctx context.Context, args []string) error {
 		fl := flag.NewFlagSet("said tick", flag.ContinueOnError)
 		dry := fl.Bool("dry-run", false, "напечатать реплики в очереди, модель не звать и ничего не писать")
 		parse(fl, rest)
-		return a.saidRound(ctx, &cfg.Said, *dry)
+		return a.saidRound(ctx, &cfg, *dry)
 	case "report":
 		fl := flag.NewFlagSet("said report", flag.ContinueOnError)
 		since := fl.Duration("since", 7*24*time.Hour, "за какой срок")
@@ -72,7 +75,8 @@ func (a *app) saidCmd(ctx context.Context, args []string) error {
 
 // saidRound — один проход: новые реплики в очередь, до Batch из очереди — модели. Состояние сохраняется после
 // записи журнала: сбой записи — те же реплики размечаются снова.
-func (a *app) saidRound(ctx context.Context, cfg *said.Config, dry bool) error {
+func (a *app) saidRound(ctx context.Context, c *config.Config, dry bool) error {
+	cfg := &c.Said
 	if cfg.Mode == said.ModeOff {
 		return nil
 	}
@@ -97,7 +101,7 @@ func (a *app) saidRound(ctx context.Context, cfg *said.Config, dry bool) error {
 		}
 		return nil
 	}
-	recs, err := a.saidClassify(ctx, cfg, st)
+	recs, err := a.saidClassify(ctx, c, st)
 	if err != nil {
 		return err
 	}
@@ -105,8 +109,19 @@ func (a *app) saidRound(ctx context.Context, cfg *said.Config, dry bool) error {
 	if err := store.Append(recs); err != nil {
 		return err
 	}
+	// Сначала состояние: при несохранённом Signal письмо уходило бы каждый проход.
 	if err := st.Save(path); err != nil {
 		return err
+	}
+	if ctx.Err() != nil { // демон останавливается: вызов мог быть отменён, о простое судить не по чему
+		return nil
+	}
+	signal := st.Signal
+	a.saidStall(c, st, now)
+	if !st.Signal.Equal(signal) {
+		if err := st.Save(path); err != nil {
+			return err
+		}
 	}
 	a.log.Debug("aguard said", "replies", len(recs), "queue", len(st.Pending))
 	return store.Rotate(now, cfg.Keep.D())
@@ -115,12 +130,18 @@ func (a *app) saidRound(ctx context.Context, cfg *said.Config, dry bool) error {
 // saidClassify — до Batch реплик из очереди — модели, находки в режиме write — в указатель. В очереди остаются
 // неразмеченные: сверх Batch, с непригодным ответом модели (до Retries попыток), с несохранённой записью и все, если
 // модель не ответила: тогда проход кончается и до pause модель не зовётся — лимит или сбой мощности одинаковы для
-// всех реплик, попытки не тратятся.
-func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State) ([]said.Record, error) {
+// всех реплик, попытки не тратятся. Отказ учётки по кредитам не конец прохода: та же реплика идёт следующей учётке.
+func (a *app) saidClassify(ctx context.Context, c *config.Config, st *said.State) ([]said.Record, error) {
+	cfg := &c.Said
 	if len(st.Pending) == 0 || time.Now().Before(st.Pause) {
 		return nil, nil
 	}
-	model := cfg.OneShot()
+	accounts, skipped := a.saidAccounts(c, st, time.Now())
+	if len(accounts) == 0 {
+		st.Pause = time.Now().Add(cfg.Pause.D())
+		st.Waiting(time.Now(), "нет учётки OpenAI с лимитом: "+strings.Join(skipped, "; "))
+		return nil, nil
+	}
 	prior, bad, err := said.Read(cfg.File)
 	if err != nil {
 		return nil, err
@@ -138,7 +159,11 @@ func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State
 			continue
 		}
 		p.Attempts++
-		rec, entries := cfg.Classify(ctx, model, p, a.home, prior, time.Now())
+		rec, entries, refused := a.saidAsk(ctx, cfg, st, &accounts, p, prior)
+		recs = append(recs, refused...)
+		if !rec.Down {
+			st.Answered()
+		}
 		switch {
 		case rec.Down && ctx.Err() != nil: // демон останавливается: вызов отменён, модель ни при чём — без паузы
 			p.Attempts--
@@ -148,6 +173,7 @@ func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State
 			a.warn("said", "модель не ответила, очередь ждёт", "queue", len(st.Pending), "err", rec.Err)
 			p.Attempts--
 			down, st.Pause = true, time.Now().Add(cfg.Pause.D())
+			st.Down(time.Now(), rec.Err)
 			left = append(left, *p)
 		case rec.Err != "":
 			a.warn("said", "модель не разметила реплику", "ref", rec.Ref, "attempt", p.Attempts, "err", rec.Err)
@@ -168,4 +194,85 @@ func (a *app) saidClassify(ctx context.Context, cfg *said.Config, st *said.State
 	}
 	st.Pending = left
 	return recs, nil
+}
+
+// saidAsk — реплика первой учётке списка; отказ по кредитам метит учётку и отдаёт реплику следующей. Кончились учётки —
+// запись с Down, как любой сбой модели. refused — отказы перед сменой учётки: каждый вызов идёт в журнал.
+func (a *app) saidAsk(ctx context.Context, cfg *said.Config, st *said.State, accounts *[]said.Account, p *said.Pending,
+	prior []said.Entry) (rec said.Record, entries []said.Entry, refused []said.Record) {
+	for {
+		acc := (*accounts)[0]
+		rec, entries = cfg.Classify(ctx, cfg.OneShot(acc.Home), p, a.home, prior, time.Now())
+		rec.Account = acc.Name
+		if !rec.Down || ctx.Err() != nil || acc.Name == "" || !said.AccountOut(rec.Err) {
+			return rec, entries, refused
+		}
+		a.warn("said", "учётка отказала по кредитам", "account", acc.Name, "err", rec.Err)
+		if st.Out == nil {
+			st.Out = map[string]time.Time{}
+		}
+		st.Out[acc.Name] = time.Now().Add(said.AccountRetry)
+		if len(*accounts) == 1 {
+			return rec, entries, refused
+		}
+		refused = append(refused, rec)
+		*accounts = (*accounts)[1:]
+	}
+}
+
+// saidAccounts — учётки для прохода по замерам codexwatch, в его порядке (тот же, что у бойцов worker). Битый файл
+// замера убирает только свою учётку. Модель не на codex — один вызов без учётки. skipped — пропущенные с причиной.
+func (a *app) saidAccounts(c *config.Config, st *said.State, now time.Time) (ok []said.Account, skipped []string) {
+	if !c.Said.OnCodex() {
+		return []said.Account{{}}, nil
+	}
+	accounts := make([]said.Account, 0, len(c.Codex.Accounts))
+	var broken []string
+	for _, acc := range c.Codex.Accounts {
+		m, err := codexwatch.LoadState(filepath.Join(a.dir("codex"), acc.Name+".json"))
+		if err != nil {
+			a.warn("said", "замер учётки не прочитан, учётка пропущена", "account", acc.Name, "err", err)
+			broken = append(broken, acc.Name+": замер не прочитан")
+			continue
+		}
+		one := said.Account{Name: acc.Name, Home: acc.Home, ResetsAt: m.ResetsAt, Denied: m.Denied}
+		if n := len(m.Samples); n > 0 && !m.ResetsAt.IsZero() {
+			one.Known, one.Used = true, m.Samples[n-1].Used
+		}
+		accounts = append(accounts, one)
+	}
+	ok, skipped = said.Usable(accounts, st.Out, c.Said.Ceiling, now)
+	skipped = append(broken, skipped...)
+	if len(ok) == 0 {
+		a.warn("said", "нет учётки с лимитом, очередь ждёт", "queue", len(st.Pending), "skipped", strings.Join(skipped, "; "))
+	}
+	return ok, skipped
+}
+
+// saidStallRepeat — повтор письма о простое, пока модель не отвечает.
+const saidStallRepeat = 24 * time.Hour
+
+// saidStall — модель не отвечает дольше Stall: письмо лиду, иначе указатель сказанного молча стоит. Не ушло — повтор на
+// следующем проходе. Настоящее письмо — только в режиме write, как и запись в указатель.
+func (a *app) saidStall(c *config.Config, st *said.State, now time.Time) {
+	if st.DownSince.IsZero() || now.Sub(st.DownSince) < c.Said.Stall.D() || now.Sub(st.Signal) < saidStallRepeat {
+		return
+	}
+	msg := fmt.Sprintf("aguard said: модель не отвечает с %s, очередь %d, указатель %s не пополняется. %s",
+		st.DownSince.Format(time.RFC3339), len(st.Pending), c.Said.File, st.Why())
+	if c.Said.Mode != said.ModeWrite {
+		a.log.Info("aguard said: написал бы", "session", c.Lead, "msg", msg)
+		st.Signal = now
+		return
+	}
+	alive, err := a.reg.Alive()
+	if err == nil {
+		err = a.sendAlive(alive, c.Lead, c.SendAuth, msg)
+	}
+	if err != nil {
+		a.warn("said", "письмо о простое не отправлено", "session", c.Lead, "err", err)
+		return
+	}
+	a.log.Info("aguard said: написал", "session", c.Lead, "msg", msg)
+	st.Signal = now
 }

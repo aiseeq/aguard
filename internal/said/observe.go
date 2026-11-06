@@ -108,6 +108,50 @@ type State struct {
 	Pending []Pending         `json:"pending,omitempty"`
 	// Pause — модель не ответила: до этого момента не звать (сбой мощности не лечится частыми повторами).
 	Pause time.Time `json:"pause,omitzero"`
+	// Out — учётки OpenAI, отказавшие по кредитам: до этого момента не звать.
+	Out map[string]time.Time `json:"out,omitempty"`
+	// DownSince — с какого момента модель не отвечает; DownErr — её последняя ошибка, Skip — когда и почему её не позвали
+	// (пересчёт на каждом проходе, исход вызова очищает). Простой из-за замера и из-за сбоя — разные причины: лиду нужны обе.
+	DownSince time.Time `json:"down_since,omitzero"`
+	DownErr   string    `json:"down_err,omitempty"`
+	Skip      string    `json:"skip,omitempty"`
+	// Signal — когда лиду ушло письмо о простое.
+	Signal time.Time `json:"signal,omitzero"`
+}
+
+// Down — модель позвали, она не ответила: начало простоя и последняя ошибка, причины не звать больше нет.
+func (st *State) Down(now time.Time, why string) {
+	st.downFrom(now)
+	st.DownErr, st.Skip = why, ""
+}
+
+// Waiting — модель не зовём, учётки нет: начало простоя и нынешняя причина; ошибка модели остаётся.
+func (st *State) Waiting(now time.Time, why string) {
+	st.downFrom(now)
+	st.Skip = now.Format(time.RFC3339) + ": " + why
+}
+
+func (st *State) downFrom(now time.Time) {
+	if st.DownSince.IsZero() {
+		st.DownSince = now
+	}
+}
+
+// Why — причины простоя для письма.
+func (st *State) Why() string {
+	var parts []string
+	if st.Skip != "" {
+		parts = append(parts, "Проверка учёток "+st.Skip+".")
+	}
+	if st.DownErr != "" {
+		parts = append(parts, "Последняя ошибка модели: "+st.DownErr)
+	}
+	return strings.Join(parts, " ")
+}
+
+// Answered — модель ответила: простоя нет.
+func (st *State) Answered() {
+	st.DownSince, st.DownErr, st.Skip, st.Signal = time.Time{}, "", "", time.Time{}
 }
 
 // LoadState — состояние из файла; нет файла — пустое.

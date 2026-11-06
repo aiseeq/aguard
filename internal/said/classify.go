@@ -15,13 +15,16 @@ import (
 // Model — разовый вызов модели: инструкция Prompt, ответ по Schema; в ответе id модели и токены вызова.
 type Model func(ctx context.Context, input string) (oneshot.Result, error)
 
-// OneShot — Model через akit/oneshot: модель из списка одобренных, без инструментов.
-func (c *Config) OneShot() Model {
+// OneShot — Model через akit/oneshot: модель из списка одобренных, без инструментов; codexHome — учётка OpenAI вызова.
+func (c *Config) OneShot(codexHome string) Model {
 	return func(ctx context.Context, input string) (oneshot.Result, error) {
 		return oneshot.Ask(ctx, oneshot.Request{Model: c.Model, Effort: c.Effort, System: Prompt, Schema: Schema,
-			Input: input})
+			Input: input, CodexHome: codexHome})
 	}
 }
+
+// OnCodex — модель идёт через codex и выбирает учётку OpenAI (в akit/oneshot всё, кроме opus).
+func (c *Config) OnCodex() bool { return c.Model != "opus" }
 
 // Item — находка модели.
 type Item struct {
@@ -43,7 +46,8 @@ type Record struct {
 	Items   []Item    `json:"items,omitempty"`
 	// Dropped — находки, чья цитата не нашлась в реплике дословно: в указатель не идут.
 	Dropped []Item      `json:"dropped,omitempty"`
-	Model   string      `json:"model,omitempty"` // id модели: по нему price.Cost
+	Model   string      `json:"model,omitempty"`   // id модели: по нему price.Cost
+	Account string      `json:"account,omitempty"` // учётка OpenAI вызова
 	Usage   price.Usage `json:"usage"`
 	Ms      int64       `json:"ms"`
 	Attempt int         `json:"attempt"`
