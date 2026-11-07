@@ -107,7 +107,7 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 			fmt.Fprintf(&b, ", файлов %d", e.Files)
 		}
 		fmt.Fprintf(&b, ", возраст %s, мера %s ГБ·мин; создал: %s", HumanAge(now.Sub(e.Born)),
-			FormatGBMin(l.Item.GBMin()), CreatorText(e.Owner))
+			FormatGBMin(l.Item.GBMin(now)), CreatorText(e.Owner))
 		if l.Item.Fighter != "" {
 			b.WriteString(", боец " + l.Item.Fighter)
 		}

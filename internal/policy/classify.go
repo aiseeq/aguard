@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aiseeq/aguard/internal/record"
 )
@@ -98,8 +99,11 @@ type Item struct {
 	OwnerKey string
 }
 
-// GBMin — накопленная мера записи.
-func (it *Item) GBMin() float64 { return it.Entry.ByteSec / GiBMin }
+// GBMin — текущий размер записи, умноженный на её возраст.
+func (it *Item) GBMin(now time.Time) float64 {
+	age := max(now.Sub(it.Entry.Born), 0)
+	return float64(it.Entry.Bytes) * age.Seconds() / GiBMin
+}
 
 // Group — записи одного владельца.
 type Group struct {
@@ -144,7 +148,7 @@ func (c *Config) Items(entries []record.Entry, myUID int) []Item {
 
 // Over — владельцы сверх порога. factor < 1 ужесточает порог (давление памяти).
 // Кеши сюда не попадают: у них своя чистка.
-func (c *Config) Over(items []Item, factor float64) []Group {
+func (c *Config) Over(now time.Time, items []Item, factor float64) []Group {
 	groups := map[string]*Group{}
 	for i := range items {
 		it := &items[i]
@@ -158,7 +162,7 @@ func (c *Config) Over(items []Item, factor float64) []Group {
 		}
 		g.Items = append(g.Items, *it)
 		g.Bytes += it.Entry.Bytes
-		g.GBMin += it.GBMin()
+		g.GBMin += it.GBMin(now)
 	}
 	budget := c.Policy.BudgetGBM * factor
 	var out []Group
@@ -166,7 +170,7 @@ func (c *Config) Over(items []Item, factor float64) []Group {
 		if g.Bytes < int64(c.Policy.MinOwner) || g.GBMin < budget {
 			continue
 		}
-		sort.Slice(g.Items, func(i, j int) bool { return g.Items[i].Entry.ByteSec > g.Items[j].Entry.ByteSec })
+		sort.Slice(g.Items, func(i, j int) bool { return g.Items[i].GBMin(now) > g.Items[j].GBMin(now) })
 		out = append(out, *g)
 	}
 	sort.Slice(out, func(i, j int) bool {

@@ -168,7 +168,7 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 			as.LastSent = now
 		}
 	}
-	return sendB.list(), deferB.list()
+	return sendB.list(now), deferB.list(now)
 }
 
 // Forget забывает эскалацию записей, которых больше нет в /tmp (items — все
@@ -212,7 +212,7 @@ func (b *summaries) add(t Target, l Line, next time.Time) {
 	}
 }
 
-func (b *summaries) list() []Summary {
+func (b *summaries) list(now time.Time) []Summary {
 	out := make([]Summary, 0, len(b.order))
 	for _, k := range b.order {
 		s := b.by[k]
@@ -220,7 +220,7 @@ func (b *summaries) list() []Summary {
 			if s.Lines[i].Rel != s.Lines[j].Rel {
 				return s.Lines[i].Rel < s.Lines[j].Rel
 			}
-			return s.Lines[i].Item.Entry.ByteSec > s.Lines[j].Item.Entry.ByteSec
+			return s.Lines[i].Item.GBMin(now) > s.Lines[j].Item.GBMin(now)
 		})
 		out = append(out, *s)
 	}

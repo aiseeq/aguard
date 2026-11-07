@@ -182,7 +182,7 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 	prev := copyAlerts(st.Alerts)
 	items := cfg.Items(snap.Entries, a.uid)
 	factor := a.tmpFactor(cfg)
-	groups := cfg.Over(items, factor)
+	groups := cfg.Over(now, items, factor)
 	sums, deferred := cfg.Plan(now, groups, live, st, factor)
 	st.Forget(items)
 	a.log.Info(fmt.Sprintf("aguard tmp %s: %s, сводок %d (записей %d), отложено записей %d",
@@ -355,7 +355,7 @@ func (a *app) tmpReport(cfg *policy.Config, since time.Duration) error {
 	}
 	factor := a.tmpFactor(cfg)
 	items := cfg.Items(snap.Entries, a.uid)
-	groups := cfg.Over(items, factor)
+	groups := cfg.Over(now, items, factor)
 	fmt.Fprintf(a.out, "\n5. Сейчас (режим %s): %s.\n", cfg.Mode, policy.OverText(items, groups, factor))
 	st := a.loadUserState() // только читаем: report счётчики не меняет
 	if st.Mode != cfg.Mode {
@@ -393,7 +393,7 @@ func (a *app) tmpSendTest(cfg *policy.Config, to string, dry bool) error {
 	factor := a.tmpFactor(cfg)
 	st := &policy.UserState{}
 	var sum *policy.Summary
-	planned, _ := cfg.Plan(now, cfg.Over(cfg.Items(snap.Entries, a.uid), factor), live, st, factor)
+	planned, _ := cfg.Plan(now, cfg.Over(now, cfg.Items(snap.Entries, a.uid), factor), live, st, factor)
 	for i := range planned {
 		if planned[i].Target.Key() == target.Key() {
 			sum = &planned[i]
@@ -401,7 +401,7 @@ func (a *app) tmpSendTest(cfg *policy.Config, to string, dry bool) error {
 	}
 	if sum == nil { // адресату сейчас нечего слать — покажем формат на любых записях сверх порога
 		sum = &policy.Summary{Target: target, Factor: factor, Pressure: factor < 1}
-		for _, g := range cfg.Over(cfg.Items(snap.Entries, a.uid), factor) {
+		for _, g := range cfg.Over(now, cfg.Items(snap.Entries, a.uid), factor) {
 			for i := range g.Items {
 				sum.Lines = append(sum.Lines, testLine(&g.Items[i]))
 			}

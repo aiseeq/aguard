@@ -100,7 +100,7 @@ func TestOverThresholds(t *testing.T) {
 		entry("/tmp/claude-tmp/fresh", 2*gib, 2*time.Minute, sessionOwner(shop, "cargo")), // 4 ГБ·мин, тянет сумму shop
 	}
 	items := c.Items(entries, me)
-	groups := c.Over(items, 1)
+	groups := c.Over(t0, items, 1)
 	got := map[string]float64{}
 	for _, g := range groups {
 		got[g.Key] = g.GBMin
@@ -123,7 +123,7 @@ func TestOverThresholds(t *testing.T) {
 		}
 	}
 	// под давлением порог ×0.25: 10 МБ на 10 ч (≈5.9) уже сверх 3
-	under := c.Over(items, c.Pressure.Factor)
+	under := c.Over(t0, items, c.Pressure.Factor)
 	found := false
 	for _, g := range under {
 		found = found || g.Key == "c:chrome"
@@ -133,8 +133,41 @@ func TestOverThresholds(t *testing.T) {
 	}
 	// min_owner: одна запись 2 МБ на сутки (≈2.8) с бюджетом 1 — отсекается суммой 5 МБ
 	c.Policy.BudgetGBM = 1
-	if g := c.Over(c.Items([]record.Entry{entry("/tmp/x", 2*mib, 24*time.Hour, plainOwner("vim", me))}, me), 1); len(g) != 0 {
+	if g := c.Over(t0, c.Items([]record.Entry{entry("/tmp/x", 2*mib, 24*time.Hour, plainOwner("vim", me))}, me), 1); len(g) != 0 {
 		t.Error("сумма меньше min_owner не должна давать сводку")
+	}
+}
+
+func TestCurrentSizeAgeMeasure(t *testing.T) {
+	c := cfg()
+	c.Policy.BudgetGBM = 100
+	c.Policy.MinOwner = Size(5 * mib)
+	owner := plainOwner("worker", me)
+	cases := []struct {
+		name     string
+		bytes    int64
+		age      time.Duration
+		maxBytes int64
+		byteSec  float64
+		want     bool
+	}{
+		{"убрана до 47 МиБ", 47 * mib, 20 * time.Hour, 14 * gib / 10, 1607 * GiBMin, false},
+		{"690 МиБ после уборки", 690 * mib, 3 * time.Hour, 14 * gib / 10, 1200 * GiBMin, true},
+		{"142 МиБ, 11 ч", 142 * mib, 11 * time.Hour, 142 * mib, 1, false},
+		{"142 МиБ, 13 ч", 142 * mib, 13 * time.Hour, 142 * mib, 1, true},
+		{"10 МиБ, 6 суток", 10 * mib, 6 * 24 * time.Hour, 10 * mib, 1, false},
+		{"10 МиБ, 8 суток", 10 * mib, 8 * 24 * time.Hour, 10 * mib, 1, true},
+		{"всплеск у старой записи", 50 * mib, 7 * 24 * time.Hour, 50 * mib, 0.01, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := entry("/tmp/measure", tc.bytes, tc.age, owner)
+			e.MaxBytes, e.ByteSec = tc.maxBytes, tc.byteSec
+			groups := c.Over(t0, c.Items([]record.Entry{e}, me), 1)
+			if got := len(groups) != 0; got != tc.want {
+				t.Fatalf("сводка = %v, ожидалось %v; мера %.1f ГБ·мин", got, tc.want, float64(tc.bytes)*tc.age.Seconds()/GiBMin)
+			}
+		})
 	}
 }
 
@@ -186,7 +219,7 @@ func targets(sums []Summary) []string {
 func TestPlanEscalation(t *testing.T) {
 	c := cfg()
 	shop := sess(11, "shop-master", home+"/work/shop")
-	groups := c.Over(c.Items([]record.Entry{entry("/tmp/claude-tmp/big", gib, time.Hour, sessionOwner(shop, "go"))}, me), 1)
+	groups := c.Over(t0, c.Items([]record.Entry{entry("/tmp/claude-tmp/big", gib, time.Hour, sessionOwner(shop, "go"))}, me), 1)
 	live := newLive(tLead, tShop, tAdmin)
 	st := &UserState{}
 	want := []string{"shop-master", "shop-master", "work-admin", "work-admin", "lead"}
@@ -246,7 +279,7 @@ func TestPlanDeadCreatorAndLadderGaps(t *testing.T) {
 		entry("/tmp/admin-own", gib, time.Hour, sessionOwner(admin, "go")),
 	}
 	entries[3].UID = 0
-	groups := c.Over(c.Items(entries, me), 1)
+	groups := c.Over(t0, c.Items(entries, me), 1)
 	// shop и git-admin мертвы; work-admin и лид живы
 	live := newLive(tLead, tAdmin)
 	sums, _ := c.Plan(t0, groups, live, &UserState{}, 1)
@@ -277,7 +310,7 @@ func TestPlanDeadCreatorAndLadderGaps(t *testing.T) {
 	}
 	// админ сам себе создатель: следующая ступень сразу лид (без дубля)
 	st := &UserState{}
-	g := c.Over(c.Items([]record.Entry{entry("/tmp/admin-own", gib, time.Hour, sessionOwner(admin, "go"))}, me), 1)
+	g := c.Over(t0, c.Items([]record.Entry{entry("/tmp/admin-own", gib, time.Hour, sessionOwner(admin, "go"))}, me), 1)
 	var seq []string
 	for i := range 4 {
 		sums, _ := c.Plan(t0.Add(time.Duration(i)*5*time.Minute), g, live, st, 1)
@@ -289,7 +322,7 @@ func TestPlanDeadCreatorAndLadderGaps(t *testing.T) {
 		t.Errorf("лестница админа: %v", seq)
 	}
 	// лида нет — сводки не-агентам некому слать
-	if s, d := c.Plan(t0, c.Over(c.Items(entries[2:3], me), 1), newLive(), &UserState{}, 1); len(s)+len(d) != 0 {
+	if s, d := c.Plan(t0, c.Over(t0, c.Items(entries[2:3], me), 1), newLive(), &UserState{}, 1); len(s)+len(d) != 0 {
 		t.Errorf("без лида сводок быть не должно: %v", targets(s))
 	}
 }

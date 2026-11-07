@@ -90,7 +90,7 @@ func Collect(cfg *policy.Config, events []record.Event, st *record.State, since 
 		it := &items[i]
 		d.Live = append(d.Live, Rec{
 			Path: it.Entry.Path, Class: it.Class, Creator: creatorOf(it.Class, it.Entry.Owner), Life: now.Sub(it.Entry.Born),
-			MaxBytes: it.Entry.MaxBytes, Bytes: it.Entry.Bytes, Measured: !it.Entry.MeasuredAt.IsZero(), GBMin: it.GBMin(), Live: true,
+			MaxBytes: it.Entry.MaxBytes, Bytes: it.Entry.Bytes, Measured: !it.Entry.MeasuredAt.IsZero(), GBMin: it.Entry.ByteSec / policy.GiBMin, Live: true,
 		})
 	}
 	return d
