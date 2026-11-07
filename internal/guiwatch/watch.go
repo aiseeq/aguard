@@ -1214,9 +1214,8 @@ func (w *Watcher) writeSlice(s *targetState, e *episode) error {
 				item.ID, item.Starttime, item.Merged = old.ID, old.Starttime, old.Merged
 				item.Samples = dedupeSamples(append(old.Samples, item.Samples...))
 				item.Threads, item.Top = old.Threads, old.Top
-				if lost != "" {
-					item.Errors = append(item.Errors, lost)
-				}
+				// ошибки прежних снимков эпизода (и потеря файла) остаются в срезе
+				item.Errors = unionErrors(old.Errors, item.Errors, lost)
 				w.document.Slices[i] = item
 				w.markSliceDirty(item.ID)
 				break
@@ -1247,9 +1246,7 @@ func (w *Watcher) createSlice(s *targetState, e *episode) error {
 		if err != nil {
 			return err
 		}
-		if lost != "" {
-			old.Errors = append(old.Errors, lost)
-		}
+		old.Errors = unionErrors(old.Errors, nil, lost)
 		item := w.makeSlice(s, e, true)
 		old.Merged++
 		old.End = item.End
@@ -1951,6 +1948,24 @@ func (w *Watcher) compactSlices() {
 	}
 }
 
+// unionErrors — ошибки a, затем новые из b и extra, без повторов, в порядке появления.
+func unionErrors(a, b []string, extra string) []string {
+	if len(b) == 0 && extra == "" {
+		return a
+	}
+	out := make([]string, 0, len(a)+len(b)+1)
+	seen := make(map[string]bool, cap(out))
+	for _, list := range [][]string{a, b, {extra}} {
+		for _, e := range list {
+			if e != "" && !seen[e] {
+				seen[e] = true
+				out = append(out, e)
+			}
+		}
+	}
+	return out
+}
+
 // loadSliceContents дочитывает сокращённый срез с диска. Файл удалили мимо
 // демона — прежние подробности потеряны: срез дописывается со сводкой и
 // новыми выборками, а lost — строка для его ошибок (отчёт её покажет);
@@ -2183,8 +2198,11 @@ func (w *Watcher) mergeDiskSlice(item *Slice) error {
 		return fmt.Errorf("разобрать %s: %w", path, err)
 	}
 	if old.End.After(item.End) {
+		errs := item.Errors
 		*item = old
+		item.Errors = unionErrors(old.Errors, errs, "")
 	} else {
+		item.Errors = unionErrors(old.Errors, item.Errors, "")
 		item.Merged = max(item.Merged, old.Merged)
 		item.Samples = dedupeSamples(append(old.Samples, item.Samples...))
 	}

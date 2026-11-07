@@ -58,3 +58,38 @@ func TestTombsExpireOpenWithoutProc(t *testing.T) {
 		t.Errorf("pid 1: запись не снята через keep после выхода")
 	}
 }
+
+// Пока /proc проверяется без мьютекса, pid ушёл новому процессу (exec
+// обновил запись, fork потерян): запись не помечается. Постоянная ошибка
+// проверки даёт один WARN в час, не на каждом обходе.
+func TestTombsExpireRaceAndWarnOnce(t *testing.T) {
+	var logs bytes.Buffer
+	tb := newTombs(time.Minute, slog.New(slog.NewTextHandler(&logs, nil)))
+	old := time.Now().Add(-2 * time.Minute)
+	tb.m[1] = &tomb{seen: old}
+	tb.m[2] = &tomb{seen: old}
+	tb.gone = func(pid int) (bool, error) {
+		if pid == 2 {
+			return false, errors.New("stat: permission denied")
+		}
+		tb.mu.Lock()
+		tb.m[1].seen = time.Now() // exec нового процесса с тем же pid во время проверки
+		tb.mu.Unlock()
+		return true, nil
+	}
+	tb.expireOnce()
+	if !tb.m[1].exited.IsZero() {
+		t.Errorf("pid 1: выход поставлен записи, которую за время проверки обновил exec")
+	}
+	tb.m[1].seen = old
+	tb.gone = func(pid int) (bool, error) {
+		if pid == 2 {
+			return false, errors.New("stat: permission denied")
+		}
+		return false, nil
+	}
+	tb.expireOnce()
+	if n := strings.Count(logs.String(), "level=WARN"); n != 1 {
+		t.Errorf("WARN об ошибке проверки: %d строк, ждали 1 за час:\n%s", n, logs.String())
+	}
+}

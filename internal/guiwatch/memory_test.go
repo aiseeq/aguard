@@ -128,4 +128,17 @@ func TestCompactSliceMissingFileMerges(t *testing.T) {
 	if got.ID != "original" || got.Merged != 1 || !slices.ContainsFunc(got.Errors, func(s string) bool { return strings.Contains(s, "файл среза пропал") }) {
 		t.Fatalf("склейка после пропажи файла: %#v", got)
 	}
+	// следующее дополнение того же эпизода не стирает строку о потере
+	w.compactSlices()
+	s.ring = append(s.ring, Sample{At: at.Add(4 * time.Second), State: "D"})
+	e.end = at.Add(4 * time.Second)
+	if err := w.writeSlice(s, e); err != nil {
+		t.Fatal(err)
+	}
+	if doc, err = ReadReport(dir, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := doc.Slices[0]; len(got.Samples) < 2 || !slices.ContainsFunc(got.Errors, func(s string) bool { return strings.Contains(s, "файл среза пропал") }) {
+		t.Fatalf("дополнение после пропажи файла потеряло строку о потере или выборки: %#v", got)
+	}
 }

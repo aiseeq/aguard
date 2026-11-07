@@ -34,7 +34,9 @@ type Tombs struct {
 	m       map[int]*tomb
 	keep    time.Duration
 	overrun atomic.Int64
-	log     *slog.Logger
+	// lastFailWarn — последний WARN об ошибке проверки /proc: постоянная ошибка — строка раз в час, не каждые 30 с
+	lastFailWarn time.Time
+	log          *slog.Logger
 	// gone — процесса нет в /proc; запись без события выхода старше keep без процесса получает выход сейчас
 	gone func(pid int) (bool, error)
 }
@@ -169,15 +171,17 @@ func (t *Tombs) expireOnce() {
 			gone = append(gone, pid)
 		}
 	}
-	if failed > 0 {
+	if failed > 0 && time.Since(t.lastFailWarn) >= time.Hour {
+		t.lastFailWarn = time.Now()
 		t.log.Warn("aguard слежение: проверка процесса надгробия не удалась, запись оставлена", "записей", failed, "err", firstErr)
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	marked := time.Now() // keep — от пометки, не от начала обхода
 	for _, pid := range gone {
-		// та же запись: за время проверки pid мог уйти новому процессу
+		// та же запись: за время проверки pid мог уйти новому процессу (fork — новая запись, exec — новый seen)
 		if x := t.m[pid]; x != nil && x.exited.IsZero() && x.seen.Equal(open[pid]) {
-			x.exited = now
+			x.exited = marked
 		}
 	}
 }
@@ -224,6 +228,7 @@ func (t *Tombs) handle(cn []byte) {
 			t.m[pid] = x
 		}
 		x.comm, x.args, x.cwd, x.uid = d.comm, d.args, d.cwd, d.uid
+		x.seen = time.Now() // exec — процесс жив сейчас: обход, начатый раньше, эту запись не пометит
 		t.mu.Unlock()
 	case procEvExit: // process_pid, process_tgid, exit_code, exit_signal, parent_pid, parent_tgid
 		if u(0) != u(1) {
