@@ -272,8 +272,8 @@ type watcher struct {
 // не делаем), пауза — по умолчанию.
 func (a *app) run(ctx context.Context) error {
 	started := time.Now()
-	// SIGUSR2 делает ручной снимок буфера; подписка до старта наблюдателей. SIGUSR1 ничего не значит, но и не
-	// убивает демон: канал без читателя, а не signal.Ignore — игнор унаследовали бы дочерние процессы.
+	// SIGUSR2 делает ручной снимок буфера; подписка до старта наблюдателей. SIGUSR1 пишет профиль кучи
+	// (heapLoop); подписка, а не signal.Ignore — игнор унаследовали бы дочерние процессы.
 	usr1, usr2 := make(chan os.Signal, 1), make(chan os.Signal, 1)
 	signal.Notify(usr1, syscall.SIGUSR1)
 	defer signal.Stop(usr1)
@@ -293,6 +293,7 @@ func (a *app) run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() { a.restartServe(ctx, judge) })
 	wg.Go(func() { a.ioLoop(ctx, usr2) })
+	wg.Go(func() { a.heapLoop(ctx, usr1) })
 	wg.Go(func() { a.guiLoop(ctx) })
 	insts := track.Instances(a.home)
 	for i := range insts {
