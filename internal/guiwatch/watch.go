@@ -43,24 +43,25 @@ type Thread struct {
 	Wchan string `json:"wchan,omitempty"`
 }
 type Slice struct {
-	ID         string            `json:"id,omitempty"`
-	Starttime  uint64            `json:"starttime,omitempty"`
-	Target     string            `json:"target"`
-	PID        int               `json:"pid"`
-	TID        int               `json:"tid"`
-	Kind       string            `json:"kind"`
-	Start      time.Time         `json:"start"`
-	End        time.Time         `json:"end"`
-	DurationMS int64             `json:"duration_ms"`
-	Suspend    bool              `json:"suspend"`
-	Merged     int               `json:"merged"`
-	SelfWaitMS int64             `json:"self_wait_ms"`
-	Samples    []Sample          `json:"samples"`
-	Threads    []Thread          `json:"threads"`
-	Journal    []string          `json:"journal"`
-	PSI        map[string]string `json:"psi"`
-	Top        []ProcessCPU      `json:"top"`
-	Errors     []string          `json:"errors,omitempty"`
+	ID           string            `json:"id,omitempty"`
+	Starttime    uint64            `json:"starttime,omitempty"`
+	Target       string            `json:"target"`
+	PID          int               `json:"pid"`
+	TID          int               `json:"tid"`
+	Kind         string            `json:"kind"`
+	Start        time.Time         `json:"start"`
+	End          time.Time         `json:"end"`
+	DurationMS   int64             `json:"duration_ms"`
+	Suspend      bool              `json:"suspend"`
+	Merged       int               `json:"merged"`
+	SelfWaitMS   int64             `json:"self_wait_ms"`
+	Samples      []Sample          `json:"samples"`
+	Threads      []Thread          `json:"threads"`
+	Journal      []string          `json:"journal"`
+	PSI          map[string]string `json:"psi"`
+	Top          []ProcessCPU      `json:"top"`
+	Errors       []string          `json:"errors,omitempty"`
+	metadataOnly bool
 }
 type ProcessCPU struct {
 	PID   int    `json:"pid"`
@@ -325,6 +326,7 @@ func (w *Watcher) step(at time.Time) error {
 		}
 	}
 	w.topTracking = w.hasEpisode()
+	w.compactSlices()
 	return nil
 }
 
@@ -1205,6 +1207,9 @@ func (w *Watcher) writeSlice(s *targetState, e *episode) error {
 		for i := range w.document.Slices {
 			old := &w.document.Slices[i]
 			if old.ID == e.sliceID {
+				if err := w.loadSliceContents(old); err != nil {
+					return err
+				}
 				item.ID, item.Starttime, item.Merged = old.ID, old.Starttime, old.Merged
 				item.Samples = dedupeSamples(append(old.Samples, item.Samples...))
 				item.Threads, item.Top = old.Threads, old.Top
@@ -1234,6 +1239,9 @@ func (w *Watcher) createSlice(s *targetState, e *episode) error {
 	}
 	if merged >= 0 {
 		old := &w.document.Slices[merged]
+		if err := w.loadSliceContents(old); err != nil {
+			return err
+		}
 		item := w.makeSlice(s, e, true)
 		old.Merged++
 		old.End = item.End
@@ -1807,7 +1815,7 @@ func (w *Watcher) load() (retErr error) {
 	if err := w.readSuppressed(); err != nil {
 		return err
 	}
-	items, err := readSliceFiles(w.Dir)
+	items, err := readSlices(w.Dir, true)
 	if err != nil {
 		return err
 	}
@@ -1873,6 +1881,10 @@ func readSingleFileDocument(path string) (Document, bool, error) {
 }
 
 func readSliceFiles(dir string) ([]Slice, error) {
+	return readSlices(dir, false)
+}
+
+func readSlices(dir string, metadataOnly bool) ([]Slice, error) {
 	root := filepath.Join(dir, "slices")
 	entries, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1898,12 +1910,57 @@ func readSliceFiles(dir string) ([]Slice, error) {
 		if err := json.Unmarshal(b, &item); err != nil {
 			return nil, fmt.Errorf("разобрать %s: %w", path, err)
 		}
-		for i := range item.Samples {
-			item.Samples[i].At = item.Start.Add(time.Duration(item.Samples[i].AtMS) * time.Millisecond)
+		if metadataOnly {
+			item = sliceMetadata(item)
+		} else {
+			for i := range item.Samples {
+				item.Samples[i].At = item.Start.Add(time.Duration(item.Samples[i].AtMS) * time.Millisecond)
+			}
 		}
 		items = append(items, item)
 	}
 	return items, nil
+}
+
+// Сводки нужны для склейки, часового лимита и чистки; подробности остаются в файле.
+func sliceMetadata(item Slice) Slice {
+	item.Samples = nil
+	item.Threads = nil
+	item.Journal = nil
+	item.PSI = nil
+	item.Top = nil
+	item.Errors = nil
+	item.metadataOnly = true
+	return item
+}
+
+func (w *Watcher) compactSlices() {
+	for i := range w.document.Slices {
+		item := &w.document.Slices[i]
+		if !item.metadataOnly && !w.dirtySlices[item.ID] {
+			*item = sliceMetadata(*item)
+		}
+	}
+}
+
+func (w *Watcher) loadSliceContents(item *Slice) error {
+	if !item.metadataOnly {
+		return nil
+	}
+	path := slicePath(w.Dir, item.ID)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("прочитать %s: %w", path, err)
+	}
+	var full Slice
+	if err := json.Unmarshal(b, &full); err != nil {
+		return fmt.Errorf("разобрать %s: %w", path, err)
+	}
+	for i := range full.Samples {
+		full.Samples[i].At = full.Start.Add(time.Duration(full.Samples[i].AtMS) * time.Millisecond)
+	}
+	*item = full
+	return nil
 }
 
 func writeSliceIfMissing(dir string, item *Slice) error {
