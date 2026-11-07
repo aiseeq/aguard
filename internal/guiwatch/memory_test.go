@@ -142,3 +142,26 @@ func TestCompactSliceMissingFileMerges(t *testing.T) {
 		t.Fatalf("дополнение после пропажи файла потеряло строку о потере или выборки: %#v", got)
 	}
 }
+
+// Дисковая версия среза новее памяти (mergeDiskSlice заменяет срез): ошибки
+// обеих версий остаются, без повторов.
+func TestMergeDiskSliceNewerKeepsErrors(t *testing.T) {
+	dir := t.TempDir()
+	w := New(t.TempDir(), dir, Default(), nil)
+	defer w.closeAll()
+	at := time.Now()
+	disk := Slice{ID: "s1", Target: "victim", Start: at, End: at.Add(2 * time.Second), Errors: []string{"на диске", "общая"}}
+	if err := os.MkdirAll(filepath.Join(dir, "slices"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONAtomic(slicePath(dir, "s1"), &disk); err != nil {
+		t.Fatal(err)
+	}
+	item := Slice{ID: "s1", Target: "victim", Start: at, End: at.Add(time.Second), Errors: []string{"общая", "файл среза пропал до дополнения"}}
+	if err := w.mergeDiskSlice(&item); err != nil {
+		t.Fatal(err)
+	}
+	if !item.End.Equal(disk.End) || !slices.Equal(item.Errors, []string{"на диске", "общая", "файл среза пропал до дополнения"}) {
+		t.Fatalf("слияние с более новым диском: End %v, Errors %q", item.End, item.Errors)
+	}
+}

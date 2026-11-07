@@ -2,8 +2,10 @@ package track
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -59,29 +61,37 @@ func TestTombsExpireOpenWithoutProc(t *testing.T) {
 	}
 }
 
+// execMsg — cn_msg(20) + proc_event exec для pid (как шлёт proc connector).
+func execMsg(pid int) []byte {
+	b := make([]byte, 20+16+24)
+	binary.LittleEndian.PutUint32(b[20:], procEvExec)
+	binary.LittleEndian.PutUint32(b[20+16:], uint32(pid))
+	binary.LittleEndian.PutUint32(b[20+16+4:], uint32(pid))
+	return b
+}
+
 // Пока /proc проверяется без мьютекса, pid ушёл новому процессу (exec
 // обновил запись, fork потерян): запись не помечается. Постоянная ошибка
 // проверки даёт один WARN в час, не на каждом обходе.
 func TestTombsExpireRaceAndWarnOnce(t *testing.T) {
 	var logs bytes.Buffer
 	tb := newTombs(time.Minute, slog.New(slog.NewTextHandler(&logs, nil)))
+	self := os.Getpid() // exec читает /proc: нужен живой процесс
 	old := time.Now().Add(-2 * time.Minute)
-	tb.m[1] = &tomb{seen: old}
+	tb.m[self] = &tomb{seen: old}
 	tb.m[2] = &tomb{seen: old}
 	tb.gone = func(pid int) (bool, error) {
 		if pid == 2 {
 			return false, errors.New("stat: permission denied")
 		}
-		tb.mu.Lock()
-		tb.m[1].seen = time.Now() // exec нового процесса с тем же pid во время проверки
-		tb.mu.Unlock()
+		tb.handle(execMsg(self)) // exec нового процесса с тем же pid во время проверки
 		return true, nil
 	}
 	tb.expireOnce()
-	if !tb.m[1].exited.IsZero() {
-		t.Errorf("pid 1: выход поставлен записи, которую за время проверки обновил exec")
+	if x := tb.m[self]; !x.exited.IsZero() || x.comm == "" {
+		t.Errorf("pid %d: выход поставлен записи, которую за время проверки обновил exec (или exec не дошёл): %+v", self, *x)
 	}
-	tb.m[1].seen = old
+	tb.m[self].seen = old
 	tb.gone = func(pid int) (bool, error) {
 		if pid == 2 {
 			return false, errors.New("stat: permission denied")
@@ -91,5 +101,10 @@ func TestTombsExpireRaceAndWarnOnce(t *testing.T) {
 	tb.expireOnce()
 	if n := strings.Count(logs.String(), "level=WARN"); n != 1 {
 		t.Errorf("WARN об ошибке проверки: %d строк, ждали 1 за час:\n%s", n, logs.String())
+	}
+	tb.lastFailWarn = time.Now().Add(-time.Hour - time.Second)
+	tb.expireOnce()
+	if n := strings.Count(logs.String(), "level=WARN"); n != 2 {
+		t.Errorf("WARN через час: %d строк, ждали 2", n)
 	}
 }
