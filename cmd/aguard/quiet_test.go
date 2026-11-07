@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -191,8 +192,8 @@ func TestQuietSendMissingBrokenAndUnreadableState(t *testing.T) {
 			t.Skip("текущий пользователь может читать файл с mode 000")
 		}
 		err := a.sendSocket(0, "lead", "unused", false, "не отправлять")
-		if err == nil || errors.Is(err, errQuiet) || !strings.Contains(err.Error(), a.quietPath()) {
-			t.Fatalf("ожидалась ошибка чтения с путём, errQuiet=false: %v", err)
+		if err == nil || errors.Is(err, errQuiet) || !errors.Is(err, fs.ErrPermission) || !strings.Contains(err.Error(), a.quietPath()) {
+			t.Fatalf("ожидалась ошибка прав чтения с путём, errQuiet=false: %v", err)
 		}
 	})
 }
@@ -286,7 +287,13 @@ func TestQuietQueueNoticeRemainsPendingUntilSent(t *testing.T) {
 	}
 	sock, got := quietListener(t)
 	alive["lead"] = session.Info{Name: "lead", SocketPath: sock}
-	a.deliverQueueNotices(&config.Config{Queue: queue.Config{Mode: queue.ModeOn}}, alive, &state, v, notices, now)
+	// следующий проход очереди: неподтверждённое уведомление снова в плане
+	v.Now = now.Add(time.Minute)
+	notices = state.Step([]queue.Ticket{ticket}, v)
+	if len(notices) == 0 {
+		t.Fatal("следующий проход очереди не вернул неподтверждённое уведомление")
+	}
+	a.deliverQueueNotices(&config.Config{Queue: queue.Config{Mode: queue.ModeOn}}, alive, &state, v, notices, v.Now)
 	select {
 	case msg := <-got:
 		if !strings.Contains(msg, "critical") {
