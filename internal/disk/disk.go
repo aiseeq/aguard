@@ -28,13 +28,17 @@ type Config struct {
 	Walk       policy.Duration `toml:"walk"`        // минимальный промежуток между обходами записей
 	WalkChange policy.Size     `toml:"walk_change"` // изменение свободного места для обхода
 	WalkMax    policy.Duration `toml:"walk_max"`    // максимум между обходами записей
-	Roots      []string        `toml:"roots"`       // их дети — записи
-	Containers []string        `toml:"containers"`  // шаблоны glob: дети совпавших папок — записи, предки — нет
-	Grow       policy.Size     `toml:"grow"`        // рост записи за сутки
-	Fast       policy.Size     `toml:"fast"`        // убыль свободного места за fast_window
-	FastWindow policy.Duration `toml:"fast_window"` // окно убыли
-	Stale      policy.Duration `toml:"stale"`       // столько без изменений — остаток
-	StaleMin   policy.Size     `toml:"stale_min"`   // остаток от этого размера
+	// WalkWindow — местное окно планового обхода; при нём walk и walk_change не влияют на план.
+	WalkWindow      string `toml:"walk_window"`
+	walkWindowStart int
+	walkWindowEnd   int
+	Roots           []string        `toml:"roots"`       // их дети — записи
+	Containers      []string        `toml:"containers"`  // шаблоны glob: дети совпавших папок — записи, предки — нет
+	Grow            policy.Size     `toml:"grow"`        // рост записи за сутки
+	Fast            policy.Size     `toml:"fast"`        // убыль свободного места за fast_window
+	FastWindow      policy.Duration `toml:"fast_window"` // окно убыли
+	Stale           policy.Duration `toml:"stale"`       // столько без изменений — остаток
+	StaleMin        policy.Size     `toml:"stale_min"`   // остаток от этого размера
 	// Lasting — долгоживущие кэши инструментов (glob по пути записи): не остатки, сколько бы ни лежали.
 	Lasting []string `toml:"lasting"`
 	// FiemapMin — файл меньше этого места по st_blocks считается без FIEMAP (0 — FIEMAP на все): reflink мелких файлов
@@ -120,6 +124,14 @@ func (c *Config) Validate(home string) error {
 
 // validateThresholds — режимы, сроки и пороги.
 func (c *Config) validateThresholds() error {
+	c.walkWindowStart, c.walkWindowEnd = 0, 0
+	if c.WalkWindow != "" {
+		start, end, err := parseWalkWindow(c.WalkWindow)
+		if err != nil {
+			return fmt.Errorf("disk.walk_window: %w", err)
+		}
+		c.walkWindowStart, c.walkWindowEnd = start, end
+	}
 	if c.Mode != ModeLog {
 		return fmt.Errorf("disk.mode = %q: есть только %q", c.Mode, ModeLog)
 	}
