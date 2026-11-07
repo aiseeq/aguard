@@ -120,6 +120,7 @@ interval = "1m"        # замер свободного места
 walk = "1h"            # минимум между обходами; раньше — если место тает быстро
 walk_change = "2G"     # изменение свободного места для обхода после walk
 walk_max = "6h"         # максимум между обходами записей
+# walk_window = "02:00-05:00" # местное ночное окно; с ним walk и walk_change не влияют на плановый обход
 fiemap_min = "0"       # файл меньше этого — по st_blocks, без FIEMAP; 0 — FIEMAP на все
 roots = ["~/.cache", "~/.local/state", "/var/tmp"]
 containers = ["~/.cache/claude-tmp/claude-*/*", "~/.cache/worktrees/*"]

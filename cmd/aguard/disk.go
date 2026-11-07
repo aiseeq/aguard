@@ -138,6 +138,7 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	}
 	owners := a.diskOwners(cfg)
 	yield := a.diskYield(ctx)
+	walkReason := st.WalkDue(&cfg.Disk, now, free)
 	measure := func(entries []string) map[string]disk.Usage {
 		readBefore, readErr := iowatch.SelfReadBytes(procRoot)
 		usage := cfg.Disk.MeasureAll(ctx, entries, yield.wait)
@@ -146,8 +147,9 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 			files += u.Files
 			fiemaps += u.Fiemaps
 		}
-		attrs := []any{"entries", len(entries), "files", files, "fiemaps", fiemaps, "took", time.Since(now).Round(time.Second).String(),
-			"paused", yield.paused.String(), "pauses", yield.pauses, "interrupted", ctx.Err() != nil}
+		attrs := []any{"reason", string(walkReason), "entries", len(entries), "files", files, "fiemaps", fiemaps,
+			"took", time.Since(now).Round(time.Second).String(), "paused", yield.paused.String(), "pauses", yield.pauses,
+			"interrupted", ctx.Err() != nil}
 		// Цена обхода: read_bytes всего процесса за обход, тикет self-io-reads. Прочие наблюдатели — фон поверх.
 		readAfter, err := iowatch.SelfReadBytes(procRoot)
 		if readErr = errors.Join(readErr, err); readErr != nil {
@@ -208,7 +210,7 @@ func (a *app) diskRoundState(path string, cfg *config.Config, now time.Time, fre
 	}
 	st := a.diskState
 	needsSizes := cfg.Disk.FreeMode != disk.FreeOff && free < int64(cfg.Disk.FreeMin)
-	if !a.diskWalkLoaded && (needsSizes || st.WalkDue(&cfg.Disk, now, free)) {
+	if !a.diskWalkLoaded && (needsSizes || st.WalkDue(&cfg.Disk, now, free) != "") {
 		loaded, err := disk.Load(path)
 		if err != nil {
 			return nil, err

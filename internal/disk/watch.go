@@ -69,6 +69,7 @@ type State struct {
 	Free         []Point              `json:"free"`
 	LastWalk     time.Time            `json:"last_walk"`
 	LastWalkFree int64                `json:"last_walk_free"`
+	LastWindow   string               `json:"last_window,omitempty"`
 	Told         map[string]time.Time `json:"told"`             // вид и путь -> когда записан
 	Traces       map[string]Trace     `json:"traces,omitempty"` // учтённые следы, путь -> последний замер
 }
@@ -164,6 +165,7 @@ type roundState struct {
 	Free         []Point              `json:"free"`
 	LastWalk     time.Time            `json:"last_walk"`
 	LastWalkFree int64                `json:"last_walk_free"`
+	LastWindow   string               `json:"last_window,omitempty"`
 	Told         map[string]time.Time `json:"told"`
 }
 
@@ -178,7 +180,7 @@ func LoadRound(path string) (*State, bool, error) {
 		return st, true, err
 	}
 	return &State{Sizes: map[string][]Point{}, Free: frequent.Free, LastWalk: frequent.LastWalk,
-		LastWalkFree: frequent.LastWalkFree, Told: frequent.Told}, false, nil
+		LastWalkFree: frequent.LastWalkFree, LastWindow: frequent.LastWindow, Told: frequent.Told}, false, nil
 }
 
 // Load читает полное состояние. round.json имеет приоритет над одноимёнными полями старого state.json.
@@ -206,7 +208,10 @@ func Load(path string) (*State, error) {
 	if !exists {
 		return s, nil
 	}
-	s.Free, s.LastWalk, s.LastWalkFree, s.Told = frequent.Free, frequent.LastWalk, frequent.LastWalkFree, frequent.Told
+	s.Free, s.Told = frequent.Free, frequent.Told
+	if frequent.LastWalk.After(s.LastWalk) {
+		s.LastWalk, s.LastWalkFree, s.LastWindow = frequent.LastWalk, frequent.LastWalkFree, frequent.LastWindow
+	}
 	if s.Told == nil {
 		s.Told = map[string]time.Time{}
 	}
@@ -238,8 +243,9 @@ func (s *State) SaveWalk(path string) error {
 		Sizes        map[string][]Point `json:"sizes"`
 		LastWalk     time.Time          `json:"last_walk"`
 		LastWalkFree int64              `json:"last_walk_free"`
+		LastWindow   string             `json:"last_window,omitempty"`
 		Traces       map[string]Trace   `json:"traces,omitempty"`
-	}{s.Sizes, s.LastWalk, s.LastWalkFree, s.Traces}
+	}{s.Sizes, s.LastWalk, s.LastWalkFree, s.LastWindow, s.Traces}
 	b, err := json.Marshal(large)
 	if err != nil {
 		return fmt.Errorf("состояние disk: %w", err)
@@ -249,7 +255,8 @@ func (s *State) SaveWalk(path string) error {
 
 // SaveFrequent пишет данные прохода атомарно.
 func (s *State) SaveFrequent(path string) error {
-	frequent := roundState{Free: s.Free, LastWalk: s.LastWalk, LastWalkFree: s.LastWalkFree, Told: s.Told}
+	frequent := roundState{Free: s.Free, LastWalk: s.LastWalk, LastWalkFree: s.LastWalkFree,
+		LastWindow: s.LastWindow, Told: s.Told}
 	b, err := json.Marshal(frequent)
 	if err != nil {
 		return fmt.Errorf("состояние disk: %w", err)
@@ -316,31 +323,119 @@ func (c *Config) MeasureAll(ctx context.Context, entries []string, yield func())
 // FIEMAP — доли секунды чтения диска.
 const yieldEvery = 1024
 
-// WalkDue сообщает, нужен ли обход по смене свободного места, сроку или быстрому падению.
-func (s *State) WalkDue(c *Config, now time.Time, free int64) bool {
-	points := slices.DeleteFunc(slices.Clone(s.Free), func(p Point) bool { return now.Sub(p.At) > c.FastWindow.D() })
+type WalkReason string // причина планового, оконного или быстрого обхода.
+
+const (
+	WalkPlan   WalkReason = "plan"
+	WalkWindow WalkReason = "window"
+	WalkFast   WalkReason = "fast"
+	WalkMissed WalkReason = "missed"
+)
+
+// parseWalkWindow разбирает местное окно в формате HH:MM-HH:MM.
+func parseWalkWindow(value string) (start, end int, err error) {
+	if len(value) != 11 || value[5] != '-' || value[2] != ':' || value[8] != ':' {
+		return 0, 0, errors.New("ожидается формат ЧЧ:ММ-ЧЧ:ММ")
+	}
+	parse := func(s string) (int, bool) {
+		for _, i := range []int{0, 1, 3, 4} {
+			if s[i] < '0' || s[i] > '9' {
+				return 0, false
+			}
+		}
+		h := int(s[0]-'0')*10 + int(s[1]-'0')
+		m := int(s[3]-'0')*10 + int(s[4]-'0')
+		if h > 23 || m > 59 {
+			return 0, false
+		}
+		return h*60 + m, true
+	}
+	start, okStart := parse(value[:5])
+	end, okEnd := parse(value[6:])
+	if !okStart || !okEnd {
+		return 0, 0, errors.New("время должно быть в пределах 00:00-23:59")
+	}
+	if start == end {
+		return 0, 0, errors.New("начало и конец должны различаться")
+	}
+	return start, end, nil
+}
+
+func civilTime(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
+}
+
+// walkWindowInstance возвращает местную дату начала окна, содержащего now. Границы строятся через time.Date в Local;
+// сравнение нормализованных местных компонентов учитывает оба повторения часа DST как один экземпляр.
+func walkWindowInstance(start, end int, now time.Time) (string, bool) {
+	local := now.In(time.Local)
+	today := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.Local)
+	dates := []time.Time{today}
+	if start > end {
+		dates = append(dates, today.AddDate(0, 0, -1))
+	}
+	wallNow := civilTime(local)
+	for _, date := range dates {
+		startAt := time.Date(date.Year(), date.Month(), date.Day(), start/60, start%60, 0, 0, time.Local)
+		endDate := date
+		if start > end {
+			endDate = date.AddDate(0, 0, 1)
+		}
+		endAt := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), end/60, end%60, 0, 0, time.Local)
+		if !wallNow.Before(civilTime(startAt)) && wallNow.Before(civilTime(endAt)) {
+			return date.Format("2006-01-02"), true
+		}
+	}
+	return "", false
+}
+
+// WalkDue возвращает причину нужного обхода или пустую строку, если обход не нужен.
+func (s *State) WalkDue(c *Config, now time.Time, free int64) WalkReason {
+	// падение — только по точкам после прошлого обхода: то же падение второго быстрого обхода не даёт
+	points := slices.DeleteFunc(slices.Clone(s.Free), func(p Point) bool {
+		return now.Sub(p.At) > c.FastWindow.D() || p.At.Before(s.LastWalk)
+	})
 	points = append(points, Point{At: now, Bytes: free})
 	drop := slices.MaxFunc(points, func(a, b Point) int { return cmp.Compare(a.Bytes, b.Bytes) }).Bytes - free
 	fast := drop >= int64(c.Fast)
 	since := now.Sub(s.LastWalk)
-	if since >= c.WalkMax.D() || fast && since >= walkGap {
-		return true
+	if fast && since >= walkGap {
+		return WalkFast
+	}
+	if c.WalkWindow != "" {
+		if !s.LastWalk.IsZero() && since >= c.WalkMax.D()+24*time.Hour {
+			return WalkMissed
+		}
+		if date, inside := walkWindowInstance(c.walkWindowStart, c.walkWindowEnd, now); inside && s.LastWindow != date {
+			return WalkWindow
+		}
+		return ""
+	}
+	if since >= c.WalkMax.D() {
+		return WalkPlan
 	}
 	if s.LastWalkFree == 0 {
-		return since >= c.Walk.D()
+		if since >= c.Walk.D() {
+			return WalkPlan
+		}
+		return ""
 	}
 	change := free - s.LastWalkFree
 	if change < 0 {
 		change = -change
 	}
-	return since >= c.Walk.D() && change >= int64(c.WalkChange)
+	if since >= c.Walk.D() && change >= int64(c.WalkChange) {
+		return WalkPlan
+	}
+	return ""
 }
 
 // Pass — один проход: свободное место free; обход записей после заметной смены места, максимум через walk_max или по тревоге.
 // Unread — записи, где не прочитались папки: их пишет вызывающий.
 func (s *State) Pass(c *Config, now time.Time, free int64, entries func() ([]string, error), m Measure,
 	owner func(path string) (string, string)) ([]Record, map[string]Usage, error) {
-	walkDue := s.WalkDue(c, now, free)
+	reason := s.WalkDue(c, now, free)
+	walkDue := reason != ""
 	s.Free = append(slices.DeleteFunc(s.Free, func(p Point) bool { return now.Sub(p.At) > c.FastWindow.D() }),
 		Point{At: now, Bytes: free})
 	if !walkDue {
@@ -354,6 +449,11 @@ func (s *State) Pass(c *Config, now time.Time, free int64, entries func() ([]str
 	}
 	usage := m(list)
 	s.LastWalk, s.LastWalkFree = now, free
+	if c.WalkWindow != "" {
+		if date, inside := walkWindowInstance(c.walkWindowStart, c.walkWindowEnd, now); inside {
+			s.LastWindow = date
+		}
+	}
 	var out []Record
 	tell := func(r Record, every time.Duration) {
 		key := r.Kind + " " + r.Path
