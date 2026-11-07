@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"time"
 )
@@ -167,13 +166,16 @@ func ReadState(path string) (*State, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	s.Entries = slices.DeleteFunc(s.Entries, func(e Entry) bool {
-		if e.Born.IsZero() { // мера сводки — размер × возраст: без born возраст неизвестен
-			s.NoBorn = append(s.NoBorn, e.Path)
-			return true
+	// мера сводки — размер × возраст: без born возраст неизвестен, запись исключается на месте
+	kept := s.Entries[:0]
+	for i := range s.Entries {
+		if s.Entries[i].Born.IsZero() {
+			s.NoBorn = append(s.NoBorn, s.Entries[i].Path)
+			continue
 		}
-		return false
-	})
+		kept = append(kept, s.Entries[i])
+	}
+	s.Entries = kept
 	return &s, nil
 }
 

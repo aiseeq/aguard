@@ -59,8 +59,7 @@ func (a *app) sendSocket(pid int, name, socket string, auth bool, msg string) er
 		return err
 	}
 	if active {
-		line := strings.SplitN(msg, "\n", 2)[0]
-		line = string([]rune(line)[:min(len([]rune(line)), 200)])
+		line, _, _ := strings.Cut(msg, "\n")
 		a.log.Info("aguard тихо: не отправил", "to", name, "msg", line, "until", state.Until, "why", state.Why)
 		return fmt.Errorf("%w: %s", errQuiet, state.Until.Format(time.RFC3339))
 	}

@@ -462,3 +462,17 @@ func TestQuietBrokenStateLoggedByObserver(t *testing.T) {
 		t.Fatalf("битый файл тихого режима: ожидался WARN с путём, не «тихо»: %s", out)
 	}
 }
+
+func TestQuietLogLineHasWholeFirstLine(t *testing.T) {
+	a, log := quietObservedApp(t)
+	sock, _ := quietListener(t)
+	writeQuietState(t, a, time.Now().Add(time.Minute))
+	first := "aguard: " + strings.Repeat("длинная первая строка ", 20)
+	if err := a.sendSocket(0, "lead", sock, false, first+"\nтело письма"); !errors.Is(err, errQuiet) {
+		t.Fatalf("ошибка тихого режима: %v", err)
+	}
+	out := log.String()
+	if !strings.Contains(out, strings.TrimSpace(first)) || strings.Contains(out, "тело письма") || !strings.Contains(out, "to=lead") {
+		t.Fatalf("строка «тихо»: нужна первая строка целиком, без тела: %s", out)
+	}
+}
