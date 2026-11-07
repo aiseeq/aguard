@@ -71,7 +71,8 @@ func FallbackDeadline(cfg Config) string {
 
 func fallbackEnd(start time.Time) time.Time { return start.Add(FallbackWindow) }
 
-func fallbackEndAt(now time.Time, cfg Config) time.Time {
+// FallbackEndAt — конец окна запасного Сна за местную дату now: позже о несостоявшемся Сне не пишем.
+func FallbackEndAt(now time.Time, cfg Config) time.Time {
 	t := fallbackBy(cfg)
 	start := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
 	return fallbackEnd(start)
@@ -145,7 +146,7 @@ type Signal struct {
 func Check(now time.Time, cfg Config, facts Facts) []Signal {
 	date := now.Format("2006-01-02")
 	var out []Signal
-	if due(now, cfg.DreamBy) && !facts.DreamMarker && !facts.DreamPaused && now.Before(fallbackEndAt(now, cfg)) {
+	if due(now, cfg.DreamBy) && !facts.DreamMarker && !facts.DreamPaused && now.Before(FallbackEndAt(now, cfg)) {
 		fallback := ""
 		if cfg.DreamFallback != "" {
 			fallback = fmt.Sprintf(" В %s без маркера aguard сам запустит `%s` (unit %s).", cfg.DreamFallbackBy, cfg.DreamFallback, FallbackUnit(now))

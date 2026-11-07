@@ -346,3 +346,60 @@ func liveUnit(t *testing.T, code int) {
 		t.Fatalf("повторное снятие: %v", err)
 	}
 }
+
+// Битый fallback.json после окна запасного Сна (06:10) — письма нет: о несостоявшемся Сне уже поздно.
+func TestNightFallbackBrokenStateAfterWindow(t *testing.T) {
+	units := &fakeUnits{}
+	a, cfg := fallbackApp(t, units)
+	path := filepath.Join(a.dir("night"), "fallback.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{обрезан"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		clock string
+		want  int
+	}{{"06:09", 1}, {"06:10", 0}, {"10:34", 0}} {
+		signals, err := a.fallbackStep(cfg, at(c.clock), night.Facts{}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(signals) != c.want || len(units.started) != 0 {
+			t.Fatalf("%s: сигналов %d, ждали %d; запусков %v", c.clock, len(signals), c.want, units.started)
+		}
+	}
+}
+
+// Сон снят: ни битое состояние, ни ранее упавший запуск не дают писем о запасном Сне.
+func TestNightFallbackPausedNoSignals(t *testing.T) {
+	units := &fakeUnits{}
+	a, cfg := fallbackApp(t, units)
+	path := filepath.Join(a.dir("night"), "fallback.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paused := night.Facts{DreamPaused: true}
+	if err := os.WriteFile(path, []byte("{обрезан"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.nightFallback(cfg, at("03:10"), paused, false); len(got) != 0 {
+		t.Fatalf("битое состояние при паузе: %+v", got)
+	}
+	a.nightFb = nil
+	if err := saveFallbackState(path, fallbackState{"2026-10-31": {Unit: night.FallbackUnit(at("03:10")), At: at("03:10"),
+		Err: "systemd-run: отказ"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.nightFallback(cfg, at("03:20"), paused, false); len(got) != 0 {
+		t.Fatalf("упавший запуск при паузе: %+v", got)
+	}
+	if len(units.started) != 0 {
+		t.Fatalf("запуск при паузе: %v", units.started)
+	}
+	a.nightFb = nil
+	if got := a.nightFallback(cfg, at("03:20"), night.Facts{}, false); len(got) == 0 {
+		t.Fatal("без паузы упавший запуск не дал письма — тест не проверяет то, что должен")
+	}
+}

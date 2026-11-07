@@ -203,6 +203,9 @@ func (a *app) nightFallback(cfg *night.Config, now time.Time, facts night.Facts,
 		a.log.Warn("aguard night: запасной Сон", "err", err)
 		a.nightNote("dream_fallback_failed", err.Error(), "", 0, "")
 	}
+	if facts.DreamPaused { // Сон снят: ни запуска, ни писем о запасном Сне — учёт начатого unit идёт дальше
+		return nil
+	}
 	return signals
 }
 
@@ -216,9 +219,13 @@ func (a *app) fallbackStep(cfg *night.Config, now time.Time, facts night.Facts, 
 		state, err := loadFallbackState(path)
 		if err != nil { // не знаю, запускал ли уже: не запускаю и пишу, раз за дату (ключ), читаю снова каждый проход
 			a.log.Warn("aguard night: запасной Сон", "err", err)
-			return []night.Signal{{Key: "dream-fallback-state:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
-				"Запасной Сон на Terra выключен: %v — не знаю, запускал ли я его уже. Почини или убери файл; до тех пор "+
-					"без маркера к %s Сон сам не начнётся.", err, cfg.DreamFallbackBy)}}, nil
+			var signals []night.Signal
+			if now.Before(night.FallbackEndAt(now, *cfg)) { // после окна письмо уже ничего не спасёт: только журнал
+				signals = append(signals, night.Signal{Key: "dream-fallback-state:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
+					"Запасной Сон на Terra выключен: %v — не знаю, запускал ли я его уже. Почини или убери файл; до тех пор "+
+						"без маркера к %s Сон сам не начнётся.", err, cfg.DreamFallbackBy)})
+			}
+			return signals, nil
 		}
 		a.nightFb = state
 	}
