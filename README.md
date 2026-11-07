@@ -28,6 +28,7 @@ The project’s [graft install task](.graft.yaml) also builds the tools and inst
 Run `aguard` without arguments to print the full usage, flags, and subcommands.
 
 - `aguard run` starts the daemon; systemd normally runs this command.
+- `aguard quiet`, `aguard quiet on --until <time> --why <text> --by <name>`, and `aguard quiet off` inspect, enable, or disable quiet mode.
 - `aguard orphans tick` checks for processes left by ended Claude Code sessions. Run with `-dry-run` to inspect a pass.
 - `aguard tmp tick`, `report`, and `send-test` check `/tmp`, summarize recorded usage, or verify message delivery.
 - `aguard memory tick` samples session memory; `report` reviews the recorded peaks.

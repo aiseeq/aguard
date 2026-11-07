@@ -205,16 +205,12 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 			continue
 		}
 		if err := a.tmpSend(cfg, s.Target, msg); err != nil {
-			a.log.Warn("aguard tmp: сводка не доставлена", "to", s.Target.Key(), "err", err)
-			a.note("tmp", "send_failed", "", s.Target.Key(), int64(len(s.Lines)), "entries")
-			for j := range s.Lines { // не доставлено — не считается
-				k := policy.EntryKey(&s.Lines[j].Item)
-				if p, ok := prev[k]; ok {
-					st.Alerts[k] = p
-				} else {
-					delete(st.Alerts, k)
-				}
+			quiet := a.quietFailure("tmp", err)
+			if !quiet {
+				a.log.Warn("aguard tmp: сводка не доставлена", "to", s.Target.Key(), "err", err)
+				a.note("tmp", "send_failed", "", s.Target.Key(), int64(len(s.Lines)), "entries")
 			}
+			restoreTmpAlerts(st, s.Lines, prev)
 			continue
 		}
 		a.log.Info("aguard tmp: сводка", "to", s.Target.Key(), "entries", len(s.Lines), "bytes", policy.HumanBytes(total))
@@ -227,6 +223,17 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 	}
 	a.caches(cfg, items, false)
 	return a.saveUserState(st)
+}
+
+func restoreTmpAlerts(st *policy.UserState, lines []policy.Line, prev map[string]*policy.AlertState) {
+	for i := range lines {
+		k := policy.EntryKey(&lines[i].Item)
+		if p, ok := prev[k]; ok {
+			st.Alerts[k] = p
+		} else {
+			delete(st.Alerts, k)
+		}
+	}
 }
 
 // caches — общие кеши: при превышении размера чистим старое содержимое

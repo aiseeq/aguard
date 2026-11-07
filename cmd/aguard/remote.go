@@ -125,6 +125,9 @@ func (a *app) remoteSend(cfg *remotebroken.Config, alive map[string]session.Info
 		return
 	}
 	if err := a.sendAlive(alive, n.To, cfg.SendAuth, n.Message); err != nil {
+		if a.quietFailure("remote", err) {
+			return
+		}
 		a.warn("remote", "письмо не отправлено", "session", n.To, "err", err)
 		a.note("remote", "send_failed", n.Key, n.To, int64(n.Count), "events")
 		return

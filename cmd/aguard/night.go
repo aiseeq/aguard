@@ -136,12 +136,15 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 			return fmt.Errorf("реестр сессий: %w", regErr)
 		}
 		err := a.nightEmail(cfg, alive, to, msg)
-		if a.act != nil {
+		if a.act != nil && !errors.Is(err, errQuiet) {
 			a.note("night", map[bool]string{true: "email_sent", false: "email_failed"}[err == nil], "", to, 0, "")
 		}
 		return err
 	})
 	for _, f := range failures {
+		if a.quietFailure("night", f.Err) {
+			continue
+		}
 		a.log.Warn("aguard night: канал доставки", "channel", f.Channel, "key", f.Key, "err", f.Err)
 	}
 	if err := saveNightState(statePath, state); err != nil {

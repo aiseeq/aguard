@@ -43,6 +43,9 @@ func (a *app) alertIO(cfg iowatch.Config, cases []iowatch.Case) error {
 			continue
 		}
 		if err := a.sendAlive(alive, to, cfg.SendAuth, message); err != nil {
+			if a.quietFailure("io", err) {
+				continue
+			}
 			sendErr = errors.Join(sendErr, fmt.Errorf("письмо %s: %w", to, err))
 			continue
 		}

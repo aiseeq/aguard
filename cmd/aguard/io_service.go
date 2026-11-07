@@ -560,6 +560,9 @@ func (s *ioService) launchAlert(now time.Time) {
 func (s *ioService) alertDone(err error) {
 	s.alerting = false
 	if err != nil {
+		if errors.Is(err, errQuiet) {
+			return
+		}
 		s.a.warn("io", "письмо о фризе не ушло", "err", err)
 		s.a.note("io", "alert_failed", err.Error(), "", 0, "")
 	}

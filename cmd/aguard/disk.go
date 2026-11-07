@@ -446,7 +446,9 @@ func (a *app) diskFree(cfg *disk.Config, st *disk.State, now time.Time, free int
 		for _, to := range due {
 			err := a.diskLowFree(cfg, to, msg, free)
 			if err != nil {
-				a.warn("disk", "письмо о свободном месте", "session", to, "err", err)
+				if !a.quietFailure("disk", err) {
+					a.warn("disk", "письмо о свободном месте", "session", to, "err", err)
+				}
 			}
 			told.Mark(to, now, err == nil)
 		}
@@ -467,6 +469,9 @@ func (a *app) diskLowFree(cfg *disk.Config, to, msg string, free int64) error {
 		a.warn("disk", "реестр сессий", "err", err)
 	}
 	if err := a.sendAlive(alive, to, cfg.SendAuth, msg); err != nil {
+		if errors.Is(err, errQuiet) {
+			return err
+		}
 		a.note("disk", "free_send_failed", "", to, gb, "GiB")
 		return err
 	}

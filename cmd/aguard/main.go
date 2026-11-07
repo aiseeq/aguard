@@ -179,6 +179,8 @@ func (a *app) dispatch(ctx context.Context, cmd string, args []string) error {
 		return a.remoteCmd(args)
 	case "codex":
 		return a.codexCmd(ctx, args)
+	case "quiet":
+		return a.quietCmd(args)
 	default:
 		return a.dispatchLate(ctx, cmd, args)
 	}
@@ -222,6 +224,7 @@ func usage() {
   aguard io import [-dir папка] [-remove] [-out файл]   снимки событий прежнего наблюдателя — в сводки, при остановленной службе
   aguard night tick [-dry-run]
   aguard codex tick [-dry-run]
+  aguard quiet [on --until время --why текст --by имя | off]
   aguard queue tick [-dry-run] | replay -history путь -from дата -to дата [-hour 7] [-zone +02:00] | report [-since 168h] [-json]
   aguard report [-json] [-at время RFC3339]
   aguard limit-reset-check --account почта --since время RFC3339 [--history путь]   сброс лимита учётки после постановки паузы: код 0 есть, 1 нет (причина в выводе), 2 ошибка входа`)

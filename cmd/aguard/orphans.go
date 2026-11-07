@@ -143,6 +143,9 @@ func (a *app) orphansAct(ctx context.Context, cfg *orphans.Config, trees []orpha
 	a.appendJournal(lines)
 	for _, to := range slices.Sorted(maps.Keys(byTo)) {
 		if err := a.sendSocket(alive[to].Pid, alive[to].Name, alive[to].SocketPath, cfg.SendAuth, a.orphansMessage(cfg, byTo[to])); err != nil {
+			if a.quietFailure("orphans", err) {
+				continue
+			}
 			a.log.Warn("aguard orphans: сводка не доставлена", "to", to, "err", err)
 			a.note("orphans", "send_failed", "", to, int64(len(byTo[to])), "trees")
 			continue

@@ -278,6 +278,9 @@ func saveCPUState(path string, h *cpuwatch.Host) error {
 const leadKey = "сводка:"
 
 func (a *app) cpuFailed(to string, value int64, err error) {
+	if a.quietFailure("cpu", err) {
+		return
+	}
 	a.warn("cpu", "письмо о перегрузке", "session", to, "err", err)
 	a.note("cpu", "send_failed", "", to, value, "runnable")
 }

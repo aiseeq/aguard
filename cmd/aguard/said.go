@@ -270,6 +270,9 @@ func (a *app) saidStall(c *config.Config, st *said.State, now time.Time) {
 		err = a.sendAlive(alive, c.Lead, c.SendAuth, msg)
 	}
 	if err != nil {
+		if a.quietFailure("said", err) {
+			return
+		}
 		a.warn("said", "письмо о простое не отправлено", "session", c.Lead, "err", err)
 		return
 	}

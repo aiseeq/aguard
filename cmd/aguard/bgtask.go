@@ -119,6 +119,9 @@ func (a *app) bgtaskNotify(cfg *bgtask.Config, t *bgtask.Task, o *bgtask.Origin,
 		return
 	}
 	if err := a.sendSocket(in.Pid, in.Name, in.SocketPath, cfg.SendAuth, msg); err != nil {
+		if a.quietFailure("bgtask", err) {
+			return
+		}
 		a.warn("bgtask", "письмо о задаче "+t.ID, "session", in.Name, "err", err)
 		a.note("bgtask", prefix+"send_failed", t.ID, in.Name, value, "min")
 		return

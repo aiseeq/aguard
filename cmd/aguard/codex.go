@@ -195,8 +195,10 @@ func (a *app) codexFleet(cfg *codexwatch.Config, readings []codexwatch.Reading, 
 	}
 	if msg != "" {
 		if err := a.codexSend(cfg, msg); err != nil {
-			a.warn("codex", "письмо не отправлено", "session", cfg.Lead, "kind", "all_out", "err", err)
-			a.note("codex", "send_failed", "all_out", cfg.Lead, 1, "")
+			if !a.quietFailure("codex", err) {
+				a.warn("codex", "письмо не отправлено", "session", cfg.Lead, "kind", "all_out", "err", err)
+				a.note("codex", "send_failed", "all_out", cfg.Lead, 1, "")
+			}
 			fleet.AllOut = false
 		} else {
 			a.note("codex", "sent", "all_out", cfg.Lead, 1, "")
@@ -239,6 +241,10 @@ func (a *app) codexAccount(ctx context.Context, cfg *codexwatch.Config, r codexw
 			continue
 		}
 		if err := a.codexSend(cfg, n.Message); err != nil {
+			if a.quietFailure("codex", err) {
+				st.Unsent(n.Kind)
+				continue
+			}
 			a.warn("codex", "письмо не отправлено", "account", r.Account.Name, "session", cfg.Lead, "kind", n.Kind, "err", err)
 			a.note("codex", "send_failed", string(n.Kind), cfg.Lead, 1, "")
 			st.Unsent(n.Kind)
@@ -285,7 +291,9 @@ func (a *app) codexDeliver(ctx context.Context, cfg *codexwatch.Config, st *code
 		d := &st.Pending[i]
 		if !d.Lead {
 			if err := a.codexSend(cfg, d.Message); err != nil {
-				a.warn("codex", "исход не отправлен лиду", "err", err)
+				if !a.quietFailure("codex", err) {
+					a.warn("codex", "исход не отправлен лиду", "err", err)
+				}
 			} else {
 				d.Lead = true
 			}

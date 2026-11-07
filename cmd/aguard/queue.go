@@ -626,6 +626,9 @@ func (a *app) deliverQueueNotices(c *config.Config, alive map[string]session.Inf
 			lines = append(lines, n.Line)
 		}
 		if err := a.sendAlive(alive, to, c.SendAuth, strings.Join(lines, "\n")); err != nil {
+			if a.quietFailure("queue", err) {
+				continue
+			}
 			a.warn("queue", "письмо не отправлено", "to", to, "err", err)
 			a.note("queue", "send_failed", "", to, int64(len(ns)), "notices")
 			continue
