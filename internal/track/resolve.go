@@ -66,7 +66,8 @@ func readProc(pid int) (procData, error) {
 	if err != nil {
 		return d, fmt.Errorf("процесс %d: cmdline: %w", pid, err)
 	}
-	d.args = truncate(strings.ReplaceAll(strings.TrimRight(string(cmdline), "\x00"), "\x00", " "), argsMax)
+	// Clone: срез truncate держал бы всю командную строку (до сотен КБ) на всё время жизни надгробия
+	d.args = strings.Clone(truncate(strings.ReplaceAll(strings.TrimRight(string(cmdline), "\x00"), "\x00", " "), argsMax))
 	// Чужой процесс (root) пользовательскому демону cwd не показывает: остальное о нём известно, cwd пуст.
 	if d.cwd, err = os.Readlink(ps + "/cwd"); err != nil && !errors.Is(err, fs.ErrPermission) {
 		return d, fmt.Errorf("процесс %d: cwd: %w", pid, err)

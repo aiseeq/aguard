@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,7 @@ type tomb struct {
 	comm, args, cwd string
 	uid             int
 	exited          time.Time
+	seen            time.Time // когда завели запись: без события выхода её снимает проверка /proc
 }
 
 // Tombs — таблица процессов из proc connector.
@@ -32,10 +34,29 @@ type Tombs struct {
 	keep    time.Duration
 	overrun atomic.Int64
 	log     *slog.Logger
+	// alive — есть ли процесс в /proc; записи без события выхода старше keep без процесса снимаются
+	alive func(pid int) bool
 }
 
 func newTombs(keep time.Duration, lg *slog.Logger) *Tombs {
-	return &Tombs{m: map[int]*tomb{}, keep: keep, log: lg}
+	return &Tombs{m: map[int]*tomb{}, keep: keep, log: lg, alive: procAlive}
+}
+
+func procAlive(pid int) bool {
+	_, err := os.Stat("/proc/" + strconv.Itoa(pid))
+	return err == nil
+}
+
+// size — записей всего и без события выхода (для часовой сводки).
+func (t *Tombs) size() (total, open int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, x := range t.m {
+		if x.exited.IsZero() {
+			open++
+		}
+	}
+	return len(t.m), open
 }
 
 func (t *Tombs) lookup(pid int) (tomb, bool) {
@@ -113,6 +134,11 @@ func (t *Tombs) expireOnce() {
 	for pid, x := range t.m {
 		if !x.exited.IsZero() && time.Since(x.exited) > t.keep {
 			delete(t.m, pid)
+			continue
+		}
+		// выход не пришёл (процесс в чужом пространстве имён, событие потеряно): процесса нет — запись не нужна
+		if x.exited.IsZero() && time.Since(x.seen) > t.keep && !t.alive(pid) {
+			delete(t.m, pid)
 		}
 	}
 }
@@ -139,7 +165,7 @@ func (t *Tombs) handle(cn []byte) {
 		if u(2) != u(3) { // поток, не процесс
 			return
 		}
-		x := &tomb{ppid: u(1), uid: -1}
+		x := &tomb{ppid: u(1), uid: -1, seen: time.Now()}
 		t.mu.Lock()
 		if p := t.m[u(1)]; p != nil { // без exec ребёнок остаётся копией родителя
 			x.comm, x.args, x.cwd, x.uid = p.comm, p.args, p.cwd, p.uid
@@ -155,7 +181,7 @@ func (t *Tombs) handle(cn []byte) {
 		t.mu.Lock()
 		x := t.m[pid]
 		if x == nil {
-			x = &tomb{uid: -1}
+			x = &tomb{uid: -1, seen: time.Now()}
 			t.m[pid] = x
 		}
 		x.comm, x.args, x.cwd, x.uid = d.comm, d.args, d.cwd, d.uid
@@ -167,7 +193,7 @@ func (t *Tombs) handle(cn []byte) {
 		t.mu.Lock()
 		x := t.m[u(1)]
 		if x == nil {
-			x = &tomb{uid: -1}
+			x = &tomb{uid: -1, seen: time.Now()}
 			t.m[u(1)] = x
 		}
 		x.ppid = u(5)

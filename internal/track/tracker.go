@@ -598,11 +598,12 @@ func (t *Tracker) save(persist bool) {
 
 func (t *Tracker) logStats() {
 	s := t.st
+	tombs, open := t.tombs.size()
 	t.log.Info(fmt.Sprintf("aguard слежение: за час событий %d (создано %d, удалено %d, переименовано %d, переполнений %d); "+
 		"создатель: жив %d, восстановлен %d, неизвестен %d; сессия по ppid %d, по cgroup %d, нет %d; "+
-		"потерь proc connector %d; записей %d",
+		"потерь proc connector %d; записей %d; надгробий %d (без выхода %d)",
 		s.events, s.creates, s.deletes, s.renames, s.overflow, s.procOK, s.procReaped, s.procUnknown,
-		s.sessPpid, s.sessCgroup, s.noSession, t.tombs.overrun.Load(), len(t.entries)))
+		s.sessPpid, s.sessCgroup, s.noSession, t.tombs.overrun.Load(), len(t.entries), tombs, open))
 	t.st = counters{}
 }
 
