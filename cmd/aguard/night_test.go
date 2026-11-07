@@ -379,8 +379,15 @@ func TestNightLogModeIgnoresBrokenState(t *testing.T) {
 		if n := strings.Count(logs.String(), want); n < 1 {
 			t.Fatalf("пауза %v: нет %q:\n%s", paused, want, logs.String())
 		}
-		if paused && strings.Count(logs.String(), "aguard night: Сон снят") != 1 {
-			t.Fatalf("строка о снятом Сне не одна:\n%s", logs.String())
+		if paused {
+			// перезапуск в режиме log: новый app на той же папке состояния — строки за дату больше нет
+			restarted := &app{home: dir, stateDir: stateDir, log: a.log, units: &fakeUnits{}}
+			if err := restarted.nightRound(&cfg, false); err != nil {
+				t.Fatal(err)
+			}
+			if n := strings.Count(logs.String(), "aguard night: Сон снят"); n != 1 {
+				t.Fatalf("строк о снятом Сне %d, ждали 1 и после перезапуска:\n%s", n, logs.String())
+			}
 		}
 	}
 }

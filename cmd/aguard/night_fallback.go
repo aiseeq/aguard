@@ -169,7 +169,13 @@ func fallbackRound(cfg *night.Config, now time.Time, facts night.Facts, state fa
 			}
 		}
 		if now.Sub(rec.At) <= 24*time.Hour {
-			signals = append(signals, fallbackSignals(cfg, d, rec)...)
+			for _, s := range fallbackSignals(cfg, d, rec) {
+				// «запуск не вышел, запусти сам» после окна уже ничего не спасёт; отчёты о прошедшем запуске — сутки
+				if rec.Err != "" && s.Key == "dream-fallback:"+d && !now.Before(night.FallbackEndAt(rec.At, *cfg)) {
+					continue
+				}
+				signals = append(signals, s)
+			}
 		}
 	}
 	if len(notes) > 0 {

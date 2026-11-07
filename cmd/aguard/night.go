@@ -14,6 +14,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/cllog"
 	"github.com/aiseeq/aguard/internal/night"
+	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -108,9 +109,8 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 		if a.nightLogged == nil {
 			a.nightLogged = map[string]bool{}
 		}
-		if key := "dream-paused:" + now.Format("2006-01-02"); facts.DreamPaused && !a.nightLogged[key] {
-			a.nightLogged[key] = true
-			a.log.Info("aguard night: Сон снят, письма и запасного Сна нет", "by", facts.DreamPausedBy)
+		if err := a.nightPausedLine(now, facts); err != nil {
+			return err
 		}
 		for _, s := range signals {
 			if !a.nightLogged[s.Key] {
@@ -121,7 +121,10 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 		}
 		return nil
 	}
-	statePath, state, err := a.nightStateForRound(now, facts)
+	if err := a.nightPausedLine(now, facts); err != nil {
+		return err
+	}
+	statePath, state, err := a.nightStateForRound(now)
 	if err != nil {
 		return err
 	}
@@ -153,8 +156,30 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 	return nil
 }
 
-// nightStateForRound загружает и очищает состояние доставок, записывает строку о снятом Сне за дату.
-func (a *app) nightStateForRound(now time.Time, facts night.Facts) (string, nightState, error) {
+// nightPausedLine — строка журнала о снятом Сне раз за местную дату в любом режиме: дата последней строки — в своём
+// файле night/paused-logged, а не в состоянии доставок (режим log его не читает) и не в памяти (перезапуск).
+func (a *app) nightPausedLine(now time.Time, facts night.Facts) error {
+	if !facts.DreamPaused {
+		return nil
+	}
+	path := filepath.Join(a.dir("night"), "paused-logged")
+	date := now.Format("2006-01-02")
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("night: отметка строки о снятом Сне %s: %w", path, err)
+	}
+	if strings.TrimSpace(string(b)) == date {
+		return nil
+	}
+	a.log.Info("aguard night: Сон снят, письма и запасного Сна нет", "by", facts.DreamPausedBy)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("night: отметка строки о снятом Сне: %w", err)
+	}
+	return record.WriteFileAtomic(path, []byte(date+"\n"), 0o600)
+}
+
+// nightStateForRound загружает состояние доставок и убирает отметки старше недели.
+func (a *app) nightStateForRound(now time.Time) (string, nightState, error) {
 	path := filepath.Join(a.dir("night"), "state.json")
 	state := a.nightSent
 	if state == nil {
@@ -168,13 +193,6 @@ func (a *app) nightStateForRound(now time.Time, facts night.Facts) (string, nigh
 	for key, sent := range state {
 		if now.Sub(sent.At) > 7*24*time.Hour {
 			delete(state, key)
-		}
-	}
-	if facts.DreamPaused {
-		key := "dream-paused:" + now.Format("2006-01-02")
-		if _, logged := state[key]; !logged {
-			a.log.Info("aguard night: Сон снят, письма и запасного Сна нет", "by", facts.DreamPausedBy)
-			state[key] = nightSent{At: now}
 		}
 	}
 	return path, state, nil

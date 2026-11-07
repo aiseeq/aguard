@@ -403,3 +403,30 @@ func TestNightFallbackPausedNoSignals(t *testing.T) {
 		t.Fatal("без паузы упавший запуск не дал письма — тест не проверяет то, что должен")
 	}
 }
+
+// Упавший в окне запасной запуск: «запусти сам» — только до конца окна (06:10), днём письма нет.
+func TestNightFallbackFailedLaunchAfterWindow(t *testing.T) {
+	units := &fakeUnits{}
+	a, cfg := fallbackApp(t, units)
+	path := filepath.Join(a.dir("night"), "fallback.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveFallbackState(path, fallbackState{"2026-10-31": {Unit: night.FallbackUnit(at("03:10")), At: at("03:10"),
+		Err: "systemd-run: отказ"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		clock string
+		want  int
+	}{{"06:09", 1}, {"06:10", 0}, {"10:34", 0}} {
+		a.nightFb = nil
+		signals, err := a.fallbackStep(cfg, at(c.clock), night.Facts{}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(signals) != c.want {
+			t.Fatalf("%s: сигналов %d, ждали %d: %+v", c.clock, len(signals), c.want, signals)
+		}
+	}
+}
