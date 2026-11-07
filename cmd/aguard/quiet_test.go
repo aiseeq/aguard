@@ -67,6 +67,21 @@ func assertQuietAccounting(t *testing.T, a *app, log *bytes.Buffer, watcher stri
 	if quiet == 0 || failed != 0 {
 		t.Fatalf("учёт %s: quiet=%d failed=%d", watcher, quiet, failed)
 	}
+	// на каждое подавленное письмо — ровно одна строка INFO с адресатом и первой строкой
+	var lines []string
+	for l := range strings.SplitSeq(log.String(), "\n") {
+		if strings.Contains(l, `msg="aguard тихо: не отправил"`) {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != quiet {
+		t.Fatalf("строк «тихо» %d, подавленных писем %d: %s", len(lines), quiet, log.String())
+	}
+	for _, l := range lines {
+		if !strings.Contains(l, "level=INFO") || !strings.Contains(l, " to=") || !strings.Contains(l, " msg=") || strings.Count(l, `msg=`) < 2 {
+			t.Fatalf("строка «тихо» без уровня INFO, адресата или первой строки письма: %s", l)
+		}
+	}
 }
 
 func writeQuietState(t *testing.T, a *app, until time.Time) {
@@ -128,7 +143,13 @@ func TestQuietSendSocketAndExpiryWithoutReload(t *testing.T) {
 		t.Fatalf("письмо ушло в сокет: %s", msg)
 	default:
 	}
-	writeQuietState(t, a, time.Now().Add(-time.Second))
+	// срок истекает сам: файл тот же, его не переписываем и не перечитываем конфиг
+	until := time.Now().Add(300 * time.Millisecond)
+	writeQuietState(t, a, until)
+	if err := a.sendSocket(0, "lead", sock, false, "ещё тихо"); !errors.Is(err, errQuiet) {
+		t.Fatalf("до срока ожидался errQuiet: %v", err)
+	}
+	time.Sleep(time.Until(until) + 50*time.Millisecond)
 	if err := a.sendSocket(0, "lead", sock, false, "проверка доставки"); err != nil {
 		t.Fatal(err)
 	}
@@ -409,5 +430,35 @@ func TestQuietUnixListenerReadsWholeFrame(t *testing.T) {
 	frame := <-got
 	if !strings.Contains(frame, `"type":"user"`) {
 		t.Fatalf("кадр: %q", frame)
+	}
+}
+
+func TestQuietBrokenStateLoggedByObserver(t *testing.T) {
+	a, log := quietObservedApp(t)
+	sock, got := quietListener(t)
+	if err := os.MkdirAll(a.dir("quiet"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.quietPath(), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	v := queue.View{Now: now, Lead: "lead", Serious: func(string) bool { return true }, Alive: func(string) bool { return true }}
+	state := queue.State{}
+	ticket := queue.Ticket{Key: "p/c", Project: "p", Slug: "c", Title: "critical", Prio: "CRIT", Status: "открыт"}
+	notices := state.Step([]queue.Ticket{ticket}, v)
+	if len(notices) == 0 {
+		t.Fatal("не создано уведомление queue")
+	}
+	alive := map[string]session.Info{"lead": {Name: "lead", SocketPath: sock}}
+	a.deliverQueueNotices(&config.Config{Queue: queue.Config{Mode: queue.ModeOn}}, alive, &state, v, notices, now)
+	select {
+	case msg := <-got:
+		t.Fatalf("при битом файле тихого режима письмо ушло: %s", msg)
+	case <-time.After(100 * time.Millisecond):
+	}
+	out := log.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, a.quietPath()) || strings.Contains(out, "aguard тихо") {
+		t.Fatalf("битый файл тихого режима: ожидался WARN с путём, не «тихо»: %s", out)
 	}
 }
