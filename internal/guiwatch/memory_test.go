@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -89,5 +91,41 @@ func TestCompactSliceMergeAndUpdate(t *testing.T) {
 	got := doc.Slices[0]
 	if got.Merged != 1 || len(got.Samples) != 4 || got.Samples[0].AtMS != -1000 || len(got.Threads) != 1 {
 		t.Fatalf("потеряны данные при склейке или дополнении: %#v", got)
+	}
+}
+
+// Файл сокращённого среза удалили мимо демона: склейка не обрывает
+// наблюдатель, срез дописывается новыми выборками, потеря — в его ошибках.
+func TestCompactSliceMissingFileMerges(t *testing.T) {
+	dir := t.TempDir()
+	at := time.Now()
+	w := New(t.TempDir(), dir, Default(), nil)
+	w.now = func() time.Time { return at.Add(10 * time.Second) }
+	t.Setenv("PATH", t.TempDir())
+	defer w.closeAll()
+	old := Slice{ID: "original", Target: "victim", PID: 4321, TID: 4321, Starttime: 100, Kind: "D", Start: at, End: at.Add(time.Second), Samples: []Sample{{AtMS: -1000, State: "D"}}}
+	w.document.Slices = []Slice{old}
+	if err := w.save(); err != nil {
+		t.Fatal(err)
+	}
+	w.compactSlices()
+	if err := os.Remove(slicePath(dir, "original")); err != nil {
+		t.Fatal(err)
+	}
+	s := &targetState{Target: Target{Name: "victim", PID: 4321, Start: 100}, ring: []Sample{{At: at.Add(2 * time.Second), State: "D"}}}
+	e := &episode{start: at.Add(2 * time.Second), end: at.Add(3 * time.Second), kind: "D"}
+	if err := w.writeSlice(s, e); err != nil {
+		t.Fatalf("пропавший файл оборвал запись среза: %v", err)
+	}
+	doc, err := ReadReport(dir, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Slices) != 1 {
+		t.Fatalf("срезы отчёта: %#v", doc.Slices)
+	}
+	got := doc.Slices[0]
+	if got.ID != "original" || got.Merged != 1 || !slices.ContainsFunc(got.Errors, func(s string) bool { return strings.Contains(s, "файл среза пропал") }) {
+		t.Fatalf("склейка после пропажи файла: %#v", got)
 	}
 }

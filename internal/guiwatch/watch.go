@@ -1207,12 +1207,16 @@ func (w *Watcher) writeSlice(s *targetState, e *episode) error {
 		for i := range w.document.Slices {
 			old := &w.document.Slices[i]
 			if old.ID == e.sliceID {
-				if err := w.loadSliceContents(old); err != nil {
+				lost, err := w.loadSliceContents(old)
+				if err != nil {
 					return err
 				}
 				item.ID, item.Starttime, item.Merged = old.ID, old.Starttime, old.Merged
 				item.Samples = dedupeSamples(append(old.Samples, item.Samples...))
 				item.Threads, item.Top = old.Threads, old.Top
+				if lost != "" {
+					item.Errors = append(item.Errors, lost)
+				}
 				w.document.Slices[i] = item
 				w.markSliceDirty(item.ID)
 				break
@@ -1239,8 +1243,12 @@ func (w *Watcher) createSlice(s *targetState, e *episode) error {
 	}
 	if merged >= 0 {
 		old := &w.document.Slices[merged]
-		if err := w.loadSliceContents(old); err != nil {
+		lost, err := w.loadSliceContents(old)
+		if err != nil {
 			return err
+		}
+		if lost != "" {
+			old.Errors = append(old.Errors, lost)
 		}
 		item := w.makeSlice(s, e, true)
 		old.Merged++
@@ -1943,24 +1951,32 @@ func (w *Watcher) compactSlices() {
 	}
 }
 
-func (w *Watcher) loadSliceContents(item *Slice) error {
+// loadSliceContents дочитывает сокращённый срез с диска. Файл удалили мимо
+// демона — прежние подробности потеряны: срез дописывается со сводкой и
+// новыми выборками, а lost — строка для его ошибок (отчёт её покажет);
+// наблюдатель из-за этого не обрывается.
+func (w *Watcher) loadSliceContents(item *Slice) (lost string, err error) {
 	if !item.metadataOnly {
-		return nil
+		return "", nil
 	}
 	path := slicePath(w.Dir, item.ID)
 	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		item.metadataOnly = false
+		return "файл среза пропал до дополнения, прежние выборки потеряны: " + path, nil
+	}
 	if err != nil {
-		return fmt.Errorf("прочитать %s: %w", path, err)
+		return "", fmt.Errorf("прочитать %s: %w", path, err)
 	}
 	var full Slice
 	if err := json.Unmarshal(b, &full); err != nil {
-		return fmt.Errorf("разобрать %s: %w", path, err)
+		return "", fmt.Errorf("разобрать %s: %w", path, err)
 	}
 	for i := range full.Samples {
 		full.Samples[i].At = full.Start.Add(time.Duration(full.Samples[i].AtMS) * time.Millisecond)
 	}
 	*item = full
-	return nil
+	return "", nil
 }
 
 func writeSliceIfMissing(dir string, item *Slice) error {

@@ -1,6 +1,7 @@
 package track
 
 import (
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"log/slog"
@@ -34,17 +35,24 @@ type Tombs struct {
 	keep    time.Duration
 	overrun atomic.Int64
 	log     *slog.Logger
-	// alive — есть ли процесс в /proc; записи без события выхода старше keep без процесса снимаются
-	alive func(pid int) bool
+	// gone — процесса нет в /proc; запись без события выхода старше keep без процесса получает выход сейчас
+	gone func(pid int) (bool, error)
 }
 
 func newTombs(keep time.Duration, lg *slog.Logger) *Tombs {
-	return &Tombs{m: map[int]*tomb{}, keep: keep, log: lg, alive: procAlive}
+	return &Tombs{m: map[int]*tomb{}, keep: keep, log: lg, gone: procGone}
 }
 
-func procAlive(pid int) bool {
+// procGone — нет ли процесса в /proc; ошибка, кроме «нет такого», — не ответ.
+func procGone(pid int) (bool, error) {
 	_, err := os.Stat("/proc/" + strconv.Itoa(pid))
-	return err == nil
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	return false, err
 }
 
 // size — записей всего и без события выхода (для часовой сводки).
@@ -127,18 +135,49 @@ func (t *Tombs) expire(done <-chan struct{}) {
 	}
 }
 
+// expireOnce снимает записи, вышедшие раньше keep. Запись без события выхода
+// (процесс в чужом пространстве имён, событие потеряно) старше keep, чьего
+// процесса нет в /proc, получает выход сейчас и живёт ещё keep, как
+// обычная: запоздалое событие fanotify ещё найдёт создателя. /proc
+// проверяется без мьютекса — connector и lookup не ждут обхода.
 func (t *Tombs) expireOnce() {
 	defer recovered(t.log, "чистка надгробий")
+	now := time.Now()
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	open := map[int]time.Time{}
 	for pid, x := range t.m {
-		if !x.exited.IsZero() && time.Since(x.exited) > t.keep {
+		if !x.exited.IsZero() && now.Sub(x.exited) > t.keep {
 			delete(t.m, pid)
 			continue
 		}
-		// выход не пришёл (процесс в чужом пространстве имён, событие потеряно): процесса нет — запись не нужна
-		if x.exited.IsZero() && time.Since(x.seen) > t.keep && !t.alive(pid) {
-			delete(t.m, pid)
+		if x.exited.IsZero() && now.Sub(x.seen) > t.keep {
+			open[pid] = x.seen
+		}
+	}
+	t.mu.Unlock()
+	var gone []int
+	var failed int
+	var firstErr error
+	for pid := range open {
+		g, err := t.gone(pid)
+		if err != nil {
+			failed++
+			firstErr = cmp.Or(firstErr, err)
+			continue
+		}
+		if g {
+			gone = append(gone, pid)
+		}
+	}
+	if failed > 0 {
+		t.log.Warn("aguard слежение: проверка процесса надгробия не удалась, запись оставлена", "записей", failed, "err", firstErr)
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, pid := range gone {
+		// та же запись: за время проверки pid мог уйти новому процессу
+		if x := t.m[pid]; x != nil && x.exited.IsZero() && x.seen.Equal(open[pid]) {
+			x.exited = now
 		}
 	}
 }
