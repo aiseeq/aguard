@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -91,13 +92,17 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 }
 
-func TestReadStateRejectsEntryWithoutBorn(t *testing.T) {
+func TestReadStateDropsEntryWithoutBorn(t *testing.T) {
 	p := filepath.Join(t.TempDir(), StateFile)
-	b, _ := json.Marshal(State{Entries: []Entry{{Path: "/tmp/noborn", Bytes: 10}}})
+	b, _ := json.Marshal(State{Entries: []Entry{{Path: "/tmp/noborn", Bytes: 10}, {Path: "/tmp/ok", Bytes: 20, Born: time.Unix(100, 0)}}})
 	if err := WriteFileAtomic(p, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadState(p); err == nil || !strings.Contains(err.Error(), "/tmp/noborn") || !strings.Contains(err.Error(), p) {
-		t.Fatalf("запись без born должна давать ошибку с путями: %v", err)
+	s, err := ReadState(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Entries) != 1 || s.Entries[0].Path != "/tmp/ok" || !slices.Equal(s.NoBorn, []string{"/tmp/noborn"}) {
+		t.Fatalf("запись без born — в NoBorn, остальные годны: %+v", s)
 	}
 }

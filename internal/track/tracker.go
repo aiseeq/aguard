@@ -553,6 +553,9 @@ func (t *Tracker) restore() {
 			t.log.Warn("aguard слежение: снимок не прочитан", "dir", dir, "err", err)
 			continue
 		}
+		for _, p := range s.NoBorn {
+			t.log.Warn("aguard слежение: запись снимка без born не восстановлена", "dir", dir, "path", p)
+		}
 		if st == nil || s.Updated.After(st.Updated) {
 			st = s
 		}

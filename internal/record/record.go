@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 )
@@ -148,6 +149,9 @@ type State struct {
 	Roots      []string  `json:"roots"`
 	Containers []string  `json:"containers"`
 	Entries    []Entry   `json:"entries"`
+	// NoBorn — пути записей без born, исключённых при чтении: возраст неизвестен, меру сводки не посчитать.
+	// Вызывающий пишет их в журнал; остальные записи снимка годны.
+	NoBorn []string `json:"-"`
 }
 
 // ReadState читает снимок; отсутствующий файл — пустой снимок без ошибки.
@@ -163,11 +167,13 @@ func ReadState(path string) (*State, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	for i := range s.Entries {
-		if s.Entries[i].Born.IsZero() { // мера сводки — размер × возраст: без born возраст неизвестен
-			return nil, fmt.Errorf("%s: запись %s без born", path, s.Entries[i].Path)
+	s.Entries = slices.DeleteFunc(s.Entries, func(e Entry) bool {
+		if e.Born.IsZero() { // мера сводки — размер × возраст: без born возраст неизвестен
+			s.NoBorn = append(s.NoBorn, e.Path)
+			return true
 		}
-	}
+		return false
+	})
 	return &s, nil
 }
 

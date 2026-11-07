@@ -73,6 +73,9 @@ func (a *app) snapshot(cfg *policy.Config) (*record.State, error) {
 	if best.Updated.IsZero() {
 		return nil, errors.New("снимка слежения нет: проверьте aguard-track-helper и строки «слежение» в журнале aguard")
 	}
+	for _, p := range best.NoBorn {
+		a.warn("tmp", "запись снимка без born исключена из сводок", "path", p)
+	}
 	return best, nil
 }
 
