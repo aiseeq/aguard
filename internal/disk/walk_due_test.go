@@ -115,6 +115,24 @@ func TestWalkWindowReasonsAndClosure(t *testing.T) {
 	if got := missed.WalkDue(&c, time.Date(2026, 11, 3, 10, 0, 0, 0, time.Local), 100); got != WalkMissed {
 		t.Errorf("missed window: got %q, want missed", got)
 	}
+	// обход по пропуску идёт через Pass, окно не закрывает: следующей ночью — обычный обход окна
+	missed.Told = map[string]time.Time{}
+	walks := 0
+	measureCount := func([]string) map[string]Usage { walks++; return map[string]Usage{} }
+	noEntries := func() ([]string, error) { return nil, nil }
+	noOwner := func(string) (string, string) { return "", "" }
+	if _, _, err := missed.Pass(&c, time.Date(2026, 11, 3, 10, 0, 0, 0, time.Local), 100, noEntries, measureCount, noOwner); err != nil {
+		t.Fatal(err)
+	}
+	if walks != 1 || missed.LastWindow != "" {
+		t.Fatalf("обход по пропуску: walks=%d LastWindow=%q", walks, missed.LastWindow)
+	}
+	if got := missed.WalkDue(&c, time.Date(2026, 11, 3, 14, 0, 0, 0, time.Local), 100); got != "" {
+		t.Errorf("после обхода по пропуску днём: got %q", got)
+	}
+	if got := missed.WalkDue(&c, time.Date(2026, 11, 4, 2, 0, 0, 0, time.Local), 100); got != WalkWindow {
+		t.Errorf("ночь после пропуска: got %q, want window", got)
+	}
 }
 
 func TestWalkWindowOvernightAndClockRollback(t *testing.T) {
@@ -189,7 +207,7 @@ func TestWalkWindowValidationAndLoadNewestWalk(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	old := &State{LastWalk: time.Date(2026, 11, 8, 1, 0, 0, 0, time.Local), LastWalkFree: 10, LastWindow: "2026-11-08"}
+	old := &State{LastWalk: time.Date(2026, 11, 7, 3, 0, 0, 0, time.Local), LastWalkFree: 10, LastWindow: "2026-11-07"}
 	if err := old.Save(path); err != nil {
 		t.Fatal(err)
 	}
