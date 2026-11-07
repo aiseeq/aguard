@@ -61,7 +61,7 @@ func FallbackDue(now time.Time, cfg Config, facts Facts) bool {
 	}
 	t := fallbackBy(cfg)
 	start := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
-	return !now.Before(start) && !now.After(fallbackEnd(start))
+	return !now.Before(start) && now.Before(fallbackEnd(start))
 }
 
 // FallbackDeadline — до какого времени суток запасной Сон ещё запускается («06:10»).
@@ -145,7 +145,7 @@ type Signal struct {
 func Check(now time.Time, cfg Config, facts Facts) []Signal {
 	date := now.Format("2006-01-02")
 	var out []Signal
-	if due(now, cfg.DreamBy) && !facts.DreamMarker && !facts.DreamPaused && !now.After(fallbackEndAt(now, cfg)) {
+	if due(now, cfg.DreamBy) && !facts.DreamMarker && !facts.DreamPaused && now.Before(fallbackEndAt(now, cfg)) {
 		fallback := ""
 		if cfg.DreamFallback != "" {
 			fallback = fmt.Sprintf(" В %s без маркера aguard сам запустит `%s` (unit %s).", cfg.DreamFallbackBy, cfg.DreamFallback, FallbackUnit(now))

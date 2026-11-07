@@ -67,8 +67,17 @@ func TestDreamSignalWindowAndFallbackPause(t *testing.T) {
 	if got := Check(local(6, 11), cfg, Facts{}); len(got) != 0 {
 		t.Fatalf("сигнал после окна запасного Сна: %+v", got)
 	}
+	if got := Check(local(6, 9), cfg, Facts{}); len(got) != 1 {
+		t.Fatalf("нет сигнала за минуту до конца окна: %+v", got)
+	}
+	if got := Check(local(6, 10), cfg, Facts{}); len(got) != 0 {
+		t.Fatalf("сигнал ровно на конце окна: %+v", got)
+	}
 	if !FallbackDue(local(3, 11), cfg, Facts{}) {
 		t.Fatal("запасной Сон не наступил без паузы")
+	}
+	if !FallbackDue(local(6, 9), cfg, Facts{}) || FallbackDue(local(6, 10), cfg, Facts{}) {
+		t.Fatal("конец окна запасного Сна: 06:09 — да, 06:10 — нет")
 	}
 	facts := Facts{DreamPaused: true}
 	if FallbackDue(local(3, 11), cfg, facts) {

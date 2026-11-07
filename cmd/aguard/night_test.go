@@ -67,6 +67,11 @@ func TestNightPausedSilencesDreamAndFallback(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// перезапуск демона: новый app на том же состоянии — строка о снятом Сне не повторяется
+	restarted := &app{home: dir, stateDir: a.stateDir, log: a.log, units: units, reg: a.reg}
+	if err := restarted.nightRound(&cfg, false); err != nil {
+		t.Fatal(err)
+	}
 	if len(units.started) != 0 {
 		t.Fatalf("запасной unit запущен: %v", units.started)
 	}
@@ -335,6 +340,47 @@ func TestNightAlertOnlySessionLetters(t *testing.T) {
 		}
 		if _, ok := sent.Channels["lead"]; !ok {
 			t.Errorf("%s: письмо лиду не учтено: %+v", key, sent)
+		}
+	}
+}
+
+// Режим log не читает состояние доставок: битый state.json не мешает «написал бы» и строке о снятом Сне.
+func TestNightLogModeIgnoresBrokenState(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(filepath.Join(stateDir, "night"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "night", "state.json"), []byte("{битый"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, paused := range []bool{false, true} {
+		var logs strings.Builder
+		a := &app{home: dir, stateDir: stateDir, log: slog.New(slog.NewTextHandler(&logs, nil)), units: &fakeUnits{}}
+		cfg := night.Default(dir)
+		cfg.Mode = night.ModeLog
+		cfg.DreamBy = "00:00"
+		cfg.DreamFallback = ""
+		cfg.DreamFallbackBy = "23:59"
+		cfg.DreamMarker = filepath.Join(dir, "absent-marker")
+		cfg.DreamPaused = filepath.Join(dir, "night-paused")
+		if paused {
+			if err := os.WriteFile(cfg.DreamPaused, []byte("пользователь\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cfg.DigestMarker = filepath.Join(dir, "digest")
+		for range 2 {
+			if err := a.nightRound(&cfg, false); err != nil {
+				t.Fatalf("пауза %v: %v", paused, err)
+			}
+		}
+		want := map[bool]string{false: "aguard night: написал бы", true: "aguard night: Сон снят"}[paused]
+		if n := strings.Count(logs.String(), want); n < 1 {
+			t.Fatalf("пауза %v: нет %q:\n%s", paused, want, logs.String())
+		}
+		if paused && strings.Count(logs.String(), "aguard night: Сон снят") != 1 {
+			t.Fatalf("строка о снятом Сне не одна:\n%s", logs.String())
 		}
 	}
 }

@@ -104,13 +104,13 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 		a.nightDry(cfg, now, facts, signals)
 		return nil
 	}
-	statePath, state, err := a.nightStateForRound(now, facts)
-	if err != nil {
-		return err
-	}
 	if cfg.Mode == night.ModeLog { // учёт «написал бы» — только в памяти: переход на alert шлёт сегодняшнее по-настоящему
 		if a.nightLogged == nil {
 			a.nightLogged = map[string]bool{}
+		}
+		if key := "dream-paused:" + now.Format("2006-01-02"); facts.DreamPaused && !a.nightLogged[key] {
+			a.nightLogged[key] = true
+			a.log.Info("aguard night: Сон снят, письма и запасного Сна нет", "by", facts.DreamPausedBy)
 		}
 		for _, s := range signals {
 			if !a.nightLogged[s.Key] {
@@ -119,12 +119,11 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 				a.nightNote("would_send", s.Key, "", 0, "")
 			}
 		}
-		if facts.DreamPaused {
-			if err := saveNightState(statePath, state); err != nil {
-				return err
-			}
-		}
 		return nil
+	}
+	statePath, state, err := a.nightStateForRound(now, facts)
+	if err != nil {
+		return err
 	}
 	alive, regErr := a.reg.Alive()
 	if regErr != nil {
