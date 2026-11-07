@@ -313,6 +313,7 @@ func TestQuietNightDoesNotWarnOrRecordEmailFailure(t *testing.T) {
 	}
 	cfg := night.Default(a.home)
 	cfg.Lead, cfg.DreamBy, cfg.DreamFallback = "lead", "00:00", ""
+	cfg.DreamFallbackBy = "23:59" // окно письма о Сне — до 23:59+3 ч: тест не зависит от часа запуска
 	cfg.AlsoTo, cfg.DreamTo = nil, nil
 	cfg.DreamMarker = filepath.Join(a.home, "absent-dream-marker")
 	cfg.DigestBy, cfg.DigestMarker = "23:59", filepath.Join(a.home, "digest-marker")
