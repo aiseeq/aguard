@@ -407,7 +407,12 @@ func (a *app) tmpSendTest(cfg *policy.Config, to string, dry bool) error {
 			}
 		}
 	}
-	sort.SliceStable(sum.Lines, func(i, j int) bool { return sum.Lines[i].Rel < sum.Lines[j].Rel })
+	sort.SliceStable(sum.Lines, func(i, j int) bool {
+		if sum.Lines[i].Rel != sum.Lines[j].Rel {
+			return sum.Lines[i].Rel < sum.Lines[j].Rel
+		}
+		return sum.Lines[i].Item.GBMin(now) > sum.Lines[j].Item.GBMin(now)
+	})
 	if len(sum.Lines) > 5 {
 		sum.Lines = sum.Lines[:5]
 	}

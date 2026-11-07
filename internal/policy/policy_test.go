@@ -151,7 +151,7 @@ func TestCurrentSizeAgeMeasure(t *testing.T) {
 		byteSec  float64
 		want     bool
 	}{
-		{"убрана до 47 МиБ", 47 * mib, 20 * time.Hour, 14 * gib / 10, 1607 * GiBMin, false},
+		{"убрана до 47 МиБ", 47 * mib, 24 * time.Hour, 14 * gib / 10, 1607 * GiBMin, false},
 		{"690 МиБ после уборки", 690 * mib, 3 * time.Hour, 14 * gib / 10, 1200 * GiBMin, true},
 		{"142 МиБ, 11 ч", 142 * mib, 11 * time.Hour, 142 * mib, 1, false},
 		{"142 МиБ, 13 ч", 142 * mib, 13 * time.Hour, 142 * mib, 1, true},

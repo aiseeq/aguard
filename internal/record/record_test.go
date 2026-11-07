@@ -90,3 +90,14 @@ func TestStateRoundTrip(t *testing.T) {
 		t.Errorf("права снимка %v", fi.Mode().Perm())
 	}
 }
+
+func TestReadStateRejectsEntryWithoutBorn(t *testing.T) {
+	p := filepath.Join(t.TempDir(), StateFile)
+	b, _ := json.Marshal(State{Entries: []Entry{{Path: "/tmp/noborn", Bytes: 10}}})
+	if err := WriteFileAtomic(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadState(p); err == nil || !strings.Contains(err.Error(), "/tmp/noborn") || !strings.Contains(err.Error(), p) {
+		t.Fatalf("запись без born должна давать ошибку с путями: %v", err)
+	}
+}

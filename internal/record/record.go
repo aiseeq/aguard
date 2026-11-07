@@ -163,6 +163,11 @@ func ReadState(path string) (*State, error) {
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	for i := range s.Entries {
+		if s.Entries[i].Born.IsZero() { // мера сводки — размер × возраст: без born возраст неизвестен
+			return nil, fmt.Errorf("%s: запись %s без born", path, s.Entries[i].Path)
+		}
+	}
 	return &s, nil
 }
 
