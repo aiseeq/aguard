@@ -300,6 +300,7 @@ mode = "alert"         # off | log | alert
 interval = "1m"
 dream_by = "02:50"
 dream_marker = "~/.claude/improve/runs/{date}/started"
+dream_paused = "~/.claude/improve/state/night-paused" # файл есть — Сон снят: нет письма и запасного запуска
 dream_fallback = "~/.claude/improve/run.sh terra"  # нет маркера к dream_fallback_by — раз за дату отдельным unit; "" — выключено
 dream_fallback_by = "03:10"
 digest_by = "07:00"

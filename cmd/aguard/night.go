@@ -94,12 +94,19 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 		return nil
 	}
 	now := time.Now().In(time.Local)
-	facts := a.nightFacts(cfg, now)
+	facts, err := a.nightFacts(cfg, now)
+	if err != nil {
+		return err
+	}
 	signals := night.Check(now, *cfg, facts)
 	signals = append(signals, a.nightFallback(cfg, now, facts, dry)...)
 	if dry {
 		a.nightDry(cfg, now, facts, signals)
 		return nil
+	}
+	statePath, state, err := a.nightStateForRound(now, facts)
+	if err != nil {
+		return err
 	}
 	if cfg.Mode == night.ModeLog { // учёт «написал бы» — только в памяти: переход на alert шлёт сегодняшнее по-настоящему
 		if a.nightLogged == nil {
@@ -112,21 +119,12 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 				a.nightNote("would_send", s.Key, "", 0, "")
 			}
 		}
+		if facts.DreamPaused {
+			if err := saveNightState(statePath, state); err != nil {
+				return err
+			}
+		}
 		return nil
-	}
-	statePath := filepath.Join(a.dir("night"), "state.json")
-	state := a.nightSent
-	if state == nil {
-		var err error
-		if state, err = loadNightState(statePath); err != nil {
-			return err
-		}
-		a.nightSent = state
-	}
-	for k, sent := range state {
-		if now.Sub(sent.At) > 7*24*time.Hour {
-			delete(state, k)
-		}
 	}
 	alive, regErr := a.reg.Alive()
 	if regErr != nil {
@@ -151,6 +149,33 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 		return err
 	}
 	return nil
+}
+
+// nightStateForRound загружает и очищает состояние доставок, записывает строку о снятом Сне за дату.
+func (a *app) nightStateForRound(now time.Time, facts night.Facts) (string, nightState, error) {
+	path := filepath.Join(a.dir("night"), "state.json")
+	state := a.nightSent
+	if state == nil {
+		var err error
+		state, err = loadNightState(path)
+		if err != nil {
+			return "", nil, err
+		}
+		a.nightSent = state
+	}
+	for key, sent := range state {
+		if now.Sub(sent.At) > 7*24*time.Hour {
+			delete(state, key)
+		}
+	}
+	if facts.DreamPaused {
+		key := "dream-paused:" + now.Format("2006-01-02")
+		if _, logged := state[key]; !logged {
+			a.log.Info("aguard night: Сон снят, письма и запасного Сна нет", "by", facts.DreamPausedBy)
+			state[key] = nightSent{At: now}
+		}
+	}
+	return path, state, nil
 }
 
 // nightDry — печать прохода без отправки.
@@ -244,14 +269,25 @@ func recentTrust(events []cllog.TrustEvent, now time.Time) int {
 	return n
 }
 
-// nightFacts — маркеры Сна и Дайджеста и окна доверия из журнала cl; сбой чтения — в журнал aguard.
-func (a *app) nightFacts(cfg *night.Config, now time.Time) night.Facts {
+// nightFacts — маркеры Сна и Дайджеста и окна доверия из журнала cl; сбой чтения паузы прерывает проход.
+func (a *app) nightFacts(cfg *night.Config, now time.Time) (night.Facts, error) {
 	facts := night.Facts{}
 	marker := night.DreamPath(*cfg, now)
 	_, err := os.Stat(marker)
 	facts.DreamMarker = err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		a.log.Warn("aguard night: маркер Сна", "path", marker, "err", err)
+	}
+	_, err = os.Stat(cfg.DreamPaused)
+	if err == nil {
+		b, readErr := os.ReadFile(cfg.DreamPaused)
+		if readErr != nil {
+			return night.Facts{}, fmt.Errorf("night: файл паузы Сна %s: %w", cfg.DreamPaused, readErr)
+		}
+		facts.DreamPaused = true
+		facts.DreamPausedBy = strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return night.Facts{}, fmt.Errorf("night: файл паузы Сна %s: %w", cfg.DreamPaused, err)
 	}
 	if b, err := os.ReadFile(cfg.DigestMarker); err == nil {
 		facts.DigestText = string(b)
@@ -269,7 +305,7 @@ func (a *app) nightFacts(cfg *night.Config, now time.Time) night.Facts {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		a.log.Warn("aguard night: журнал cl", "err", err)
 	}
-	return facts
+	return facts, nil
 }
 
 // openTrust — окна, чей cl ещё жив: консоль закрыли — claude не стоит на окне (ревью 28.10: 3 закрытые пробы

@@ -18,6 +18,17 @@ func local(h, m int) time.Time {
 	return time.Date(2026, 10, 28, h, m, 0, 0, time.FixedZone("CET", 3600))
 }
 
+func TestValidateExpandsDreamPausedHome(t *testing.T) {
+	cfg := testConfig()
+	cfg.DreamPaused = "~/.claude/improve/state/night-paused"
+	if err := cfg.Validate("/home/u"); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DreamPaused != "/home/u/.claude/improve/state/night-paused" {
+		t.Fatalf("путь паузы не раскрыт: %q", cfg.DreamPaused)
+	}
+}
+
 func TestCheckMarkers(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -28,6 +39,7 @@ func TestCheckMarkers(t *testing.T) {
 		{"до Сна", local(2, 49), Facts{}, ""},
 		{"Сон без маркера", local(2, 51), Facts{}, "dream:2026-10-28"},
 		{"Сон с маркером", local(2, 51), Facts{DreamMarker: true}, ""},
+		{"Сон снят", local(2, 51), Facts{DreamPaused: true}, ""},
 		{"Дайджест с датой вчера", local(7, 1), Facts{DreamMarker: true, DigestText: "2026-10-27"}, "digest:2026-10-28"},
 		{"Дайджест с сегодняшней датой", local(7, 1), Facts{DreamMarker: true, DigestText: "done 2026-10-28"}, ""},
 		{"Дайджест без файла", local(7, 1), Facts{DreamMarker: true}, "digest:2026-10-28"},
@@ -42,6 +54,28 @@ func TestCheckMarkers(t *testing.T) {
 				t.Fatalf("получено %+v, ключ %s", got, tc.key)
 			}
 		})
+	}
+}
+
+func TestDreamSignalWindowAndFallbackPause(t *testing.T) {
+	cfg := testConfig()
+	cfg.DreamBy = "02:50"
+	cfg.DreamFallbackBy = "03:10"
+	if got := Check(local(2, 51), cfg, Facts{}); len(got) != 1 || got[0].Key != "dream:2026-10-28" {
+		t.Fatalf("сигнал сразу после dream_by: %+v", got)
+	}
+	if got := Check(local(6, 11), cfg, Facts{}); len(got) != 0 {
+		t.Fatalf("сигнал после окна запасного Сна: %+v", got)
+	}
+	if !FallbackDue(local(3, 11), cfg, Facts{}) {
+		t.Fatal("запасной Сон не наступил без паузы")
+	}
+	facts := Facts{DreamPaused: true}
+	if FallbackDue(local(3, 11), cfg, facts) {
+		t.Fatal("запасной Сон наступил при паузе")
+	}
+	if got := Check(local(3, 11), cfg, facts); len(got) != 0 {
+		t.Fatalf("сигнал при паузе: %+v", got)
 	}
 }
 

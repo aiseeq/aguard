@@ -19,6 +19,7 @@ type Config struct {
 	Interval     policy.Duration `toml:"interval"`
 	DreamBy      string          `toml:"dream_by"`
 	DreamMarker  string          `toml:"dream_marker"`
+	DreamPaused  string          `toml:"dream_paused"`
 	DigestBy     string          `toml:"digest_by"`
 	DigestMarker string          `toml:"digest_marker"`
 	TrustWait    policy.Duration `toml:"trust_wait"`
@@ -43,7 +44,7 @@ const (
 // Default returns ночной сторож по умолчанию.
 func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "02:50",
-		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DigestBy: "07:00",
+		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DreamPaused: filepath.Join(home, ".claude/improve/state/night-paused"), DigestBy: "07:00",
 		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute),
 		AlsoTo: []string{"git-admin"}, DreamTo: []string{"dream-master"},
 		DreamFallback: "~/.claude/improve/run.sh terra", DreamFallbackBy: "03:10"}
@@ -55,17 +56,25 @@ const FallbackWindow = 3 * time.Hour
 
 // FallbackDue — пора запускать запасной Сон: команда задана, маркера нет, срок прошёл не дальше FallbackWindow.
 func FallbackDue(now time.Time, cfg Config, facts Facts) bool {
-	if cfg.DreamFallback == "" || facts.DreamMarker {
+	if cfg.DreamFallback == "" || facts.DreamMarker || facts.DreamPaused {
 		return false
 	}
 	t := fallbackBy(cfg)
-	at := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
-	return !now.Before(at) && now.Sub(at) < FallbackWindow
+	start := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+	return !now.Before(start) && !now.After(fallbackEnd(start))
 }
 
 // FallbackDeadline — до какого времени суток запасной Сон ещё запускается («06:10»).
 func FallbackDeadline(cfg Config) string {
 	return fallbackBy(cfg).Add(FallbackWindow).Format("15:04")
+}
+
+func fallbackEnd(start time.Time) time.Time { return start.Add(FallbackWindow) }
+
+func fallbackEndAt(now time.Time, cfg Config) time.Time {
+	t := fallbackBy(cfg)
+	start := time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), 0, 0, now.Location())
+	return fallbackEnd(start)
 }
 
 func fallbackBy(cfg Config) time.Time {
@@ -103,13 +112,14 @@ func (c *Config) Validate(home string) error {
 	if !validClock(c.DreamBy) || !validClock(c.DigestBy) {
 		return fmt.Errorf("night.dream_by и night.digest_by должны быть ЧЧ:ММ")
 	}
-	if c.DreamFallback != "" && !validClock(c.DreamFallbackBy) {
-		return fmt.Errorf("night.dream_fallback_by должно быть ЧЧ:ММ при заданном night.dream_fallback")
+	if !validClock(c.DreamFallbackBy) {
+		return fmt.Errorf("night.dream_fallback_by должно быть ЧЧ:ММ")
 	}
 	if slices.Contains(c.AlsoTo, "") || slices.Contains(c.DreamTo, "") {
 		return fmt.Errorf("night.also_to, night.dream_to: пустое имя сессии")
 	}
 	c.DreamMarker = policy.ExpandHome(c.DreamMarker, home)
+	c.DreamPaused = policy.ExpandHome(c.DreamPaused, home)
 	c.DigestMarker = policy.ExpandHome(c.DigestMarker, home)
 	return nil
 }
@@ -118,9 +128,11 @@ func validClock(s string) bool { _, err := time.Parse("15:04", s); return err ==
 
 // Facts — уже прочитанные наблюдателем данные, пригодные для чистой проверки.
 type Facts struct {
-	DreamMarker bool
-	DigestText  string
-	TrustEvents []cllog.TrustEvent
+	DreamMarker   bool
+	DreamPaused   bool
+	DreamPausedBy string
+	DigestText    string
+	TrustEvents   []cllog.TrustEvent
 }
 
 // Signal — срабатывание с ключом дедупликации и текстом для человека; To — адресаты сверх Recipients.
@@ -133,7 +145,7 @@ type Signal struct {
 func Check(now time.Time, cfg Config, facts Facts) []Signal {
 	date := now.Format("2006-01-02")
 	var out []Signal
-	if due(now, cfg.DreamBy) && !facts.DreamMarker {
+	if due(now, cfg.DreamBy) && !facts.DreamMarker && !facts.DreamPaused && !now.After(fallbackEndAt(now, cfg)) {
 		fallback := ""
 		if cfg.DreamFallback != "" {
 			fallback = fmt.Sprintf(" В %s без маркера aguard сам запустит `%s` (unit %s).", cfg.DreamFallbackBy, cfg.DreamFallback, FallbackUnit(now))
