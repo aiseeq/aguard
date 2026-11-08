@@ -31,10 +31,12 @@ type Culprits struct {
 	// aguard читает, своя запись известна.
 	// У системных служб (postgres, journald) процессы чужого uid, их write_bytes не видны — ноль там не значит «не писал».
 	Readable    map[string]bool
-	cgroupWrite map[string]int64 // запись процессов по пути cgroup
-	cgroupRead  map[string]int64 // чтение cgroup по пути
-	cgroupTotal map[string]int64 // запись процессов + чтение: мера главной cgroup
-	foreignIO   map[string]int64 // по имени cgroup чужого uid: запись и чтение по io.stat — мера, сравнимая с главной
+	cgroupWrite map[string]int64  // запись процессов по пути cgroup
+	cgroupRead  map[string]int64  // чтение cgroup по пути
+	cgroupTotal map[string]int64  // запись процессов + чтение: мера главной cgroup
+	procCgroup  map[string]string // имя процесса → путь его cgroup (последней записи)
+	procIO      map[string]int64  // имя процесса → запись и чтение
+	foreignIO   map[string]int64  // по имени cgroup чужого uid: запись и чтение по io.stat — мера, сравнимая с главной
 }
 
 type procID struct {
@@ -49,7 +51,7 @@ func SumCulprits(details []Step) Culprits {
 	c := Culprits{ProcWrite: map[string]int64{}, ProcRead: map[string]int64{}, ProcMajflt: map[string]int64{},
 		CgroupWrite: map[string]int64{}, CgroupRead: map[string]int64{}, CgroupSwapIn: map[string]int64{},
 		CgroupIdle: map[string]int64{}, CgroupWriteOps: map[string]int64{}, CgroupDirty: map[string]int64{}, Readable: map[string]bool{},
-		cgroupWrite: map[string]int64{}, cgroupRead: map[string]int64{}, cgroupTotal: map[string]int64{}, foreignIO: map[string]int64{}}
+		cgroupWrite: map[string]int64{}, cgroupRead: map[string]int64{}, cgroupTotal: map[string]int64{}, foreignIO: map[string]int64{}, procCgroup: map[string]string{}, procIO: map[string]int64{}}
 	userTree := "/user-" + strconv.Itoa(os.Getuid()) + ".slice/"
 	foreign := map[string]bool{} // имя есть и вне user-<uid>.slice (dbus-broker.service и в system.slice): своя запись неизвестна
 	names := processNames(details)
@@ -64,6 +66,10 @@ func SumCulprits(details []Step) Culprits {
 			c.ProcWrite[name] += p.WriteBytes
 			c.ProcRead[name] += p.ReadBytes
 			c.ProcMajflt[name] += p.Majflt
+			c.procIO[name] += p.WriteBytes + p.ReadBytes
+			if p.Cgroup != "" {
+				c.procCgroup[name] = p.Cgroup
+			}
 			if p.Cgroup != "" && p.WriteBytes > 0 {
 				c.CgroupDirty[CgroupName(p.Cgroup)] += p.WriteBytes
 				c.cgroupWrite[p.Cgroup] += p.WriteBytes
@@ -130,6 +136,21 @@ func (c *Culprits) MainCgroup() string {
 	for path, v := range c.cgroupTotal {
 		if v > 0 && (best == "" || v > c.cgroupTotal[best] || v == c.cgroupTotal[best] && path < best) {
 			best = path
+		}
+	}
+	return best
+}
+
+// MainProc — имя (comm(pid), как в списках процессов) процесса главной cgroup main с наибольшими записью и чтением;
+// "" — такого нет.
+func (c *Culprits) MainProc(main string) string {
+	var best string
+	for name, v := range c.procIO {
+		if main == "" || c.procCgroup[name] != main || v <= 0 {
+			continue
+		}
+		if best == "" || v > c.procIO[best] || v == c.procIO[best] && name < best {
+			best = name
 		}
 	}
 	return best

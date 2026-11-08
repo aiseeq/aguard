@@ -374,11 +374,7 @@ func TestQuietIOAlertDoneDoesNotWarnOrRecordFailure(t *testing.T) {
 	_ = liveLead(t, a)
 	cfg := iowatch.Default()
 	cfg.Mode, cfg.Lead = iowatch.ModeAlert, "lead"
-	if err := a.alertIO(cfg, []iowatch.Case{alertCase(time.Now().Add(-time.Minute), 2500)}); err != nil {
-		t.Fatalf("alertIO error: %v", err)
-	}
-	s := &ioService{a: a, alerting: true}
-	s.alertDone(fmt.Errorf("письмо io: %w", errQuiet))
+	a.ioSend(cfg, "lead", "срочно", "aguard io: фриз", 2500)
 	assertQuietAccounting(t, a, log, "io")
 }
 

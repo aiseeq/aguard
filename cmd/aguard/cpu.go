@@ -228,6 +228,11 @@ func (a *app) cpuAct(cfg *cpuwatch.Config, h *cpuwatch.Host, v *cpuwatch.Verdict
 		}
 		h.Sent(m.Name, now)
 	}
+	// Сводка лиду — когда перегрузку не на кого одного повесить: мастерам не писали (хозяина нет) или писали двоим и
+	// больше (каждый видит только своё). Один мастер — он и адресат, копии лиду нет (тикет alert-async).
+	if told := h.Told(); len(told) == 1 && told[0] != cfg.Lead {
+		return
+	}
 	if h.Due(leadKey+cfg.Lead, now, cfg.Repeat.D()) {
 		lead := cpuwatch.LeadMessage(h.Name, v, h.Told(), now)
 		if err := a.cpuSend(cfg, alive, cfg.Lead, lead, int64(v.Runnable)); err != nil {

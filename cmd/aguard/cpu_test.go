@@ -275,7 +275,7 @@ func TestCpuLetterAfterRestart(t *testing.T) {
 	cfg.Mode, cfg.Lead = cpuwatch.ModeLog, "lead"
 	path := filepath.Join(a.dir("cpu"), "local.json")
 	start := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
-	heavy := map[string]int{"glint-master": 10}
+	heavy := map[string]int{"glint-master": 10, "akit-master": 10} // двое мастеров — и сводка лиду
 	h := cpuwatch.Host{Name: cpuwatch.HostLocal, Every: time.Minute}
 	round := func(i int) string {
 		at := start.Add(time.Duration(i) * time.Minute)
@@ -308,6 +308,36 @@ func TestCpuLetterAfterRestart(t *testing.T) {
 	}
 	if out := round(11); strings.Contains(out, "написал бы") {
 		t.Fatalf("письмо раньше repeat после рестарта:\n%s", out)
+	}
+}
+
+// Перегрузка одного мастера — письмо ему, сводки лиду нет; второй мастер в той же перегрузке — сводка лиду.
+func TestCpuLeadOnlyWithoutSingleOwner(t *testing.T) {
+	var logs strings.Builder
+	a := cpuApp(t, &logs)
+	cfg := cpuwatch.Default(a.home)
+	cfg.Mode, cfg.Lead = cpuwatch.ModeLog, "lead"
+	h := cpuwatch.Host{Name: cpuwatch.HostLocal}
+	start := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
+	act := func(at time.Time, heavy map[string]int) string {
+		logs.Reset()
+		v := h.Judge(cpuSample(at, 30, 30, heavy), cpuOwner)
+		a.cpuAct(&cfg, &h, &v, at)
+		return logs.String()
+	}
+	act(start, map[string]int{"glint-master": 20})
+	out := act(start.Add(10*time.Minute), map[string]int{"glint-master": 20})
+	if !strings.Contains(out, "session=glint-master") || strings.Contains(out, "session=lead") {
+		t.Fatalf("один мастер — письмо ему, лиду нет:\n%s", out)
+	}
+	out = act(start.Add(11*time.Minute), map[string]int{"glint-master": 10, "akit-master": 10})
+	if !strings.Contains(out, "session=akit-master") || !strings.Contains(out, "session=lead") {
+		t.Fatalf("второй мастер — письмо ему и сводка лиду:\n%s", out)
+	}
+	h = cpuwatch.Host{Name: cpuwatch.HostLocal}
+	act(start, nil)
+	if out := act(start.Add(10*time.Minute), nil); !strings.Contains(out, "session=lead") {
+		t.Fatalf("без мастеров — сводка лиду:\n%s", out)
 	}
 }
 

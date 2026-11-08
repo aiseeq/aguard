@@ -47,6 +47,7 @@ type Culprit struct {
 	MainValue      int64                     `json:"main_value,omitempty"` // мера, по которой главная cgroup выбрана главной
 	MainWrite      int64                     `json:"main_write,omitempty"` // запись процессов главной cgroup
 	MainRead       int64                     `json:"main_read,omitempty"`  // чтение главной cgroup
+	MainProc       string                    `json:"main_proc,omitempty"`  // процесс главной cgroup с наибольшим I/O, comm(pid): класс тикета, хозяин временного scope
 	ProcWrite      []Ranked                  `json:"proc_write,omitempty"`
 	ProcRead       []Ranked                  `json:"proc_read,omitempty"`
 	ProcMajflt     []Ranked                  `json:"proc_majflt,omitempty"`
@@ -306,15 +307,16 @@ func (r *Recorder) finish(c *Case) {
 	sum := SumCulprits(details)
 	procWrite, procRead := Rank(sum.ProcWrite, caseTop), Rank(sum.ProcRead, caseTop)
 	processDetails := make(map[string]ProcessDetails)
-	for _, top := range [][]Ranked{procWrite, procRead} {
+	main := sum.MainCgroup()
+	mainProc := sum.MainProc(main)
+	for _, top := range [][]Ranked{procWrite, procRead, {{Name: mainProc}}} {
 		for _, p := range top {
 			if info, ok := sum.ProcessDetails[p.Name]; ok {
 				processDetails[p.Name] = info
 			}
 		}
 	}
-	main := sum.MainCgroup()
-	c.Culprits = &Culprit{From: from, Main: main, MainValue: sum.cgroupTotal[main], MainWrite: sum.cgroupWrite[main], MainRead: sum.cgroupRead[main],
+	c.Culprits = &Culprit{From: from, Main: main, MainValue: sum.cgroupTotal[main], MainWrite: sum.cgroupWrite[main], MainRead: sum.cgroupRead[main], MainProc: mainProc,
 		ProcWrite: procWrite, ProcRead: procRead, ProcMajflt: Rank(sum.ProcMajflt, caseTop),
 		ProcessDetails: processDetails,
 		CgroupWrite:    Rank(sum.CgroupWrite, caseTop), CgroupRead: Rank(sum.CgroupRead, caseTop),

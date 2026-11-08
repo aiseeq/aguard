@@ -65,7 +65,7 @@ The daemon reads `~/.config/aguard/config.toml` and reloads it on each observer 
 - `[disk]`: disk growth, free-space, and trace observation; record walks run after a notable free-space change, with a maximum interval; decisions are logged by default.
 - `[bgtask]`: detection thresholds for forgotten background commands; alerts are enabled by default.
 - `[cpu]`: CPU pressure sampling and alert routing; alerts are enabled by default.
-- `[io]`: I/O and memory pressure stall sampling; alerts are enabled by default.
+- `[io]`: I/O and memory pressure stall sampling; freezes are routed to the culprit's owner (letter when harm is ongoing, otherwise a `tk` ticket in its project); `aguard io route` replays the routing over saved cases.
 - `[gui]`: KDE Plasma and Chrome responsiveness sampling; defaults to logging.
 - `[remote]`: detection of remote graft failures; alerts are enabled by default.
 - `[codex]`: Codex weekly limit forecast; notices the lead before an early 100% and at 100%; alerts are enabled by default.

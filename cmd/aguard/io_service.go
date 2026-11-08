@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/activity"
+	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/iowatch"
 )
 
@@ -156,18 +157,22 @@ type ioService struct {
 	warnAt    map[string]time.Time
 	passAt    time.Time // следующая отметка прохода в учёте срабатываний
 	cases     []iowatch.Case
-	alerts    []iowatch.Case // случаи от alert_min, ждут письма
-	alerting  bool
-	alerted   time.Time
+	// Маршрут случаев от alert_min (тикет alert-async): письма хозяину или лиду, тикеты — горутиной tickets.
+	route   *ioroute.Router
+	owners  *ioOwnerFinder
+	tickets *ioTicketer
+	tickAt  time.Time
 }
 
 func newIOService(ctx context.Context, a *app) *ioService {
 	state := a.dir("io")
-	return &ioService{a: a, ctx: ctx, dir: filepath.Join(state, "events"), path: filepath.Join(state, ioCasesFile),
+	def := iowatch.Default()
+	return &ioService{route: ioroute.New(def.Route()), owners: a.ioOwners(&def), a: a, ctx: ctx, dir: filepath.Join(state, "events"), path: filepath.Join(state, ioCasesFile),
 		seriesPath: filepath.Join(state, ioSeriesFile), profilesPath: filepath.Join(state, ioProfilesFile),
 		cgroupRoot: iowatch.SystemRoots().Cgroup, workerState: filepath.Join(a.home, ".local", "state", "worker"),
 		series: iowatch.NewSeries(iowatch.Default().SeriesKeep.D()), profiles: iowatch.NewProfiles(), live: iowatch.NewLive(),
-		extra: make(chan func(), 16), warnAt: map[string]time.Time{}}
+		extra: make(chan func(), 16), warnAt: map[string]time.Time{},
+		tickets: &ioTicketer{a: a, queue: make(chan ioTicketJob, 64)}}
 }
 
 // Копии в папке состояния io: сводки случаев, посекундный ряд машины, профили cgroup.
@@ -184,6 +189,7 @@ func (a *app) ioLoop(ctx context.Context, usr2 <-chan os.Signal) {
 	s := newIOService(ctx, a)
 	s.load()
 	go s.serve()
+	go s.tickets.run(ctx)
 	go func() {
 		for {
 			var f func()
@@ -256,6 +262,7 @@ func (s *ioService) load() {
 		return iowatch.LoadProfiles(path, now.Add(-cfg.ProfilesKeep.D()))
 	})
 	s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
+	s.seedRoute(cfg, now)
 }
 
 // loadIOFile — копия прошлого запуска; файл не читается — он сохраняется рядом с пометкой, история
@@ -342,6 +349,7 @@ func (s *ioService) run(cfg iowatch.Config) (err error) {
 	defer cancel()
 	s.gen++
 	s.cfg, s.restart, s.restarted = cfg, cancel, false
+	s.setRoute(cfg)
 	s.rec = iowatch.NewRecorder(cfg)
 	s.resizeSeries(cfg)
 	s.rec.Attach(s.series, s.profiles, s.live)
@@ -362,7 +370,10 @@ func (s *ioService) step(st iowatch.Step) {
 	for i := range closed {
 		s.closed(closed[i])
 	}
-	s.launchAlert(st.At)
+	if !st.At.Before(s.tickAt) {
+		s.tickAt = st.At.Add(time.Second)
+		s.act(s.route.Tick(st.At))
+	}
 }
 
 func (s *ioService) detail(st iowatch.Step) { s.rec.Detail(st) }
@@ -504,7 +515,7 @@ func (s *ioService) endProfiles(gone map[string]string, now time.Time) {
 	s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
 }
 
-// closed — случай в сводки; от case_min — строка журнала, от alert_min — в очередь письма.
+// closed — случай в сводки; от case_min — строка журнала, от alert_min — в маршрут (письмо или тикет).
 func (s *ioService) closed(c iowatch.Case) {
 	s.cases = append(s.cases, c)
 	if c.Dur() < s.cfg.CaseMin.D() {
@@ -519,8 +530,8 @@ func (s *ioService) closed(c iowatch.Case) {
 		kind = "под потолком"
 	}
 	s.a.note("io", kind, c.Start.Format(time.RFC3339), "", c.DurMS, "ms")
-	if c.Dur() >= s.cfg.AlertMin.D() && !c.Quiet && !c.Capped {
-		s.alerts = append(s.alerts, c)
+	if alertable(&c, s.cfg) {
+		s.routeOne(&c)
 	}
 }
 
@@ -538,39 +549,4 @@ func (s *ioService) dump() {
 		}
 		s.a.log.Info("aguard io: снимок", "path", snap.Path)
 	}()
-}
-
-// launchAlert — письмо о накопленных длинных случаях не чаще alert_every и не больше одного сразу:
-// первый случай после паузы — сразу, следующие в паузе склеиваются в одно письмо.
-func (s *ioService) launchAlert(now time.Time) {
-	if s.alerting || len(s.alerts) == 0 || !s.alerted.IsZero() && now.Sub(s.alerted) < s.cfg.AlertEvery.D() {
-		return
-	}
-	cases := s.alerts
-	s.alerts, s.alerting, s.alerted = nil, true, now
-	cfg, ctx := s.cfg, s.ctx
-	go func() {
-		var err error
-		defer func() {
-			if v := recover(); v != nil {
-				err = fmt.Errorf("паника письма io: %v\n%s", v, debug.Stack())
-			}
-			select {
-			case s.extra <- func() { s.alertDone(err) }:
-			case <-ctx.Done():
-			}
-		}()
-		err = s.a.alertIO(cfg, cases)
-	}()
-}
-
-func (s *ioService) alertDone(err error) {
-	s.alerting = false
-	if err != nil {
-		if errors.Is(err, errQuiet) {
-			return
-		}
-		s.a.warn("io", "письмо о фризе не ушло", "err", err)
-		s.a.note("io", "alert_failed", err.Error(), "", 0, "")
-	}
 }

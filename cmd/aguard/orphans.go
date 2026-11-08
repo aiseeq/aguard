@@ -115,7 +115,7 @@ func (a *app) orphansObserve(cfg *orphans.Config, trees []orphans.Tree, info map
 	a.appendJournal(lines)
 }
 
-// act снимает деревья, пишет журнал и шлёт сводки.
+// orphansAct снимает деревья, пишет журнал и шлёт сводки.
 func (a *app) orphansAct(ctx context.Context, cfg *orphans.Config, trees []orphans.Tree, info map[string]orphans.SessionInfo,
 	alive map[string]session.Info, now time.Time) {
 	var reap []*orphans.Tree

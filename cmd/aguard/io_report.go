@@ -182,6 +182,21 @@ func ioDecimal(x float64) string {
 	return strings.Replace(strconv.FormatFloat(x, 'f', 1, 64), ".", ",", 1)
 }
 
+// ioLoadCases — сводки случаев: у службы (live), не запущена — из файла как есть.
+func (a *app) ioLoadCases(cfg *iowatch.Config, path string, live bool, since time.Time) ([]iowatch.Case, error) {
+	if live {
+		ans, err := askIO(cfg.Socket, iowatch.Request{Q: iowatch.QueryCases, Since: since.Format(time.RFC3339)})
+		if err == nil {
+			return ans.Cases, nil
+		}
+		if !errors.Is(err, errIONotRunning) {
+			return nil, err
+		}
+		a.log.Warn("aguard io: служба не запущена, сводки — из файла как есть")
+	}
+	return iowatch.LoadCases(path)
+}
+
 // ioReport — итог случаев [since, until): live запрашивает сводки из службы, без службы читает файл.
 func (a *app) ioReport(path string, live bool, since, until time.Time, minDur time.Duration, asJSON bool) error {
 	cfg, err := a.ioConfig()
@@ -191,24 +206,9 @@ func (a *app) ioReport(path string, live bool, since, until time.Time, minDur ti
 	if minDur <= 0 {
 		minDur = cfg.CaseMin.D()
 	}
-	var cases []iowatch.Case
-	fromService := false
-	if live {
-		ans, err := askIO(cfg.Socket, iowatch.Request{Q: iowatch.QueryCases, Since: since.Format(time.RFC3339)})
-		if err == nil {
-			cases, fromService = ans.Cases, true
-		} else if errors.Is(err, errIONotRunning) {
-			a.log.Warn("aguard io report: служба не запущена, сводки — из файла как есть")
-		} else {
-			return err
-		}
-	}
-	if !fromService {
-		var err error
-		cases, err = iowatch.LoadCases(path)
-		if err != nil {
-			return err
-		}
+	cases, err := a.ioLoadCases(&cfg, path, live, since)
+	if err != nil {
+		return err
 	}
 	sum := iowatch.Summarize(cases, since, until, minDur)
 	if asJSON {

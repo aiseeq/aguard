@@ -1381,3 +1381,24 @@ func TestSelfReadBytes(t *testing.T) {
 		t.Fatalf("нет строки read_bytes: нужна ошибка, а не %d", got)
 	}
 }
+
+// Главный процесс — из главной cgroup, не самый большой по машине: класс тикета хозяину.
+func TestMainProcFromMainCgroup(t *testing.T) {
+	main, other := "/user.slice/a/agent-x-1.scope", "/user.slice/a/app-chrome.scope"
+	details := []Step{{Processes: []Process{
+		{PID: 1, Comm: "chrome", WriteBytes: 900, Cgroup: other},
+		{PID: 2, Comm: "go", WriteBytes: 300, Cgroup: main},
+		{PID: 3, Comm: "rg", ReadBytes: 200, Cgroup: main},
+		{PID: 4, Comm: "bash", WriteBytes: 10, Cgroup: main},
+	}, Cgroups: []Cgroup{{Path: main, ReadBytes: 2000}}}}
+	c := SumCulprits(details)
+	if got := c.MainCgroup(); got != main {
+		t.Fatalf("главная %q", got)
+	}
+	if got := c.MainProc(main); got != "go(2)" {
+		t.Fatalf("главный процесс %q", got)
+	}
+	if got := c.MainProc(""); got != "" {
+		t.Fatalf("без главной: %q", got)
+	}
+}

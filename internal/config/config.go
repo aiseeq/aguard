@@ -140,6 +140,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Disk.Lead, c.Disk.SendAuth = c.Lead, c.SendAuth
 	c.IO.Lead, c.IO.SendAuth = c.Lead, c.SendAuth
 	c.IO.Socket = policy.ExpandHome(c.IO.Socket, home)
+	c.IO.Tk = policy.ExpandHome(c.IO.Tk, home)
 	c.Remote.Lead, c.Remote.SendAuth = c.Lead, c.SendAuth
 	c.Codex.Lead, c.Codex.SendAuth = c.Lead, c.SendAuth
 	c.Night.Lead, c.Night.SendAuth = c.Lead, c.SendAuth

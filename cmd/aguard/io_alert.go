@@ -1,67 +1,15 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/iowatch"
-	"github.com/aiseeq/akit/proc"
 )
 
-// Письмо о длинных случаях фриза: сводка главного (самого длинного) с виновниками и список
-// остальных — лиду и сессии-виновнику главного случая. Сводка с виновниками и есть разбор: лид
-// получает её сразу и сам решает, что делать.
-
-// alertIO — письмо о случаях; mode = log — строка журнала «написал бы». Зовётся из своей горутины.
-func (a *app) alertIO(cfg iowatch.Config, cases []iowatch.Case) error {
-	if len(cases) == 0 {
-		return nil
-	}
-	message, main := ioAlertText(cases, cfg.AlertMin.D())
-	owner := ""
-	if main.Culprits != nil && !main.Culprits.SnapshotDeletion() && !main.Culprits.ReadMostly() {
-		if name, _, ok := proc.SessionScope(main.Culprits.Main); ok {
-			owner = name
-		}
-	}
-	recipients := ioRecipients(cfg.Lead, owner)
-	if cfg.Mode == iowatch.ModeLog {
-		a.log.Info("aguard io: написал бы", "to", strings.Join(recipients, ","), "message", message)
-		a.note("io", "написал бы", main.Start.Format(time.RFC3339), strings.Join(recipients, ","), main.DurMS, "ms")
-		return nil
-	}
-	alive, err := a.reg.Alive()
-	if err != nil {
-		return fmt.Errorf("реестр сессий: %w", err)
-	}
-	var sendErr error
-	for _, to := range recipients {
-		if _, ok := alive[to]; !ok && to != cfg.Lead {
-			a.log.Info("aguard io: сессия-виновник уже закрыта, письмо только лиду", "session", to)
-			continue
-		}
-		if err := a.sendAlive(alive, to, cfg.SendAuth, message); err != nil {
-			if a.quietFailure("io", err) {
-				continue
-			}
-			sendErr = errors.Join(sendErr, fmt.Errorf("письмо %s: %w", to, err))
-			continue
-		}
-		a.note("io", "alert_sent", main.Start.Format(time.RFC3339), to, main.DurMS, "ms")
-	}
-	return sendErr
-}
-
-// ioRecipients — лид всегда, сессия-виновник — если она есть и это не лид.
-func ioRecipients(lead, owner string) []string {
-	recipients := []string{lead}
-	if owner != "" && owner != lead {
-		recipients = append(recipients, owner)
-	}
-	return recipients
-}
+// Текст письма о случаях фриза: сводка главного (самого длинного) с виновниками и список остальных. Кому — решает
+// маршрут (io_route.go).
 
 // ioAlertText — текст письма и главный случай.
 func ioAlertText(cases []iowatch.Case, alertMin time.Duration) (string, iowatch.Case) {

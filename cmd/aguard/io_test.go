@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/activity"
+	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/akit/proc"
@@ -180,22 +181,22 @@ func TestAtTimeUsesLocalTimezone(t *testing.T) {
 func alertCase(at time.Time, ms int64) iowatch.Case {
 	return iowatch.Case{Start: at, End: at.Add(time.Duration(ms) * time.Millisecond), DurMS: ms, IdleMS: ms * 3 / 4, PeakMS: 99,
 		IOFullMS: ms * 3 / 4, SwapIn: 1200, WriteB: 300 << 20, WAwaitMS: 40, InFlight: 30,
-		Culprits: &iowatch.Culprit{From: at.Add(-5 * time.Second), Main: "/user.slice/agent-sess7-1.scope",
+		Culprits: &iowatch.Culprit{From: at.Add(-5 * time.Second), Main: "/user.slice/agent-sess7-1.scope", MainProc: "dd",
 			ProcWrite: []iowatch.Ranked{{Name: "dd(2)", Value: 300 << 20}}, CgroupWrite: []iowatch.Ranked{{Name: "sess7", Value: 300 << 20}}}}
 }
 
-func TestAlertLogModeTextAndRecipients(t *testing.T) {
+func TestAlertLogModeText(t *testing.T) {
 	a, _ := testIOApp(t)
 	var logged bytes.Buffer
 	a.log = slog.New(slog.NewTextHandler(&logged, nil))
 	cfg := iowatch.Default()
 	cfg.Mode, cfg.Lead = iowatch.ModeLog, "lead"
 	base := time.Date(2026, 10, 29, 7, 9, 28, 0, time.Local)
-	if err := a.alertIO(cfg, []iowatch.Case{alertCase(base, 2100), alertCase(base.Add(time.Minute), 3400)}); err != nil {
-		t.Fatal(err)
-	}
+	full := []iowatch.Case{alertCase(base, 2100), alertCase(base.Add(time.Minute), 3400)}
+	act := ioroute.Action{Kind: ioroute.Letter, To: "sess7", Why: ioroute.WhyUrgent}
+	a.ioSend(cfg, act.To, string(act.Why), ioRouteLetter(act, full, cfg.AlertMin.D(), nil), 3400)
 	text := logged.String()
-	for _, want := range []string{"написал бы", "to=lead,sess7", "фриз 29.10 07:10:28, 3,4 с (простой 2,5 с, io", "главная cgroup sess7",
+	for _, want := range []string{"написал бы", "to=sess7", "фриз 29.10 07:10:28, 3,4 с (простой 2,5 с, io", "главная cgroup sess7",
 		"запись процессов (данные и метаданные): dd(2) 300 МБ", "своп in/out 1200/0 стр", "Всего случаев от 2,0 с с 07:09: 2, вместе 5,5 с", "aguard io report -since"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("нет %q в журнале:\n%s", want, text)
@@ -203,24 +204,48 @@ func TestAlertLogModeTextAndRecipients(t *testing.T) {
 	}
 }
 
-// Первый длинный случай — письмо сразу; следующие в паузе alert_every — одним письмом после неё;
-// случаи короче — только в сводки.
-func TestAlertFirstNowRepeatsGlued(t *testing.T) {
+// routeOwner — хозяин случая, которому положено письмо: у возможной жертвы (читала, удаление снимка) — "", ей только тикет.
+func routeOwner(t *testing.T, a *app, c iowatch.Case) string {
+	t.Helper()
+	cfg := iowatch.Default()
+	rc, err := a.ioOwners(&cfg).routeCase(&c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc.Victim {
+		return ""
+	}
+	return rc.Owner
+}
+
+// Служба: короче alert_min, тихий, под потолком — не в маршрут; короткий от 2 с — тикет хозяину без письма; длинный
+// при хозяине не в сети — письмо лиду и тикет хозяину; следующий длинный в паузе — ждёт её конца, а по концу, когда
+// вред кончился, уходит заметкой в тикет, без письма.
+func TestIOServiceRoutes(t *testing.T) {
 	a, _ := testIOApp(t)
 	var logged bytes.Buffer
 	a.log = slog.New(slog.NewTextHandler(&logged, nil))
 	s := newIOService(context.Background(), a)
-	s.cfg = iowatch.Default()
-	s.cfg.Mode, s.cfg.Lead = iowatch.ModeLog, "lead"
+	cfg := iowatch.Default()
+	cfg.Mode, cfg.Lead = iowatch.ModeLog, "lead"
+	s.cfg = cfg
+	s.setRoute(cfg)
 	base := time.Now().Truncate(time.Second)
-	wait := func() {
-		t.Helper()
-		select {
-		case f := <-s.extra:
-			f()
-		case <-time.After(5 * time.Second):
-			t.Fatal("письмо не завершилось")
+	jobs := func() []ioTicketJob {
+		var out []ioTicketJob
+		for {
+			select {
+			case j := <-s.tickets.queue:
+				out = append(out, j)
+			default:
+				return out
+			}
 		}
+	}
+	letters := func() int {
+		t.Helper()
+		time.Sleep(50 * time.Millisecond) // письма — своими горутинами
+		return strings.Count(logged.String(), "написал бы")
 	}
 	s.closed(alertCase(base, 1900))
 	quiet := alertCase(base, 5000)
@@ -229,42 +254,39 @@ func TestAlertFirstNowRepeatsGlued(t *testing.T) {
 	capped := alertCase(base, 12600)
 	capped.Capped = true
 	s.closed(capped)
-	s.launchAlert(base)
-	if s.alerting || len(s.cases) != 3 {
-		t.Fatalf("короче alert_min, тихий или под потолком — письмо: alerting=%v cases=%d", s.alerting, len(s.cases))
+	if n, j := letters(), jobs(); n != 0 || len(j) != 0 || len(s.cases) != 3 {
+		t.Fatalf("не в маршрут: писем %d, тикетов %d, случаев %d", n, len(j), len(s.cases))
 	}
-	s.closed(alertCase(base, 2000))
-	s.launchAlert(base)
-	if !s.alerting || len(s.alerts) != 0 {
-		t.Fatalf("первый — не сразу: %+v", s.alerts)
+	s.closed(alertCase(base, 3000))
+	if n, j := letters(), jobs(); n != 0 || len(j) != 1 || j[0].owner != "sess7" || j[0].class != "dd" || j[0].tk == "" {
+		t.Fatalf("короткий: писем %d, тикеты %+v", n, j)
 	}
-	wait()
-	s.closed(alertCase(base.Add(time.Minute), 2500))
-	s.closed(alertCase(base.Add(2*time.Minute), 3000))
-	s.launchAlert(base.Add(3 * time.Minute))
-	if s.alerting || len(s.alerts) != 2 {
-		t.Fatalf("пауза не склеила: alerting=%v alerts=%d", s.alerting, len(s.alerts))
+	s.closed(alertCase(base.Add(time.Minute), 12000))
+	if n, j := letters(), jobs(); n != 1 || !strings.Contains(logged.String(), "to=lead") || len(j) != 1 || j[0].why != ioroute.WhyOffline {
+		t.Fatalf("длинный, хозяин не в сети: писем %d, тикеты %+v, журнал:\n%s", n, j, logged.String())
 	}
-	s.launchAlert(base.Add(16 * time.Minute))
-	wait()
-	if n := strings.Count(logged.String(), "написал бы"); n != 2 || !strings.Contains(logged.String(), "Всего случаев от 2,0 с") || len(s.cases) != 6 {
-		t.Fatalf("писем %d, случаев %d, журнал:\n%s", n, len(s.cases), logged.String())
+	s.closed(alertCase(base.Add(2*time.Minute), 12000))
+	if n := letters(); n != 1 || s.route.Pending() != 1 {
+		t.Fatalf("в паузе: писем %d, ждёт %d", n, s.route.Pending())
+	}
+	jobs()
+	s.act(s.route.Tick(base.Add(2 * time.Hour)))
+	if n, j := letters(), jobs(); n != 1 || len(j) != 1 || len(j[0].cases) != 1 || s.route.Pending() != 0 {
+		t.Fatalf("конец паузы, вред кончился: писем %d, тикеты %+v", n, j)
 	}
 }
 
-// Сессия-виновник закрыта к моменту письма: лиду ушло, это не провал.
-func TestAlertClosedCulpritSessionIsNotFailure(t *testing.T) {
+// Письмо живой сессии в режиме alert доходит; сбоя в журнале нет.
+func TestIOSendAlive(t *testing.T) {
 	a, _ := testIOApp(t)
 	var logged bytes.Buffer
 	a.log = slog.New(slog.NewTextHandler(&logged, nil))
 	cfg := iowatch.Default()
 	cfg.Mode, cfg.Lead = iowatch.ModeAlert, "lead"
-	got := liveLead(t, a) // лид жив (сессия — этот процесс), sess7 в реестре нет
-	if err := a.alertIO(cfg, []iowatch.Case{alertCase(time.Now().Add(-time.Minute), 2500)}); err != nil {
-		t.Fatal(err)
-	}
-	if msg := <-got; !strings.Contains(msg, "aguard io: фриз") || !strings.Contains(msg, "dd(2)") ||
-		!strings.Contains(logged.String(), "сессия-виновник уже закрыта") || strings.Contains(logged.String(), "level=WARN") {
+	got := liveLead(t, a)
+	act := ioroute.Action{Kind: ioroute.Letter, To: "lead", Why: ioroute.WhyNoOwner}
+	a.ioSend(cfg, "lead", string(act.Why), ioRouteLetter(act, []iowatch.Case{alertCase(time.Now().Add(-time.Minute), 12500)}, cfg.AlertMin.D(), nil), 12500)
+	if msg := <-got; !strings.Contains(msg, "хозяина виновника нет") || !strings.Contains(msg, "dd(2)") || strings.Contains(logged.String(), "level=WARN") {
 		t.Fatalf("письмо лиду %.300q, журнал:\n%s", msg, logged.String())
 	}
 }
@@ -576,15 +598,8 @@ func TestIOCaseCleanerAttributionAndAlertRecipient(t *testing.T) {
 	}
 
 	a, _ := testIOApp(t)
-	var logged bytes.Buffer
-	a.log = slog.New(slog.NewTextHandler(&logged, nil))
-	cfg := iowatch.Default()
-	cfg.Mode, cfg.Lead = iowatch.ModeLog, "lead"
-	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(logged.String(), "to=lead ") || strings.Contains(logged.String(), "to=lead,sess7") {
-		t.Fatalf("письмо cleaner адресовано только лиду:\n%s", logged.String())
+	if o := routeOwner(t, a, c); o != "" {
+		t.Fatalf("письмо cleaner адресовано только лиду: хозяин %q", o)
 	}
 }
 
@@ -626,15 +641,8 @@ func TestIOCaseAttributionWithoutMainAndReadMostlyAlert(t *testing.T) {
 		t.Fatalf("письмо без главных не содержит обе подписи или содержит пустую главную: %q", alertText)
 	}
 	snapApp, _ := testIOApp(t)
-	var noMainLog bytes.Buffer
-	snapApp.log = slog.New(slog.NewTextHandler(&noMainLog, nil))
-	snapCfg := iowatch.Default()
-	snapCfg.Mode, snapCfg.Lead = iowatch.ModeLog, "lead"
-	if err := snapApp.alertIO(snapCfg, []iowatch.Case{c}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(noMainLog.String(), "to=lead ") || strings.Contains(noMainLog.String(), "to=lead,sess7") {
-		t.Fatalf("снапшоты без главной отправлены не только лиду:\n%s", noMainLog.String())
+	if o := routeOwner(t, snapApp, c); o != "" {
+		t.Fatalf("снапшоты без главной отправлены не только лиду: хозяин %q", o)
 	}
 
 	c = alertCase(base, 2100)
@@ -643,31 +651,16 @@ func TestIOCaseAttributionWithoutMainAndReadMostlyAlert(t *testing.T) {
 		t.Fatalf("подпись читающей главной: %q, want %q", got, want)
 	}
 	a, _ := testIOApp(t)
-	var logged bytes.Buffer
-	a.log = slog.New(slog.NewTextHandler(&logged, nil))
-	cfg := iowatch.Default()
-	cfg.Mode, cfg.Lead = iowatch.ModeLog, "lead"
-	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(logged.String(), "to=lead ") || strings.Contains(logged.String(), "to=lead,sess7") {
-		t.Fatalf("читающей главной отправлено письмо сессии:\n%s", logged.String())
+	if o := routeOwner(t, a, c); o != "" {
+		t.Fatalf("читающей главной отправлено письмо сессии: хозяин %q", o)
 	}
 	c.Culprits.MainWrite = 200 // запись равна чтению — адресат сессии сохраняется
-	logged.Reset()
-	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(logged.String(), "to=lead,sess7") {
-		t.Fatalf("пишущей главной не отправлено письмо сессии:\n%s", logged.String())
+	if o := routeOwner(t, a, c); o != "sess7" {
+		t.Fatalf("пишущей главной не отправлено письмо сессии: хозяин %q", o)
 	}
 	c.Culprits.MainWrite = 201 // запись строго больше чтения
-	logged.Reset()
-	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(logged.String(), "to=lead,sess7") {
-		t.Fatalf("главной с записью больше чтения не отправлено письмо сессии:\n%s", logged.String())
+	if o := routeOwner(t, a, c); o != "sess7" {
+		t.Fatalf("главной с записью больше чтения не отправлено письмо сессии: хозяин %q", o)
 	}
 }
 
@@ -682,15 +675,8 @@ func TestIOCaseForeignWithoutMainAttributionAndRecipient(t *testing.T) {
 		t.Fatalf("подпись чужой cgroup без главной: %q, want %q", got, want)
 	}
 	a, _ := testIOApp(t)
-	var logged bytes.Buffer
-	a.log = slog.New(slog.NewTextHandler(&logged, nil))
-	cfg := iowatch.Default()
-	cfg.Mode, cfg.Lead = iowatch.ModeLog, "lead"
-	if err := a.alertIO(cfg, []iowatch.Case{c}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(logged.String(), "to=lead ") || strings.Contains(logged.String(), "to=lead,sess7") {
-		t.Fatalf("чужая cgroup без главной отправлена не только лиду:\n%s", logged.String())
+	if o := routeOwner(t, a, c); o != "" {
+		t.Fatalf("чужая cgroup без главной отправлена не только лиду: хозяин %q", o)
 	}
 }
 

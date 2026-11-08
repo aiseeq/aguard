@@ -34,6 +34,13 @@ func (a *app) ioCmd(ctx context.Context, args []string) error {
 		file := fl.String("file", cases, "файл сводок; не файл службы — читается как есть, без запроса службе")
 		parse(fl, rest)
 		return a.ioReport(*file, *file == cases, time.Now().Add(-*since), time.Now(), *minDur, *asJSON)
+	case "route":
+		fl := flag.NewFlagSet("io route", flag.ContinueOnError)
+		since := fl.Duration("since", 7*24*time.Hour, "глубина")
+		verbose := fl.Bool("v", false, "каждое письмо строкой")
+		file := fl.String("file", cases, "файл сводок; не файл службы — читается как есть, без запроса службе")
+		parse(fl, rest)
+		return a.ioRouteReplay(*file, *file == cases, time.Now().Add(-*since), *verbose)
 	case "record":
 		fl := flag.NewFlagSet("io record", flag.ContinueOnError)
 		dur := fl.Duration("for", 30*time.Second, "длительность записи")
