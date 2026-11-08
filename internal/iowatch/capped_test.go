@@ -150,6 +150,17 @@ func TestCappedWaitScenarios(t *testing.T) {
 			t.Fatalf("lead ждал 250 мс: %v %d", capped, outside)
 		}
 	})
+	t.Run("последняя секунда чтения без упора (проба 08.11 13:43:06)", func(t *testing.T) {
+		details := capCase(base, 2, func(i int, s *Step) {
+			if i == 2 {
+				s.Cgroups[0].ReadBytes, s.Cgroups[0].IOFullUS = 2_000_000, 40_000
+			}
+		})
+		capped, outside, who := cappedWait(details, base.Add(700*time.Millisecond), base.Add(1700*time.Millisecond), time.Second, 999, 59)
+		if !capped || outside != 40 || len(who) != 1 || who[0].Value != 700 {
+			t.Fatalf("упор — по записи: %v %d %+v", capped, outside, who)
+		}
+	})
 	t.Run("диск занят больше половины", func(t *testing.T) {
 		if capped, _, _ := cappedWait(capCase(base, 13, nil), base, end, time.Second, dur, 6300); capped {
 			t.Fatal("занятый диск — не оправдание")

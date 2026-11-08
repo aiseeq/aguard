@@ -144,24 +144,27 @@ const (
 )
 
 // cappedWait — случай [start, end] — ожидание под потолком, а не фриз машины: по детальным записям самого
-// случая (без окна контекста: простой до случая не его) cgroup под потолками, идущие со скоростью потолка, дали
-// больше половины простоя листьев, ни одна cgroup вне них не ждала capOutsideMS, диск занят меньше половины
-// случая. outside — наибольший простой cgroup вне потолка, мс; who — простой по потолкам, мс.
+// случая (без окна контекста: простой до случая не его) cgroup под потолками, упиравшиеся в них, дали больше
+// половины простоя листьев, ни одна cgroup вне них не ждала capOutsideMS, диск занят меньше половины случая.
+// outside — наибольший простой cgroup вне потолка, мс; who — простой по потолкам, мс.
 //
-// Потолок, в который cgroup не упирается (предел записи при простое чтения, снятый за проход потолок), не
-// оправдывает простой: его листья считаются вне потолка.
+// Упор — по каждой записи отдельно: сумма листьев под одним потолком за запись не ниже capRateShare предела
+// в ограниченном направлении. Простой записи без упора (предел записи при простое чтения, последняя секунда
+// чтения, снятый потолок) потолком не оправдан и считается простоем вне потолка.
 func cappedWait(details []Step, start, end time.Time, detail time.Duration, durMS, busyMS int64) (capped bool, outside int64, who []Ranked) {
 	type owner struct{ rd, wr, rios, wios, idleUS int64 }
-	var span time.Duration
-	owners := map[Cap]*owner{}
+	sec := detail.Seconds()
+	atCap := func(sum, limit int64) bool { return limit > 0 && float64(sum)/sec >= capRateShare*float64(limit) }
 	outsideUS := map[string]int64{}
-	var totalUS int64
+	byName := map[string]int64{}
+	var totalUS, cappedUS int64
+	owners := map[Cap]*owner{}
 	for i := range details {
 		d := &details[i]
 		if !d.At.After(start) || !d.At.Before(end.Add(detail)) {
 			continue // запись покрывает (At − detail, At]: с случаем не пересекается
 		}
-		span += detail
+		clear(owners)
 		for j := range d.Cgroups {
 			g := &d.Cgroups[j]
 			totalUS += g.IOFullUS
@@ -180,24 +183,20 @@ func cappedWait(details []Step, start, end time.Time, detail time.Duration, durM
 			o.wios += g.WriteOps
 			o.idleUS += g.IOFullUS
 		}
-	}
-	if span == 0 {
-		return false, 0, nil
-	}
-	sec := span.Seconds()
-	atCap := func(sum, limit int64) bool { return limit > 0 && float64(sum)/sec >= capRateShare*float64(limit) }
-	var cappedUS int64
-	byName := map[string]int64{}
-	for c, o := range owners {
-		if atCap(o.rd, c.RBps) || atCap(o.wr, c.WBps) || atCap(o.rios, c.RIOps) || atCap(o.wios, c.WIOps) {
-			cappedUS += o.idleUS
-			byName[CgroupName(c.Path)] += o.idleUS / 1000
-			continue
+		for c, o := range owners {
+			if atCap(o.rd, c.RBps) || atCap(o.wr, c.WBps) || atCap(o.rios, c.RIOps) || atCap(o.wios, c.WIOps) {
+				cappedUS += o.idleUS
+				byName[CgroupName(c.Path)] += o.idleUS
+				continue
+			}
+			outsideUS[CgroupName(c.Path)] += o.idleUS
 		}
-		outsideUS[CgroupName(c.Path)] += o.idleUS
 	}
 	for _, us := range outsideUS {
 		outside = max(outside, us/1000)
+	}
+	for name, us := range byName {
+		byName[name] = us / 1000
 	}
 	capped = cappedUS > 0 && 2*cappedUS > totalUS && outside < capOutsideMS && 2*busyMS < durMS
 	return capped, outside, Rank(byName, caseTop)
