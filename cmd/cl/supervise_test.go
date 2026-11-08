@@ -31,23 +31,29 @@ const testCheck = time.Second
 func TestSuperviseRestart(t *testing.T) {
 	answer := `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",` +
 		`"running":"2.1.309","installed":"2.1.310","crons":true` // свои таймеры есть — реплики всё равно нет: --resume их вернёт
-	t.Run("свои таймеры", func(t *testing.T) { superviseRestart(t, answer+`}`, nil) })
+	lost := answer + `,"lost":[{"id":"j1","cron":"47 1 * * *","prompt":"Сон","recurring":true}]}`
+	t.Run("свои таймеры", func(t *testing.T) { superviseRestart(t, answer+`}`, "always", nil, "") })
 	// Унаследованные через /clear таймеры --resume не вернёт — подъём со строкой роли, как у старта cl руками.
 	t.Run("потерянные таймеры", func(t *testing.T) {
-		superviseRestart(t, answer+`,"lost":[{"id":"j1","cron":"47 1 * * *","prompt":"Сон","recurring":true}]}`,
-			[]string{"Роль (cl поднял сессию заново в ЧЧ:ММ на Claude Code 2.1.310)."})
+		superviseRestart(t, lost, "always", []string{"Роль (cl поднял сессию заново в ЧЧ:ММ на Claude Code 2.1.310)."},
+			`таймер прошлой беседы j1 (47 1 * * *, "Сон") после подъёма не вернётся — поднимаю со строкой роли`)
+	})
+	// Роль без строки при старте (resume_file без файла) — подъём без реплики, журнал так и пишет.
+	t.Run("потерянные таймеры, роль молчит", func(t *testing.T) {
+		superviseRestart(t, lost, "resume_file", nil, `j1 (47 1 * * *, "Сон") после подъёма не вернётся — строки роли у подъёма нет`)
 	})
 }
 
-// superviseRestart — перезапуск ради версии в act целиком: aguard отвечает answer, второй запуск — --resume s1 и line.
-func superviseRestart(t *testing.T, answer string, line []string) {
+// superviseRestart — перезапуск ради версии в act целиком: aguard отвечает answer, у роли on_start onStart; второй
+// запуск — --resume s1 и line, в журнале — lostLine (пусто — строк о таймерах нет).
+func superviseRestart(t *testing.T, answer, onStart string, line []string, lostLine string) {
 	w := newWorld(t)
 	d := w.dir
 	settings := filepath.Join(d, "role.json")
 	write(t, settings, `{"permissions":{"deny":["Artifact"]}}`)
 	write(t, filepath.Join(d, "config.json"), `{"restart":{"mode":"act","check_seconds":10,`+
 		`"journal":"`+filepath.Join(d, "restart.log")+`","resume_dir":"`+filepath.Join(d, "restart")+`"},`+
-		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"always","settings":[{"dirs":["`+d+`"],"file":"`+settings+`"}]}]}`)
+		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"`+onStart+`","settings":[{"dirs":["`+d+`"],"file":"`+settings+`"}]}]}`)
 	// Нет перезапуска — sleep выходит сам через 25 с, и тест падает на отсутствии второго запуска, а не висит.
 	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
 		`if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; exit 3; fi
@@ -80,8 +86,9 @@ exec sleep 25`)
 		t.Errorf("перезапуск:\n%q\nwant\n%q", got, second)
 	}
 	if journalText := strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n"); !strings.Contains(journalText, "x-master pid=") ||
-		!strings.Contains(journalText, "2.1.309→2.1.310 act: перезапускаю") || !strings.Contains(journalText, "SIGTERM, поднимаю --resume s1 на 2.1.310") {
-		t.Errorf("журнал:\n%s", journalText)
+		!strings.Contains(journalText, "2.1.309→2.1.310 act: перезапускаю") || !strings.Contains(journalText, "SIGTERM, поднимаю --resume s1 на 2.1.310") ||
+		(lostLine == "") == strings.Contains(journalText, "таймер прошлой беседы") || !strings.Contains(journalText, lostLine) {
+		t.Errorf("журнал (строка о таймере %q):\n%s", lostLine, journalText)
 	}
 }
 
@@ -316,37 +323,47 @@ func TestNext(t *testing.T) {
 	}
 }
 
-// Перезапуск при таймерах, унаследованных через /clear: не набор, а подъём; каждый таймер — строкой журнала с началом
-// prompt одной строкой; без них — строк о таймерах нет (тикет 20261108-2117).
+// Перезапуск при таймерах, унаследованных через /clear: не набор, а подъём с ними в out.lost; строки о них пишет
+// подъём (journalLost), не решение (тикет 20261108-2117).
 func TestNextLostCrons(t *testing.T) {
 	cfg := defaultConfig(t.TempDir())
 	cfg.Restart.Mode = modeAct
 	l := launcher{name: "x-master", console: &console{}}
-	long := "Дайджест:\n" + strings.Repeat("я", 100)
-	lost := []restart.LostCron{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true},
-		{ID: "j2", Cron: "11 6 * * *", Prompt: long, Recurring: true}, {ID: "j3", Cron: "57 7 9 11 *", Prompt: "снять выходное открытие"}}
+	lost := []restart.LostCron{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true}}
 	a := restart.Answer{Verdict: restart.Verdict{Restart: true, Lost: lost}, Key: "true,false", SessionID: "s1", Name: "x-master", Installed: "2.1.320"}
-	now := time.Now()
-	out, _ := l.next(cfg, now, 7, a, nil, journalKeys{})
+	out, _ := l.next(cfg, time.Now(), 7, a, nil, journalKeys{})
 	if !out.restart || out.typed != "" || !slices.Equal(out.lost, lost) || out.sessionID != "s1" {
 		t.Fatalf("подъём с потерянными таймерами: %+v", out)
 	}
-	lines := readLines(t, cfg.Restart.Journal)
-	journal := strings.Join(lines, "\n")
-	if n := len(slices.DeleteFunc(slices.Clone(lines), func(s string) bool { return !strings.Contains(s, "таймер прошлой беседы") })); n != 3 {
-		t.Errorf("строк о таймерах %d, want 3 — по одной на таймер, разовый тоже:\n%s", n, journal)
+	a.Lost = nil
+	if out, _ := l.next(cfg, time.Now(), 7, a, nil, journalKeys{}); !out.restart || len(out.lost) != 0 {
+		t.Errorf("без потерянных таймеров — lost пуст: %+v", out)
 	}
-	for _, want := range []string{`x-master pid=7: таймер прошлой беседы j1 (47 1 * * *, "Сон (скилл dream)") после подъёма не вернётся`,
-		`j2 (11 6 * * *, "Дайджест: ` + strings.Repeat("я", 70) + `…")`} {
+}
+
+// Строка на каждый потерянный таймер, разовый тоже, с началом prompt одной строкой; хвост — по факту: есть у подъёма
+// строка роли или нет (мастер с on_start resume_file без файла её не получит).
+func TestJournalLost(t *testing.T) {
+	d := t.TempDir()
+	write(t, filepath.Join(d, "config.json"), `{"restart":{"journal":"`+filepath.Join(d, "restart.log")+`"}}`)
+	l := launcher{home: d, configFile: filepath.Join(d, "config.json")}
+	long := "Дайджест:\n" + strings.Repeat("я", 100)
+	out := outcome{name: "x-master", lost: []restart.LostCron{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true},
+		{ID: "j2", Cron: "11 6 * * *", Prompt: long, Recurring: true}, {ID: "j3", Cron: "57 7 9 11 *", Prompt: "снять выходное открытие"}}}
+	l.journalLost(out, true)
+	out.lost = out.lost[:1]
+	l.journalLost(out, false)
+	lines := readLines(t, filepath.Join(d, "restart.log"))
+	journal := strings.Join(lines, "\n")
+	if len(lines) != 4 {
+		t.Errorf("строк %d, want 4 — по одной на таймер:\n%s", len(lines), journal)
+	}
+	for _, want := range []string{`x-master: таймер прошлой беседы j1 (47 1 * * *, "Сон (скилл dream)") после подъёма не вернётся — поднимаю со строкой роли`,
+		`j2 (11 6 * * *, "Дайджест: ` + strings.Repeat("я", 70) + `…")`, `j3 (57 7 9 11 *, "снять выходное открытие")`,
+		`j1 (47 1 * * *, "Сон (скилл dream)") после подъёма не вернётся — строки роли у подъёма нет`} {
 		if !strings.Contains(journal, want) {
 			t.Errorf("в журнале нет %q:\n%s", want, journal)
 		}
-	}
-	cfg.Restart.Journal = filepath.Join(t.TempDir(), "restart.log")
-	a.Lost = nil
-	if out, _ := l.next(cfg, now, 7, a, nil, journalKeys{}); !out.restart || len(out.lost) != 0 ||
-		strings.Contains(strings.Join(readLines(t, cfg.Restart.Journal), "\n"), "таймер прошлой беседы") {
-		t.Errorf("без потерянных таймеров — без строк о них: %+v", out)
 	}
 }
 

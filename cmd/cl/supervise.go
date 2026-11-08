@@ -154,8 +154,23 @@ func (l launcher) supervise(pre, userArgs []string) int {
 		// первой репликой — проба 08.11 21:19 на 2.1.319).
 		args = append(args, "--resume", out.sessionID)
 		if len(out.lost) > 0 {
-			args = l.withRoleLine(args, out.name, eventStart, out)
+			with := l.withRoleLine(args, out.name, eventStart, out)
+			l.journalLost(out, len(with) > len(args))
+			args = with
 		}
+	}
+}
+
+// journalLost пишет строку на каждый таймер out.lost: перезапуск их не вернёт; withRole — подъём получил строку роли.
+// Пишется при сборке подъёма, а не при решении: только тогда известно, будет ли строка роли.
+func (l launcher) journalLost(out outcome, withRole bool) {
+	cfg, err := loadConfig(l.configFile, l.home)
+	now := time.Now()
+	if err != nil {
+		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s: %v — журнал по умолчанию", out.name, err))
+	}
+	for _, job := range out.lost {
+		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s: %s", out.name, cllog.LostCron(job.ID, job.Cron, job.Prompt, withRole)))
 	}
 }
 
@@ -573,9 +588,6 @@ func (l *launcher) next(cfg config, now time.Time, pid int, a restart.Answer, as
 	last.verdict = journalOnce(cfg, last.verdict, a.Key, journalLine(cfg.Restart.Mode, name, pid, a))
 	if a.Restart && cfg.Restart.Mode == modeAct && a.SessionID != "" {
 		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: SIGTERM, поднимаю --resume %s на %s", name, pid, a.SessionID, a.Installed))
-		for _, job := range a.Lost {
-			journal(cfg.Restart.Journal, now, fmt.Sprintf("%s pid=%d: %s", name, pid, cllog.LostCron(job.ID, job.Cron, job.Prompt)))
-		}
 		return outcome{restart: true, sessionID: a.SessionID, name: name, version: a.Installed, at: now, lost: a.Lost}, last
 	}
 	// Сброс раньше сжатия: где можно сбросить, aguard и так не сжимает (preferReset), порядок — на случай обоих «да».

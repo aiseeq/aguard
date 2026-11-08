@@ -72,13 +72,18 @@ func Typed(typed, sessionID string) string {
 }
 
 // LostCron — таймер, унаследованный через /clear, перезапуск не вернёт: --resume поднимает только таймеры своей
-// беседы; cl даёт подъёму строку роли, свои таймеры роль ставит по ней. prompt — начало, одной строкой.
-func LostCron(id, cron, prompt string) string {
+// беседы. withRole — подъём получил строку роли (свои таймеры роль ставит по ней); нет — у роли строки при старте нет
+// (on_start) или она не собралась. prompt — начало, одной строкой.
+func LostCron(id, cron, prompt string, withRole bool) string {
 	prompt = strings.Join(strings.Fields(prompt), " ")
 	if r := []rune(prompt); len(r) > lostPrompt {
 		prompt = string(r[:lostPrompt]) + "…"
 	}
-	return fmt.Sprintf("таймер прошлой беседы %s (%s, %q) после подъёма не вернётся — поднимаю со строкой роли", id, cron, prompt)
+	tail := "поднимаю со строкой роли"
+	if !withRole {
+		tail = "строки роли у подъёма нет"
+	}
+	return fmt.Sprintf("таймер прошлой беседы %s (%s, %q) после подъёма не вернётся — %s", id, cron, prompt, tail)
 }
 
 // lostPrompt — сколько знаков prompt таймера в строке журнала: узнать таймер, а не переписать его.
