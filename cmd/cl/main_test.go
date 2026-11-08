@@ -130,3 +130,23 @@ func TestInteractiveOnly(t *testing.T) {
 		t.Error("неинтерактивная — по доводу kind")
 	}
 }
+
+// Файл настроек роли выбирается по папке, где запущен cl: мастер в ~/work — свой файл, в ~/git и ~/workshop — другой.
+func TestMainRoleSettings(t *testing.T) {
+	home := t.TempDir()
+	work, git := filepath.Join(home, "s", "work.json"), filepath.Join(home, "s", "git.json")
+	write(t, work, `{"permissions":{"deny":["Artifact"]}}`)
+	write(t, git, `{"permissions":{"deny":["Artifact"]}}`)
+	write(t, filepath.Join(home, ".config", "cl", "config.json"), `{"roles":[{"names":["*-master"],`+
+		`"settings":[{"dirs":["~/work"],"file":"~/s/work.json"},{"file":"~/s/git.json"}]}]}`)
+	for _, c := range []struct{ dir, name, file string }{
+		{filepath.Join(home, "work", "shop"), "shop-master", work},
+		{filepath.Join(home, "git", "proj"), "proj-master", git},
+		{filepath.Join(home, "workshop", "x"), "x-master", git},
+	} {
+		want := []string{"--settings", c.file, "--dangerously-skip-permissions", "--allowedTools=Grep,Glob", "-n", c.name}
+		if got := runMain(t, home, c.dir, "-n", c.name); !slices.Equal(got, want) {
+			t.Errorf("cl в %s → claude %q, want %q", c.dir, got, want)
+		}
+	}
+}

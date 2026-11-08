@@ -88,14 +88,18 @@ func TestExitCode(t *testing.T) {
 
 // Сжатие в режиме act целиком, со сбоем сжатия: версия свежая (перезапуска нет), aguard отвечает «сжать». cl шлёт
 // SIGTERM, запускает `claude -p --resume s1 /compact` — оно падает, — и всё равно поднимает беседу с теми же флагами,
-// без строки роли (таймеров не было); в журнале — «сжимаю» и «не сжалось … поднимаю без сжатия».
+// без строки роли (таймеров не было); в журнале — «сжимаю» и «не сжалось … поднимаю без сжатия». Флаги роли (файл
+// настроек и промпт) — и у сжатия, и у подъёма.
 func TestSuperviseCompact(t *testing.T) {
 	w := newWorld(t)
 	d := w.dir
+	settings := filepath.Join(d, "role.json")
+	write(t, settings, `{"permissions":{"deny":["Artifact"]}}`)
 	write(t, filepath.Join(d, "config.json"), `{"restart":{"mode":"act","check_seconds":10,`+
 		`"journal":"`+filepath.Join(d, "restart.log")+`","resume_dir":"`+filepath.Join(d, "restart")+`",`+
 		`"compact_mode":"act","compact_names":["x-*"]},`+
-		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"always"}]}`)
+		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"always","prompt":"Ты {name}.",`+
+		`"settings":[{"dirs":["`+d+`"],"file":"`+settings+`"}]}]}`)
 	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
 		`if [ -e "$D/run2" ]; then printf '%s\n' "$@" > "$D/run3"; exit 3; fi
 if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; echo 'API Error: overloaded'; exit 1; fi
@@ -105,14 +109,14 @@ exec sleep 25`)
 	socket := fakeAguard(t, `{"v":1,"restart":false,"fresh":true,"key":"false,true","session_id":"s1","name":"x-master",`+
 		`"running":"2.1.310","installed":"2.1.310","compact":true,"compact_key":"true","tokens":150000}`)
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"),
-		aguard: socket, name: "x-master", check: testCheck}
+		aguard: socket, name: "x-master", dir: filepath.Join(d, "proj"), check: testCheck}
 
 	if code := l.supervise(append(sessionFlags(d), "-n", "x-master"), []string{"--model", "opus"}); code != 3 {
 		t.Errorf("код выхода cl = %d, want 3 (код подъёма)", code)
 	}
 	pid := strconv.Itoa(os.Getpid())
 	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice", "--property=IOAccounting=yes"}
-	own := sessionFlags(d)
+	own := append([]string{"--settings", settings, "--append-system-prompt", "Ты x-master."}, sessionFlags(d)...)
 	compact := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-c1", "--", w.claude), own...),
 		"--model", "opus", "-p", "--resume", "s1", "/compact")
 	journalText := strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n")
