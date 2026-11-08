@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -423,6 +424,126 @@ func TestWithRoleFlags(t *testing.T) {
 		"missing.json: no such file or directory — поднимаю без файла настроек роли", "list.json: не объект JSON"} {
 		if !strings.Contains(text, s) {
 			t.Errorf("в журнале нет %q:\n%s", s, text)
+		}
+	}
+}
+
+// Расхождение файла настроек живого claude с положенным по роли: --settings из /proc/<pid>/cmdline (обе формы, пути
+// после Clean) против файла роли по папке. Судить не о чем — роль без settings, свой --settings, положенный файл не
+// читается; cmdline не прочиталась — ошибка.
+func TestStaleSettings(t *testing.T) {
+	d := t.TempDir()
+	good, broken := filepath.Join(d, "role.json"), filepath.Join(d, "broken.json")
+	write(t, good, `{"permissions":{"deny":["Artifact"]}}`)
+	write(t, broken, `{"permissions":`)
+	proc := filepath.Join(d, "proc")
+	cmdline := func(args ...string) {
+		write(t, filepath.Join(proc, "7", "cmdline"), strings.Join(append([]string{"claude"}, args...), "\x00")+"\x00")
+	}
+	cfg := config{Roles: []role{{Names: []string{"x-master"}, Settings: []roleSettings{{Dirs: []string{d}, File: good}}},
+		{Names: []string{"y-master"}}}}
+	l := launcher{name: "x-master", dir: filepath.Join(d, "proj")}
+	l.registry.ProcRoot = proc
+	for _, c := range []struct {
+		running []string
+		want    string
+	}{
+		{nil, "файл настроек роли: нет → " + good},
+		{[]string{"--settings", "/other.json", "-n", "x"}, "файл настроек роли: /other.json → " + good},
+		{[]string{"--settings", good}, ""},
+		{[]string{"--settings=" + filepath.Join(d, ".", "role.json")}, ""},
+		{[]string{"--settings", "/other.json", "--settings", good}, ""}, // Claude Code берёт последний
+	} {
+		cmdline(c.running...)
+		if got, err := l.staleSettings(cfg, 7, nil); err != nil || got != c.want {
+			t.Errorf("claude %q: %q, %v; want %q", c.running, got, err, c.want)
+		}
+	}
+	cmdline()
+	if got, err := l.staleSettings(cfg, 7, []string{"--settings=/own.json"}); err != nil || got != "" {
+		t.Errorf("свой --settings — не судить: %q, %v", got, err)
+	}
+	if got, err := (launcher{name: "y-master", registry: l.registry}).staleSettings(cfg, 7, nil); err != nil || got != "" {
+		t.Errorf("роль без settings — не судить: %q, %v", got, err)
+	}
+	if got, err := (launcher{name: "x-master", dir: "/elsewhere", registry: l.registry}).staleSettings(cfg, 7, nil); err != nil || got != "" {
+		t.Errorf("папке файл не положен, у claude его нет — совпадает: %q, %v", got, err)
+	}
+	cmdline("--settings", good)
+	if got, err := (launcher{name: "x-master", dir: "/elsewhere", registry: l.registry}).staleSettings(cfg, 7, nil); err != nil ||
+		got != "файл настроек роли: "+good+" → нет" {
+		t.Errorf("файл есть, а папке не положен: %q, %v", got, err)
+	}
+	cfg.Roles[0].Settings[0].File = broken
+	cmdline()
+	if got, err := l.staleSettings(cfg, 7, nil); err != nil || got != "" {
+		t.Errorf("положенный файл битый (могут дописывать) — не судить: %q, %v", got, err)
+	}
+	cfg.Roles[0].Settings[0].File = good
+	if _, err := l.staleSettings(cfg, 8, nil); err == nil {
+		t.Error("cmdline не прочиталась — ошибка")
+	}
+}
+
+// Перезапуск ради файла настроек роли целиком: у живого claude --settings нет, роль его кладёт — cl спрашивает aguard
+// с stale, по «да» поднимает --resume уже с --settings. Новый процесс расходится так же (подменный systemd-run claude
+// не запускает) — cl больше не просит, строка в журнал.
+func TestSuperviseStaleSettings(t *testing.T) {
+	w := newWorld(t)
+	d := w.dir
+	settings := filepath.Join(d, "role.json")
+	write(t, settings, `{"permissions":{"deny":["Artifact"]}}`)
+	journalFile := filepath.Join(d, "restart.log")
+	write(t, filepath.Join(d, "config.json"), `{"restart":{"mode":"act","check_seconds":10,`+
+		`"journal":"`+journalFile+`","resume_dir":"`+filepath.Join(d, "restart")+`"},`+
+		`"roles":[{"names":["x-*"],"settings":[{"dirs":["`+d+`"],"file":"`+settings+`"}]}]}`)
+	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
+		`if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; exec sleep 4; fi
+printf '%s\n' "$@" > "$D/run1"
+exec sleep 25`)
+	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
+	var mu sync.Mutex
+	stalePids := map[int]string{}
+	asked := map[int]bool{}
+	socket := fakeAguardFunc(t, func(req restart.Request) string {
+		mu.Lock()
+		defer mu.Unlock()
+		asked[req.Pid] = true
+		if req.Stale == "" {
+			return `{"v":1,"fresh":true,"key":"false,true","session_id":"s1","name":"x-master","running":"2.1.319","installed":"2.1.319"}`
+		}
+		stalePids[req.Pid] = req.Stale
+		return `{"v":1,"restart":true,"args_stale":true,"key":"true,false,stale","session_id":"s1","name":"x-master",` +
+			`"running":"2.1.319","installed":"2.1.319","stale":` + strconv.Quote(req.Stale) + `}`
+	})
+	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"), name: "x-master",
+		dir: filepath.Join(d, "proj"), aguard: socket, check: testCheck}
+	l.registry.ProcRoot = "/proc"
+
+	if code := l.supervise(append(sessionFlags(d), "-n", "x-master"), nil); code != 0 {
+		t.Errorf("код выхода cl = %d, want 0 (второй запуск вышел сам)", code)
+	}
+	journalText := strings.Join(readLines(t, journalFile), "\n")
+	if _, err := os.Stat(filepath.Join(d, "run2")); err != nil {
+		t.Fatalf("подъёма нет: %v; журнал:\n%s", err, journalText)
+	}
+	if got := readLines(t, filepath.Join(d, "run2")); !slices.Contains(got, settings) || !slices.Contains(got, "--resume") {
+		t.Fatalf("подъём без --settings или без --resume: %q; журнал:\n%s", got, journalText)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stalePids) != 1 || len(asked) != 2 {
+		t.Errorf("stale — только у первого процесса из двух: stale %v, спрошены %v", stalePids, asked)
+	}
+	for _, s := range stalePids {
+		if s != "файл настроек роли: нет → "+settings {
+			t.Errorf("stale %q", s)
+		}
+	}
+	for _, want := range []string{"2.1.319→2.1.319, файл настроек роли: нет → " + settings + " act: перезапускаю",
+		"файл настроек роли: нет → " + settings + " и после перезапуска ради него — больше не прошу"} {
+		if !strings.Contains(journalText, want) {
+			t.Errorf("в журнале нет %q:\n%s", want, journalText)
 		}
 	}
 }

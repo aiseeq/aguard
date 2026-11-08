@@ -14,6 +14,12 @@ import (
 // fakeAguard — сокет, который на каждый вопрос отвечает строкой reply. Молчащий сервер — linesock.TestAskSilentServerDeadline.
 func fakeAguard(t *testing.T, reply string) string {
 	t.Helper()
+	return fakeAguardFunc(t, func(restart.Request) string { return reply })
+}
+
+// fakeAguardFunc — aguard, чей ответ зависит от вопроса.
+func fakeAguardFunc(t *testing.T, answer func(restart.Request) string) string {
+	t.Helper()
 	socket := filepath.Join(t.TempDir(), "aguard.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
@@ -26,8 +32,12 @@ func fakeAguard(t *testing.T, reply string) string {
 			if err != nil {
 				return
 			}
-			if _, err := bufio.NewReader(conn).ReadBytes('\n'); err == nil {
-				_, _ = conn.Write([]byte(reply + "\n"))
+			if line, err := bufio.NewReader(conn).ReadBytes('\n'); err == nil {
+				var req restart.Request
+				if err := json.Unmarshal(line, &req); err != nil {
+					t.Errorf("вопрос не JSON: %v", err)
+				}
+				_, _ = conn.Write([]byte(answer(req) + "\n"))
 			}
 			_ = conn.Close()
 		}
@@ -88,7 +98,7 @@ func TestAskClean(t *testing.T) {
 	}()
 	c := &console{}
 	l := launcher{aguard: socket, name: "x-master", console: c}
-	if _, err := l.ask(7, "", true); err != nil {
+	if _, err := l.ask(7, "", "", true); err != nil {
 		t.Fatal(err)
 	}
 	if req := <-reqs; !req.Clean || !req.Typed {
@@ -96,7 +106,7 @@ func TestAskClean(t *testing.T) {
 	}
 	c.drafted.Store(true)
 	c.typed.Store(time.Now().Add(-time.Minute).UnixNano())
-	if _, err := l.ask(7, "", true); err != nil {
+	if _, err := l.ask(7, "", "", true); err != nil {
 		t.Fatal(err)
 	}
 	if req := <-reqs; req.Clean {

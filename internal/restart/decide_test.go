@@ -227,3 +227,26 @@ func TestDecideCleanField(t *testing.T) {
 		t.Errorf("поля не видно — держит и при чистом вводе: %+v", v)
 	}
 }
+
+// Устаревшие аргументы запуска (Request.Stale) при свежей версии — решать как при новой: простаивает — перезапуск
+// (Stale в вердикте и ключе), работает — доводы против; без stale свежая версия — Fresh.
+func TestDecideStale(t *testing.T) {
+	f := idleFacts()
+	f.Running = f.Installed
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Fresh || v.Restart {
+		t.Fatalf("свежая версия без stale — незачем: %+v", v)
+	}
+	stale := allowance{idle: 10 * time.Minute, stale: "файл настроек роли: нет → /x.json"}
+	v := decide(f, stale)
+	if !v.Restart || v.Fresh || !v.ArgsStale || !strings.HasSuffix(v.Key(), ",stale") {
+		t.Fatalf("stale в простое — перезапуск: %+v %q", v, v.Key())
+	}
+	f.Quiet = time.Minute
+	if v := decide(f, stale); v.Restart || !slices.Contains(codes(v), "quiet") {
+		t.Errorf("stale, но только что работала — против: %+v", v)
+	}
+	f = idleFacts()
+	if v := decide(f, stale); !v.Restart || v.ArgsStale {
+		t.Errorf("версия и так старая — перезапуск ради версии: %+v", v)
+	}
+}

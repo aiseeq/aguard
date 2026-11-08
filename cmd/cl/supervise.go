@@ -78,6 +78,9 @@ type outcome struct {
 	typed string
 	// recreate — typed ставит заново таймеры, унаследованные через /clear, перед перезапуском ради версии.
 	recreate bool
+	// stale — перезапуск решён при этом расхождении аргументов с ролью (staleSettings): тот же текст у нового
+	// процесса — подъём его не исправил, больше не просить.
+	stale string
 }
 
 // humanQuiet — сколько человек не должен ничего вводить, чтобы cl набирал в его сессии.
@@ -110,7 +113,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 	}()
 	keep, argsProblem := restartArgs(userArgs)
 	args := append(append([]string{}, pre...), userArgs...)
-	first := 0
+	first, stale := 0, ""
 	switch {
 	case l.upgraded != nil:
 		args, first = l.upgraded.Args, l.upgraded.N
@@ -135,8 +138,9 @@ func (l launcher) supervise(pre, userArgs []string) int {
 		if err != nil {
 			fail(err)
 		}
-		out := l.watch(proc, sigs, argsProblem, n, args)
+		out := l.watch(proc, sigs, argsProblem, n, args, stale)
 		finish()
+		stale = out.stale
 		if !out.restart {
 			return exitCode(out.err)
 		}
@@ -248,6 +252,60 @@ func (l launcher) settingsFlags(cfg config, args []string, name string) []string
 		return nil
 	}
 	return []string{"--settings", file}
+}
+
+// staleSettings — чем файл настроек живого claude pid (--settings в /proc/<pid>/cmdline) расходится с положенным по
+// роли и папке сессии: «файл настроек роли: нет → /x.json». Пусто — совпадает или судить не о чем: у роли нет
+// settings, свой --settings в аргументах, положенный файл сейчас не читается или не объект JSON (его могут
+// дописывать: перезапуск поднял бы сессию без файла — сценарий противника замысла 08.11). Пути — после Clean.
+func (l launcher) staleSettings(cfg config, pid int, args []string) (string, error) {
+	r, ok := cfg.roleFor(l.name)
+	if !ok || len(r.Settings) == 0 || slices.ContainsFunc(args, settingsFlag) {
+		return "", nil
+	}
+	want := cfg.settingsFile(l.name, l.dir)
+	if want != "" && settingsObject(want) != nil {
+		return "", nil
+	}
+	if l.registry.ProcRoot == "" {
+		return "", errors.New("корень /proc не задан")
+	}
+	running, err := cmdlineArgs(l.registry.ProcRoot, pid)
+	if err != nil {
+		return "", err
+	}
+	have := settingsValue(running)
+	if cleanOrEmpty(have) == cleanOrEmpty(want) {
+		return "", nil
+	}
+	return "файл настроек роли: " + orNone(have) + " → " + orNone(want), nil
+}
+
+// settingsValue — значение последнего --settings в аргументах (Claude Code берёт последний); нет — пусто.
+func settingsValue(args []string) string {
+	value := ""
+	for i, a := range args {
+		if v, ok := strings.CutPrefix(a, "--settings="); ok {
+			value = v
+		} else if a == "--settings" && i+1 < len(args) {
+			value = args[i+1]
+		}
+	}
+	return value
+}
+
+func cleanOrEmpty(p string) string {
+	if p == "" {
+		return ""
+	}
+	return filepath.Clean(p)
+}
+
+func orNone(p string) string {
+	if p == "" {
+		return "нет"
+	}
+	return p
 }
 
 // settingsObject — файл читается и в нём объект JSON.
@@ -393,7 +451,9 @@ func (l launcher) every(c restartConfig) time.Duration {
 // internal/restart), пишет в журнал смену решения, а в режиме act перезапускает: SIGTERM — мягкий выход Claude Code
 // (беседа дописана, «Resume this session with: claude --resume <id>»). Пока claude рисует экран, cl в терминал не
 // пишет: всё — в журнал.
-func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem string, n int, args []string) outcome {
+// Расхождение аргументов с ролью (staleSettings) идёт в вопрос aguard; prevStale — расхождение, ради которого
+// прошлый процесс перезапустили: у нового оно же — не просить снова (петля), строка в журнал.
+func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem string, n int, args []string, prevStale string) outcome {
 	done := make(chan error, 1)
 	go func() { done <- wait(proc) }()
 	pid := proc.Pid
@@ -433,8 +493,19 @@ func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem str
 			}
 			now := time.Now()
 			upgradeTried = upgradeTried || l.liveUpgrade(cfg, now, pid, n, args)
-			a, askErr := l.ask(pid, argsProblem, l.console != nil && cfg.Restart.TypeMode == modeAct)
+			stale, staleErr := l.staleSettings(cfg, pid, args)
+			switch {
+			case staleErr != nil:
+				last.stale = journalOnce(cfg, last.stale, "error/"+staleErr.Error(), fmt.Sprintf("%s pid=%d: %v — о файле настроек роли не сужу", l.name, pid, staleErr))
+			case stale != "" && stale == prevStale:
+				last.stale = journalOnce(cfg, last.stale, "loop/"+stale, fmt.Sprintf("%s pid=%d: %s и после перезапуска ради него — больше не прошу", l.name, pid, stale))
+				stale = ""
+			}
+			a, askErr := l.ask(pid, argsProblem, stale, l.console != nil && cfg.Restart.TypeMode == modeAct)
 			out, last = l.next(cfg, now, pid, a, askErr, last)
+			if out.restart {
+				out.stale = stale
+			}
 			if out.typed != "" {
 				l.typeOutcome(cfg, now, pid, out)
 				out = outcome{}
@@ -469,12 +540,12 @@ func (l *launcher) openPty() {
 
 // ask — ответ aguard о сессии pid; typed — сжатие и сброс cl наберёт в живой сессии. Сокета нет в настройках —
 // ответа нет.
-func (l launcher) ask(pid int, argsProblem string, typed bool) (restart.Answer, error) {
+func (l launcher) ask(pid int, argsProblem, stale string, typed bool) (restart.Answer, error) {
 	if l.aguard == "" {
 		return restart.Answer{}, errors.New("aguard не задан")
 	}
 	req := restart.NewRequest(pid, l.name, argsProblem)
-	req.Typed = typed
+	req.Typed, req.Stale = typed, stale
 	req.Clean = l.console != nil && l.console.clean()
 	asked := time.Now()
 	a, err := askAguard(l.aguard, req)
@@ -486,7 +557,7 @@ func (l launcher) ask(pid int, argsProblem string, typed bool) (restart.Answer, 
 
 // journalKeys — ключи последних строк журнала: решения о перезапуске, сжатии и сбросе пишутся один раз на решение.
 type journalKeys struct {
-	verdict, compact, reset string
+	verdict, compact, reset, stale string
 }
 
 // next — что делать с сессией по ответу aguard: перезапуск (act) важнее сжатия, сжатие — сброса. aguard не ответил —
@@ -666,6 +737,9 @@ func journalOnce(cfg config, lastKey, key, line string) string {
 // journalLine — строка журнала: сессия, версии, режим cl, решение aguard и доводы против.
 func journalLine(mode, name string, pid int, a restart.Answer) string {
 	head := fmt.Sprintf("%s pid=%d %s→%s %s: ", name, pid, restart.OrDash(a.Running), restart.OrDash(a.Installed), mode)
+	if a.Stale != "" && !a.Fresh {
+		head = fmt.Sprintf("%s pid=%d %s→%s, %s %s: ", name, pid, restart.OrDash(a.Running), restart.OrDash(a.Installed), a.Stale, mode)
+	}
 	switch {
 	case a.Fresh:
 		return head + "версия свежая"

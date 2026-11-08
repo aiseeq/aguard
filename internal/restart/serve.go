@@ -30,6 +30,9 @@ type Request struct {
 	// он не набирал. Текст в поле тогда — подсказка Claude Code, не черновик (случай chooks-master 30.10: у сессий,
 	// которые ведут письма, реплик человека в транскрипте нет, и признак по atime pts не срабатывал).
 	Clean bool `json:"clean,omitempty"`
+	// Stale — чем живой процесс устарел, кроме версии: аргументы запуска расходятся с положенными по роли («файл
+	// настроек роли: нет → /x.json»; знает только cl). Не пусто — перезапуск в простое и при свежей версии.
+	Stale string `json:"stale,omitempty"`
 }
 
 // NewRequest — вопрос текущей версии протокола о процессе pid.
@@ -62,8 +65,10 @@ type Answer struct {
 	ResetKey     string   `json:"reset_key"`
 	// FieldEmpty — поле ввода по экрану пусто: cl считает его чистым, если человек ничего не вводил с вопроса (так
 	// чистеет и поле, о котором прежний cl при подхвате на ходу не знал).
-	FieldEmpty bool   `json:"field_empty,omitempty"`
-	Error      string `json:"error,omitempty"`
+	FieldEmpty bool `json:"field_empty,omitempty"`
+	// Stale — Request.Stale, по которому решалось: для журнала cl.
+	Stale string `json:"stale,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // cacheTTL — сколько держать разбор транскрипта сессии, о которой не спрашивают: cl спрашивает раз в минуту.
@@ -127,14 +132,14 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	c.mu.Unlock()
 	f.cleanField(req.Clean)
 	name := firstNonEmpty(f.Name, req.Name)
-	v := decide(f, allowance{idle: cfg.Idle.D(), argsProblem: req.ArgsProblem, typed: req.Typed})
+	v := decide(f, allowance{idle: cfg.Idle.D(), argsProblem: req.ArgsProblem, typed: req.Typed, stale: req.Stale})
 	cv := j.Compact(cfg, cc, Request{Pid: req.Pid, Name: name, ArgsProblem: req.ArgsProblem, Typed: req.Typed, Clean: req.Clean}, now)
 	return Answer{
 		V: Version, Verdict: v, Key: v.Key(), Mode: cfg.Mode,
 		SessionID: f.SessionID, Name: name, Running: f.Running, Installed: f.Installed, Crons: len(f.Transcript.Crons) > 0,
 		Compact: cv.Compact, CompactAgainst: cv.Against, CompactKey: cv.Key(), Tokens: cv.Tokens,
 		Reset: cv.Reset.Reset, ResetAgainst: cv.Reset.Against, ResetKey: cv.Reset.Key(),
-		FieldEmpty: f.PromptErr == "" && f.Prompt == screen.Empty,
+		FieldEmpty: f.PromptErr == "" && f.Prompt == screen.Empty, Stale: req.Stale,
 	}
 }
 

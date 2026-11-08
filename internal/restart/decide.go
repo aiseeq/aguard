@@ -29,15 +29,20 @@ type Verdict struct {
 	Restart bool `json:"restart"`
 	// Recreate — команда для набора унаследованных таймеров, когда это единственный довод против перезапуска.
 	Recreate string `json:"recreate,omitempty"`
-	// Fresh — версия процесса последняя: перезапускать незачем, остальное не проверялось.
-	Fresh   bool     `json:"fresh"`
-	Against []Reason `json:"against"`
+	// Fresh — версия процесса последняя и аргументы не устарели: перезапускать незачем, остальное не проверялось.
+	Fresh bool `json:"fresh"`
+	// ArgsStale — решалось ради устаревших аргументов запуска при свежей версии (Request.Stale).
+	ArgsStale bool     `json:"args_stale,omitempty"`
+	Against   []Reason `json:"against"`
 }
 
 // Key — решение без чисел: журнал пишет строку, только когда оно меняется.
 func (v Verdict) Key() string {
 	codes := make([]string, 0, len(v.Against)+1)
 	codes = append(codes, fmt.Sprint(v.Restart, v.Fresh))
+	if v.ArgsStale {
+		codes = append(codes, "stale")
+	}
 	for _, r := range v.Against {
 		codes = append(codes, r.Code)
 	}
@@ -54,6 +59,8 @@ type allowance struct {
 	argsProblem string
 	// typed — cl может набирать команды в живой сессии под pty.
 	typed bool
+	// stale — чем процесс устарел, кроме версии (Request.Stale); не пусто — перезапуск и при свежей версии.
+	stale string
 }
 
 // action — что делают с живым claude: от этого зависит, что пропадёт.
@@ -72,7 +79,7 @@ const (
 )
 
 // decide — можно ли перезапускать сессию сейчас. Перезапуск — только когда ни один довод против не сработал:
-// версия процесса старее установленной, ход закончен и сессия простояла idle, нет ввода в терминал (и после конца хода), детей-процессов,
+// версия процесса старее установленной (или аргументы запуска устарели — p.stale), ход закончен и сессия простояла idle, нет ввода в терминал (и после конца хода), детей-процессов,
 // идущих инструментов, фоновых задач, суб-агентов и таймеров, которые пропали бы. Любое непрочитанное — против.
 func decide(f facts, p allowance) Verdict {
 	var v Verdict
@@ -85,13 +92,16 @@ func decide(f facts, p allowance) Verdict {
 	if len(f.Errors) > 0 {
 		return v
 	}
-	if old, err := older(f.Running, f.Installed); err != nil || !old {
-		v.Fresh = err == nil
-		if err != nil {
-			against("version", "%v", err)
-		}
+	old, err := older(f.Running, f.Installed)
+	if err != nil {
+		against("version", "%v", err)
 		return v
 	}
+	if !old && p.stale == "" {
+		v.Fresh = true
+		return v
+	}
+	v.ArgsStale = !old
 	sessionChecks(f, restart, against)
 	if f.Quiet < p.idle {
 		against("quiet", "тихо %s из %s", minutes(f.Quiet), minutes(p.idle))

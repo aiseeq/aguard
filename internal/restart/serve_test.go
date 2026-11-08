@@ -107,6 +107,10 @@ func TestAnswerUsesRequest(t *testing.T) {
 		t.Errorf("под pty — команда набора таймера: %+v", a.Verdict)
 	}
 
+	if a := answer(Request{Stale: "файл настроек роли: нет → /x.json"}); a.Stale != "файл настроек роли: нет → /x.json" {
+		t.Errorf("stale вопроса — в ответе для журнала cl: %q", a.Stale)
+	}
+
 	w.p.prompt = func(int) (screen.Prompt, error) { return screen.Draft, nil }
 	if a := answer(Request{}); !held(a.Against, "screen") || !held(a.CompactAgainst, "screen") || a.FieldEmpty {
 		t.Errorf("текст в поле, cl о нём не знает — держит перезапуск и сжатие: %+v", a)
@@ -114,5 +118,18 @@ func TestAnswerUsesRequest(t *testing.T) {
 	if a := answer(Request{Clean: true}); held(a.Against, "screen") || held(a.CompactAgainst, "screen") {
 		t.Errorf("cl: человек не набирал — текст в поле подсказка, не держит ни перезапуск, ни сжатие: against %+v, compact %+v",
 			a.Against, a.CompactAgainst)
+	}
+}
+
+// Ответ проходит через JSON целиком: поля вердикта не затеняются полями ответа с тем же именем.
+func TestAnswerJSONRoundTrip(t *testing.T) {
+	in := Answer{V: Version, Verdict: Verdict{Restart: true, ArgsStale: true}, Stale: "файл настроек роли: нет → /x.json"}
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out Answer
+	if err := json.Unmarshal(data, &out); err != nil || !out.ArgsStale || out.Stale != in.Stale || !out.Restart {
+		t.Errorf("%s → %+v, %v", data, out, err)
 	}
 }
