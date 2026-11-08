@@ -75,6 +75,18 @@ type Culprit struct {
 // ReadMostly — главная cgroup читала больше, чем писали её процессы.
 func (c *Culprit) ReadMostly() bool { return c != nil && c.MainRead > c.MainWrite }
 
+// pageBytes — страница свопа и majflt в байтах (x86_64).
+const pageBytes = 4096
+
+// PagingVictim — главная читала больше, чем писала, и подкачка всей машины за случай (swap-in и majflt) — не меньше
+// половины её чтения: чтение может быть возвратом вытесненного, главная — жертва. Читающая файлы главная (подкачка
+// меньше) — виновник. Подкачка машины, а не главной, — с запасом в сторону жертвы. Пользователь 08.11 (alert-async):
+// правило 03.11 «главная только читает — письмо только лиду» сужено до подкачки; фриз пробы 13:12:52 (387 МБ
+// чтения при 6 МБ подкачки) уходил лиду.
+func (c *Case) PagingVictim() bool {
+	return c.Culprits.ReadMostly() && 2*(c.SwapIn+c.Majflt)*pageBytes >= c.Culprits.MainRead
+}
+
 // KernelOver — запись вне cgroup перевешивает главную cgroup и не меньше чужой; без обеих мер любой фон ядра виден.
 func (c *Culprit) KernelOver() bool {
 	return c != nil && (c.MainValue > 0 && c.KernelWrite > c.MainValue || c.Foreign.Value > 0 && c.KernelWrite > c.Foreign.Value || c.Main == "" && c.MainValue == 0 && c.Foreign.Value == 0 && c.KernelWrite > 0) && c.KernelWrite >= c.Foreign.Value

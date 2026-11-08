@@ -58,7 +58,7 @@ func (a *app) ioOwners(cfg *iowatch.Config) *ioOwnerFinder {
 }
 
 // routeCase — случай для маршрута. Хозяина нет, когда главную cgroup не к кому отнести; главная — возможная жертва
-// (удаление снимка btrfs, больше читала) — хозяин есть, но с пометкой Victim; сбой поиска задания бойца или сессии
+// (удаление снимка btrfs, чтение главной — подкачка) — хозяин есть, но с пометкой Victim; сбой поиска задания бойца или сессии
 // по scratchpad — хозяина нет, ошибка наверх.
 func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 	rc := ioroute.Case{Start: c.Start, End: c.End, DurMS: c.DurMS, Text: ioCaseLine(c)}
@@ -70,7 +70,7 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 		}
 		return rc, nil
 	}
-	rc.Victim = cul.SnapshotDeletion() || cul.ReadMostly()
+	rc.Victim = cul.SnapshotDeletion() || c.PagingVictim()
 	unit := proc.ServiceUnit(cul.Main)
 	if name, _, ok := proc.SessionScope(cul.Main); ok {
 		rc.Class, rc.Generic = byProc(cul.MainProc, "session")
@@ -405,7 +405,7 @@ func ioRouteLetter(act ioroute.Action, full []iowatch.Case, alertMin time.Durati
 	case ioroute.WhyOffline:
 		fmt.Fprintf(&b, "aguard io: вред сейчас, хозяин %s не в сети — тебе; ему тикет.\n", act.Cases[0].Owner)
 	case ioroute.WhyVictim:
-		fmt.Fprintf(&b, "aguard io: вред сейчас; главная cgroup %s в основном читала — может быть жертвой вытеснения, ей тикет, письмо тебе.\n",
+		fmt.Fprintf(&b, "aguard io: вред сейчас; главная cgroup %s в основном читала при подкачке не меньше половины чтения — может быть жертвой вытеснения, ей тикет, письмо тебе.\n",
 			act.Cases[0].Owner)
 	case ioroute.WhyNoOwner:
 		b.WriteString("aguard io: вред сейчас, хозяина виновника нет.\n")

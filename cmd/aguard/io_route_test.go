@@ -122,11 +122,33 @@ func TestIOOwnerByProcess(t *testing.T) {
 			t.Errorf("%+v: %q %v, want %q", tc.d, got, err, tc.want)
 		}
 	}
-	c := iowatch.Case{Start: time.Now(), End: time.Now(), DurMS: 12600, Culprits: &iowatch.Culprit{
-		Main: "/user.slice/user-1000.slice/user@1000.service/app.slice/run-p2016228-i69065841.scope", MainRead: 387 << 20,
-		MainProc: "fuse-overlayfs(2016008)", ProcessDetails: map[string]iowatch.ProcessDetails{"fuse-overlayfs(2016008)": {Cmdline: cmd, CWD: "/"}}}}
+	// Фриз пробы 08.11 13:12:52: чтение 387 МБ при подкачке машины 864 + 721 страниц (~6 МБ) — чтение файлов,
+	// главная — виновник: письмо хозяину, лиду ничего (пользователь 08.11, сужение правила 03.11).
+	c := iowatch.Case{Start: time.Now().Add(-12600 * time.Millisecond), End: time.Now(), DurMS: 12600, SwapIn: 864, Majflt: 721,
+		Culprits: &iowatch.Culprit{
+			Main: "/user.slice/user-1000.slice/user@1000.service/app.slice/run-p2016228-i69065841.scope", MainRead: 387 << 20,
+			MainProc: "fuse-overlayfs(2016008)", ProcessDetails: map[string]iowatch.ProcessDetails{"fuse-overlayfs(2016008)": {Cmdline: cmd, CWD: "/"}}}}
 	rc, err := o.routeCase(&c)
-	if err != nil || rc.Owner != "dream-master" || !rc.Victim || rc.Class != "fuse-overlayfs" {
+	if err != nil || rc.Owner != "dream-master" || rc.Victim || rc.Class != "fuse-overlayfs" {
 		t.Fatalf("run-p scope: %+v %v", rc, err)
+	}
+	def := iowatch.Default()
+	acts := ioroute.New(def.Route()).Route(rc, func(s string) bool { return s == "dream-master" || s == "lead" })
+	if len(acts) != 1 || acts[0].Kind != ioroute.Letter || acts[0].To != "dream-master" || acts[0].Why != ioroute.WhyUrgent {
+		t.Fatalf("фриз пробы 13:12: %+v", acts)
+	}
+	// Подкачка — половина чтения и больше: возможная жертва; меньше половины — виновник.
+	for _, tc := range []struct {
+		pages  int64
+		victim bool
+	}{{(387 << 20) / 2 / 4096, true}, {(387<<20)/2/4096 - 1, false}} {
+		c.SwapIn, c.Majflt = tc.pages, 0
+		if rc, err := o.routeCase(&c); err != nil || rc.Victim != tc.victim {
+			t.Errorf("подкачка %d стр: Victim %v %v, want %v", tc.pages, rc.Victim, err, tc.victim)
+		}
+	}
+	c.SwapIn, c.Culprits.MainWrite = 1<<20, 388<<20 // пишет больше, чем читает — не жертва при любой подкачке
+	if rc, _ := o.routeCase(&c); rc.Victim {
+		t.Errorf("пишущая главная — жертва: %+v", rc)
 	}
 }
