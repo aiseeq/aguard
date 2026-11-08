@@ -143,71 +143,138 @@ const (
 	capOutsideMS = 200
 )
 
-// cappedWait — случай [start, end] — ожидание под потолком, а не фриз машины: по детальным записям самого
-// случая (без окна контекста: простой до случая не его) cgroup под потолками, упиравшиеся в них, дали больше
-// половины простоя листьев, ни одна cgroup вне них не ждала capOutsideMS, диск занят меньше половины случая.
-// outside — наибольший простой cgroup вне потолка, мс; who — простой по потолкам, мс.
-//
-// Упор — по каждой записи отдельно: сумма листьев под одним потолком за запись не ниже capRateShare предела
-// в ограниченном направлении. Простой записи без упора (предел записи при простое чтения, последняя секунда
-// чтения, снятый потолок) потолком не оправдан и считается простоем вне потолка.
+// capPart — простой листа или потолка в одной детальной записи: cgroup вне потолка (по имени) или потолок (по
+// имени его cgroup) с пометкой, упирались ли в него за запись.
+type capPart struct {
+	name   string
+	idleUS int64
+	capped bool
+}
+
+// capOwner — листья под одним потолком в записи.
+type capOwner struct {
+	cap                        Cap
+	rd, wr, rios, wios, idleUS int64
+}
+
+// capParts сводит запись за interval в простой по потолкам и вне их, дописывая в dst. Упор — по сумме листьев
+// под одним потолком за запись: не ниже capRateShare предела в ограниченном направлении. Простой под потолком
+// без упора (предел записи при простое чтения, последняя секунда чтения, снятый потолок) потолком не оправдан и
+// идёт как простой вне потолка. owners — буфер для повторного использования.
+func capParts(d *Step, interval time.Duration, dst []capPart, owners []capOwner) ([]capPart, []capOwner) {
+	owners = owners[:0]
+	for j := range d.Cgroups {
+		g := &d.Cgroups[j]
+		if !g.Cap.limited() {
+			if g.IOFullUS > 0 {
+				dst = append(dst, capPart{name: CgroupName(g.Path), idleUS: g.IOFullUS})
+			}
+			continue
+		}
+		k := slices.IndexFunc(owners, func(o capOwner) bool { return o.cap == g.Cap })
+		if k < 0 {
+			owners = append(owners, capOwner{cap: g.Cap})
+			k = len(owners) - 1
+		}
+		o := &owners[k]
+		o.rd += g.ReadBytes
+		o.wr += g.WriteBytes
+		o.rios += g.ReadOps
+		o.wios += g.WriteOps
+		o.idleUS += g.IOFullUS
+	}
+	sec := interval.Seconds()
+	atCap := func(sum, limit int64) bool { return limit > 0 && float64(sum)/sec >= capRateShare*float64(limit) }
+	for k := range owners {
+		o, c := &owners[k], owners[k].cap
+		if o.idleUS == 0 {
+			continue
+		}
+		dst = append(dst, capPart{name: CgroupName(c.Path), idleUS: o.idleUS,
+			capped: atCap(o.rd, c.RBps) || atCap(o.wr, c.WBps) || atCap(o.rios, c.RIOps) || atCap(o.wios, c.WIOps)})
+	}
+	return dst, owners
+}
+
+// capAcc — простой записей, взвешенный долей записи внутри окна (случая или окна now).
+type capAcc struct {
+	totalUS, cappedUS float64
+	outside, byName   map[string]float64
+}
+
+func newCapAcc() capAcc { return capAcc{outside: map[string]float64{}, byName: map[string]float64{}} }
+
+func (a *capAcc) add(parts []capPart, weight float64) {
+	for _, p := range parts {
+		v := float64(p.idleUS) * weight
+		a.totalUS += v
+		if p.capped {
+			a.cappedUS += v
+			a.byName[p.name] += v
+		} else {
+			a.outside[p.name] += v
+		}
+	}
+}
+
+// capVerdict — признание окна: ожидание под потолком (Capped), наибольший простой cgroup вне потолка и простой
+// упиравшихся в потолки, мс; Who — простой по потолкам.
+type capVerdict struct {
+	Capped              bool
+	OutsideMS, CappedMS int64
+	Who                 []Ranked
+}
+
+// verdict — под потолком: упиравшиеся в потолки дали больше половины простоя листьев, ни одна cgroup вне них не
+// ждала capOutsideMS, диск занят меньше половины окна длиной durMS.
+func (a *capAcc) verdict(durMS, busyMS int64) capVerdict {
+	var v capVerdict
+	for _, us := range a.outside {
+		v.OutsideMS = max(v.OutsideMS, int64(us)/1000)
+	}
+	who := make(map[string]int64, len(a.byName))
+	for name, us := range a.byName {
+		who[name] = int64(us) / 1000
+	}
+	v.CappedMS = int64(a.cappedUS) / 1000
+	v.Who = Rank(who, caseTop)
+	v.Capped = a.cappedUS > 0 && 2*a.cappedUS > a.totalUS && v.OutsideMS < capOutsideMS && 2*busyMS < durMS
+	return v
+}
+
+// overlapShare — доля записи (from, at] внутри [start, end], UnixNano; 0 — не пересекаются.
+func overlapShare(from, at, start, end int64) float64 {
+	lo, hi := max(from, start), min(at, end)
+	if hi <= lo || at <= from {
+		return 0
+	}
+	return float64(hi-lo) / float64(at-from)
+}
+
+// cappedWait — случай [start, end] — ожидание под потолком, а не фриз машины (capAcc.verdict) по детальным
+// записям, пересекающим случай: простой записи — пропорционально её доле внутри случая (простой до случая не его).
+// Запись — дельта с прошлого прохода: медленный проход (тикер пропустил такты) покрывает несколько секунд, и
+// скорость упора — байты за весь этот промежуток. Первая запись — за номинальный detail.
 //
 // Не видит (известные пределы): потолок на самом интерфейсе (его ожидание — тоже «под потолком»; на 08.11 число в
 // io.max есть только у agents-evals.slice) и ожидание блокировки ФС, которую держит придержанный писатель, — оно не
 // в PSI io full ждущего. Срезы интерфейса (guiwatch) детектор не сверяет.
-func cappedWait(details []Step, start, end time.Time, detail time.Duration, durMS, busyMS int64) (capped bool, outside int64, who []Ranked) {
-	type owner struct{ rd, wr, rios, wios, idleUS int64 }
-	outsideUS := map[string]int64{}
-	byName := map[string]int64{}
-	var totalUS, cappedUS int64
-	owners := map[Cap]*owner{}
+func cappedWait(details []Step, start, end time.Time, detail time.Duration, durMS, busyMS int64) capVerdict {
+	acc := newCapAcc()
+	var parts []capPart
+	var owners []capOwner
 	for i := range details {
 		d := &details[i]
-		// Запись — дельта с прошлого прохода: медленный проход (тикер пропустил такты) покрывает несколько секунд,
-		// и скорость — байты за весь этот промежуток. Первая запись окна — за номинальный detail.
 		interval := detail
 		if i > 0 {
 			interval = max(detail, d.At.Sub(details[i-1].At))
 		}
-		if !d.At.After(start) || !d.At.Add(-interval).Before(end) {
-			continue // запись покрывает (At − interval, At]: с случаем не пересекается
+		share := overlapShare(d.At.Add(-interval).UnixNano(), d.At.UnixNano(), start.UnixNano(), end.UnixNano())
+		if share == 0 {
+			continue
 		}
-		sec := interval.Seconds()
-		atCap := func(sum, limit int64) bool { return limit > 0 && float64(sum)/sec >= capRateShare*float64(limit) }
-		clear(owners)
-		for j := range d.Cgroups {
-			g := &d.Cgroups[j]
-			totalUS += g.IOFullUS
-			if !g.Cap.limited() {
-				outsideUS[CgroupName(g.Path)] += g.IOFullUS
-				continue
-			}
-			o := owners[g.Cap]
-			if o == nil {
-				o = &owner{}
-				owners[g.Cap] = o
-			}
-			o.rd += g.ReadBytes
-			o.wr += g.WriteBytes
-			o.rios += g.ReadOps
-			o.wios += g.WriteOps
-			o.idleUS += g.IOFullUS
-		}
-		for c, o := range owners {
-			if atCap(o.rd, c.RBps) || atCap(o.wr, c.WBps) || atCap(o.rios, c.RIOps) || atCap(o.wios, c.WIOps) {
-				cappedUS += o.idleUS
-				byName[CgroupName(c.Path)] += o.idleUS
-				continue
-			}
-			outsideUS[CgroupName(c.Path)] += o.idleUS
-		}
+		parts, owners = capParts(d, interval, parts[:0], owners)
+		acc.add(parts, share)
 	}
-	for _, us := range outsideUS {
-		outside = max(outside, us/1000)
-	}
-	for name, us := range byName {
-		byName[name] = us / 1000
-	}
-	capped = cappedUS > 0 && 2*cappedUS > totalUS && outside < capOutsideMS && 2*busyMS < durMS
-	return capped, outside, Rank(byName, caseTop)
+	return acc.verdict(durMS, busyMS)
 }

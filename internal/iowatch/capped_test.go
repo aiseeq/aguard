@@ -122,8 +122,9 @@ func TestCappedWaitScenarios(t *testing.T) {
 	end := base.Add(12600 * time.Millisecond)
 	const busy, dur = 612, 12600
 	t.Run("случай 13:12:52 — под потолком", func(t *testing.T) {
-		capped, outside, who := cappedWait(capCase(base, 13, nil), base, end, time.Second, dur, busy)
-		if !capped || outside != 26 || len(who) != 1 || who[0] != (Ranked{"run-p2016228-i69065841.scope", 9100}) {
+		capped, outside, who := cw(capCase(base, 13, nil), base, end, time.Second, dur, busy)
+		// 13 записей, последняя (12, 13 с] внутри случая на 0,6: 12,6 × 2 мс и 12,6 × 700 мс
+		if !capped || outside != 25 || len(who) != 1 || who[0] != (Ranked{"run-p2016228-i69065841.scope", 8820}) {
 			t.Fatalf("%v %d %+v", capped, outside, who)
 		}
 	})
@@ -131,13 +132,14 @@ func TestCappedWaitScenarios(t *testing.T) {
 		details := append(capCase(base.Add(-5*time.Second), 4, nil), capCase(base, 2, func(_ int, s *Step) {
 			s.Cgroups = []Cgroup{{Path: "/session.slice/plasmashell.service", IOFullUS: 600_000}}
 		})...)
-		if capped, outside, _ := cappedWait(details, base, base.Add(2*time.Second), time.Second, 2000, 100); capped || outside != 1200 {
+		// записи в 0 с нет: первая запись случая покрывает (−1, 1 с] и внутри него на половину — 300 + 600 мс
+		if capped, outside, _ := cw(details, base, base.Add(2*time.Second), time.Second, 2000, 100); capped || outside != 900 {
 			t.Fatalf("фриз после ожидания под потолком: %v %d", capped, outside)
 		}
 	})
 	t.Run("потолок записи при простое чтения (сценарий 4)", func(t *testing.T) {
 		details := capCase(base, 13, func(_ int, s *Step) { s.Cgroups[0].Cap = Cap{Path: s.Cgroups[0].Path, WBps: 30_000_000} })
-		if capped, outside, _ := cappedWait(details, base, end, time.Second, dur, busy); capped || outside != 9100 {
+		if capped, outside, _ := cw(details, base, end, time.Second, dur, busy); capped || outside != 8820 {
 			t.Fatalf("в потолок не упирались — простой машины: %v %d", capped, outside)
 		}
 	})
@@ -147,7 +149,7 @@ func TestCappedWaitScenarios(t *testing.T) {
 				s.Cgroups[1].IOFullUS = 250_000
 			}
 		})
-		if capped, outside, _ := cappedWait(details, base, end, time.Second, dur, busy); capped || outside != 274 {
+		if capped, outside, _ := cw(details, base, end, time.Second, dur, busy); capped || outside != 273 {
 			t.Fatalf("lead ждал 250 мс: %v %d", capped, outside)
 		}
 	})
@@ -157,13 +159,14 @@ func TestCappedWaitScenarios(t *testing.T) {
 				s.Cgroups[0].ReadBytes, s.Cgroups[0].IOFullUS = 2_000_000, 40_000
 			}
 		})
-		capped, outside, who := cappedWait(details, base.Add(700*time.Millisecond), base.Add(1700*time.Millisecond), time.Second, 999, 59)
-		if !capped || outside != 40 || len(who) != 1 || who[0].Value != 700 {
+		capped, outside, who := cw(details, base.Add(700*time.Millisecond), base.Add(1700*time.Millisecond), time.Second, 999, 59)
+		// случай 0,7–1,7 с: от первой записи 0,3 (210 мс под потолком), от второй 0,7 (28 мс вне)
+		if !capped || outside != 28 || len(who) != 1 || who[0].Value != 210 {
 			t.Fatalf("упор — по записи: %v %d %+v", capped, outside, who)
 		}
 	})
 	t.Run("диск занят больше половины", func(t *testing.T) {
-		if capped, _, _ := cappedWait(capCase(base, 13, nil), base, end, time.Second, dur, 6300); capped {
+		if capped, _, _ := cw(capCase(base, 13, nil), base, end, time.Second, dur, 6300); capped {
 			t.Fatal("занятый диск — не оправдание")
 		}
 	})
@@ -176,7 +179,7 @@ func TestCappedWaitScenarios(t *testing.T) {
 				{Path: "/agents.slice/agent-lead-1.scope", IOFullUS: 1000},
 			}
 		})
-		capped, _, who := cappedWait(details, base, base.Add(5*time.Second), time.Second, 5000, 200)
+		capped, _, who := cw(details, base, base.Add(5*time.Second), time.Second, 5000, 200)
 		if !capped || len(who) != 1 || who[0] != (Ranked{"agents-evals.slice", 3500}) {
 			t.Fatalf("сумма листьев упирается в потолок slice: %v %+v", capped, who)
 		}
@@ -205,8 +208,8 @@ func TestRecorderCappedCaseAndSummary(t *testing.T) {
 		}
 		got = append(got, r.Step(Step{At: at, IOFullUS: v, ReadBytes: 3_000_000, RIOS: 24, IOTicks: 5})...)
 	}
-	// детальные записи 1–4 с покрывают случай 0,9–3,9 с: вне потолка lead 4 × 3 мс
-	if len(got) != 1 || !got[0].Capped || got[0].OutsideIdleMS != 12 || got[0].Culprits == nil || len(got[0].Culprits.CappedIdle) != 1 {
+	// детальные записи 1–4 с внутри случая 0,9–3,9 с на 0,1 + 1 + 1 + 0,9: вне потолка lead 3 × 3 мс
+	if len(got) != 1 || !got[0].Capped || got[0].OutsideIdleMS != 9 || got[0].Culprits == nil || len(got[0].Culprits.CappedIdle) != 1 {
 		t.Fatalf("случай под потолком: %+v", got)
 	}
 	s := Summarize(got, base, base.Add(time.Hour), 500*time.Millisecond)
@@ -227,7 +230,7 @@ func TestCappedWaitWindowAndRecordBoundary(t *testing.T) {
 	t.Run("простой до случая, вне потолка 189 мс", func(t *testing.T) {
 		details := []Step{rec(-3*time.Second, eval), rec(-2*time.Second, eval), rec(-time.Second, eval), rec(0, eval),
 			rec(time.Second, ui(63_000)), rec(2*time.Second, ui(63_000)), rec(3*time.Second, ui(63_000))}
-		if capped, outside, _ := cappedWait(details, base, base.Add(2500*time.Millisecond), time.Second, 2500, 100); capped || outside != 189 {
+		if capped, outside, _ := cw(details, base, base.Add(2500*time.Millisecond), time.Second, 2500, 100); capped || outside != 157 {
 			t.Fatalf("простой под потолком до случая — не его: %v %d", capped, outside)
 		}
 	})
@@ -235,7 +238,7 @@ func TestCappedWaitWindowAndRecordBoundary(t *testing.T) {
 		big := eval
 		big.IOFullUS = 900_000
 		details := []Step{rec(0, big), rec(time.Second, big), rec(2*time.Second, ui(150_000))}
-		if capped, outside, _ := cappedWait(details, base.Add(1100*time.Millisecond), base.Add(1700*time.Millisecond), time.Second, 600, 50); capped || outside != 150 {
+		if capped, outside, _ := cw(details, base.Add(1100*time.Millisecond), base.Add(1700*time.Millisecond), time.Second, 600, 50); capped || outside != 90 {
 			t.Fatalf("запись (0, 1 с] со случаем 1,1–1,7 с не пересекается: %v %d", capped, outside)
 		}
 	})
@@ -249,7 +252,7 @@ func TestCappedWaitLateRecordInterval(t *testing.T) {
 	details := []Step{{At: base.Add(time.Second)}, {At: base.Add(4 * time.Second), Cgroups: []Cgroup{
 		{Path: evals.Path + "/a.scope", ReadBytes: 90_000_000, IOFullUS: 2_500_000, Cap: evals},
 		{Path: "/app.slice/app-com.google.Chrome-1.scope", IOFullUS: 150_000}}}}
-	if capped, outside, _ := cappedWait(details, base.Add(1200*time.Millisecond), base.Add(4*time.Second), time.Second, 2800, 900); capped || outside != 2500 {
+	if capped, outside, _ := cw(details, base.Add(1200*time.Millisecond), base.Add(4*time.Second), time.Second, 2800, 900); capped || outside != 2333 {
 		t.Fatalf("скорость — за весь промежуток записи: %v %d", capped, outside)
 	}
 	// те же 3 с по секунде — по 80 МБ: упор, случай под потолком
@@ -258,7 +261,7 @@ func TestCappedWaitLateRecordInterval(t *testing.T) {
 		details = append(details, Step{At: base.Add(time.Duration(i) * time.Second), Cgroups: []Cgroup{
 			{Path: evals.Path + "/a.scope", ReadBytes: 80_000_000, IOFullUS: 800_000, Cap: evals}}})
 	}
-	if capped, _, _ := cappedWait(details, base.Add(1200*time.Millisecond), base.Add(4*time.Second), time.Second, 2800, 900); !capped {
+	if capped, _, _ := cw(details, base.Add(1200*time.Millisecond), base.Add(4*time.Second), time.Second, 2800, 900); !capped {
 		t.Fatal("посекундные записи с упором — под потолком")
 	}
 }
@@ -303,4 +306,10 @@ func TestCgroupReaderDropsCapFilesOfGoneLeaves(t *testing.T) {
 	if len(r.capFiles) != 1 || r.capFiles[leaves[0]] == nil {
 		t.Fatalf("после ухода двух листьев: %v", r.capFiles)
 	}
+}
+
+// cw — признание случая тремя значениями: пометка, наибольший простой вне потолка, простой по потолкам.
+func cw(details []Step, start, end time.Time, detail time.Duration, durMS, busyMS int64) (bool, int64, []Ranked) {
+	v := cappedWait(details, start, end, detail, durMS, busyMS)
+	return v.Capped, v.OutsideMS, v.Who
 }

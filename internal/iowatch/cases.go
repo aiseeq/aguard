@@ -265,6 +265,12 @@ func (r *Recorder) Detail(s Step) {
 	}
 	if r.live != nil {
 		r.live.detail(&s, r.cfg.Detail.D())
+		if o := r.open; o != nil {
+			// идущий случай — по своим детальным записям, как закрытый в finish; запись до начала — для интервала первой
+			detail := r.cfg.Detail.D()
+			v := cappedWait(r.ring.Details(o.start.Add(-2*detail), s.At), o.start, o.last, detail, o.last.Sub(o.start).Milliseconds(), o.sum.ticks)
+			r.live.setOpenCapped(o.start, v.Capped)
+		}
 	}
 }
 
@@ -315,7 +321,8 @@ func (r *Recorder) finish(c *Case) {
 		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
 		CgroupDirty: Rank(sum.CgroupDirty, caseTop), CgroupOwn: map[string]int64{}}
 	c.Culprits.Foreign, _ = sum.ForeignOver(c.Culprits.Main)
-	c.Capped, c.OutsideIdleMS, c.Culprits.CappedIdle = cappedWait(details, c.Start, c.End, r.cfg.Detail.D(), c.DurMS, c.BusyMS)
+	v := cappedWait(details, c.Start, c.End, r.cfg.Detail.D(), c.DurMS, c.BusyMS)
+	c.Capped, c.OutsideIdleMS, c.Culprits.CappedIdle = v.Capped, v.OutsideMS, v.Who
 	for i := range details {
 		c.Culprits.CleanerMS += details[i].CleanerMS
 	}

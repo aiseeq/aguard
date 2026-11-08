@@ -16,6 +16,10 @@ type Live struct {
 	head, count      int
 	last             detailLast
 	open             time.Time // начало идущего случая; ноль — случая нет
+	openCapped       bool      // идущий случай по своим детальным записям — ожидание под потолком (Recorder.Detail)
+	details          [liveDetails]liveDetail
+	dHead, nDetail   int
+	owners           []capOwner // буфер capParts
 	cases            [liveCases]liveCase
 	casesHead, nCase int
 	writers          [nowTop]Writer
@@ -32,12 +36,20 @@ const (
 	liveCases = 128
 	// nowTop — сколько cgroup в writers и swappers.
 	nowTop = 5
+	// liveDetails — детальные записи для признания окон: окно 30 с при детальном проходе 1 с, с запасом.
+	liveDetails = 40
 )
+
+// liveDetail — детальная запись (from, at], сведённая capParts: простой по потолкам и вне их.
+type liveDetail struct {
+	from, at int64 // UnixNano
+	parts    []capPart
+}
 
 type liveStep struct {
 	at, from                                                 int64 // UnixNano
 	ioFull, memFull, stall, rd, wr, wms, wios, flush, swapIn int64 // мкс и счётчики шага
-	cpuSome, majflt                                          int64
+	cpuSome, majflt, ticks                                   int64 // ticks — мс занятости устройства
 	inflight, runnable                                       int64 // моментальные
 }
 
@@ -58,7 +70,10 @@ func (l *Live) step(s *Step, stallUS int64, interval time.Duration, open time.Ti
 	}
 	l.steps[i] = liveStep{at: s.At.UnixNano(), from: s.At.Add(-interval).UnixNano(), ioFull: s.IOFullUS, memFull: s.MemFullUS, stall: stallUS, rd: s.ReadBytes,
 		wr: s.WriteBytes, wms: s.WMS, wios: s.WIOS, flush: s.FIOS, swapIn: s.SwapIn, cpuSome: s.CPUSomeUS, majflt: s.Majflt,
-		inflight: s.InFlight, runnable: s.Runnable}
+		inflight: s.InFlight, runnable: s.Runnable, ticks: s.IOTicks}
+	if !open.Equal(l.open) {
+		l.openCapped = false // новый случай или конец прежнего: признание — с его детальных записей
+	}
 	l.open = open
 	if !closed.end.IsZero() {
 		j := (l.casesHead + l.nCase) % liveCases
@@ -86,6 +101,20 @@ func (l *Live) detail(s *Step, interval time.Duration) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	at := s.At.UnixNano()
+	from := at - int64(interval)
+	if l.nDetail > 0 { // как cappedWait: запись — дельта с прошлого прохода, не короче detail
+		from = min(from, l.details[(l.dHead+l.nDetail-1)%liveDetails].at)
+	}
+	i := (l.dHead + l.nDetail) % liveDetails
+	if l.nDetail == liveDetails {
+		l.dHead = (l.dHead + 1) % liveDetails
+	} else {
+		l.nDetail++
+	}
+	d := &l.details[i]
+	d.from, d.at = from, at
+	d.parts, l.owners = capParts(s, time.Duration(at-from), d.parts[:0], l.owners)
 	l.last = detailLast{dirty: s.Dirty, writeback: s.Writeback, memAvail: s.MemAvail, swapUsed: s.SwapUsed}
 	l.writers, l.nWriters = writers, nw
 	l.swappers, l.nSwappers = swappers, ns
@@ -110,6 +139,29 @@ func topCgroups(cgroups []Cgroup, key func(*Cgroup) int64) (top [nowTop]*Cgroup,
 		top[pos] = g
 	}
 	return top, n
+}
+
+// setOpenCapped — признание идущего случая, начавшегося в start; случай уже другой — не трогает.
+func (l *Live) setOpenCapped(start time.Time, capped bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.open.Equal(start) {
+		l.openCapped = capped
+	}
+}
+
+// capWindow — признание окна (last − d, last] по детальным записям, пропорционально их доле внутри окна.
+func (l *Live) capWindow(last int64, d time.Duration, busyMS int64) NowCapped {
+	acc := newCapAcc()
+	from := last - int64(d)
+	for i := range l.nDetail {
+		rec := &l.details[(l.dHead+i)%liveDetails]
+		if share := overlapShare(rec.from, rec.at, from, last); share > 0 {
+			acc.add(rec.parts, share)
+		}
+	}
+	v := acc.verdict(d.Milliseconds(), busyMS)
+	return NowCapped{Capped: v.Capped, OutsideMS: v.OutsideMS, CappedMS: v.CappedMS}
 }
 
 // SetProfiles — свод профилей по видам (служба пересчитывает, когда профили меняются).
@@ -150,12 +202,25 @@ type NowWindow struct {
 	Majflt      int64 `json:"majflt"`
 	CPUSomeMS   int64 `json:"cpu_some_ms"`  // PSI some cpu окна
 	RunnableMax int64 `json:"runnable_max"` // наибольшее число готовых к работе за окно
+	BusyMS      int64 `json:"busy_ms"`      // занятость устройства (io_ticks) за окно
+	// Capped — окно по детальным записям — ожидание под потолком io.max (то же правило, что у закрытых случаев).
+	// Нет поля — сторож старее этой меры. Детальная запись запаздывает за быстрым шагом до прохода (1 с).
+	Capped NowCapped `json:"capped"`
+}
+
+// NowCapped — признание окна: под потолком, наибольший простой cgroup вне потолка и простой упиравшихся, мс.
+type NowCapped struct {
+	Capped    bool  `json:"capped"`
+	OutsideMS int64 `json:"outside_ms"`
+	CappedMS  int64 `json:"capped_ms"`
 }
 
 // NowOpen — идущий случай фриза.
 type NowOpen struct {
 	Open bool  `json:"open"`
 	MS   int64 `json:"ms,omitempty"` // от начала первого шага с простоем до последнего шага
+	// Capped — идущий случай по своим детальным записям — ожидание под потолком; деталей ещё нет — false.
+	Capped bool `json:"capped"`
 }
 
 // NowCases — закрытые случаи по концу за последние 30 и 60 с: от 100 и от 200 мс.
@@ -197,6 +262,12 @@ func (l *Live) Now(kind string) (Now, bool) {
 		W30s: l.window(last, 30*time.Second), NProc: runtime.NumCPU(), Dirty: l.last.dirty, Writeback: l.last.writeback,
 		MemAvailable: l.last.memAvail, SwapUsed: l.last.swapUsed,
 		Writers: slices.Clone(l.writers[:l.nWriters]), Swappers: slices.Clone(l.swappers[:l.nSwappers])}
+	for _, w := range [...]struct {
+		win *NowWindow
+		d   time.Duration
+	}{{&n.W1s, time.Second}, {&n.W5s, 5 * time.Second}, {&n.W30s, 30 * time.Second}} {
+		w.win.Capped = l.capWindow(last, w.d, w.win.BusyMS)
+	}
 	if n.Writers == nil {
 		n.Writers = []Writer{}
 	}
@@ -204,7 +275,7 @@ func (l *Live) Now(kind string) (Now, bool) {
 		n.Swappers = []Swapper{}
 	}
 	if !l.open.IsZero() {
-		n.Open = NowOpen{Open: true, MS: n.At.Sub(l.open).Milliseconds()}
+		n.Open = NowOpen{Open: true, MS: n.At.Sub(l.open).Milliseconds(), Capped: l.openCapped}
 	}
 	for i := range l.nCase {
 		c := l.cases[(l.casesHead+i)%liveCases]
@@ -233,7 +304,7 @@ func (l *Live) Now(kind string) (Now, bool) {
 // неинтервальные учитываются целиком, если конец шага попал в окно. Байты/с считаются по d.
 func (l *Live) window(last int64, d time.Duration) NowWindow {
 	var w NowWindow
-	var stall, ioFull, memFull, cpuSome, rd, wr, wms, wios, flush, swapIn, majflt int64
+	var stall, ioFull, memFull, cpuSome, rd, wr, wms, wios, flush, swapIn, majflt, ticks int64
 	from := last - int64(d)
 	for i := l.count - 1; i >= 0; i-- {
 		s := &l.steps[(l.head+i)%liveSteps]
@@ -256,6 +327,7 @@ func (l *Live) window(last int64, d time.Duration) NowWindow {
 			flush += scale(s.flush)
 			swapIn += scale(s.swapIn)
 			majflt += scale(s.majflt)
+			ticks += scale(s.ticks)
 		} else if s.at > from {
 			ioFull += s.ioFull
 			memFull += s.memFull
@@ -268,6 +340,7 @@ func (l *Live) window(last int64, d time.Duration) NowWindow {
 			flush += s.flush
 			swapIn += s.swapIn
 			majflt += s.majflt
+			ticks += s.ticks
 		}
 		w.InFlightMax = max(w.InFlightMax, s.inflight)
 		w.RunnableMax = max(w.RunnableMax, s.runnable)
@@ -275,6 +348,6 @@ func (l *Live) window(last int64, d time.Duration) NowWindow {
 	w.IOFullMS, w.MemFullMS, w.CPUSomeMS, w.StallMS = ioFull/1000, memFull/1000, cpuSome/1000, stall/1000
 	w.ReadBps, w.WriteBps = perSecond(rd, d), perSecond(wr, d)
 	w.WAwaitMS = AwaitMS(wms, wios)
-	w.Flushes, w.SwapIn, w.Majflt = flush, swapIn, majflt
+	w.Flushes, w.SwapIn, w.Majflt, w.BusyMS = flush, swapIn, majflt, ticks
 	return w
 }

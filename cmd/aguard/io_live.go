@@ -79,13 +79,20 @@ func askIO(socket string, req iowatch.Request) (iowatch.Answer, error) {
 // пишет, свод вида.
 func writeIONow(w io.Writer, n *iowatch.Now) {
 	win := func(label string, x iowatch.NowWindow) string {
-		return fmt.Sprintf("%s: full %d мс, простой %d мс, W/R %.0f/%.0f МБ/с, ожид W %d мс, очередь %d", label, x.IOFullMS, x.StallMS,
+		line := fmt.Sprintf("%s: full %d мс, простой %d мс, W/R %.0f/%.0f МБ/с, ожид W %d мс, очередь %d", label, x.IOFullMS, x.StallMS,
 			megabytes(x.WriteBps), megabytes(x.ReadBps), x.WAwaitMS, x.InFlightMax)
+		if x.Capped.Capped {
+			line += fmt.Sprintf(", под потолком io.max (вне потолка до %d мс)", x.Capped.OutsideMS)
+		}
+		return line
 	}
 	fmt.Fprintf(w, "%s  %s | %s | %s\n", n.At.Format("15:04:05.0"), win("1с", n.W1s), win("5с", n.W5s), win("30с", n.W30s))
 	open := "случая нет"
 	if n.Open.Open {
 		open = "идёт случай " + ioSeconds(n.Open.MS)
+		if n.Open.Capped {
+			open += " (ожидание под потолком io.max, не фриз)"
+		}
 	}
 	writers := make([]string, len(n.Writers))
 	for i, x := range n.Writers {
