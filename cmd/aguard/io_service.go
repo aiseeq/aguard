@@ -532,7 +532,7 @@ func (s *ioService) closed(c iowatch.Case) {
 	}
 	s.a.note("io", kind, c.Start.Format(time.RFC3339), "", c.DurMS, "ms")
 	if alertable(&c, s.cfg) {
-		s.routeOne(&c)
+		s.routeOne(&s.cases[len(s.cases)-1])
 	}
 }
 

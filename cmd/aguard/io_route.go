@@ -455,22 +455,25 @@ func (s *ioService) seedRoute(cfg iowatch.Config, now time.Time) {
 		if err != nil {
 			s.a.warn("io", "хозяин случая при засеве маршрута", "err", err)
 		}
+		rc.Offline = c.OwnerOffline
 		seed = append(seed, rc)
 	}
 	slices.SortFunc(seed, func(x, y ioroute.Case) int { return x.End.Compare(y.End) })
-	s.route.Seed(seed, s.aliveFunc(), now)
+	s.route.Seed(seed, now)
 	if len(seed) > 0 {
 		s.a.log.Info("aguard io: маршрут засеян", "cases", len(seed), "pending", s.route.Pending())
 	}
 }
 
-// routeOne — закрытый случай в маршрут.
+// routeOne — закрытый случай в маршрут; c — запись в кеше службы: хозяин не в сети сохраняется с ней для засева.
 func (s *ioService) routeOne(c *iowatch.Case) {
 	rc, err := s.owners.routeCase(c)
 	if err != nil {
 		s.a.warn("io", "хозяин случая не найден, случай — как без хозяина", "err", err)
 	}
-	s.act(s.route.Route(rc, s.aliveFunc()))
+	alive := s.aliveFunc()
+	c.OwnerOffline = rc.Owner != "" && !alive(rc.Owner)
+	s.act(s.route.Route(rc, alive))
 }
 
 // aliveFunc — жива ли сессия по реестру сейчас; реестр не читается — в сети (письмо покажет).
@@ -516,9 +519,9 @@ func (s *ioService) act(acts []ioroute.Action) {
 				return
 			}
 			// Письмо хозяину не ушло (сессия кончилась после проверки, тишина) — случаи в его тикет: иначе не дойдут никуда.
-			for _, c := range act.Cases {
-				if c.Owner != "" {
-					s.tickets.add(ioTicketJob{owner: c.Owner, class: c.Class, why: act.Why, cases: []ioroute.Case{c},
+			for _, t := range ioroute.Tickets(act.Cases) {
+				if t.Kind == ioroute.Ticket {
+					s.tickets.add(ioTicketJob{owner: t.Owner, class: t.Class, why: act.Why, cases: t.Cases,
 						tk: cfg.Tk, lead: cfg.Lead, log: cfg.Mode == iowatch.ModeLog})
 				}
 			}

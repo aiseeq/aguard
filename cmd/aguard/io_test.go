@@ -790,3 +790,26 @@ func TestIOReconfigureRefreshesRoute(t *testing.T) {
 		}
 	}
 }
+
+// Хозяин не в сети при маршруте сохраняется в случае (owner_offline) и переживает перезапуск: засев не решает по
+// сессиям в сети сейчас.
+func TestIOOwnerOfflineSavedForSeed(t *testing.T) {
+	a, _ := testIOApp(t)
+	s := newIOService(context.Background(), a)
+	cfg := iowatch.Default()
+	cfg.Mode, cfg.Lead = iowatch.ModeLog, "lead"
+	s.cfg = cfg
+	s.setRoute(cfg)
+	s.closed(alertCase(time.Now().Add(-time.Minute), 12000)) // хозяин sess7 не в реестре
+	if len(s.cases) != 1 || !s.cases[0].OwnerOffline {
+		t.Fatalf("owner_offline не записан: %+v", s.cases)
+	}
+	if err := iowatch.SaveCases(s.path, s.kept(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	next := newIOService(context.Background(), a)
+	next.load()
+	if len(next.cases) != 1 || !next.cases[0].OwnerOffline {
+		t.Fatalf("после перезапуска: %+v", next.cases)
+	}
+}

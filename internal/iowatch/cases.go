@@ -38,6 +38,9 @@ type Case struct {
 	Capped        bool     `json:"capped,omitempty"`
 	OutsideIdleMS int64    `json:"outside_idle_ms,omitempty"`
 	Culprits      *Culprit `json:"culprits,omitempty"` // только у случаев от case_min
+	// OwnerOffline — хозяин случая был не в сети, когда маршрут решал (ioroute): засев после перезапуска повторяет
+	// тогдашнее решение, а не по сессиям в сети сейчас.
+	OwnerOffline bool `json:"owner_offline,omitempty"`
 }
 
 // Culprit — виновники случая за окно From..End: до caseTop имён на меру.

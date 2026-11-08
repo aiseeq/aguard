@@ -37,6 +37,8 @@ type Case struct {
 	// вытеснения (правило 03.11 io-culprit-victim, сужено 08.11) — хозяину только тикет, срочное — лиду.
 	Victim bool
 	Text   string // строка случая для письма и тикета
+	// Offline — хозяин был не в сети, когда маршрут решал (сохранено со случаем): только для Seed.
+	Offline bool
 	// ticketed — тикет хозяину уже заведён при маршруте (жертва, хозяин не в сети): по концу паузы письма — не в тикет.
 	ticketed bool
 }
@@ -138,7 +140,7 @@ func (r *Router) Tick(now time.Time) []Action {
 			out = append(out, Action{Kind: Letter, To: to, Why: WhyAfter, Cases: cases})
 			continue
 		}
-		out = append(out, groupTickets(cases)...)
+		out = append(out, Tickets(cases)...)
 	}
 	return out
 }
@@ -146,11 +148,11 @@ func (r *Router) Tick(now time.Time) []Action {
 // Seed — состояние по прошлым случаям (по времени) без действий: после перезапуска серии, паузы и сверка классов
 // продолжаются; срочное, ждавшее конца паузы, остаётся ждать. Пауза, кончившаяся до now, — сделанное прежним
 // демоном: не повторяется (цена — демон стоял через конец паузы: заметки её случаев не уйдут, случаи — в сводке).
-// alive — сессии в сети сейчас (тогдашних не знаем): хозяин не в сети — тикет ушёл сразу.
-func (r *Router) Seed(cases []Case, alive func(string) bool, now time.Time) {
+// Хозяин в сети — по Offline случая, как решал прежний демон.
+func (r *Router) Seed(cases []Case, now time.Time) {
 	for _, c := range cases {
 		r.Tick(c.End)
-		r.Route(c, alive)
+		r.Route(c, func(string) bool { return !c.Offline })
 	}
 	r.Tick(now)
 }
@@ -232,8 +234,9 @@ func (r *Router) crossCheck(c Case, now time.Time) []Action {
 // Owners — хозяева класса в окне сверки, по имени.
 func (r *Router) Owners(class string) []string { return slices.Sorted(maps.Keys(r.cross[class])) }
 
-// groupTickets — случаи паузы по тикетам (хозяин, класс), в порядке первого случая; уже ушедшие в тикет — мимо.
-func groupTickets(cases []Case) []Action {
+// Tickets — случаи по тикетам (хозяин, класс), в порядке первого случая; без хозяина — сводка; уже ушедшие в
+// тикет — мимо.
+func Tickets(cases []Case) []Action {
 	var out []Action
 	idx := map[[2]string]int{}
 	for _, c := range cases {
