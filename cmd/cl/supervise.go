@@ -254,6 +254,20 @@ func (l launcher) settingsFlags(cfg config, args []string, name string) []string
 	return []string{"--settings", file}
 }
 
+// staleAsk — расхождение файла настроек для вопроса aguard (staleSettings): ошибка сверки — не судить, то же, ради
+// чего прошлый процесс перезапустили, — не просить снова (петля); и то и другое — строкой в журнал один раз
+// (lastKey — ключ прошлой строки, возвращается новый).
+func (l launcher) staleAsk(cfg config, pid int, args []string, prevStale, lastKey string) (stale, key string) {
+	stale, err := l.staleSettings(cfg, pid, args)
+	switch {
+	case err != nil:
+		return "", journalOnce(cfg, lastKey, "error/"+err.Error(), fmt.Sprintf("%s pid=%d: %v — о файле настроек роли не сужу", l.name, pid, err))
+	case stale != "" && stale == prevStale:
+		return "", journalOnce(cfg, lastKey, "loop/"+stale, fmt.Sprintf("%s pid=%d: %s и после перезапуска ради него — больше не прошу", l.name, pid, stale))
+	}
+	return stale, lastKey
+}
+
 // staleSettings — чем файл настроек живого claude pid (--settings в /proc/<pid>/cmdline) расходится с положенным по
 // роли и папке сессии: «файл настроек роли: нет → /x.json». Пусто — совпадает или судить не о чем: у роли нет
 // settings, свой --settings в аргументах, положенный файл сейчас не читается или не объект JSON (его могут
@@ -493,14 +507,8 @@ func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem str
 			}
 			now := time.Now()
 			upgradeTried = upgradeTried || l.liveUpgrade(cfg, now, pid, n, args)
-			stale, staleErr := l.staleSettings(cfg, pid, args)
-			switch {
-			case staleErr != nil:
-				last.stale = journalOnce(cfg, last.stale, "error/"+staleErr.Error(), fmt.Sprintf("%s pid=%d: %v — о файле настроек роли не сужу", l.name, pid, staleErr))
-			case stale != "" && stale == prevStale:
-				last.stale = journalOnce(cfg, last.stale, "loop/"+stale, fmt.Sprintf("%s pid=%d: %s и после перезапуска ради него — больше не прошу", l.name, pid, stale))
-				stale = ""
-			}
+			var stale string
+			stale, last.stale = l.staleAsk(cfg, pid, args, prevStale, last.stale)
 			a, askErr := l.ask(pid, argsProblem, stale, l.console != nil && cfg.Restart.TypeMode == modeAct)
 			out, last = l.next(cfg, now, pid, a, askErr, last)
 			if out.restart {
