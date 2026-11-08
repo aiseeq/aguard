@@ -124,7 +124,7 @@ func TestDecideCrons(t *testing.T) {
 }
 
 // Таймеры, унаследованные через /clear, перезапуск не держат: уходят в Lost (cl поднимет со строкой роли и запишет
-// каждый в журнал); свои и поставленные заново двойники — не потеря (cl-drop-recreate).
+// каждый в журнал); свои и поставленные заново двойники — не потеря (тикет 20261108-2117).
 func TestDecideRestartInheritedCrons(t *testing.T) {
 	f := idleFacts()
 	f.Transcript.Crons = []cronJob{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true}}

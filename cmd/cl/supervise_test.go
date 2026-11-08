@@ -317,20 +317,25 @@ func TestNext(t *testing.T) {
 }
 
 // Перезапуск при таймерах, унаследованных через /clear: не набор, а подъём; каждый таймер — строкой журнала с началом
-// prompt одной строкой; без них — строк о таймерах нет (cl-drop-recreate).
+// prompt одной строкой; без них — строк о таймерах нет (тикет 20261108-2117).
 func TestNextLostCrons(t *testing.T) {
 	cfg := defaultConfig(t.TempDir())
 	cfg.Restart.Mode = modeAct
 	l := launcher{name: "x-master", console: &console{}}
 	long := "Дайджест:\n" + strings.Repeat("я", 100)
-	lost := []restart.LostCron{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true}, {ID: "j2", Cron: "11 6 * * *", Prompt: long}}
+	lost := []restart.LostCron{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true},
+		{ID: "j2", Cron: "11 6 * * *", Prompt: long, Recurring: true}, {ID: "j3", Cron: "57 7 9 11 *", Prompt: "снять выходное открытие"}}
 	a := restart.Answer{Verdict: restart.Verdict{Restart: true, Lost: lost}, Key: "true,false", SessionID: "s1", Name: "x-master", Installed: "2.1.320"}
 	now := time.Now()
 	out, _ := l.next(cfg, now, 7, a, nil, journalKeys{})
 	if !out.restart || out.typed != "" || !slices.Equal(out.lost, lost) || out.sessionID != "s1" {
 		t.Fatalf("подъём с потерянными таймерами: %+v", out)
 	}
-	journal := strings.Join(readLines(t, cfg.Restart.Journal), "\n")
+	lines := readLines(t, cfg.Restart.Journal)
+	journal := strings.Join(lines, "\n")
+	if n := len(slices.DeleteFunc(slices.Clone(lines), func(s string) bool { return !strings.Contains(s, "таймер прошлой беседы") })); n != 3 {
+		t.Errorf("строк о таймерах %d, want 3 — по одной на таймер, разовый тоже:\n%s", n, journal)
+	}
 	for _, want := range []string{`x-master pid=7: таймер прошлой беседы j1 (47 1 * * *, "Сон (скилл dream)") после подъёма не вернётся`,
 		`j2 (11 6 * * *, "Дайджест: ` + strings.Repeat("я", 70) + `…")`} {
 		if !strings.Contains(journal, want) {
