@@ -30,6 +30,14 @@ func ioCaseLine(c *iowatch.Case) string {
 	if attribution := ioCaseAttribution(c); attribution != "" {
 		line += ", " + attribution
 	}
+	if c.Capped {
+		who := make([]string, 0, len(c.Culprits.CappedIdle))
+		for _, g := range c.Culprits.CappedIdle {
+			who = append(who, fmt.Sprintf("%s %d мс", g.Name, g.Value))
+		}
+		line += fmt.Sprintf("; ожидание под потолком io.max (%s), не фриз: вне потолка простой до %d мс",
+			strings.Join(who, ", "), c.OutsideIdleMS)
+	}
 	return line
 }
 
@@ -227,6 +235,10 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 	if s.Quiet > 0 {
 		fmt.Fprintf(w, "тихих (простой без обмена с диском, не фриз): %d, простой %s; кто ждал (случаев от %s): %s\n", s.Quiet,
 			ioSeconds(s.QuietIdleMS), ioSeconds(s.Min), ioRankedCases(s.QuietWho, -1))
+	}
+	if s.Capped > 0 {
+		fmt.Fprintf(w, "под потолком io.max (ждали придержанный потолком IO, остальные — нет; не фриз): %d, простой %s; чей потолок: %s\n",
+			s.Capped, ioSeconds(s.CappedIdleMS), ioRankedCases(s.CappedWho, -1))
 	}
 	if s.Total == 0 {
 		return

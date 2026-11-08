@@ -88,6 +88,7 @@ type Cgroup struct {
 	MemFullUS  int64  `json:"mem_full_us,omitempty"`
 	CPUUS      int64  `json:"cpu_us,omitempty"` // usage_usec из cpu.stat
 	AnonB      int64  `json:"anon,omitempty"`   // anon из memory.stat на момент прохода, байт
+	Cap        Cap    `json:"cap,omitzero"`     // потолок io.max листа или предка на момент прохода
 }
 
 // Record — строка снимка: {"k":"s"|"d", поля Step}.

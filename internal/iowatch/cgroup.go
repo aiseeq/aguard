@@ -34,6 +34,8 @@ type cgroupReader struct {
 	groups   map[string]*cgroupEntry
 	buf      []byte
 	ioScr    [][ioFields]int64
+	capFiles map[string]*cachedFile // io.max листьев и предков по пути от root
+	capPass  map[string]Cap         // потолок папки в текущем проходе
 }
 
 type cgroupEntry struct {
@@ -46,7 +48,7 @@ type cgroupEntry struct {
 
 func newCgroupReader(root string, devices []string) *cgroupReader {
 	return &cgroupReader{root: root, devices: devices, groups: map[string]*cgroupEntry{}, inner: map[string]time.Time{},
-		buf: make([]byte, 8192), ioScr: make([][ioFields]int64, len(devices))}
+		buf: make([]byte, 8192), ioScr: make([][ioFields]int64, len(devices)), capFiles: map[string]*cachedFile{}, capPass: map[string]Cap{}}
 }
 
 func (r *cgroupReader) close() {
@@ -54,6 +56,7 @@ func (r *cgroupReader) close() {
 		g.close()
 		delete(r.groups, rel)
 	}
+	r.dropCapFiles(nil)
 }
 
 func (g *cgroupEntry) close() {
@@ -72,6 +75,7 @@ func (r *cgroupReader) read(s *Step) (skipped, err error) {
 	}
 	failed := 0
 	var first error
+	clear(r.capPass)
 	for _, rel := range r.leaves {
 		g := r.groups[rel]
 		if g == nil {
@@ -91,6 +95,12 @@ func (r *cgroupReader) read(s *Step) (skipped, err error) {
 		}
 		// AnonB — моментальное, лист в проход не выводит: иначе каждый спящий лист с памятью.
 		if item.ReadBytes|item.WriteBytes|item.ReadOps|item.WriteOps|item.SwapIn|item.SwapOut|item.Majflt|item.IOFullUS|item.MemFullUS|item.CPUUS != 0 {
+			// Потолок не прочитан — лист идёт без него (вне потолка): его простой остаётся простоем машины.
+			if item.Cap, err = r.capOf(rel); err != nil {
+				if failed++; first == nil {
+					first = fmt.Errorf("потолок %s (лист учтён без него): %w", rel, err)
+				}
+			}
 			s.Cgroups = append(s.Cgroups, item)
 		}
 	}
@@ -152,6 +162,18 @@ func (r *cgroupReader) refresh(now time.Time) error {
 	}
 	r.newEmpty = newEmpty
 	r.leaves, r.leavesAt, r.inner = tree.leaves, now, tree.inner
+	keep := make(map[string]bool, len(tree.leaves)+len(tree.inner))
+	for _, rel := range tree.leaves {
+		keep[rel] = true
+	}
+	for dir := range tree.inner {
+		rel, err := filepath.Rel(r.root, dir)
+		if err != nil {
+			return fmt.Errorf("папка %s вне %s: %w", dir, r.root, err)
+		}
+		keep[rel] = true
+	}
+	r.dropCapFiles(keep)
 	return nil
 }
 

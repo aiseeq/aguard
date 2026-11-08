@@ -226,9 +226,12 @@ func TestAlertFirstNowRepeatsGlued(t *testing.T) {
 	quiet := alertCase(base, 5000)
 	quiet.Quiet = true
 	s.closed(quiet)
+	capped := alertCase(base, 12600)
+	capped.Capped = true
+	s.closed(capped)
 	s.launchAlert(base)
-	if s.alerting || len(s.cases) != 2 {
-		t.Fatalf("короче alert_min или тихий — письмо: alerting=%v cases=%d", s.alerting, len(s.cases))
+	if s.alerting || len(s.cases) != 3 {
+		t.Fatalf("короче alert_min, тихий или под потолком — письмо: alerting=%v cases=%d", s.alerting, len(s.cases))
 	}
 	s.closed(alertCase(base, 2000))
 	s.launchAlert(base)
@@ -244,7 +247,7 @@ func TestAlertFirstNowRepeatsGlued(t *testing.T) {
 	}
 	s.launchAlert(base.Add(16 * time.Minute))
 	wait()
-	if n := strings.Count(logged.String(), "написал бы"); n != 2 || !strings.Contains(logged.String(), "Всего случаев от 2,0 с") || len(s.cases) != 5 {
+	if n := strings.Count(logged.String(), "написал бы"); n != 2 || !strings.Contains(logged.String(), "Всего случаев от 2,0 с") || len(s.cases) != 6 {
 		t.Fatalf("писем %d, случаев %d, журнал:\n%s", n, len(s.cases), logged.String())
 	}
 }
@@ -301,7 +304,10 @@ func TestReportTextAndJSONFromFile(t *testing.T) {
 	base := time.Now().Add(-2 * time.Hour).Truncate(time.Hour)
 	quiet := iowatch.Case{Start: base.Add(30 * time.Minute), DurMS: 1100, IdleMS: 1000, Quiet: true,
 		Culprits: &iowatch.Culprit{CgroupIdle: []iowatch.Ranked{{Name: "thinkfan", Value: 1000}}}}
-	cases := []iowatch.Case{{Start: base, DurMS: 100, IdleMS: 60}, alertCase(base.Add(time.Minute), 2500), quiet, alertCase(base.Add(time.Hour), 700)}
+	capped := alertCase(base.Add(40*time.Minute), 12600)
+	capped.IdleMS, capped.Capped, capped.OutsideIdleMS = 8100, true, 51
+	capped.Culprits.CappedIdle = []iowatch.Ranked{{Name: "run-p2016228-i69065841.scope", Value: 9133}}
+	cases := []iowatch.Case{{Start: base, DurMS: 100, IdleMS: 60}, alertCase(base.Add(time.Minute), 2500), quiet, capped, alertCase(base.Add(time.Hour), 700)}
 	if err := iowatch.SaveCases(path, cases); err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +318,8 @@ func TestReportTextAndJSONFromFile(t *testing.T) {
 	for _, want := range []string{": 3, простой всего 2,5 с\n", "по длительности: <300 мс 1 · 300–500 мс 0 · 0,5–1 с 1 · 1–2 с 0 · 2–5 с 1 · ≥5 с 0\n",
 		"  " + base.Format("02.01 15:00") + "  2 / 1 / 2,5 с\n", "главная cgroup (случаев): sess7 2\n", "запись процессов: dd 600 МБ в 2\n",
 		"самые длинные:\n- " + base.Add(time.Minute).Format("02.01 15:04:05") + ", 2,5 с",
-		"тихих (простой без обмена с диском, не фриз): 1, простой 1,0 с; кто ждал (случаев от 500 мс): thinkfan 1\n"} {
+		"тихих (простой без обмена с диском, не фриз): 1, простой 1,0 с; кто ждал (случаев от 500 мс): thinkfan 1\n",
+		"под потолком io.max (ждали придержанный потолком IO, остальные — нет; не фриз): 1, простой 8,1 с; чей потолок: run-p2016228-i69065841.scope 1\n"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("нет %q в итоге:\n%s", want, text)
 		}
@@ -323,7 +330,7 @@ func TestReportTextAndJSONFromFile(t *testing.T) {
 	}
 	var sum iowatch.Summary
 	if err := json.Unmarshal(out.Bytes(), &sum); err != nil || sum.Total != 3 || len(sum.Cases) != 1 || sum.Min != 1000 || len(sum.Hours) != 2 ||
-		sum.Quiet != 1 || len(sum.QuietWho) != 1 {
+		sum.Quiet != 1 || len(sum.QuietWho) != 1 || sum.Capped != 1 || sum.CappedIdleMS != 8100 || len(sum.CappedWho) != 1 {
 		t.Fatalf("JSON: %+v %v", sum, err)
 	}
 }

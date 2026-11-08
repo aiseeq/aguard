@@ -70,7 +70,8 @@ func SumCulprits(details []Step) Culprits {
 				c.cgroupTotal[p.Cgroup] += p.WriteBytes
 			}
 		}
-		for _, g := range d.Cgroups {
+		for j := range d.Cgroups {
+			g := &d.Cgroups[j]
 			name := CgroupName(g.Path)
 			c.CgroupWrite[name] += g.WriteBytes
 			c.CgroupRead[name] += g.ReadBytes

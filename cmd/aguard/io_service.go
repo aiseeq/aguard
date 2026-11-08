@@ -512,7 +512,7 @@ func (s *ioService) closed(c iowatch.Case) {
 	}
 	s.a.log.Info("aguard io: " + ioCaseLine(&c))
 	s.a.note("io", "фриз", c.Start.Format(time.RFC3339), "", c.DurMS, "ms")
-	if c.Dur() >= s.cfg.AlertMin.D() && !c.Quiet {
+	if c.Dur() >= s.cfg.AlertMin.D() && !c.Quiet && !c.Capped {
 		s.alerts = append(s.alerts, c)
 	}
 }

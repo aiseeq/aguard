@@ -32,8 +32,12 @@ type Case struct {
 	Writeback int64     `json:"writeback,omitempty"`
 	// Quiet — обмен с диском за случай меньше quiet_bytes: простой без трафика (одна задача ждёт
 	// датчик, как thinkfan) — PSI считает его 100 % full, а машина не стоит. В письма не идёт.
-	Quiet    bool     `json:"quiet,omitempty"`
-	Culprits *Culprit `json:"culprits,omitempty"` // только у случаев от case_min
+	Quiet bool `json:"quiet,omitempty"`
+	// Capped — ожидание под потолком io.max, а не фриз (cappedWait): только у случаев от case_min. OutsideIdleMS —
+	// наибольший простой cgroup вне потолка за случай. В письма и в счёт фризов не идёт.
+	Capped        bool     `json:"capped,omitempty"`
+	OutsideIdleMS int64    `json:"outside_idle_ms,omitempty"`
+	Culprits      *Culprit `json:"culprits,omitempty"` // только у случаев от case_min
 }
 
 // Culprit — виновники случая за окно From..End: до caseTop имён на меру.
@@ -51,6 +55,7 @@ type Culprit struct {
 	CgroupRead     []Ranked                  `json:"cgroup_read,omitempty"`
 	CgroupSwapIn   []Ranked                  `json:"cgroup_swapin,omitempty"`
 	CgroupIdle     []Ranked                  `json:"cgroup_idle,omitempty"` // мс PSI full io
+	CappedIdle     []Ranked                  `json:"capped_idle,omitempty"` // мс PSI full io под потолками, в которые упирались
 	// CgroupDirty — запись процессов cgroup (write_bytes, данные и метаданные): кто порождает запись.
 	CgroupDirty []Ranked `json:"cgroup_dirty,omitempty"`
 	// CgroupOwn — запись процессов для каждой своей (Readable) cgroup из CgroupWrite: io.stat намного больше своей —
@@ -310,6 +315,7 @@ func (r *Recorder) finish(c *Case) {
 		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
 		CgroupDirty: Rank(sum.CgroupDirty, caseTop), CgroupOwn: map[string]int64{}}
 	c.Culprits.Foreign, _ = sum.ForeignOver(c.Culprits.Main)
+	c.Capped, c.OutsideIdleMS, c.Culprits.CappedIdle = cappedWait(details, c.Start, c.End, r.cfg.Detail.D(), c.DurMS, c.BusyMS)
 	for i := range details {
 		c.Culprits.CleanerMS += details[i].CleanerMS
 	}
