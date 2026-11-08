@@ -459,6 +459,7 @@ func (s *ioService) reconfigure(gen int, next iowatch.Config, err error) {
 		return
 	}
 	s.cfg = next
+	s.setRoute(next)
 	s.rec.SetConfig(next)
 	s.resizeSeries(next)
 	s.rec.Attach(s.series, s.profiles, s.live)

@@ -768,3 +768,26 @@ func TestIOCaseAttribution(t *testing.T) {
 		})
 	}
 }
+
+// Перечитка конфига на ходу (owners, пороги маршрута) — сразу, без перезапуска демона: таблица хозяев служб
+// добавлена после выкатки 08.11 17:03 и до перезапуска не работала.
+func TestIOReconfigureRefreshesRoute(t *testing.T) {
+	a, _ := testIOApp(t)
+	s := newIOService(context.Background(), a)
+	s.cfg = iowatch.Default()
+	s.rec = iowatch.NewRecorder(s.cfg)
+	s.setRoute(s.cfg)
+	next := s.cfg
+	next.Owners = map[string]string{"adream.service": "dream-master"}
+	next.UrgentMin = policy.Duration(30 * time.Second)
+	s.reconfigure(s.gen, next, nil)
+	if s.owners.units["adream.service"] != "dream-master" {
+		t.Fatalf("owners после перечитки: %v", s.owners.units)
+	}
+	c := ioroute.Case{Start: time.Now().Add(-12 * time.Second), End: time.Now(), DurMS: 12000, Owner: "dream-master", Class: "adream"}
+	for _, act := range s.route.Route(c, func(string) bool { return true }) {
+		if act.Kind == ioroute.Letter {
+			t.Fatalf("12 с при urgent_min 30s — письмо: %+v", act)
+		}
+	}
+}
