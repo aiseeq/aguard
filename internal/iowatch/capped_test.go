@@ -1,6 +1,7 @@
 package iowatch
 
 import (
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -211,5 +212,95 @@ func TestRecorderCappedCaseAndSummary(t *testing.T) {
 	s := Summarize(got, base, base.Add(time.Hour), 500*time.Millisecond)
 	if s.Total != 0 || s.Capped != 1 || s.CappedIdleMS != got[0].IdleMS || len(s.CappedWho) != 1 || s.CappedWho[0].Name != "run-p1-i2.scope" || len(s.Cases) != 0 {
 		t.Fatalf("сводка: %+v", s)
+	}
+}
+
+// Окно случая и граница записи (проверка 13:59, сценарии 1 и 2 противника): простой под потолком в записях до
+// случая не оправдывает его, даже когда вне потолка набралось меньше порога; запись с At ровно в начале случая
+// покрывает секунду до него.
+func TestCappedWaitWindowAndRecordBoundary(t *testing.T) {
+	base := time.Date(2026, 11, 8, 14, 0, 0, 0, time.Local)
+	evals := Cap{Path: "/agents.slice/agents-evals.slice", RBps: 80_000_000}
+	rec := func(at time.Duration, g ...Cgroup) Step { return Step{At: base.Add(at), Cgroups: g} }
+	eval := Cgroup{Path: evals.Path + "/a.scope", ReadBytes: 80_000_000, IOFullUS: 700_000, Cap: evals}
+	ui := func(us int64) Cgroup { return Cgroup{Path: "/session.slice/plasmashell.service", IOFullUS: us} }
+	t.Run("простой до случая, вне потолка 189 мс", func(t *testing.T) {
+		details := []Step{rec(-3*time.Second, eval), rec(-2*time.Second, eval), rec(-time.Second, eval), rec(0, eval),
+			rec(time.Second, ui(63_000)), rec(2*time.Second, ui(63_000)), rec(3*time.Second, ui(63_000))}
+		if capped, outside, _ := cappedWait(details, base, base.Add(2500*time.Millisecond), time.Second, 2500, 100); capped || outside != 189 {
+			t.Fatalf("простой под потолком до случая — не его: %v %d", capped, outside)
+		}
+	})
+	t.Run("запись за секунду до начала", func(t *testing.T) {
+		big := eval
+		big.IOFullUS = 900_000
+		details := []Step{rec(0, big), rec(time.Second, big), rec(2*time.Second, ui(150_000))}
+		if capped, outside, _ := cappedWait(details, base.Add(1100*time.Millisecond), base.Add(1700*time.Millisecond), time.Second, 600, 50); capped || outside != 150 {
+			t.Fatalf("запись (0, 1 с] со случаем 1,1–1,7 с не пересекается: %v %d", capped, outside)
+		}
+	})
+}
+
+// Запоздавшая детальная запись (проверка 13:59): проход стоял 3 с, одна запись — дельта за 3 с. 90 МБ за 3 с при
+// потолке 80M — 30 МБ/с, в потолок не упирались, простой — машины.
+func TestCappedWaitLateRecordInterval(t *testing.T) {
+	base := time.Date(2026, 11, 8, 14, 0, 0, 0, time.Local)
+	evals := Cap{Path: "/agents.slice/agents-evals.slice", RBps: 80_000_000}
+	details := []Step{{At: base.Add(time.Second)}, {At: base.Add(4 * time.Second), Cgroups: []Cgroup{
+		{Path: evals.Path + "/a.scope", ReadBytes: 90_000_000, IOFullUS: 2_500_000, Cap: evals},
+		{Path: "/app.slice/app-com.google.Chrome-1.scope", IOFullUS: 150_000}}}}
+	if capped, outside, _ := cappedWait(details, base.Add(1200*time.Millisecond), base.Add(4*time.Second), time.Second, 2800, 900); capped || outside != 2500 {
+		t.Fatalf("скорость — за весь промежуток записи: %v %d", capped, outside)
+	}
+	// те же 3 с по секунде — по 80 МБ: упор, случай под потолком
+	details = []Step{{At: base.Add(time.Second)}}
+	for i := 2; i <= 4; i++ {
+		details = append(details, Step{At: base.Add(time.Duration(i) * time.Second), Cgroups: []Cgroup{
+			{Path: evals.Path + "/a.scope", ReadBytes: 80_000_000, IOFullUS: 800_000, Cap: evals}}})
+	}
+	if capped, _, _ := cappedWait(details, base.Add(1200*time.Millisecond), base.Add(4*time.Second), time.Second, 2800, 900); !capped {
+		t.Fatal("посекундные записи с упором — под потолком")
+	}
+}
+
+// Файлы io.max ушедших листьев закрываются при следующем обходе дерева.
+func TestCgroupReaderDropsCapFilesOfGoneLeaves(t *testing.T) {
+	root := t.TempDir()
+	leaves := []string{"u.slice/a.scope", "u.slice/b.scope", "u.slice/c.scope"}
+	full := func(rel string, us int) {
+		writeFile(t, filepath.Join(root, rel, "io.pressure"), "some avg10=0 total=0\nfull avg10=0 total="+strconv.Itoa(us)+"\n")
+	}
+	for _, rel := range leaves {
+		writeFile(t, filepath.Join(root, rel, "cgroup.procs"), "1\n")
+		writeFile(t, filepath.Join(root, rel, "memory.pressure"), "some avg10=0 total=0\nfull avg10=0 total=0\n")
+		writeFile(t, filepath.Join(root, rel, "io.max"), "259:0 rbps=30000000 wbps=max riops=max wiops=max\n")
+		full(rel, 0)
+	}
+	r := newCgroupReader(root, []string{"259:0"})
+	defer r.close()
+	now := time.Now()
+	if _, err := r.read(&Step{At: now}); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range leaves {
+		full(rel, 1000)
+	}
+	if _, err := r.read(&Step{At: now.Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.capFiles) != 3 {
+		t.Fatalf("открыты io.max листьев: %v", r.capFiles)
+	}
+	time.Sleep(10 * time.Millisecond) // время папки u.slice сменится
+	for _, rel := range leaves[1:] {
+		if err := os.RemoveAll(filepath.Join(root, rel)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := r.read(&Step{At: now.Add(2 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.capFiles) != 1 || r.capFiles[leaves[0]] == nil {
+		t.Fatalf("после ухода двух листьев: %v", r.capFiles)
 	}
 }

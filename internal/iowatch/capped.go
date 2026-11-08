@@ -151,19 +151,29 @@ const (
 // Упор — по каждой записи отдельно: сумма листьев под одним потолком за запись не ниже capRateShare предела
 // в ограниченном направлении. Простой записи без упора (предел записи при простое чтения, последняя секунда
 // чтения, снятый потолок) потолком не оправдан и считается простоем вне потолка.
+//
+// Не видит (известные пределы): потолок на самом интерфейсе (его ожидание — тоже «под потолком»; на 08.11 число в
+// io.max есть только у agents-evals.slice) и ожидание блокировки ФС, которую держит придержанный писатель, — оно не
+// в PSI io full ждущего. Срезы интерфейса (guiwatch) детектор не сверяет.
 func cappedWait(details []Step, start, end time.Time, detail time.Duration, durMS, busyMS int64) (capped bool, outside int64, who []Ranked) {
 	type owner struct{ rd, wr, rios, wios, idleUS int64 }
-	sec := detail.Seconds()
-	atCap := func(sum, limit int64) bool { return limit > 0 && float64(sum)/sec >= capRateShare*float64(limit) }
 	outsideUS := map[string]int64{}
 	byName := map[string]int64{}
 	var totalUS, cappedUS int64
 	owners := map[Cap]*owner{}
 	for i := range details {
 		d := &details[i]
-		if !d.At.After(start) || !d.At.Before(end.Add(detail)) {
-			continue // запись покрывает (At − detail, At]: с случаем не пересекается
+		// Запись — дельта с прошлого прохода: медленный проход (тикер пропустил такты) покрывает несколько секунд,
+		// и скорость — байты за весь этот промежуток. Первая запись окна — за номинальный detail.
+		interval := detail
+		if i > 0 {
+			interval = max(detail, d.At.Sub(details[i-1].At))
 		}
+		if !d.At.After(start) || !d.At.Add(-interval).Before(end) {
+			continue // запись покрывает (At − interval, At]: с случаем не пересекается
+		}
+		sec := interval.Seconds()
+		atCap := func(sum, limit int64) bool { return limit > 0 && float64(sum)/sec >= capRateShare*float64(limit) }
 		clear(owners)
 		for j := range d.Cgroups {
 			g := &d.Cgroups[j]
