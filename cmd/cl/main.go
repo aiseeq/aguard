@@ -69,6 +69,7 @@ func main() {
 	}
 	pre := sessionFlags(home)
 	l.name = nameArg(args)
+	l.dir = cwd
 	if l.upgraded != nil {
 		l.name = l.upgraded.Name
 	} else if name := names.For(cwd, home, table); name != "" && l.name == "" {

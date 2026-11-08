@@ -25,13 +25,16 @@ const testCheck = time.Second
 // Перезапуск в режиме act целиком: первая проверка (через testCheck) получает от aguard
 // «перезапустить», cl шлёт SIGTERM и поднимает claude снова с флагами сессии (dafd514: --allowedTools тоже), именем
 // из ответа, повторяемыми аргументами пользователя, --resume и строкой роли перезапуска; код выхода второго запуска —
-// код cl. systemd-run подменён: первый запуск ждёт сигнала, второй записывает аргументы и выходит с кодом 3.
+// код cl. Файл настроек роли (settings по папке сессии) — `--settings` в обоих запусках. systemd-run подменён: первый
+// запуск ждёт сигнала, второй записывает аргументы и выходит с кодом 3.
 func TestSuperviseRestart(t *testing.T) {
 	w := newWorld(t)
 	d := w.dir
+	settings := filepath.Join(d, "role.json")
+	write(t, settings, `{"permissions":{"deny":["Artifact"]}}`)
 	write(t, filepath.Join(d, "config.json"), `{"restart":{"mode":"act","check_seconds":10,`+
 		`"journal":"`+filepath.Join(d, "restart.log")+`","resume_dir":"`+filepath.Join(d, "restart")+`"},`+
-		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"always"}]}`)
+		`"roles":[{"names":["x-*"],"text":"Роль ({why}).","on_start":"always","settings":[{"dirs":["`+d+`"],"file":"`+settings+`"}]}]}`)
 	// Нет перезапуска — sleep выходит сам через 25 с, и тест падает на отсутствии второго запуска, а не висит.
 	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
 		`if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; exit 3; fi
@@ -41,7 +44,7 @@ exec sleep 25`)
 	socket := fakeAguard(t, `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",`+
 		`"running":"2.1.309","installed":"2.1.310","crons":true}`) // таймеры есть — реплики всё равно нет: --resume их вернёт
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"), name: "x-master",
-		aguard: socket, check: testCheck}
+		dir: filepath.Join(d, "proj"), aguard: socket, check: testCheck}
 
 	code := l.supervise(append(sessionFlags(d), "-n", "x-master"), []string{"--model", "opus", "--effort=high"})
 	if code != 3 {
@@ -50,12 +53,12 @@ exec sleep 25`)
 	unit := "--unit=agent-x-master-" + strconv.Itoa(os.Getpid())
 	scope := []string{"--user", "--scope", "--quiet", "--collect", "--slice=agents.slice", "--property=IOAccounting=yes"}
 	// Свои аргументы — строки роли при старте нет (bare).
-	first := append(append(slices.Clone(scope), unit, "--", w.claude),
+	first := append(append(slices.Clone(scope), unit, "--", w.claude), "--settings", settings,
 		"--dangerously-skip-permissions", "--allowedTools=Grep,Glob", "-n", "x-master", "--model", "opus", "--effort=high")
 	if got := readLines(t, filepath.Join(d, "run1")); !slices.Equal(got, first) {
 		t.Errorf("первый запуск:\n%q\nwant\n%q", got, first)
 	}
-	second := append(append(slices.Clone(scope), unit+"-r1", "--", w.claude),
+	second := append(append(slices.Clone(scope), unit+"-r1", "--", w.claude), "--settings", settings,
 		"--dangerously-skip-permissions", "--allowedTools=Grep,Glob", "-n", "x-master", "--model", "opus", "--effort=high",
 		"--resume", "s1")
 	if _, err := os.Stat(filepath.Join(d, "run2")); err != nil {
@@ -365,5 +368,57 @@ func TestTypeOutcomeRecreate(t *testing.T) {
 	}
 	if journal := strings.Join(readLines(t, cfg.Restart.Journal), "\n"); !strings.Contains(journal, "набрал заново таймеры перед перезапуском ради версии") {
 		t.Errorf("журнал: %s", journal)
+	}
+}
+
+// Флаги роли при подъёме: файл настроек роли — `--settings <файл>` впереди аргументов, вместе с промптом; роль без
+// settings — аргументы прежние; нет файла, в нём не объект JSON или свой --settings в аргументах — без файла роли,
+// строка в журнал cl.
+func TestWithRoleFlags(t *testing.T) {
+	d := t.TempDir()
+	good, notObject := filepath.Join(d, "role.json"), filepath.Join(d, "list.json")
+	write(t, good, `{"permissions":{"deny":["Artifact"]}}`)
+	write(t, notObject, `["Artifact"]`)
+	journalFile := filepath.Join(d, "restart.log")
+	config := func(file string) {
+		write(t, filepath.Join(d, "config.json"), `{"restart":{"journal":"`+journalFile+`"},"roles":[`+
+			`{"names":["x-master"],"prompt":"Ты {name}.","settings":[{"dirs":["`+d+`"],"file":"`+file+`"}]},`+
+			`{"names":["y-master"],"prompt":"Ты {name}."}]}`)
+	}
+	l := launcher{home: d, configFile: filepath.Join(d, "config.json"), dir: filepath.Join(d, "proj")}
+	args := []string{"-n", "x-master", "--resume", "s1"}
+
+	config(good)
+	want := append([]string{"--settings", good, "--append-system-prompt", "Ты x-master."}, args...)
+	if got := l.withRoleFlags(slices.Clone(args), "x-master"); !slices.Equal(got, want) {
+		t.Errorf("роль с settings:\n%q\nwant\n%q", got, want)
+	}
+	if got := l.withRoleFlags(slices.Clone(args), "y-master"); !slices.Equal(got, append([]string{"--append-system-prompt", "Ты y-master."}, args...)) {
+		t.Errorf("роль без settings — только промпт: %q", got)
+	}
+	other := launcher{home: d, configFile: l.configFile, dir: "/elsewhere"}
+	if got := other.withRoleFlags(slices.Clone(args), "x-master"); slices.Contains(got, "--settings") {
+		t.Errorf("папка не подходит — без файла: %q", got)
+	}
+	if _, err := os.Stat(journalFile); err == nil {
+		t.Errorf("без сбоев журнал пуст: %q", readLines(t, journalFile))
+	}
+
+	own := append(slices.Clone(args), "--settings=/own.json")
+	if got := l.withRoleFlags(slices.Clone(own), "x-master"); !slices.Equal(got, append([]string{"--append-system-prompt", "Ты x-master."}, own...)) {
+		t.Errorf("свой --settings — файл роли не добавляется: %q", got)
+	}
+	for _, file := range []string{filepath.Join(d, "missing.json"), notObject} {
+		config(file)
+		if got := l.withRoleFlags(slices.Clone(args), "x-master"); !slices.Equal(got, append([]string{"--append-system-prompt", "Ты x-master."}, args...)) {
+			t.Errorf("%s — подъём без файла роли: %q", file, got)
+		}
+	}
+	text := strings.Join(readLines(t, journalFile), "\n")
+	for _, s := range []string{"свой --settings в аргументах — файл роли " + good + " не добавляю",
+		"missing.json: no such file or directory — поднимаю без файла настроек роли", "list.json: не объект JSON"} {
+		if !strings.Contains(text, s) {
+			t.Errorf("в журнале нет %q:\n%s", s, text)
+		}
 	}
 }

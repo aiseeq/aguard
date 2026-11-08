@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,8 @@ type launcher struct {
 	aguard string
 	// name — имя, которое дал cl (или пользователь через -n); после перезапуска — имя из реестра Claude Code.
 	name string
+	// dir — папка сессии (cwd cl, его наследует claude): по ней роль выбирает файл настроек (settings).
+	dir string
 	// console — claude под pty cl (restart.pty_names); nil — claude получает терминал cl напрямую.
 	console *console
 	// selfExe — ссылка на свой бинарник (/proc/self/exe), exec — syscall.Exec: подхват нового cl (upgrade.go);
@@ -170,7 +173,7 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 	if err != nil {
 		journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: %v — журнал по умолчанию", out.name, err))
 	}
-	args := l.withRolePrompt(append(append(sessionFlags(l.home), keep...), "-p", "--resume", out.sessionID, "/compact"), out.name)
+	args := l.withRoleFlags(append(append(sessionFlags(l.home), keep...), "-p", "--resume", out.sessionID, "/compact"), out.name)
 	cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, out.name, unit, args)[1:]...)
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output
@@ -208,21 +211,62 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 	}
 }
 
-// withRolePrompt добавляет Prompt роли флагом --append-system-prompt — при каждом подъёме: старт, перезапуск, сжатие,
-// сброс. Claude Code записывает системный промпт на первом запросе беседы и при --resume отдаёт записанный, пока
-// беседу не сожмут (--system-prompt-snapshot, по умолчанию on, claude --help 2.1.311): флаг без подъёма-другого
-// потерялся бы на ближайшем сжатии. Свой флаг системного промпта в аргументах или роли нет — аргументы как есть.
-func (l launcher) withRolePrompt(args []string, name string) []string {
+// withRoleFlags добавляет флаги роли при каждом подъёме: старт, перезапуск, сжатие, сброс. Prompt — флагом
+// --append-system-prompt: Claude Code записывает системный промпт на первом запросе беседы и при --resume отдаёт
+// записанный, пока беседу не сожмут (--system-prompt-snapshot, по умолчанию on, claude --help 2.1.311), и флаг без
+// подъёма-другого потерялся бы на ближайшем сжатии. Свой флаг системного промпта в аргументах или роли нет — промпта
+// нет. Файл настроек — флагом --settings (settingsFlags).
+func (l launcher) withRoleFlags(args []string, name string) []string {
 	cfg, err := loadConfig(l.configFile, l.home)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cl: роль:", err)
 		return args
 	}
-	text := cfg.systemPrompt(name)
-	if text == "" || slices.ContainsFunc(args, promptFlag) {
-		return args
+	pre := l.settingsFlags(cfg, args, name)
+	if text := cfg.systemPrompt(name); text != "" && !slices.ContainsFunc(args, promptFlag) {
+		pre = append(pre, "--append-system-prompt", text)
 	}
-	return append([]string{"--append-system-prompt", text}, args...)
+	return append(pre, args...)
+}
+
+// settingsFlags — `--settings <файл>` роли сессии name по папке сессии. Файла нет или в нём не объект JSON — сессия
+// поднимается без него, ошибка в журнал cl и stderr: без файла роль лишь видит лишний инструмент или скилл, а
+// отказ в подъёме оставил бы консоль мёртвой до человека. Свой --settings в аргументах — файл роли не добавляется
+// (строка в журнал): Claude Code берёт один --settings на запуск (проба 08.11, README), и второй вытеснил бы первый.
+func (l launcher) settingsFlags(cfg config, args []string, name string) []string {
+	file := cfg.settingsFile(name, l.dir)
+	if file == "" {
+		return nil
+	}
+	if slices.ContainsFunc(args, settingsFlag) {
+		journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: свой --settings в аргументах — файл роли %s не добавляю", name, file))
+		return nil
+	}
+	if err := settingsObject(file); err != nil {
+		fmt.Fprintln(os.Stderr, "cl: настройки роли:", err)
+		journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: %v — поднимаю без файла настроек роли", name, err))
+		return nil
+	}
+	return []string{"--settings", file}
+}
+
+// settingsObject — файл читается и в нём объект JSON.
+func settingsObject(file string) error {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return fmt.Errorf("файл настроек роли: %w", err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &obj); err != nil {
+		return fmt.Errorf("файл настроек роли %s: не объект JSON: %w", file, err)
+	}
+	return nil
+}
+
+// settingsFlag — флаг --settings (с значением через = или следующим аргументом).
+func settingsFlag(arg string) bool {
+	flag, _, _ := strings.Cut(arg, "=")
+	return flag == "--settings"
 }
 
 // promptFlag — флаг системного промпта Claude Code (с значением через = или следующим аргументом).
@@ -290,7 +334,7 @@ func (l launcher) start(n int, args []string) (*os.Process, func(), error) {
 	if n > 0 {
 		unit += "-r" + strconv.Itoa(n)
 	}
-	cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, l.name, unit, l.withRolePrompt(args, l.name))[1:]...)
+	cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, l.name, unit, l.withRoleFlags(args, l.name))[1:]...)
 	finish, err := l.launch(cmd)
 	if err != nil {
 		return nil, nil, fmt.Errorf("запуск claude: %w", err)

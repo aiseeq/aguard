@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -81,6 +82,16 @@ type role struct {
 	OnStart string `json:"on_start"`
 	// Prompt — кто эта сессия, системным промптом при каждом подъёме (--append-system-prompt); {name} — имя сессии.
 	Prompt string `json:"prompt"`
+	// Settings — файл настроек Claude Code (--settings) при каждом подъёме, по папке сессии: первый вариант, к папке
+	// которого подходит папка сессии; пусто — без файла. Мастера ~/git и ~/work — одна роль с разными файлами
+	// (тикет cl-role-settings, пользователь 08.11: Artifact только у админов, чужие скиллы скрыть).
+	Settings []roleSettings `json:"settings"`
+}
+
+// roleSettings — файл настроек роли для сессий в папках Dirs (сама папка или вложенная); Dirs пусто — любая папка.
+type roleSettings struct {
+	Dirs []string `json:"dirs"`
+	File string   `json:"file"`
 }
 
 // defaultConfig — без файла: только журнал, без строк ролей.
@@ -122,6 +133,18 @@ func loadConfig(file, home string) (config, error) {
 	}
 	cfg.Restart.Journal = names.Expand(cfg.Restart.Journal, home)
 	cfg.Restart.ResumeDir = names.Expand(cfg.Restart.ResumeDir, home)
+	for i := range cfg.Roles {
+		for j := range cfg.Roles[i].Settings {
+			s := &cfg.Roles[i].Settings[j]
+			if s.File == "" {
+				return defaultConfig(home), fmt.Errorf("конфиг cl %s: роль %v, settings[%d] без file", file, cfg.Roles[i].Names, j)
+			}
+			s.File = names.Expand(s.File, home)
+			for k := range s.Dirs {
+				s.Dirs[k] = names.Expand(s.Dirs[k], home)
+			}
+		}
+	}
 	return cfg, nil
 }
 
@@ -158,6 +181,28 @@ func (c config) roleFor(name string) (role, bool) {
 		}
 	}
 	return role{}, false
+}
+
+// settingsFile — файл настроек роли сессии name в папке dir: первый вариант, к папкам которого подходит dir; роли или
+// подходящего варианта нет — пусто.
+func (c config) settingsFile(name, dir string) string {
+	r, ok := c.roleFor(name)
+	if !ok {
+		return ""
+	}
+	dir = filepath.Clean(dir)
+	for _, s := range r.Settings {
+		if len(s.Dirs) == 0 || slices.ContainsFunc(s.Dirs, func(d string) bool { return within(dir, d) }) {
+			return s.File
+		}
+	}
+	return ""
+}
+
+// within — dir это root или папка внутри него.
+func within(dir, root string) bool {
+	root = filepath.Clean(root)
+	return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
 }
 
 // roleLine — первая реплика сессии при старте и после сброса (event — eventStart или eventReset): строка роли и файл

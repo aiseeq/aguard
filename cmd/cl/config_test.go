@@ -131,6 +131,18 @@ func TestRepoConfig(t *testing.T) {
 	if !matchAny(cfg.Restart.LiveUpgradeNames, "demu-master") { // всем с 30.10 (1dae51b)
 		t.Errorf("живое обновление cl: %q", cfg.Restart.LiveUpgradeNames)
 	}
+	// Файлы настроек ролей (тикет cl-role-settings): Artifact только у админов, скиллы ~/work скрыты вне ~/work.
+	for _, c := range []struct{ name, dir, want string }{
+		{"lead", "/home/u", "/home/u/.config/cl/settings/no-artifact.json"},
+		{"shop-master", "/home/u/work/shop", "/home/u/.config/cl/settings/no-artifact.json"},
+		{"demu-master", "/home/u/git/demu", "/home/u/.config/cl/settings/git-master.json"},
+		{"git-admin", "/home/u/git", "/home/u/.config/cl/settings/git-admin.json"},
+		{"work-admin", "/home/u/work", ""},
+	} {
+		if got := cfg.settingsFile(c.name, c.dir); got != c.want {
+			t.Errorf("настройки %s в %s: %q, want %q", c.name, c.dir, got, c.want)
+		}
+	}
 	for _, name := range []string{"lead", "work-admin", "git-admin", "demu-master"} {
 		if p := cfg.systemPrompt(name); !strings.Contains(p, "/home/u/.claude/restart/<") || !strings.Contains(p, "/"+name+".md") {
 			t.Errorf("промпт %s без пути возобновления: %q", name, p)
@@ -186,5 +198,35 @@ func TestWhyText(t *testing.T) {
 	}
 	if got := whyText(eventReset, "2.1.311", at.UTC()); got != "cl начал новую беседу в 02:48 вместо простаивавшей; Claude Code 2.1.311" {
 		t.Errorf("сброс (время местное): %q", got)
+	}
+}
+
+// Файл настроек роли — по папке сессии: первый вариант, к папкам которого она подходит (сама папка или вложенная),
+// вариант без dirs — любая папка; ~ раскрывается; вариант без file — ошибка конфига.
+func TestRoleSettings(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.json")
+	write(t, file, `{"roles":[{"names":["*-master"],"settings":[{"dirs":["~/work"],"file":"~/s/work.json"},{"file":"/s/git.json"}]},`+
+		`{"names":["lead"],"settings":[{"file":"~/s/lead.json"}]},{"names":["work-admin"]}]}`)
+	cfg, err := loadConfig(file, "/home/u")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ name, dir, want string }{
+		{"shop-master", "/home/u/work/shop", "/home/u/s/work.json"},
+		{"shop-master", "/home/u/work", "/home/u/s/work.json"},
+		{"shop-master", "/home/u/work/shop/", "/home/u/s/work.json"},
+		{"aguard-master", "/home/u/git/aguard", "/s/git.json"},
+		{"x-master", "/home/u/workshop", "/s/git.json"}, // не ~/work: только целое имя папки
+		{"lead", "/home/u", "/home/u/s/lead.json"},
+		{"work-admin", "/home/u/work", ""},
+		{"nobody", "/home/u/work", ""},
+	} {
+		if got := cfg.settingsFile(c.name, c.dir); got != c.want {
+			t.Errorf("%s в %s: %q, want %q", c.name, c.dir, got, c.want)
+		}
+	}
+	write(t, file, `{"roles":[{"names":["lead"],"settings":[{"dirs":["~"]}]}]}`)
+	if _, err := loadConfig(file, "/home/u"); err == nil || !strings.Contains(err.Error(), "без file") {
+		t.Errorf("вариант без file — ошибка конфига: %v", err)
 	}
 }

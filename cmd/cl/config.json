@@ -20,7 +20,8 @@
       ],
       "text": "Ты лид ({why}): старт роли по скиллу coordinator.",
       "on_start": "always",
-      "prompt": "Ты лид (сессия {name}, пространство ~): роль — скилл coordinator."
+      "prompt": "Ты лид (сессия {name}, пространство ~): роль — скилл coordinator.",
+      "settings": [{"file": "~/.config/cl/settings/no-artifact.json"}]
     },
     {
       "names": [
@@ -36,7 +37,8 @@
       ],
       "text": "Ты git-admin, админ пространства ~/git ({why}): правила админа — скилл work-supervisor, продолжай по своей роли.",
       "on_start": "always",
-      "prompt": "Ты git-admin (сессия {name}), админ пространства ~/git: правила админа — скилл work-supervisor."
+      "prompt": "Ты git-admin (сессия {name}), админ пространства ~/git: правила админа — скилл work-supervisor.",
+      "settings": [{"file": "~/.config/cl/settings/git-admin.json"}]
     },
     {
       "names": [
@@ -45,7 +47,11 @@
       ],
       "text": "Ты мастер проекта ({why}): продолжай по своей роли.",
       "on_start": "resume_file",
-      "prompt": "Ты мастер проекта в этой папке (сессия {name})."
+      "prompt": "Ты мастер проекта в этой папке (сессия {name}).",
+      "settings": [
+        {"dirs": ["~/work"], "file": "~/.config/cl/settings/no-artifact.json"},
+        {"file": "~/.config/cl/settings/git-master.json"}
+      ]
     }
   ],
   "resume_text": "Файл возобновления: {path}.",
