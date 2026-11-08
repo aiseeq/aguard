@@ -80,7 +80,7 @@ func TestProbe(t *testing.T) {
 	idle := allowance{idle: time.Minute}
 	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 20 * time.Minute})
 	w.link(t, 4242)
-	f := probe(w.p, &scanCache{}, 4242, now)
+	f := probe(w.p, &scanCache{}, 4242, now, false)
 	if len(f.Errors) > 0 || f.Name != "x-master" || f.SessionID != "s1" || f.Running != "2.1.309" || f.Installed != "2.1.310" ||
 		f.HookState != "done" || f.HookTasks || len(f.Children) != 0 {
 		t.Fatalf("probe = %+v", f)
@@ -98,7 +98,7 @@ func TestProbeDraftAfterTurn(t *testing.T) {
 	now := time.Now()
 	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 5 * time.Minute})
 	w.link(t, 4242)
-	f := probe(w.p, &scanCache{}, 4242, now)
+	f := probe(w.p, &scanCache{}, 4242, now, false)
 	if v := decide(f, allowance{idle: time.Minute}); !v.Restart {
 		t.Errorf("ввод 5 мин назад после хода 10 мин назад при пустом поле — фокус вкладки: %+v (facts %+v)", v, f)
 	}
@@ -115,7 +115,7 @@ func TestProbeBusy(t *testing.T) {
 		use(now.Add(-30*time.Minute).UTC().Format(time.RFC3339Nano), "t1", "AskUserQuestion", `{}`))
 	w.link(t, 4242)
 	write(t, filepath.Join(w.p.proc, "4243", "stat"), "4243 (bash) S 4242 4243 4243 0")
-	f := probe(w.p, &scanCache{}, 4242, now)
+	f := probe(w.p, &scanCache{}, 4242, now, false)
 	if !slices.Equal(f.Children, []string{"4243 bash"}) || !slices.Equal(f.Transcript.Pending, []string{"AskUserQuestion t1"}) {
 		t.Fatalf("Children %q Pending %q", f.Children, f.Transcript.Pending)
 	}
@@ -133,10 +133,10 @@ func TestProbeFreshAndMissing(t *testing.T) {
 	if err := os.RemoveAll(w.p.projects); err != nil {
 		t.Fatal(err)
 	}
-	if f := probe(w.p, &scanCache{}, 4242, now); len(f.Errors) > 0 || !decide(f, allowance{}).Fresh {
+	if f := probe(w.p, &scanCache{}, 4242, now, false); len(f.Errors) > 0 || !decide(f, allowance{}).Fresh {
 		t.Errorf("свежая версия: %+v", f)
 	}
-	if f := probe(w.p, &scanCache{}, 7, now); len(f.Errors) != 1 || decide(f, allowance{}).Restart {
+	if f := probe(w.p, &scanCache{}, 7, now, false); len(f.Errors) != 1 || decide(f, allowance{}).Restart {
 		t.Errorf("нет записи реестра: %+v", f)
 	}
 }
@@ -287,7 +287,7 @@ func TestProbeSuggestion(t *testing.T) {
 		w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: c.ttyAgo}, c.rec)
 		w.p.prompt = func(int) (screen.Prompt, error) { return screen.Draft, nil }
 		w.link(t, 4242)
-		f := probe(w.p, &scanCache{}, 4242, now)
+		f := probe(w.p, &scanCache{}, 4242, now, false)
 		if len(f.Errors) > 0 || f.Suggestion != c.want {
 			t.Errorf("%s: Suggestion %v, want %v (errors %q)", name, f.Suggestion, c.want, f.Errors)
 			continue

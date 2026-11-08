@@ -128,7 +128,7 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	}
 	c := j.cache(req.Pid, now)
 	c.mu.Lock()
-	f := probe(j.pathsOf(cfg), &c.scan, req.Pid, now)
+	f := probe(j.pathsOf(cfg), &c.scan, req.Pid, now, req.Stale != "")
 	c.mu.Unlock()
 	f.cleanField(req.Clean)
 	name := firstNonEmpty(f.Name, req.Name)

@@ -133,3 +133,23 @@ func TestAnswerJSONRoundTrip(t *testing.T) {
 		t.Errorf("%s → %+v, %v", data, out, err)
 	}
 }
+
+// Judge целиком: stale вопроса доходит до решения — версия свежая, без stale Fresh, со stale простаивающая сессия
+// получает перезапуск ради аргументов (args_stale).
+func TestAnswerStale(t *testing.T) {
+	now := time.Now()
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 20 * time.Minute, ttyAgo: 30 * time.Minute})
+	w.setRunning(t, "2.1.310")
+	w.link(t, 4243)
+	cfg, cc := Default(t.TempDir(), t.TempDir()), DefaultCompact()
+	j := NewJudge(t.TempDir())
+	j.paths = &w.p
+	// Сначала stale: вопрос читает терминал, и его atime у второго вопроса был бы свежим.
+	stale := "файл настроек роли: нет → /x.json"
+	if a := j.Answer(&cfg, &cc, Request{V: Version, Pid: 4243, Stale: stale}, now); a.Fresh || !a.Restart || !a.ArgsStale || a.Stale != stale {
+		t.Errorf("stale в простое — перезапуск ради аргументов: %+v, stale %q", a.Verdict, a.Stale)
+	}
+	if a := j.Answer(&cfg, &cc, Request{V: Version, Pid: 4243}, now); !a.Fresh || a.Restart {
+		t.Errorf("свежая версия без stale: %+v", a.Verdict)
+	}
+}

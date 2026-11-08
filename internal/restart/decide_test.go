@@ -246,6 +246,11 @@ func TestDecideStale(t *testing.T) {
 		t.Errorf("stale, но только что работала — против: %+v", v)
 	}
 	f = idleFacts()
+	f.Running = "непонятная"
+	if v := decide(f, stale); v.Restart || !slices.Contains(codes(v), "version") {
+		t.Errorf("версия не разобралась — против и при stale: %+v", v)
+	}
+	f = idleFacts()
 	if v := decide(f, stale); !v.Restart || v.ArgsStale {
 		t.Errorf("версия и так старая — перезапуск ради версии: %+v", v)
 	}

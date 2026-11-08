@@ -451,8 +451,11 @@ func TestStaleSettings(t *testing.T) {
 		{nil, "файл настроек роли: нет → " + good},
 		{[]string{"--settings", "/other.json", "-n", "x"}, "файл настроек роли: /other.json → " + good},
 		{[]string{"--settings", good}, ""},
-		{[]string{"--settings=" + filepath.Join(d, ".", "role.json")}, ""},
+		{[]string{"--settings=" + d + "/./role.json"}, ""},
+		{[]string{"--settings", d + "//role.json"}, ""},
 		{[]string{"--settings", "/other.json", "--settings", good}, ""}, // Claude Code берёт последний
+		{[]string{"--settings=/other.json", "--settings=" + good}, ""},
+		{[]string{"--settings=" + good, "--settings=/other.json"}, "файл настроек роли: /other.json → " + good},
 	} {
 		cmdline(c.running...)
 		if got, err := l.staleSettings(cfg, 7, nil); err != nil || got != c.want {
@@ -483,6 +486,35 @@ func TestStaleSettings(t *testing.T) {
 	if _, err := l.staleSettings(cfg, 8, nil); err == nil {
 		t.Error("cmdline не прочиталась — ошибка")
 	}
+
+	// staleAsk: ошибка сверки — не судить и строка в журнал один раз; то же расхождение, ради которого перезапускали, —
+	// не просить (строка один раз); другое — просить.
+	journalFile := filepath.Join(d, "restart.log")
+	cfg.Restart.Journal = journalFile
+	key := ""
+	for range 2 {
+		var got string
+		if got, key = l.staleAsk(cfg, 8, nil, "", key); got != "" {
+			t.Errorf("ошибка сверки — не судить: %q", got)
+		}
+	}
+	cmdline()
+	want := "файл настроек роли: нет → " + good
+	for range 2 {
+		var got string
+		if got, key = l.staleAsk(cfg, 7, nil, want, key); got != "" {
+			t.Errorf("то же расхождение после перезапуска ради него — не просить: %q", got)
+		}
+	}
+	if got, _ := l.staleAsk(cfg, 7, nil, "файл настроек роли: нет → /old.json", key); got != want {
+		t.Errorf("другое расхождение — просить: %q", got)
+	}
+	text := strings.Join(readLines(t, journalFile), "\n")
+	for _, s := range []string{"— о файле настроек роли не сужу", "и после перезапуска ради него — больше не прошу"} {
+		if n := strings.Count(text, s); n != 1 {
+			t.Errorf("%q в журнале %d раз, want 1:\n%s", s, n, text)
+		}
+	}
 }
 
 // Перезапуск ради файла настроек роли целиком: у живого claude --settings нет, роль его кладёт — cl спрашивает aguard
@@ -498,9 +530,10 @@ func TestSuperviseStaleSettings(t *testing.T) {
 		`"journal":"`+journalFile+`","resume_dir":"`+filepath.Join(d, "restart")+`"},`+
 		`"roles":[{"names":["x-*"],"settings":[{"dirs":["`+d+`"],"file":"`+settings+`"}]}]}`)
 	run := fakeTool(t, filepath.Join(d, "bin"), "systemd-run", "D='"+d+"'\n"+
-		`if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; exec sleep 4; fi
+		`if [ -e "$D/run2" ]; then printf '%s\n' "$@" > "$D/run3"; exit 9; fi
+if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; exec sleep 4; fi
 printf '%s\n' "$@" > "$D/run1"
-exec sleep 25`)
+exec sleep 25`) // третий запуск — петля: cl выходит с кодом 9, тест не висит
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
 	var mu sync.Mutex
 	stalePids := map[int]string{}
@@ -532,6 +565,12 @@ exec sleep 25`)
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if _, err := os.Stat(filepath.Join(d, "run3")); err == nil {
+		t.Errorf("третий запуск — петля перезапусков; журнал:\n%s", journalText)
+	}
+	if n := strings.Count(journalText, "больше не прошу"); n != 1 {
+		t.Errorf("строка петли %d раз, want 1:\n%s", n, journalText)
+	}
 	if len(stalePids) != 1 || len(asked) != 2 {
 		t.Errorf("stale — только у первого процесса из двух: stale %v, спрошены %v", stalePids, asked)
 	}

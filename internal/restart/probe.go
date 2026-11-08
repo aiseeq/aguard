@@ -125,9 +125,10 @@ func readSession(dir string, pid int) (session.Info, error) {
 	return *in, nil
 }
 
-// probe собирает сведения о сессии процесса pid; cache — прошлый разбор транскрипта этой сессии. Версия свежая —
-// дальше не смотрит: перезапускать незачем.
-func probe(p paths, cache *scanCache, pid int, now time.Time) facts {
+// probe собирает сведения о сессии процесса pid; cache — прошлый разбор транскрипта этой сессии. Версия свежая и не
+// stale — дальше не смотрит: перезапускать незачем. stale — у процесса устарели аргументы (Request.Stale): состояние
+// нужно и при свежей версии, иначе decide видел бы нулевую тишину и пустой экран и всегда был бы против.
+func probe(p paths, cache *scanCache, pid int, now time.Time, stale bool) facts {
 	var f facts
 	fail := func(err error) {
 		f.Errors = append(f.Errors, err.Error())
@@ -152,7 +153,7 @@ func probe(p paths, cache *scanCache, pid int, now time.Time) facts {
 		fail(err)
 		return f
 	}
-	if !old {
+	if !old && !stale {
 		return f
 	}
 	state(p, cache, pid, now, &f)
