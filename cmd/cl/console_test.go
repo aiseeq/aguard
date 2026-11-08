@@ -189,14 +189,12 @@ func TestTypeIntoHumanTyping(t *testing.T) {
 	}
 }
 
-// Набор без консоли (ошибка cl: typed ставит только wantIdle при открытой консоли) — строка в журнал и ошибка, не
-// паника (881bc86).
+// Набор без консоли (ошибка cl: typed ставит только wantIdle при открытой консоли) — строка в журнал, не паника
+// (881bc86).
 func TestTypeIntoNoConsole(t *testing.T) {
 	cfg := defaultConfig(t.TempDir())
 	cfg.Restart.Journal = t.TempDir() + "/restart.log"
-	if err := (launcher{}).typeInto(cfg, time.Now(), 7, outcome{name: "x-master", typed: "/compact"}); err == nil {
-		t.Error("набор без консоли — ошибка")
-	}
+	(launcher{}).typeInto(cfg, time.Now(), 7, outcome{name: "x-master", typed: "/compact"})
 	data, err := os.ReadFile(cfg.Restart.Journal)
 	if err != nil || !strings.Contains(string(data), "набор без консоли pty — не набираю") {
 		t.Errorf("журнал: %q %v", data, err)

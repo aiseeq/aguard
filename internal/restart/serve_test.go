@@ -9,7 +9,6 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -100,11 +99,11 @@ func TestAnswerUsesRequest(t *testing.T) {
 		return slices.ContainsFunc(rs, func(r Reason) bool { return r.Code == code })
 	}
 
-	if a := answer(Request{}); a.Recreate != "" || !held(a.Against, "crons") || !a.FieldEmpty {
-		t.Errorf("без pty: таймер держит, набирать некому, поле пусто: %+v", a)
-	}
-	if a := answer(Request{Typed: true}); !strings.Contains(a.Recreate, `cron "11 6 * * *"`) {
-		t.Errorf("под pty — команда набора таймера: %+v", a.Verdict)
+	for _, typed := range []bool{false, true} {
+		a := answer(Request{Typed: typed})
+		if held(a.Against, "crons") || len(a.Lost) != 1 || a.Lost[0].Cron != "11 6 * * *" || a.Lost[0].Prompt != "Дайджест" || !a.FieldEmpty {
+			t.Errorf("typed=%v: унаследованный таймер не держит, а уходит в lost; поле пусто: %+v", typed, a)
+		}
 	}
 
 	if a := answer(Request{Stale: "файл настроек роли: нет → /x.json"}); a.Stale != "файл настроек роли: нет → /x.json" {

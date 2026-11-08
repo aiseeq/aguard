@@ -45,7 +45,7 @@ type config struct {
 }
 
 // restartConfig — как cl перезапускает сессию на новую версию Claude Code; когда можно — решает aguard (его
-// [restart]: порог простоя, таймеры, которые роль ставит заново).
+// [restart]: порог простоя и прочие условия безопасного перезапуска).
 type restartConfig struct {
 	Mode         string `json:"mode"`
 	CheckSeconds int    `json:"check_seconds"`

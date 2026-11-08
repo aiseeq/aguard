@@ -71,15 +71,18 @@ func Typed(typed, sessionID string) string {
 	return fmt.Sprintf("набрал %s в беседе %s", typed, sessionID)
 }
 
-// RecreateTyped — набрал команду восстановления унаследованных таймеров перед перезапуском ради версии.
-func RecreateTyped(typed string) string {
-	return fmt.Sprintf("набрал заново таймеры перед перезапуском ради версии: %s", typed)
+// LostCron — таймер, унаследованный через /clear, перезапуск не вернёт: --resume поднимает только таймеры своей
+// беседы; cl даёт подъёму строку роли, свои таймеры роль ставит по ней. prompt — начало, одной строкой.
+func LostCron(id, cron, prompt string) string {
+	prompt = strings.Join(strings.Fields(prompt), " ")
+	if r := []rune(prompt); len(r) > lostPrompt {
+		prompt = string(r[:lostPrompt]) + "…"
+	}
+	return fmt.Sprintf("таймер прошлой беседы %s (%s, %q) после подъёма не вернётся — поднимаю со строкой роли", id, cron, prompt)
 }
 
-// RecreateFailed — повторная проверка показала, что набор таймеров не помог; до появления своих таймеров не перезапускать.
-func RecreateFailed() string {
-	return "набор таймеров не помог — перезапуск не делаю"
-}
+// lostPrompt — сколько знаков prompt таймера в строке журнала: узнать таймер, а не переписать его.
+const lostPrompt = 80
 
 // HumanTyping — не набрал: человек вводил quiet назад.
 func HumanTyping(quiet time.Duration) string {

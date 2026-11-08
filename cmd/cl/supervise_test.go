@@ -29,6 +29,18 @@ const testCheck = time.Second
 // код cl. Файл настроек роли (settings по папке сессии) — `--settings` в обоих запусках. systemd-run подменён: первый
 // запуск ждёт сигнала, второй записывает аргументы и выходит с кодом 3.
 func TestSuperviseRestart(t *testing.T) {
+	answer := `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",` +
+		`"running":"2.1.309","installed":"2.1.310","crons":true` // свои таймеры есть — реплики всё равно нет: --resume их вернёт
+	t.Run("свои таймеры", func(t *testing.T) { superviseRestart(t, answer+`}`, nil) })
+	// Унаследованные через /clear таймеры --resume не вернёт — подъём со строкой роли, как у старта cl руками.
+	t.Run("потерянные таймеры", func(t *testing.T) {
+		superviseRestart(t, answer+`,"lost":[{"id":"j1","cron":"47 1 * * *","prompt":"Сон","recurring":true}]}`,
+			[]string{"Роль (cl поднял сессию заново в ЧЧ:ММ на Claude Code 2.1.310)."})
+	})
+}
+
+// superviseRestart — перезапуск ради версии в act целиком: aguard отвечает answer, второй запуск — --resume s1 и line.
+func superviseRestart(t *testing.T, answer string, line []string) {
 	w := newWorld(t)
 	d := w.dir
 	settings := filepath.Join(d, "role.json")
@@ -42,8 +54,7 @@ func TestSuperviseRestart(t *testing.T) {
 printf '%s\n' "$@" > "$D/run1"
 exec sleep 25`)
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
-	socket := fakeAguard(t, `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",`+
-		`"running":"2.1.309","installed":"2.1.310","crons":true}`) // таймеры есть — реплики всё равно нет: --resume их вернёт
+	socket := fakeAguard(t, answer)
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"), name: "x-master",
 		dir: filepath.Join(d, "proj"), aguard: socket, check: testCheck}
 
@@ -59,9 +70,9 @@ exec sleep 25`)
 	if got := readLines(t, filepath.Join(d, "run1")); !slices.Equal(got, first) {
 		t.Errorf("первый запуск:\n%q\nwant\n%q", got, first)
 	}
-	second := append(append(slices.Clone(scope), unit+"-r1", "--", w.claude), "--settings", settings,
+	second := append(append(append(slices.Clone(scope), unit+"-r1", "--", w.claude), "--settings", settings,
 		"--dangerously-skip-permissions", "--allowedTools=Grep,Glob", "-n", "x-master", "--model", "opus", "--effort=high",
-		"--resume", "s1")
+		"--resume", "s1"), line...)
 	if _, err := os.Stat(filepath.Join(d, "run2")); err != nil {
 		t.Fatalf("второго запуска нет: %v; журнал:\n%s", err, strings.Join(readLines(t, filepath.Join(d, "restart.log")), "\n"))
 	}
@@ -305,31 +316,32 @@ func TestNext(t *testing.T) {
 	}
 }
 
-func TestNextTypesRecreate(t *testing.T) {
+// Перезапуск при таймерах, унаследованных через /clear: не набор, а подъём; каждый таймер — строкой журнала с началом
+// prompt одной строкой; без них — строк о таймерах нет (cl-drop-recreate).
+func TestNextLostCrons(t *testing.T) {
 	cfg := defaultConfig(t.TempDir())
 	cfg.Restart.Mode = modeAct
 	l := launcher{name: "x-master", console: &console{}}
-	text := `cl: перед перезапуском ради версии Claude Code поставь заново таймеры прошлой беседы — --resume их не вернёт: CronCreate cron "47 1 * * *" prompt "Сон" recurring true; CronCreate …. Потом удали старые CronDelete j1 (не выйдет — оставь). Больше ничего не делай.`
-	a := restart.Answer{Verdict: restart.Verdict{Against: []restart.Reason{{Code: "crons", Text: "таймеры прошлой беседы --resume не вернёт"}}, Recreate: text},
-		Key: "false,false,crons", SessionID: "s1", Name: "x-master"}
+	long := "Дайджест:\n" + strings.Repeat("я", 100)
+	lost := []restart.LostCron{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true}, {ID: "j2", Cron: "11 6 * * *", Prompt: long}}
+	a := restart.Answer{Verdict: restart.Verdict{Restart: true, Lost: lost}, Key: "true,false", SessionID: "s1", Name: "x-master", Installed: "2.1.320"}
 	now := time.Now()
-	if out, _ := l.next(cfg, now, 7, a, nil, journalKeys{}); out.typed != text || !out.recreate || out.restart {
-		t.Fatalf("команда восстановления не набрана: %+v", out)
+	out, _ := l.next(cfg, now, 7, a, nil, journalKeys{})
+	if !out.restart || out.typed != "" || !slices.Equal(out.lost, lost) || out.sessionID != "s1" {
+		t.Fatalf("подъём с потерянными таймерами: %+v", out)
 	}
-	if out, _ := l.next(cfg, now.Add(time.Minute), 7, a, nil, journalKeys{}); out.typed != "" || out.restart {
-		t.Fatalf("повтор в 30 минут не подавлен: %+v", out)
+	journal := strings.Join(readLines(t, cfg.Restart.Journal), "\n")
+	for _, want := range []string{`x-master pid=7: таймер прошлой беседы j1 (47 1 * * *, "Сон (скилл dream)") после подъёма не вернётся`,
+		`j2 (11 6 * * *, "Дайджест: ` + strings.Repeat("я", 70) + `…")`} {
+		if !strings.Contains(journal, want) {
+			t.Errorf("в журнале нет %q:\n%s", want, journal)
+		}
 	}
-	if journal := strings.Join(readLines(t, cfg.Restart.Journal), "\n"); strings.Contains(journal, "набор таймеров не помог") {
-		t.Errorf("через минуту сессия ещё может ставить таймеры, а журнал уже пишет «не помог»: %s", journal)
-	}
-	if out, _ := l.next(cfg, now.Add(recreateCheck), 7, a, nil, journalKeys{}); out.typed != "" || out.restart {
-		t.Fatalf("повтор в 30 минут не подавлен: %+v", out)
-	}
-	if journal := strings.Join(readLines(t, cfg.Restart.Journal), "\n"); !strings.Contains(journal, "набор таймеров не помог") {
-		t.Errorf("в журнале нет результата повтора: %s", journal)
-	}
-	if out, _ := l.next(cfg, now.Add(recreateRetry), 7, a, nil, journalKeys{}); out.typed != text {
-		t.Fatalf("через 30 минут набор не повторён: %+v", out)
+	cfg.Restart.Journal = filepath.Join(t.TempDir(), "restart.log")
+	a.Lost = nil
+	if out, _ := l.next(cfg, now, 7, a, nil, journalKeys{}); !out.restart || len(out.lost) != 0 ||
+		strings.Contains(strings.Join(readLines(t, cfg.Restart.Journal), "\n"), "таймер прошлой беседы") {
+		t.Errorf("без потерянных таймеров — без строк о них: %+v", out)
 	}
 }
 
@@ -340,40 +352,6 @@ func anyClock(args []string) []string {
 		args[i] = clock.ReplaceAllString(args[i], " в ЧЧ:ММ ")
 	}
 	return args
-}
-
-// Набор таймеров не удался — повтор не ждёт recreateRetry, следующий вопрос набирает снова; удался — в журнале
-// строка набора таймеров, не обычного набора (dce2d00).
-func TestTypeOutcomeRecreate(t *testing.T) {
-	cfg := defaultConfig(t.TempDir())
-	cfg.Restart.Mode = modeAct
-	c := &console{}
-	l := launcher{name: "x-master", console: c}
-	a := restart.Answer{Verdict: restart.Verdict{Against: []restart.Reason{{Code: "crons"}}, Recreate: "cl: поставь таймеры"},
-		Key: "false,crons", SessionID: "s1", Name: "x-master"}
-	now := time.Now()
-	out, _ := l.next(cfg, now, 7, a, nil, journalKeys{})
-	if !out.recreate {
-		t.Fatalf("набор таймеров: %+v", out)
-	}
-	l.typeOutcome(cfg, now, 7, out) // pty claude нет — набор не удался
-	if out, _ = l.next(cfg, now.Add(time.Minute), 7, a, nil, journalKeys{}); out.typed != a.Recreate {
-		t.Fatalf("набор не удался — следующий вопрос набирает снова: %+v", out)
-	}
-	pty := filepath.Join(t.TempDir(), "pty")
-	master, err := os.Create(pty)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = master.Close() })
-	c.master = master
-	l.typeOutcome(cfg, now.Add(time.Minute), 7, out)
-	if data, err := os.ReadFile(pty); err != nil || string(data) != a.Recreate+"\r" {
-		t.Errorf("в pty: %q %v", data, err)
-	}
-	if journal := strings.Join(readLines(t, cfg.Restart.Journal), "\n"); !strings.Contains(journal, "набрал заново таймеры перед перезапуском ради версии") {
-		t.Errorf("журнал: %s", journal)
-	}
 }
 
 // Флаги роли при подъёме: файл настроек роли — `--settings <файл>` впереди аргументов, вместе с промптом; роль без

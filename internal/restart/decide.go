@@ -2,7 +2,6 @@ package restart
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -27,8 +26,10 @@ func Texts(rs []Reason) []string {
 // Verdict — решение о перезапуске сессии и его доводы.
 type Verdict struct {
 	Restart bool `json:"restart"`
-	// Recreate — команда для набора унаследованных таймеров, когда это единственный довод против перезапуска.
-	Recreate string `json:"recreate,omitempty"`
+	// Lost — таймеры, унаследованные через /clear: --resume их не вернёт. Перезапуск они не держат: cl поднимает
+	// сессию со строкой роли (роль ставит свои таймеры сама) и пишет каждый в журнал (тикет cl-drop-recreate,
+	// пользователь 08.11: «вся эта инструкция либо вредна, либо бесполезна. Перезапуск cl сам бы выдал роль»).
+	Lost []LostCron `json:"lost,omitempty"`
 	// Fresh — версия процесса последняя и аргументы не устарели: перезапускать незачем, остальное не проверялось.
 	Fresh bool `json:"fresh"`
 	// ArgsStale — решалось ради устаревших аргументов запуска при свежей версии (Request.Stale).
@@ -112,21 +113,26 @@ func decide(f facts, p allowance) Verdict {
 	inputChecks(f, against)
 	workChecks(f, restart, against)
 	lossChecks(f, p, against)
-	inheritedCrons := inherited(f.Transcript.Crons)
-	if len(inheritedCrons) > 0 {
-		against("crons", "таймеры прошлой беседы --resume не вернёт: %s", cronList(inheritedCrons))
-		if p.typed && len(v.Against) == 1 && allCronsKnown(inheritedCrons) {
-			v.Recreate = recreateCrons(inheritedCrons)
-		}
+	for _, job := range inherited(f.Transcript.Crons) {
+		v.Lost = append(v.Lost, LostCron{ID: job.ID, Cron: job.Cron, Prompt: job.Prompt, Recurring: job.Recurring})
 	}
 	v.Restart = len(v.Against) == 0
 	return v
 }
 
+// LostCron — таймер CronCreate, который перезапуск не вернёт (Verdict.Lost).
+type LostCron struct {
+	ID        string `json:"id"`
+	Cron      string `json:"cron"`
+	Prompt    string `json:"prompt"`
+	Recurring bool   `json:"recurring"`
+}
+
 // lossChecks — новый процесс поднимется со всем, что было: будильники, аргументы запуска. Таймеры CronCreate --resume
 // возвращает только свои — созданные в этой беседе и `tasks` записи session_cron_carry; унаследованные через /clear
 // (`otherArmed`) теряет: лид 30.10 02:09 CET, 2.1.312→2.1.314, CronList после подъёма пуст; проба aguard-master
-// 30.10 на 2.1.314 — свой таймер после --resume на месте. Их держит довод crons в decide.
+// 30.10 на 2.1.314 — свой таймер после --resume на месте. Их перезапуск не держит: они уходят в Verdict.Lost, и cl
+// поднимает сессию со строкой роли — роль ставит свои таймеры заново сама.
 func lossChecks(f facts, p allowance, against againstFunc) {
 	if len(f.Transcript.Wakeups) > 0 {
 		against("wakeup", "%s", strings.Join(f.Transcript.Wakeups, ", "))
@@ -162,29 +168,6 @@ type cronKey struct {
 
 func cronTwin(job cronJob) cronKey {
 	return cronKey{job.Cron, strings.Join(strings.Fields(job.Prompt), " "), job.Recurring}
-}
-
-// allCronsKnown — у всех известно выражение cron: без него поставить таймер заново нельзя.
-func allCronsKnown(crons []cronJob) bool {
-	for _, job := range crons {
-		if job.Cron == "" {
-			return false
-		}
-	}
-	return len(crons) > 0
-}
-
-// recreateCrons — строка для набора в сессии: поставить таймеры заново своими и снять старые.
-func recreateCrons(crons []cronJob) string {
-	parts := make([]string, 0, len(crons))
-	ids := make([]string, 0, len(crons))
-	for _, job := range crons {
-		prompt := strings.Join(strings.Fields(job.Prompt), " ")
-		parts = append(parts, "CronCreate cron "+strconv.Quote(job.Cron)+" prompt "+strconv.Quote(prompt)+fmt.Sprintf(" recurring %t", job.Recurring))
-		ids = append(ids, job.ID)
-	}
-	return "cl: перед перезапуском ради версии Claude Code поставь заново таймеры прошлой беседы — --resume их не вернёт: " +
-		strings.Join(parts, "; ") + ". Потом удали старые CronDelete " + strings.Join(ids, ", ") + " (не выйдет — оставь). Больше ничего не делай."
 }
 
 // againstFunc — записать довод против.

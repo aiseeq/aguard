@@ -193,8 +193,11 @@ func TestFreshResume(t *testing.T) {
 
 func TestWhyText(t *testing.T) {
 	at := time.Date(2026, 10, 27, 2, 48, 11, 0, time.Local)
-	if got := whyText(eventStart, "2.1.311", at); got != "старт cl на Claude Code 2.1.311" {
+	if got := whyText(eventStart, "2.1.311", time.Time{}); got != "старт cl на Claude Code 2.1.311" {
 		t.Errorf("старт: %q", got)
+	}
+	if got := whyText(eventStart, "2.1.311", at.UTC()); got != "cl поднял сессию заново в 02:48 на Claude Code 2.1.311" {
+		t.Errorf("подъём --resume при потерянных таймерах — не старт cl (время местное): %q", got)
 	}
 	if got := whyText(eventReset, "2.1.311", at.UTC()); got != "cl начал новую беседу в 02:48 вместо простаивавшей; Claude Code 2.1.311" {
 		t.Errorf("сброс (время местное): %q", got)

@@ -123,38 +123,39 @@ func TestDecideCrons(t *testing.T) {
 	}
 }
 
+// Таймеры, унаследованные через /clear, перезапуск не держат: уходят в Lost (cl поднимет со строкой роли и запишет
+// каждый в журнал); свои и поставленные заново двойники — не потеря (cl-drop-recreate).
 func TestDecideRestartInheritedCrons(t *testing.T) {
 	f := idleFacts()
 	f.Transcript.Crons = []cronJob{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true}}
-	v := decide(f, allowance{idle: 10 * time.Minute})
-	if v.Restart || !slices.Contains(codes(v), "crons") || !strings.Contains(v.Against[len(v.Against)-1].Text, "j1") {
-		t.Fatalf("унаследованный таймер должен держать перезапуск: %+v", v)
-	}
-	v = decide(f, allowance{idle: 10 * time.Minute, typed: true})
-	if v.Restart || !strings.Contains(v.Recreate, `cron "47 1 * * *"`) || !strings.Contains(v.Recreate, `prompt "Сон (скилл dream)"`) {
-		t.Errorf("для pty нужна команда восстановления: %+v", v)
+	want := []LostCron{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон (скилл dream)", Recurring: true}}
+	for _, typed := range []bool{false, true} {
+		v := decide(f, allowance{idle: 10 * time.Minute, typed: typed})
+		if !v.Restart || slices.Contains(codes(v), "crons") || !slices.Equal(v.Lost, want) {
+			t.Fatalf("typed=%v: унаследованный таймер не держит перезапуск и уходит в Lost: %+v", typed, v)
+		}
 	}
 	f.Transcript.Crons[0].Own = true
-	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); !v.Restart || v.Recreate != "" {
-		t.Errorf("свои таймеры не держат перезапуск: %+v", v)
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart || len(v.Lost) != 0 {
+		t.Errorf("свои таймеры --resume вернёт — не потеря: %+v", v)
 	}
 	twin := f.Transcript.Crons[0]
 	twin.ID = "j2"
 	f.Transcript.Crons[0].Own = false
-	f.Transcript.Crons[0].Prompt = "Сон\n(скилл  dream)" // набор ставит prompt одной строкой (recreateCrons)
+	f.Transcript.Crons[0].Prompt = "Сон\n(скилл  dream)"
 	f.Transcript.Crons = append(f.Transcript.Crons, twin)
-	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); !v.Restart || v.Recreate != "" {
-		t.Errorf("унаследованный с поставленным заново двойником — не потеря, набор не повторять: %+v", v)
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart || len(v.Lost) != 0 {
+		t.Errorf("унаследованный со своим двойником — не потеря: %+v", v)
 	}
 	f.Transcript.Crons = f.Transcript.Crons[:1]
 	f.Transcript.Wakeups = []string{"ScheduleWakeup до 19:00"}
-	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); v.Restart || v.Recreate != "" {
-		t.Errorf("набор — только когда таймеры единственный довод: %+v", v)
+	if v := decide(f, allowance{idle: 10 * time.Minute}); v.Restart || !slices.Contains(codes(v), "wakeup") {
+		t.Errorf("прочие доводы действуют и при унаследованных таймерах: %+v", v)
 	}
 	f.Transcript.Wakeups = nil
 	f.Transcript.Crons[0].Cron = ""
-	if v = decide(f, allowance{idle: 10 * time.Minute, typed: true}); v.Recreate != "" || v.Restart {
-		t.Errorf("неизвестное выражение нельзя набирать: %+v", v)
+	if v := decide(f, allowance{idle: 10 * time.Minute}); !v.Restart || len(v.Lost) != 1 {
+		t.Errorf("без выражения cron таймер всё равно в Lost — ставить его заново роли: %+v", v)
 	}
 }
 
