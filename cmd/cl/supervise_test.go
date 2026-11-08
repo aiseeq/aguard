@@ -473,6 +473,9 @@ func TestStaleSettings(t *testing.T) {
 		t.Errorf("папке файл не положен, у claude его нет — совпадает: %q, %v", got, err)
 	}
 	cmdline("--settings", good)
+	if got, err := (launcher{name: "y-master", registry: l.registry}).staleSettings(cfg, 7, nil); err != nil || got != "" {
+		t.Errorf("роль без settings, у claude файл остался — не судить: %q, %v", got, err)
+	}
 	if got, err := (launcher{name: "x-master", dir: "/elsewhere", registry: l.registry}).staleSettings(cfg, 7, nil); err != nil ||
 		got != "файл настроек роли: "+good+" → нет" {
 		t.Errorf("файл есть, а папке не положен: %q, %v", got, err)
