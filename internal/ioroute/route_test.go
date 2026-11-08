@@ -243,3 +243,27 @@ func TestVictimOwner(t *testing.T) {
 		t.Fatalf("несрочное: %+v", acts)
 	}
 }
+
+// Срочное жертвы или хозяина не в сети — тикет сразу; письмо лиду в паузе, вред к её концу кончился — второй
+// заметки того же случая нет.
+func TestPendingTicketedNoDoubleNote(t *testing.T) {
+	for _, victim := range []bool{true, false} {
+		r := New(testConfig())
+		a := alive("lead")
+		if victim {
+			a = alive("lead", "dream-master")
+		}
+		r.Route(at(0, 12, "", "plocate"), a) // письмо лиду — пауза
+		c := at(1, 12, "dream-master", "fuse")
+		c.Victim = victim
+		if tk := tickets(r.Route(c, a)); len(tk) != 1 {
+			t.Fatalf("victim=%v: тикет сразу: %+v", victim, tk)
+		}
+		if r.Pending() != 1 {
+			t.Fatalf("victim=%v: ждёт %d", victim, r.Pending())
+		}
+		if acts := r.Tick(t0.Add(2 * time.Hour)); len(tickets(acts)) != 0 {
+			t.Fatalf("victim=%v: вторая заметка: %+v", victim, acts)
+		}
+	}
+}

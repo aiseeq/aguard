@@ -220,7 +220,7 @@ func routeOwner(t *testing.T, a *app, c iowatch.Case) string {
 
 // Служба: короче alert_min, тихий, под потолком — не в маршрут; короткий от 2 с — тикет хозяину без письма; длинный
 // при хозяине не в сети — письмо лиду и тикет хозяину; следующий длинный в паузе — ждёт её конца, а по концу, когда
-// вред кончился, уходит заметкой в тикет, без письма.
+// вред кончился, — ни письма, ни второй заметки: тикет хозяину ушёл сразу.
 func TestIOServiceRoutes(t *testing.T) {
 	a, _ := testIOApp(t)
 	var logged bytes.Buffer
@@ -266,13 +266,12 @@ func TestIOServiceRoutes(t *testing.T) {
 		t.Fatalf("длинный, хозяин не в сети: писем %d, тикеты %+v, журнал:\n%s", n, j, logged.String())
 	}
 	s.closed(alertCase(base.Add(2*time.Minute), 12000))
-	if n := letters(); n != 1 || s.route.Pending() != 1 {
-		t.Fatalf("в паузе: писем %d, ждёт %d", n, s.route.Pending())
+	if n, j := letters(), jobs(); n != 1 || s.route.Pending() != 1 || len(j) != 1 || len(j[0].cases) != 1 {
+		t.Fatalf("в паузе: писем %d, ждёт %d, тикеты %+v", n, s.route.Pending(), j)
 	}
-	jobs()
 	s.act(s.route.Tick(base.Add(2 * time.Hour)))
-	if n, j := letters(), jobs(); n != 1 || len(j) != 1 || len(j[0].cases) != 1 || s.route.Pending() != 0 {
-		t.Fatalf("конец паузы, вред кончился: писем %d, тикеты %+v", n, j)
+	if n, j := letters(), jobs(); n != 1 || len(j) != 0 || s.route.Pending() != 0 {
+		t.Fatalf("конец паузы, вред кончился (случай уже в тикете): писем %d, тикеты %+v", n, j)
 	}
 }
 

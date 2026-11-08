@@ -37,6 +37,8 @@ type Case struct {
 	// вытеснения (правило 03.11 io-culprit-victim, сужено 08.11) — хозяину только тикет, срочное — лиду.
 	Victim bool
 	Text   string // строка случая для письма и тикета
+	// ticketed — тикет хозяину уже заведён при маршруте (жертва, хозяин не в сети): по концу паузы письма — не в тикет.
+	ticketed bool
 }
 
 // Kind — вид действия.
@@ -102,13 +104,15 @@ func (r *Router) Route(c Case, alive func(string) bool) []Action {
 	case urgent && c.Owner == "":
 		out = append(out, r.letter(r.cfg.Lead, WhyNoOwner, c, now)...)
 	case urgent && c.Victim:
-		out = append(out, r.letter(r.cfg.Lead, WhyVictim, c, now)...)
 		out = append(out, Action{Kind: Ticket, Owner: c.Owner, Class: c.Class, Why: WhyVictim, Cases: []Case{c}})
+		c.ticketed = true
+		out = append(out, r.letter(r.cfg.Lead, WhyVictim, c, now)...)
 	case urgent && c.Owner == r.cfg.Lead || urgent && alive(c.Owner):
 		out = append(out, r.letter(c.Owner, WhyUrgent, c, now)...)
 	case urgent:
-		out = append(out, r.letter(r.cfg.Lead, WhyOffline, c, now)...)
 		out = append(out, Action{Kind: Ticket, Owner: c.Owner, Class: c.Class, Why: WhyOffline, Cases: []Case{c}})
+		c.ticketed = true
+		out = append(out, r.letter(r.cfg.Lead, WhyOffline, c, now)...)
 	case c.Owner == "":
 		out = append(out, Action{Kind: Summary, Class: c.Class, Cases: []Case{c}})
 	default:
@@ -226,11 +230,14 @@ func (r *Router) crossCheck(c Case, now time.Time) []Action {
 // Owners — хозяева класса в окне сверки, по имени.
 func (r *Router) Owners(class string) []string { return slices.Sorted(maps.Keys(r.cross[class])) }
 
-// groupTickets — случаи паузы по тикетам (хозяин, класс), в порядке первого случая.
+// groupTickets — случаи паузы по тикетам (хозяин, класс), в порядке первого случая; уже ушедшие в тикет — мимо.
 func groupTickets(cases []Case) []Action {
 	var out []Action
 	idx := map[[2]string]int{}
 	for _, c := range cases {
+		if c.ticketed {
+			continue
+		}
 		k := [2]string{c.Owner, c.Class}
 		i, ok := idx[k]
 		if !ok {
