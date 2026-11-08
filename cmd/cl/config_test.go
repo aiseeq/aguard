@@ -216,6 +216,7 @@ func TestRoleSettings(t *testing.T) {
 		{"shop-master", "/home/u/work", "/home/u/s/work.json"},
 		{"shop-master", "/home/u/work/shop/", "/home/u/s/work.json"},
 		{"shop-master", "/home/u/work/", "/home/u/s/work.json"},
+		{"shop-master", "/home/u/work/../git/x", "/s/git.json"},
 		{"aguard-master", "/home/u/git/aguard", "/s/git.json"},
 		{"x-master", "/home/u/workshop", "/s/git.json"}, // не ~/work: только целое имя папки
 		{"lead", "/home/u", "/home/u/s/lead.json"},

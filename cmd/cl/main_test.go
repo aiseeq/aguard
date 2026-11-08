@@ -27,6 +27,12 @@ func TestMain(m *testing.M) {
 // пишет свои аргументы построчно в <home>/argv и выходит. Возвращает аргументы claude (после «--»).
 func runMain(t *testing.T, home, cwd string, args ...string) []string {
 	t.Helper()
+	return runMainEnv(t, home, cwd, nil, args...)
+}
+
+// runMainEnv — runMain с добавкой к окружению (CL_UPGRADE и т. п.).
+func runMainEnv(t *testing.T, home, cwd string, env []string, args ...string) []string {
+	t.Helper()
 	bin := filepath.Join(home, "bin")
 	write(t, filepath.Join(home, "versions", "2.1.310"), "#!/bin/sh\n")
 	if err := os.Chmod(filepath.Join(home, "versions", "2.1.310"), 0o755); err != nil {
@@ -43,7 +49,7 @@ func runMain(t *testing.T, home, cwd string, args ...string) []string {
 	}
 	cmd := exec.Command(os.Args[0], args...)
 	cmd.Dir = cwd
-	cmd.Env = []string{"CL_TEST_RUN_MAIN=1", "HOME=" + home, "PATH=" + bin, "XDG_RUNTIME_DIR=" + home}
+	cmd.Env = append([]string{"CL_TEST_RUN_MAIN=1", "HOME=" + home, "PATH=" + bin, "XDG_RUNTIME_DIR=" + home}, env...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("cl %q: %v\n%s", args, err, out)
 	}
@@ -148,5 +154,11 @@ func TestMainRoleSettings(t *testing.T) {
 		if got := runMain(t, home, c.dir, "-n", c.name); !slices.Equal(got, want) {
 			t.Errorf("cl в %s → claude %q, want %q", c.dir, got, want)
 		}
+	}
+	// Новый cl после живого обновления (CL_UPGRADE, claude не жив — запуск): файл роли — по той же папке.
+	upgraded := []string{upgradeEnv + `={"v":1,"name":"shop-master","n":2,"args":["-n","shop-master","--resume","s1"]}`}
+	want := []string{"--settings", work, "-n", "shop-master", "--resume", "s1"}
+	if got := runMainEnv(t, home, filepath.Join(home, "work", "shop"), upgraded); !slices.Equal(got, want) {
+		t.Errorf("cl по %s → claude %q, want %q", upgradeEnv, got, want)
 	}
 }
