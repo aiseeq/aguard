@@ -216,12 +216,12 @@ func TestCrossOwners(t *testing.T) {
 // Перезапуск: два случая до него (Seed), третий после — серия продолжается, письмо; письмо до перезапуска держит паузу.
 func TestSeedRestoresSeries(t *testing.T) {
 	r := New(testConfig())
-	r.Seed([]Case{at(0, 3, "akit-master", "rg"), at(5, 3, "akit-master", "rg")})
+	r.Seed([]Case{at(0, 3, "akit-master", "rg"), at(5, 3, "akit-master", "rg")}, alive("akit-master"), t0.Add(6*time.Minute))
 	if l := letters(r.Route(at(10, 3, "akit-master", "rg"), alive("akit-master"))); len(l) != 1 {
 		t.Fatalf("после перезапуска: %+v", l)
 	}
 	r = New(testConfig())
-	r.Seed([]Case{at(0, 12, "akit-master", "rg")})
+	r.Seed([]Case{at(0, 12, "akit-master", "rg")}, alive("akit-master"), t0.Add(time.Minute))
 	if l := letters(r.Route(at(10, 12, "akit-master", "rg"), alive("akit-master"))); len(l) != 0 {
 		t.Fatalf("пауза после перезапуска забыта: %+v", l)
 	}
@@ -265,5 +265,50 @@ func TestPendingTicketedNoDoubleNote(t *testing.T) {
 		if acts := r.Tick(t0.Add(2 * time.Hour)); len(tickets(acts)) != 0 {
 			t.Fatalf("victim=%v: вторая заметка: %+v", victim, acts)
 		}
+	}
+}
+
+// Перезапуск после конца паузы (находка проверки alert-async 08.11): сделанное прежним демоном по концу паузы —
+// тикет (вред кончился) или письмо «после паузы» — новый не повторяет; пауза, идущая на перезапуске, ждёт как прежде.
+func TestSeedAfterPauseNoRepeat(t *testing.T) {
+	a := alive("x")
+	seed := []Case{at(0, 12, "x", "c"), at(10, 3, "x", "c"), at(20, 3, "x", "c")}
+	r := New(testConfig())
+	r.Seed(seed[:1], a, t0.Add(30*time.Minute)) // письмо 12:00, перезапуск в паузе
+	r.Route(seed[1], a)
+	r.Route(seed[2], a)
+	if r.Pending() != 0 { // 2-й и 3-й — не срочные: тикеты, не ждут
+		t.Fatalf("ждёт %d", r.Pending())
+	}
+	// А: письмо 12:00, срочные 12:10 и 12:20 в паузе; живой демон в 13:00 отдал тикет; перезапуск в 13:30 — ничего.
+	long := []Case{at(0, 12, "x", "c"), at(10, 12, "x", "c"), at(20, 12, "x", "c")}
+	r = New(testConfig())
+	r.Seed(long, a, t0.Add(90*time.Minute))
+	if acts := r.Tick(t0.Add(91 * time.Minute)); len(acts) != 0 || r.Pending() != 0 {
+		t.Fatalf("А: повтор после перезапуска %+v, ждёт %d", acts, r.Pending())
+	}
+	// Б: письмо 12:00, случай 12:55, в 13:00 письмо «после паузы»; перезапуск в 13:05 — не повторяется.
+	r = New(testConfig())
+	r.Seed([]Case{at(0, 12, "x", "c"), at(55, 12, "x", "c")}, a, t0.Add(65*time.Minute))
+	if acts := r.Tick(t0.Add(66 * time.Minute)); len(acts) != 0 {
+		t.Fatalf("Б: повтор письма %+v", acts)
+	}
+	// Перезапуск внутри паузы: ждавшее уходит по её концу.
+	r = New(testConfig())
+	r.Seed(long, a, t0.Add(30*time.Minute))
+	if acts := r.Tick(t0.Add(60 * time.Minute)); len(tickets(acts)) != 1 || len(tickets(acts)[0].Cases) != 2 {
+		t.Fatalf("в паузе: %+v", acts)
+	}
+}
+
+// Засев с хозяином не в сети сейчас: тикет ушёл при случае, по концу паузы лиду второй заметки нет.
+func TestSeedOfflineTicketed(t *testing.T) {
+	r := New(testConfig())
+	r.Seed([]Case{at(0, 12, "", "plocate"), at(1, 12, "graft-master", "go")}, alive("lead"), t0.Add(2*time.Minute))
+	if r.Pending() != 1 {
+		t.Fatalf("ждёт %d", r.Pending())
+	}
+	if acts := r.Tick(t0.Add(2 * time.Hour)); len(acts) != 0 {
+		t.Fatalf("вторая заметка: %+v", acts)
 	}
 }

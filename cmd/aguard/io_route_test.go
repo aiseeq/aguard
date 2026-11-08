@@ -99,7 +99,7 @@ func TestTicketClassAndSlugN(t *testing.T) {
 // этим SessionID, иначе мастер проекта по ключу; без scratchpad — по cwd.
 func TestIOOwnerByProcess(t *testing.T) {
 	home := "/home/u"
-	o := &ioOwnerFinder{home: home, table: map[string]string{}, sessions: func(id string) (string, error) {
+	o := &ioOwnerFinder{home: home, table: map[string]string{home: "lead"}, sessions: func(id string) (string, error) {
 		if id == "381a85bb-1bde-458a-bed8-2cd4785b78a6" {
 			return "dream-master", nil
 		}
@@ -115,6 +115,7 @@ func TestIOOwnerByProcess(t *testing.T) {
 		{iowatch.ProcessDetails{Cmdline: "/home/u/.cache/claude-tmp/claude-1000/-home-u-git-aiarena-web/00000000-1bde-458a-bed8-2cd4785b78a6/", CWD: "/"}, "aiarena-web-master"},
 		{iowatch.ProcessDetails{Cmdline: "rg x", CWD: "/home/u/work/proj/sub"}, ""},
 		{iowatch.ProcessDetails{Cmdline: "rg x", CWD: "/home/u/work/proj"}, "proj-master"},
+		{iowatch.ProcessDetails{Cmdline: "chrome", CWD: "/home/u/"}, ""}, // ~ — программы рабочего стола, не лид
 		{iowatch.ProcessDetails{}, ""},
 	} {
 		got, err := o.byProcess(tc.d)
@@ -150,5 +151,31 @@ func TestIOOwnerByProcess(t *testing.T) {
 	c.SwapIn, c.Culprits.MainWrite = 1<<20, 388<<20 // пишет больше, чем читает — не жертва при любой подкачке
 	if rc, _ := o.routeCase(&c); rc.Victim {
 		t.Errorf("пишущая главная — жертва: %+v", rc)
+	}
+}
+
+// Письмо хозяину не ушло (сессии нет в реестре) — его случаи в тикет хозяина; письмо лиду не ушло — тикета нет.
+func TestIOLetterFailedToTicket(t *testing.T) {
+	a, _ := testIOApp(t)
+	s := newIOService(context.Background(), a)
+	cfg := iowatch.Default()
+	cfg.Mode, cfg.Lead = iowatch.ModeAlert, "lead"
+	s.cfg = cfg
+	s.setRoute(cfg)
+	c := ioroute.Case{Start: time.Now().Add(-12 * time.Second), End: time.Now(), DurMS: 12000, Owner: "gone-master", Class: "go"}
+	s.act([]ioroute.Action{{Kind: ioroute.Letter, To: "lead", Why: ioroute.WhyNoOwner, Cases: []ioroute.Case{{End: time.Now()}}},
+		{Kind: ioroute.Letter, To: "gone-master", Why: ioroute.WhyUrgent, Cases: []ioroute.Case{c}}})
+	select {
+	case j := <-s.tickets.queue:
+		if j.owner != "gone-master" || j.class != "go" || len(j.cases) != 1 {
+			t.Fatalf("тикет %+v", j)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("тикета нет")
+	}
+	select {
+	case j := <-s.tickets.queue:
+		t.Fatalf("лишний тикет %+v", j)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

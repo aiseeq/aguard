@@ -126,7 +126,9 @@ func (o *ioOwnerFinder) byProcess(d iowatch.ProcessDetails) (string, error) {
 			return name, nil
 		}
 	}
-	if d.CWD != "" {
+	// cwd ровно ~ хозяина не говорит: из него работают Chrome, Telegram и прочие программы рабочего стола, а по таблице
+	// имён ~ — лид (находка проверки alert-async 08.11: Chrome — 178 случаев за неделю ушли бы лиду).
+	if d.CWD != "" && filepath.Clean(d.CWD) != o.home {
 		return names.For(d.CWD, o.home, o.table), nil
 	}
 	return "", nil
@@ -456,7 +458,7 @@ func (s *ioService) seedRoute(cfg iowatch.Config, now time.Time) {
 		seed = append(seed, rc)
 	}
 	slices.SortFunc(seed, func(x, y ioroute.Case) int { return x.End.Compare(y.End) })
-	s.route.Seed(seed)
+	s.route.Seed(seed, s.aliveFunc(), now)
 	if len(seed) > 0 {
 		s.a.log.Info("aguard io: маршрут засеян", "cases", len(seed), "pending", s.route.Pending())
 	}
@@ -468,15 +470,19 @@ func (s *ioService) routeOne(c *iowatch.Case) {
 	if err != nil {
 		s.a.warn("io", "хозяин случая не найден, случай — как без хозяина", "err", err)
 	}
+	s.act(s.route.Route(rc, s.aliveFunc()))
+}
+
+// aliveFunc — жива ли сессия по реестру сейчас; реестр не читается — в сети (письмо покажет).
+func (s *ioService) aliveFunc() func(string) bool {
 	live, regErr := s.a.reg.Alive()
 	if regErr != nil {
 		s.a.warn("io", "реестр сессий: хозяин считается в сети, письмо покажет", "err", regErr)
 	}
-	alive := func(name string) bool {
+	return func(name string) bool {
 		_, ok := live[name]
 		return ok || regErr != nil
 	}
-	s.act(s.route.Route(rc, alive))
 }
 
 // act — действия маршрута: тикеты — в очередь, письма — своей горутиной каждое.
@@ -506,7 +512,16 @@ func (s *ioService) act(acts []ioroute.Action) {
 					s.a.warn("io", "паника письма", "err", fmt.Sprint(v), "stack", string(debug.Stack()))
 				}
 			}()
-			s.a.ioSend(cfg, act.To, string(act.Why), msg, dur)
+			if s.a.ioSend(cfg, act.To, string(act.Why), msg, dur) || act.To == cfg.Lead {
+				return
+			}
+			// Письмо хозяину не ушло (сессия кончилась после проверки, тишина) — случаи в его тикет: иначе не дойдут никуда.
+			for _, c := range act.Cases {
+				if c.Owner != "" {
+					s.tickets.add(ioTicketJob{owner: c.Owner, class: c.Class, why: act.Why, cases: []ioroute.Case{c},
+						tk: cfg.Tk, lead: cfg.Lead, log: cfg.Mode == iowatch.ModeLog})
+				}
+			}
 		}()
 	}
 }
@@ -525,12 +540,13 @@ func (s *ioService) fullCases(cases []ioroute.Case) []iowatch.Case {
 	return out
 }
 
-// ioSend — письмо о фризе сессии to; mode = log — строка журнала «написал бы». Сбой — в журнал и учёт.
-func (a *app) ioSend(cfg iowatch.Config, to, why, msg string, dur int64) {
+// ioSend — письмо о фризе сессии to; mode = log — строка журнала «написал бы». Сбой и тишина — в журнал и учёт,
+// false: письмо не дошло.
+func (a *app) ioSend(cfg iowatch.Config, to, why, msg string, dur int64) bool {
 	if cfg.Mode == iowatch.ModeLog {
 		a.log.Info("aguard io: написал бы", "to", to, "why", why, "message", msg)
 		a.note("io", "написал бы", why, to, dur, "ms")
-		return
+		return true
 	}
 	alive, err := a.reg.Alive()
 	if err == nil {
@@ -538,13 +554,14 @@ func (a *app) ioSend(cfg iowatch.Config, to, why, msg string, dur int64) {
 	}
 	if err != nil {
 		if a.quietFailure("io", err) {
-			return
+			return false
 		}
 		a.warn("io", "письмо о фризе не ушло", "to", to, "err", err)
 		a.note("io", "alert_failed", why, to, dur, "ms")
-		return
+		return false
 	}
 	a.note("io", "alert_sent", why, to, dur, "ms")
+	return true
 }
 
 // ioRouteReplay — маршрут по сохранённым случаям с since: сколько писем кому и почему, тикетов и заметок; рядом —
