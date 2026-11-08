@@ -204,16 +204,19 @@ type capAcc struct {
 
 func newCapAcc() capAcc { return capAcc{outside: map[string]float64{}, byName: map[string]float64{}} }
 
-func (a *capAcc) add(parts []capPart, weight float64) {
+// add — простой записи: под потолком — с весом capped, вне потолка — с весом outside.
+func (a *capAcc) add(parts []capPart, capped, outside float64) {
 	for _, p := range parts {
-		v := float64(p.idleUS) * weight
-		a.totalUS += v
 		if p.capped {
+			v := float64(p.idleUS) * capped
+			a.totalUS += v
 			a.cappedUS += v
 			a.byName[p.name] += v
-		} else {
-			a.outside[p.name] += v
+			continue
 		}
+		v := float64(p.idleUS) * outside
+		a.totalUS += v
+		a.outside[p.name] += v
 	}
 }
 
@@ -252,7 +255,9 @@ func overlapShare(from, at, start, end int64) float64 {
 }
 
 // cappedWait — случай [start, end] — ожидание под потолком, а не фриз машины (capAcc.verdict) по детальным
-// записям, пересекающим случай: простой записи — пропорционально её доле внутри случая (простой до случая не его).
+// записям, пересекающим случай: простой под потолком — пропорционально доле записи внутри случая (простой до
+// случая не его), простой вне потолка — целиком: фриз и есть этот простой, равномерным внутри записи он не бывает
+// (проверка 08.11 14:27: plasmashell 330 мс в записи с долей 0,6 иначе дал бы 198 мс — ниже порога, без письма).
 // Запись — дельта с прошлого прохода: медленный проход (тикер пропустил такты) покрывает несколько секунд, и
 // скорость упора — байты за весь этот промежуток. Первая запись — за номинальный detail.
 //
@@ -274,7 +279,7 @@ func cappedWait(details []Step, start, end time.Time, detail time.Duration, durM
 			continue
 		}
 		parts, owners = capParts(d, interval, parts[:0], owners)
-		acc.add(parts, share)
+		acc.add(parts, share, 1)
 	}
 	return acc.verdict(durMS, busyMS)
 }

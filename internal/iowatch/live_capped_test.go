@@ -106,3 +106,74 @@ func TestLiveCappedFieldsPresentWithoutDetails(t *testing.T) {
 		}
 	}
 }
+
+// Диск забит последние 2,3 с (проверка 08.11 14:27): за 5 с занят 2300 мс — меньше половины, но последняя секунда
+// занята целиком — окно не под потолком.
+func TestLiveCappedBusyTail(t *testing.T) {
+	probe := Cap{Path: "/app.slice/run-p1-i2.scope", RBps: 30_000_000}
+	i := 0
+	now := liveRun(t, func(s *Step) {
+		i++
+		s.IOFullUS, s.ReadBytes, s.IOTicks = 70_000, 3_000_000, 5
+		if i > 62 {
+			s.IOTicks = 100
+		}
+	}, func(int) []Cgroup {
+		return []Cgroup{{Path: probe.Path, ReadBytes: 30_000_000, IOFullUS: 700_000, Cap: probe}}
+	})
+	if now.W5s.BusyMS >= 2500 || now.W1s.BusyMS != 1000 || now.W5s.Capped.Capped || now.W30s.Capped.Capped || now.W1s.Capped.Capped {
+		t.Fatalf("занятый хвост: 5 с занят %d, 1 с %d, признание %+v %+v %+v", now.W5s.BusyMS, now.W1s.BusyMS, now.W1s.Capped, now.W5s.Capped, now.W30s.Capped)
+	}
+}
+
+// Признание идущего случая сбрасывается со сменой случая: новый до своей детальной записи — не под потолком.
+func TestLiveOpenCappedResetOnNewCase(t *testing.T) {
+	r := NewRecorder(Default())
+	live := NewLive()
+	r.Attach(nil, nil, live)
+	base := time.Date(2026, 11, 8, 14, 0, 0, 0, time.Local)
+	probe := Cap{Path: "/app.slice/run-p1-i2.scope", RBps: 30_000_000}
+	for i := 1; i <= 35; i++ {
+		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
+		if i%10 == 0 {
+			r.Detail(Step{At: at, Cgroups: []Cgroup{{Path: probe.Path, ReadBytes: 30_000_000, IOFullUS: 700_000, Cap: probe}}})
+		}
+		s := Step{At: at, IOFullUS: 70_000, ReadBytes: 3_000_000}
+		if i > 30 && i < 35 { // 400 мс без простоя — больше gap: случай закрыт, на 3,5 с — новый
+			s.IOFullUS = 0
+		}
+		r.Step(s)
+		if i == 30 {
+			if now, _ := live.Now(""); !now.Open.Open || !now.Open.Capped {
+				t.Fatalf("первый случай под потолком: %+v", now.Open)
+			}
+		}
+	}
+	if now, _ := live.Now(""); !now.Open.Open || now.Open.Capped {
+		t.Fatalf("новый случай без своих записей — не под потолком: %+v", now.Open)
+	}
+}
+
+// Запоздавшая детальная запись в Live (как TestCappedWaitLateRecordInterval): проход стоял 3 с, 90 МБ за 3 с при
+// 80M — в потолок не упирались, окно не под потолком.
+func TestLiveCappedLateRecordInterval(t *testing.T) {
+	r := NewRecorder(Default())
+	live := NewLive()
+	r.Attach(nil, nil, live)
+	base := time.Date(2026, 11, 8, 14, 0, 0, 0, time.Local)
+	evals := Cap{Path: "/agents.slice/agents-evals.slice", RBps: 80_000_000}
+	for i := 1; i <= 45; i++ {
+		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
+		switch i {
+		case 10:
+			r.Detail(Step{At: at})
+		case 40:
+			r.Detail(Step{At: at, Cgroups: []Cgroup{{Path: evals.Path + "/a.scope", ReadBytes: 90_000_000, IOFullUS: 2_500_000, Cap: evals}}})
+		}
+		r.Step(Step{At: at, IOFullUS: 70_000, ReadBytes: 3_000_000})
+	}
+	now, _ := live.Now("")
+	if c := now.W5s.Capped; c.Capped || c.CappedMS != 0 || c.OutsideMS != 2500 {
+		t.Fatalf("скорость — за весь промежуток записи: %+v", c)
+	}
+}

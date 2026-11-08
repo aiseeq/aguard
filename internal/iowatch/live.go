@@ -150,18 +150,21 @@ func (l *Live) setOpenCapped(start time.Time, capped bool) {
 	}
 }
 
-// capWindow — признание окна (last − d, last] по детальным записям, пропорционально их доле внутри окна.
-func (l *Live) capWindow(last int64, d time.Duration, busyMS int64) NowCapped {
+// capWindow — признание окна (last − d, last] по детальным записям, пропорционально их доле внутри окна (запрос
+// akit: граничная запись с простоем вне потолка до начала окна иначе даёт ложное «занята»). Диск, занятый больше
+// половины последней секунды (tailBusyMS), — не под потолком при любом окне: допуск смотрит на «сейчас», а
+// половина 5 с не замечает насыщения последних 2 с (проверка 08.11 14:27: busy 2435 из 5000).
+func (l *Live) capWindow(last int64, d time.Duration, busyMS, tailBusyMS int64) NowCapped {
 	acc := newCapAcc()
 	from := last - int64(d)
 	for i := range l.nDetail {
 		rec := &l.details[(l.dHead+i)%liveDetails]
 		if share := overlapShare(rec.from, rec.at, from, last); share > 0 {
-			acc.add(rec.parts, share)
+			acc.add(rec.parts, share, share)
 		}
 	}
 	v := acc.verdict(d.Milliseconds(), busyMS)
-	return NowCapped{Capped: v.Capped, OutsideMS: v.OutsideMS, CappedMS: v.CappedMS}
+	return NowCapped{Capped: v.Capped && 2*tailBusyMS < time.Second.Milliseconds(), OutsideMS: v.OutsideMS, CappedMS: v.CappedMS}
 }
 
 // SetProfiles — свод профилей по видам (служба пересчитывает, когда профили меняются).
@@ -266,7 +269,7 @@ func (l *Live) Now(kind string) (Now, bool) {
 		win *NowWindow
 		d   time.Duration
 	}{{&n.W1s, time.Second}, {&n.W5s, 5 * time.Second}, {&n.W30s, 30 * time.Second}} {
-		w.win.Capped = l.capWindow(last, w.d, w.win.BusyMS)
+		w.win.Capped = l.capWindow(last, w.d, w.win.BusyMS, n.W1s.BusyMS)
 	}
 	if n.Writers == nil {
 		n.Writers = []Writer{}
