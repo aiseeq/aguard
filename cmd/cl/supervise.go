@@ -511,9 +511,7 @@ func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem str
 			stale, last.stale = l.staleAsk(cfg, pid, args, prevStale, last.stale)
 			a, askErr := l.ask(pid, argsProblem, stale, l.console != nil && cfg.Restart.TypeMode == modeAct)
 			out, last = l.next(cfg, now, pid, a, askErr, last)
-			if out.restart {
-				out.stale = stale
-			}
+			out.stale = stale // нужен только перезапуску: без него supervise выходит
 			if out.typed != "" {
 				l.typeOutcome(cfg, now, pid, out)
 				out = outcome{}
