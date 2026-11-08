@@ -177,3 +177,22 @@ func TestLiveCappedLateRecordInterval(t *testing.T) {
 		t.Fatalf("скорость — за весь промежуток записи: %+v", c)
 	}
 }
+
+// Диск занят целиком первые 3 с окна 5 с, последняя секунда свободна (проверка 08.11 14:43): хвост окно не
+// отбивает — его отбивает занятость всего окна, 3000 из 5000 мс.
+func TestLiveCappedBusyHead(t *testing.T) {
+	probe := Cap{Path: "/app.slice/run-p1-i2.scope", RBps: 30_000_000}
+	i := 0
+	now := liveRun(t, func(s *Step) {
+		i++
+		s.IOFullUS, s.ReadBytes = 70_000, 3_000_000
+		if i > 35 && i <= 65 {
+			s.IOTicks = 100
+		}
+	}, func(int) []Cgroup {
+		return []Cgroup{{Path: probe.Path, ReadBytes: 30_000_000, IOFullUS: 700_000, Cap: probe}}
+	})
+	if now.W5s.BusyMS != 3000 || now.W1s.BusyMS != 0 || now.W5s.Capped.Capped || !now.W1s.Capped.Capped {
+		t.Fatalf("занятое начало окна: 5 с занят %d, 1 с %d, признание 1 с %+v, 5 с %+v", now.W5s.BusyMS, now.W1s.BusyMS, now.W1s.Capped, now.W5s.Capped)
+	}
+}
