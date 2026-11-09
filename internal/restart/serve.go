@@ -134,6 +134,9 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	name := firstNonEmpty(f.Name, req.Name)
 	v := decide(f, allowance{idle: cfg.Idle.D(), argsProblem: req.ArgsProblem, typed: req.Typed, stale: req.Stale})
 	cv := j.Compact(cfg, cc, Request{Pid: req.Pid, Name: name, ArgsProblem: req.ArgsProblem, Typed: req.Typed, Clean: req.Clean}, now)
+	if cv.Compact {
+		v.Lost = cv.Lost
+	}
 	return Answer{
 		V: Version, Verdict: v, Key: v.Key(), Mode: cfg.Mode,
 		SessionID: f.SessionID, Name: name, Running: f.Running, Installed: f.Installed, Crons: len(f.Transcript.Crons) > 0,
