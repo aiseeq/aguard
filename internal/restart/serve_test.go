@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -131,6 +132,59 @@ func TestAnswerJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &out); err != nil || !out.ArgsStale || out.Stale != in.Stale || !out.Restart {
 		t.Errorf("%s → %+v, %v", data, out, err)
 	}
+}
+
+// Judge целиком на настоящем транскрипте: сжатие разрешено — таймеры прошлой беседы в lost при любой версии, а вердикт
+// перезапуска при свежей транскрипт не читает, при нечитаемой установленной вообще выходит раньше (тикет cl-compact-lost-crons).
+func TestAnswerCompactLostCrons(t *testing.T) {
+	const b = `{"id":"B","cron":"11 6 * * *","prompt":"Дайджест","recurring":true}`
+	inheritedOnly := `{"type":"session_cron_carry","otherArmed":[` + b + `]}`
+	mixed := `{"type":"session_cron_carry","tasks":[{"id":"A","cron":"5 5 * * *","prompt":"Свой","recurring":true}],"otherArmed":[` + b + `]}`
+	world := func(t *testing.T, now time.Time, carry string) (sessionWorld, func() Answer) {
+		req := now.Add(-55 * time.Minute)
+		at := func(x time.Time) string { return x.UTC().Format(time.RFC3339Nano) }
+		w := newSessionWorld(t, worldTimes{now: now, turnAgo: 54 * time.Minute, ttyAgo: 30 * time.Minute},
+			`{"type":"attachment","timestamp":"`+at(req.Add(-time.Minute))+`","attachment":`+carry+`}`,
+			`{"type":"user","timestamp":"`+at(req)+`","message":{"role":"user","content":"hi"}}`,
+			answer(at(req.Add(time.Minute)), "false", 10, 150000, 10, 10))
+		w.link(t, 4244)
+		cfg, cc := Default(t.TempDir(), t.TempDir()), DefaultCompact()
+		cc.ResetMinTokens = 1 << 40
+		j := NewJudge(t.TempDir())
+		j.paths = &w.p
+		return w, func() Answer { return j.Answer(&cfg, &cc, Request{V: Version, Pid: 4244}, now) }
+	}
+	wantB := func(t *testing.T, a Answer) {
+		t.Helper()
+		if !a.Compact || len(a.Lost) != 1 || a.Lost[0].ID != "B" || a.Lost[0].Cron != "11 6 * * *" {
+			t.Errorf("сжатие разрешено, в lost только B: %+v", a)
+		}
+	}
+	now := time.Now()
+	for _, c := range []struct {
+		name, carry string
+		fresh       bool
+	}{{"свежая, только унаследованный", inheritedOnly, true}, {"свежая, свой и унаследованный", mixed, true},
+		{"старая, только унаследованный", inheritedOnly, false}, {"старая, свой и унаследованный", mixed, false}} {
+		t.Run(c.name, func(t *testing.T) {
+			w, ask := world(t, now, c.carry)
+			if c.fresh {
+				w.setRunning(t, "2.1.310")
+			}
+			a := ask()
+			if a.Fresh != c.fresh {
+				t.Fatalf("fresh=%v, want %v", a.Fresh, c.fresh)
+			}
+			wantB(t, a)
+		})
+	}
+	t.Run("установленная версия не читается", func(t *testing.T) {
+		w, ask := world(t, now, inheritedOnly)
+		if err := os.Remove(w.p.claude); err != nil {
+			t.Fatal(err)
+		}
+		wantB(t, ask())
+	})
 }
 
 // Judge целиком: stale вопроса доходит до решения — версия свежая, без stale Fresh, со stale простаивающая сессия

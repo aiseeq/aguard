@@ -183,6 +183,9 @@ type CompactCheck struct {
 	PromptAt time.Time `json:"prompt_at"`
 	// Reset — сбросить беседу: cl поднимает сессию новой беседой (режим act — в cl), aguard пишет «сбросил бы».
 	Reset ResetVerdict `json:"reset"`
+	// Lost — таймеры, которые подъём после сжатия не вернёт (Verdict.Lost): вердикт перезапуска при свежей версии
+	// транскрипт не читает, поэтому считаются по фактам сжатия.
+	Lost []LostCron `json:"-"`
 }
 
 // Compact — решение о сжатии сессии процесса req.Pid; cfg — раздел [restart] (пути chooks и claude, роли),
@@ -218,6 +221,7 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, req Request, now time.Tim
 		Request: ctx.Request, Tokens: ctx.Tokens, CacheRead: ctx.CacheRead, Requests: f.Transcript.Requests,
 		Compacted: ctx.Compacted, Trigger: ctx.Trigger,
 		Pid: pid, Model: ctx.Model, Reply: ctx.Reply, Prompt: ctx.Prompt, PromptAt: ctx.PromptAt, Reset: r,
+		Lost: lostCrons(f.Transcript.Crons),
 	}
 }
 

@@ -30,7 +30,7 @@ type Verdict struct {
 	// сессию со строкой роли (роль ставит свои таймеры сама) и пишет каждый в журнал (тикет 20261108-2117,
 	// пользователь 08.11: «вся эта инструкция либо вредна, либо бесполезна. Перезапуск cl сам бы выдал роль»).
 	Lost []LostCron `json:"lost,omitempty"`
-	// Fresh — версия процесса последняя и аргументы не устарели: перезапускать незачем, против не проверялось.
+	// Fresh — версия процесса последняя и аргументы не устарели: перезапускать незачем, остальное не проверялось.
 	Fresh bool `json:"fresh"`
 	// ArgsStale — решалось ради устаревших аргументов запуска при свежей версии (Request.Stale).
 	ArgsStale bool     `json:"args_stale,omitempty"`
@@ -99,9 +99,6 @@ func decide(f facts, p allowance) Verdict {
 		against("version", "%v", err)
 		return v
 	}
-	for _, job := range inherited(f.Transcript.Crons) { // и при свежей версии: подъём после сжатия тоже идёт через --resume
-		v.Lost = append(v.Lost, LostCron{ID: job.ID, Cron: job.Cron, Prompt: job.Prompt, Recurring: job.Recurring})
-	}
 	if !old && p.stale == "" {
 		v.Fresh = true
 		return v
@@ -117,6 +114,7 @@ func decide(f facts, p allowance) Verdict {
 	inputChecks(f, against)
 	workChecks(f, restart, against)
 	lossChecks(f, p, against)
+	v.Lost = lostCrons(f.Transcript.Crons)
 	v.Restart = len(v.Against) == 0
 	return v
 }
@@ -127,6 +125,15 @@ type LostCron struct {
 	Cron      string `json:"cron"`
 	Prompt    string `json:"prompt"`
 	Recurring bool   `json:"recurring"`
+}
+
+// lostCrons — таймеры прошлой беседы, которые подъём через --resume не вернёт.
+func lostCrons(crons []cronJob) []LostCron {
+	var lost []LostCron
+	for _, job := range inherited(crons) {
+		lost = append(lost, LostCron{ID: job.ID, Cron: job.Cron, Prompt: job.Prompt, Recurring: job.Recurring})
+	}
+	return lost
 }
 
 // lossChecks — новый процесс поднимется со всем, что было: будильники, аргументы запуска. Таймеры CronCreate --resume
