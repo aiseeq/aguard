@@ -110,6 +110,20 @@ func TestExitCode(t *testing.T) {
 // без строки роли (таймеров не было); в журнале — «сжимаю» и «не сжалось … поднимаю без сжатия». Флаги роли (файл
 // настроек и промпт) — и у сжатия, и у подъёма.
 func TestSuperviseCompact(t *testing.T) {
+	answer := `{"v":1,"restart":false,"fresh":true,"key":"false,true","session_id":"s1","name":"x-master",` +
+		`"running":"2.1.310","installed":"2.1.310","compact":true,"compact_key":"true","tokens":150000`
+	t.Run("без потерянных таймеров", func(t *testing.T) { superviseCompact(t, answer+`}`, nil, "") })
+	// Таймеры, унаследованные через /clear, --resume не вернёт и после сжатия: подъём как после перезапуска ради версии.
+	t.Run("потерянные таймеры", func(t *testing.T) {
+		superviseCompact(t, answer+`,"lost":[{"id":"j1","cron":"47 1 * * *","prompt":"Сон","recurring":true}]}`,
+			[]string{"Роль (cl поднял сессию заново в ЧЧ:ММ на Claude Code 2.1.310)."},
+			`таймер прошлой беседы j1 (47 1 * * *, "Сон") после подъёма не вернётся — поднимаю со строкой роли`)
+	})
+}
+
+// superviseCompact — сжатие в act целиком: aguard отвечает answer; подъём — --resume s1 и line, в журнале — lostLine
+// (пусто — строк о таймерах нет).
+func superviseCompact(t *testing.T, answer string, line []string, lostLine string) {
 	w := newWorld(t)
 	d := w.dir
 	settings := filepath.Join(d, "role.json")
@@ -125,8 +139,7 @@ if [ -e "$D/run1" ]; then printf '%s\n' "$@" > "$D/run2"; echo 'API Error: overl
 printf '%s\n' "$@" > "$D/run1"
 exec sleep 25`)
 	t.Cleanup(func() { signal.Reset(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP) })
-	socket := fakeAguard(t, `{"v":1,"restart":false,"fresh":true,"key":"false,true","session_id":"s1","name":"x-master",`+
-		`"running":"2.1.310","installed":"2.1.310","compact":true,"compact_key":"true","tokens":150000}`)
+	socket := fakeAguard(t, answer)
 	l := launcher{systemdRun: run, claude: w.claude, home: d, configFile: filepath.Join(d, "config.json"),
 		aguard: socket, name: "x-master", dir: filepath.Join(d, "proj"), check: testCheck}
 
@@ -147,8 +160,15 @@ exec sleep 25`)
 	}
 	resume := append(append(append(slices.Clone(scope), "--unit=agent-x-master-"+pid+"-r1", "--", w.claude), own...),
 		"-n", "x-master", "--model", "opus", "--resume", "s1")
-	if got := readLines(t, filepath.Join(d, "run3")); !slices.Equal(got, resume) {
+	resume = append(resume, line...)
+	if got := anyClock(readLines(t, filepath.Join(d, "run3"))); !slices.Equal(got, resume) {
 		t.Errorf("подъём:\n%q\nwant\n%q", got, resume)
+	}
+	if lostLine == "" && strings.Contains(journalText, "таймер прошлой беседы") {
+		t.Errorf("строка о таймере без потерянных таймеров:\n%s", journalText)
+	}
+	if !strings.Contains(journalText, lostLine) {
+		t.Errorf("в журнале нет %q:\n%s", lostLine, journalText)
 	}
 	for _, want := range []string{"act: сжимаю: контекст 150 тыс.", "не сжалось (exit status 1: API Error: overloaded) — поднимаю без сжатия"} {
 		if !strings.Contains(journalText, want) {

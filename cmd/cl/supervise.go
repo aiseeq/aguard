@@ -641,7 +641,7 @@ func (l launcher) wantCompact(cfg config, pid int, a restart.Answer, last string
 		mode: cfg.Restart.CompactMode, names: "compact_names", pilot: cfg.Restart.CompactNames, key: a.CompactKey,
 		would: fmt.Sprintf("сжал бы%%s: контекст %d тыс., кэш жив, ничего не идёт", a.Tokens/1000), none: "не сжимаю",
 		doing:    cllog.Compact(a.Tokens, a.SessionID),
-		out:      outcome{compact: true, version: a.Running},
+		out:      outcome{compact: true, version: a.Running, lost: a.Lost},
 		typeMode: cfg.Restart.TypeMode, typed: cllog.TypedCompact,
 		typing:  cllog.Typing(a.Tokens, cllog.TypedCompact),
 		noReset: cllog.NoReset(restart.Texts(a.ResetAgainst)),

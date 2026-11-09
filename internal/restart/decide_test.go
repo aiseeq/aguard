@@ -68,6 +68,12 @@ func TestDecideFreshVersion(t *testing.T) {
 	if v := decide(f, allowance{}); v.Restart || !v.Fresh {
 		t.Errorf("процесс новее установленной: %+v", v)
 	}
+	// Подъём после сжатия тоже идёт через --resume: свежей версии таймеры прошлой беседы нужны в Lost.
+	f.Transcript.Crons = []cronJob{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон", Recurring: true}}
+	want := []LostCron{{ID: "j1", Cron: "47 1 * * *", Prompt: "Сон", Recurring: true}}
+	if v := decide(f, allowance{}); !v.Fresh || !slices.Equal(v.Lost, want) {
+		t.Errorf("унаследованный таймер при свежей версии: %+v", v)
+	}
 }
 
 func TestDecideAgainst(t *testing.T) {
