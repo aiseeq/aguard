@@ -275,16 +275,6 @@ func readHookState(p paths, sessionID string) (hookRecord, error) {
 }
 
 // transcriptFile — транскрипт сессии в любой папке проектов: имя папки Claude Code выводит из cwd сам.
-func transcriptFile(p paths, sessionID string) (string, error) {
-	matches, err := filepath.Glob(filepath.Join(p.projects, "*", filepath.Base(sessionID)+".jsonl"))
-	if err != nil {
-		return "", fmt.Errorf("транскрипт: %w", err)
-	}
-	if len(matches) != 1 {
-		return "", fmt.Errorf("транскрипт сессии %s: нашлось %d файлов", sessionID, len(matches))
-	}
-	return matches[0], nil
-}
 
 func later(a, b time.Time) time.Time {
 	if b.After(a) {

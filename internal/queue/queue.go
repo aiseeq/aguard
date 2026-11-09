@@ -83,6 +83,12 @@ type Supply struct {
 	Burning bool
 }
 
+// NegativeMargin — запас ниже нуля у поставщика, чей остаток не сгорает; те же Supply, что идут в Compute.
+func NegativeMargin(claude Supply, openai *Supply) bool {
+	negative := func(s Supply) bool { return s.Margin < 0 && !s.Burning }
+	return negative(claude) || openai != nil && negative(*openai)
+}
+
 const noBurningRateMargin = 99 // Принятый верхний запас при нулевом расходе.
 func Measure(rows []Row, accounts []string, now time.Time) Supply {
 	return measure(rows, accounts, now, 72*time.Hour)
@@ -315,13 +321,14 @@ func Compute(t Table, ovs []Override, claude Supply, openai *Supply, now time.Ti
 const MaxSpaceShift = 2
 
 // SpaceOpen — планка каждого корня из общих ворот: пара открыта, если открыта пара того же DIFF на shift приоритетов выше.
-// Выше MED — HIGH: он открыт всегда. Корень со сдвигом 0 тоже в ответе: tk видит, что планка посчитана.
-func SpaceOpen(t Table, open []string, spaces map[string]int) map[string][]string {
+// Выше MED — HIGH; при отрицательном запасе пара открывается только если она уже открыта в общих воротах.
+// Корень со сдвигом 0 тоже в ответе: tk видит, что планка посчитана.
+func SpaceOpen(t Table, open []string, spaces map[string]int, negative bool) map[string][]string {
 	out := make(map[string][]string, len(spaces))
 	for root, shift := range spaces {
 		pairs := []string{}
 		for _, r := range t {
-			if shiftedOpen(r.Pair, open, shift) {
+			if shiftedOpen(r.Pair, open, shift, negative) {
 				pairs = append(pairs, r.Pair)
 			}
 		}
@@ -330,14 +337,14 @@ func SpaceOpen(t Table, open []string, spaces map[string]int) map[string][]strin
 	return out
 }
 
-func shiftedOpen(pair string, open []string, shift int) bool {
+func shiftedOpen(pair string, open []string, shift int, negative bool) bool {
 	prio, diff, ok := strings.Cut(pair, "-")
 	if !ok {
 		return slices.Contains(open, pair)
 	}
 	rank := map[string]int{"MED": 0, "LOW": 1}[prio] - shift
 	if rank < 0 {
-		return true
+		return !negative || slices.Contains(open, pair)
 	}
 	return slices.Contains(open, []string{"MED", "LOW"}[rank]+"-"+diff)
 }
@@ -416,15 +423,14 @@ func NormPrio(p string) string {
 }
 
 type Ticket struct {
-	Key, Project, Slug, Title, Prio, Diff, Status, Back, Master, Admin string
-	Dir                                                                string
-	Executor                                                           string // для «в работе»: tk next показывает его только исполнителю
-	WaitDue                                                            bool   // для «ждёт»: срок наступил, tk next его показывает
-	Journal                                                            bool   // журнал, а не задача: вне tk next, кроме наступившего wait
-	Transfer                                                           string // перенесён во внешний трекер: ключ и адрес; файла тикета больше нет
-	External                                                           bool   // задача внешнего трекера: файла тикета нет
-	Started                                                            bool   // внешняя задача уже в работе: письмо мастеру есть, письма админу «не взят» нет
-	Created                                                            time.Time
+	Key, Project, Slug, Title, Prio, Status, Back, Master, Admin string
+	Dir                                                          string
+	Executor                                                     string // для «в работе»: tk next показывает его только исполнителю
+	Journal                                                      bool   // журнал, а не задача: вне tk next, кроме наступившего wait
+	Transfer                                                     string // перенесён во внешний трекер: ключ и адрес; файла тикета больше нет
+	External                                                     bool   // задача внешнего трекера: файла тикета нет
+	Started                                                      bool   // внешняя задача уже в работе: письмо мастеру есть, письма админу «не взят» нет
+	Created                                                      time.Time
 }
 
 const (
@@ -434,7 +440,9 @@ const (
 	KindCritCopy    = "crit_copy"
 	KindHigh        = "high"
 	KindHighAdmin   = "high_admin"
-	KindMorning     = "morning"
+	KindWake        = "wake"
+	KindWakeStuck   = "wake_stuck"
+	KindWakeAdmin   = "wake_admin"
 	KindBack        = "back"
 	KindBackLost    = "back_lost"
 	KindUnreachable = "unreachable"
@@ -444,8 +452,16 @@ type View struct {
 	Now                  time.Time
 	Lead                 string
 	Open                 []string
-	Morning              time.Duration
 	Serious, Alive, Free func(string) bool
+	Next                 func(string, string) (Ticket, bool, error)
+	Session              func(string) string
+	TurnAfter            func(string, time.Time) bool
+	WakeFree             func(string) bool
+	Projects             func() []Ticket
+	Cwd                  func(string) string
+	Frozen               func(string) (bool, error)
+	AdminNext            func(string, string) (Ticket, bool, error)
+	AdminFor             func(string) string
 	WeekendCrit          []string // папки проектов: в субботу и воскресенье из строк идут только CRIT
 	OpenByRoot           map[string][]string
 
@@ -454,6 +470,8 @@ type View struct {
 type Notice struct {
 	To, Kind, Key, Line string
 	Serious             bool
+	Master, Session     string
+	Dir                 string
 }
 
 const highWait = 4 * time.Hour
@@ -479,19 +497,37 @@ type ticketState struct {
 	Unreachable bool      `json:"unreachable,omitempty"`
 	Notes       []string  `json:"notes,omitempty"`
 }
+type Wake struct {
+	Ticket  string    `json:"ticket"`
+	At      time.Time `json:"at"`
+	Mode    string    `json:"mode"`
+	Session string    `json:"session"`
+	Stuck   bool      `json:"stuck,omitempty"`
+}
+
+type ProjectWake struct {
+	Ticket string    `json:"ticket"`
+	At     time.Time `json:"at"`
+	Mode   string    `json:"mode"`
+}
+
 type State struct {
-	Seeded   bool                      `json:"seeded"`
-	Tickets  map[string]*ticketState   `json:"tickets,omitempty"`
-	Mornings map[string]string         `json:"mornings,omitempty"`
-	External map[string][]ExternalTask `json:"external,omitempty"` // папка проекта → последний ответ трекера
+	Seeded       bool                      `json:"seeded"`
+	Tickets      map[string]*ticketState   `json:"tickets,omitempty"`
+	Wakes        map[string]Wake           `json:"wakes,omitempty"`
+	ProjectWakes map[string]ProjectWake    `json:"project_wakes,omitempty"`
+	External     map[string][]ExternalTask `json:"external,omitempty"` // папка проекта → последний ответ трекера
 }
 
 func (s *State) init() {
 	if s.Tickets == nil {
 		s.Tickets = map[string]*ticketState{}
 	}
-	if s.Mornings == nil {
-		s.Mornings = map[string]string{}
+	if s.Wakes == nil {
+		s.Wakes = map[string]Wake{}
+	}
+	if s.ProjectWakes == nil {
+		s.ProjectWakes = map[string]ProjectWake{}
 	}
 }
 func (s *State) Step(ts []Ticket, v View) []Notice {
@@ -504,14 +540,22 @@ func (s *State) Step(ts []Ticket, v View) []Notice {
 		out = append(out, s.stepTicket(ts[i], v, wasSeed, active)...)
 	}
 	s.Seeded = true
-	out = append(out, s.morningNotices(ts, v)...)
-	s.cleanup(active, v.Now)
+	out = append(out, s.wakeNotices(ts, v, out)...)
+	out = append(out, s.adminWakeNotices(ts, v, out)...)
+	s.cleanup(active)
 	return out
 }
 
 func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool) []Notice {
 	t.Prio = NormPrio(t.Prio)
 	closedTicket := closed(t.Status)
+	if !closedTicket && !alive(v, t.Master) && frozen(v, t.Dir) {
+		delete(s.ProjectWakes, t.Dir)
+		if w, ok := s.Wakes[t.Master]; ok && strings.HasPrefix(w.Ticket, t.Project+"/") {
+			delete(s.Wakes, t.Master)
+		}
+		return nil
+	}
 	if closedTicket && t.Back == "" || !closedTicket && t.Prio != "CRIT" && t.Prio != "HIGH" {
 		return nil
 	}
@@ -562,17 +606,6 @@ func restEnd(now time.Time) time.Time {
 
 func underRoot(dir, root string) bool {
 	return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
-}
-
-// openFor — планка папки: самый длинный корень, куда она входит, иначе общие ворота. Как у tk next.
-func openFor(dir string, v View) []string {
-	open := v.Open
-	for _, root := range slices.Sorted(maps.Keys(v.OpenByRoot)) { // корни папки — цепочка префиксов: длинный идёт последним
-		if underRoot(dir, root) {
-			open = v.OpenByRoot[root]
-		}
-	}
-	return open
 }
 
 // restingSessions — мастера и админы папок на выходном: строка о закрытом им ждёт понедельника. Лиду идёт всегда.
@@ -707,92 +740,10 @@ func (s *State) backNotices(t Ticket, st *ticketState, v View) []Notice {
 	return nil
 }
 
-func (s *State) morningNotices(ts []Ticket, v View) []Notice {
-	boundary := time.Date(v.Now.Year(), v.Now.Month(), v.Now.Day(), 0, 0, 0, 0, v.Now.Location()).Add(v.Morning)
-	if !v.Now.After(boundary) {
-		return nil
-	}
-	seriousByMaster := map[string]bool{}
-	for i := range ts {
-		t := &ts[i]
-		if !morningTicket(*t, boundary, v) {
-			continue
-		}
-		if !dueWait(*t) && !morningOpen(*t, NormPrio(t.Prio), openFor(t.Dir, v)) {
-			continue
-		}
-		seriousByMaster[t.Master] = seriousByMaster[t.Master] || (v.Serious != nil && v.Serious(t.Project))
-	}
-	masters := slices.Sorted(maps.Keys(seriousByMaster))
-	var out []Notice
-	day := v.Now.Format("2006-01-02")
-	for _, master := range masters {
-		key := day + "/" + master
-		mode, sent := s.Mornings[key]
-		eligible := !sent || seriousByMaster[master] && mode == ModeLog
-		if eligible && v.Free != nil && v.Free(master) {
-			out = append(out, Notice{To: master, Kind: KindMorning, Key: key, Line: "есть работа: tk next", Serious: seriousByMaster[master]})
-		}
-	}
-	return out
-}
-
-func morningTicket(t Ticket, boundary time.Time, v View) bool {
-	p := NormPrio(t.Prio)
-	if t.Master == "" || !alive(v, t.Master) {
-		return false
-	}
-	if dueWait(t) { // другого пути нет: tk next покажет его, только когда мастер уже проснулся
-		return p == "CRIT" || !restingDir(t.Dir, v)
-	}
-	return (t.Created.IsZero() || !t.Created.After(boundary)) && (p == "MED" || p == "LOW") && visibleInNext(t) && !restingDir(t.Dir, v)
-}
-
-// dueWait — наступивший ждущий: tk next показывает его при любых воротах и любом приоритете.
-func dueWait(t Ticket) bool {
-	return t.Status == "ждёт" && t.WaitDue
-}
-
-// visibleInNext — статус тикета, который tk next покажет мастеру: иначе строка «есть работа» придёт при пустом tk next.
-func visibleInNext(t Ticket) bool {
-	if t.Journal {
-		return t.Status == "ждёт" && t.WaitDue
-	}
-	switch t.Status {
-	case "открыт":
-		return true
-	case "в работе":
-		return strings.EqualFold(t.Executor, t.Master)
-	case "ждёт":
-		return t.WaitDue
-	}
-	return false
-}
-
-// morningOpen — как у tk next: тикет с DIFF смотрит на свою пару, без DIFF виден, только когда открыты все пары приоритета.
-func morningOpen(t Ticket, prio string, open []string) bool {
-	if t.Diff != "" {
-		return slices.Contains(open, prio+"-"+t.Diff)
-	}
-	for _, pair := range pairs {
-		if strings.HasPrefix(pair, prio+"-") && !slices.Contains(open, pair) {
-			return false
-		}
-	}
-	return true
-}
-
-func (s *State) cleanup(active map[string]bool, now time.Time) {
+func (s *State) cleanup(active map[string]bool) {
 	for key := range s.Tickets {
 		if !active[key] {
 			delete(s.Tickets, key)
-		}
-	}
-	cutoff := now.AddDate(0, 0, -2).Format("2006-01-02")
-	for key := range s.Mornings {
-		date, _, ok := strings.Cut(key, "/")
-		if ok && date < cutoff {
-			delete(s.Mornings, key)
 		}
 	}
 }
@@ -844,8 +795,18 @@ func (s *State) Confirm(n Notice, v View) {
 			st.Notes = append(st.Notes, n.Line)
 		}
 	}
-	if n.Kind == KindMorning {
-		s.Mornings[v.Now.Format("2006-01-02")+"/"+n.To] = mode
+	if n.Kind == KindWakeAdmin {
+		s.ProjectWakes[n.Dir] = ProjectWake{Ticket: n.Key, At: v.Now, Mode: mode}
+	}
+	if n.Kind == KindWake {
+		s.Wakes[n.To] = Wake{Ticket: n.Key, At: v.Now, Mode: mode, Session: n.Session}
+	}
+	if n.Kind == KindWakeStuck {
+		w := s.Wakes[n.Master]
+		if w.Ticket == n.Key && w.Session == n.Session {
+			w.Stuck = true
+			s.Wakes[n.Master] = w
+		}
 	}
 }
 

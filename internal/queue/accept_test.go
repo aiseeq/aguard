@@ -21,7 +21,7 @@ func at(s string) time.Time {
 	return t
 }
 
-func TestReplayElevenMornings(t *testing.T) {
+func TestReplayElevenHistorySamples(t *testing.T) {
 	rows, err := ReadHistory("testdata/limits-history.jsonl")
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func newWorld(mode string) *world {
 
 func (w *world) view() View {
 	return View{
-		Now: w.now, Lead: "lead", Open: w.open, Morning: 7 * time.Hour, WeekendCrit: w.weekendCrit,
+		Now: w.now, Lead: "lead", Open: w.open, WeekendCrit: w.weekendCrit,
 		Serious: func(project string) bool { return w.mode == ModeOn },
 		Alive:   func(n string) bool { return w.live[n] },
 		Free:    func(n string) bool { w.asked[n]++; return w.free[n] },
@@ -466,93 +466,6 @@ func TestFreeAskedOnlyForWork(t *testing.T) {
 	step(s, []Ticket{tick("LOW", "готово"), tick("CRIT", "готово")}, w)
 	if len(w.asked) != 0 {
 		t.Fatalf("спрашивал: %v", w.asked)
-	}
-}
-
-func TestMorning(t *testing.T) {
-	w := newWorld(ModeOn)
-	w.now = at("2026-11-04T06:50:00+01:00")
-	w.free["m-master"] = true
-	w.open = []string{"LOW-DO"}
-	s := seeded(w)
-	low := tick("LOW", "открыт")
-	low.Diff = "DO"
-	ts := []Ticket{low}
-	if ns := step(s, ts, w); len(ns) != 0 {
-		t.Fatalf("до утра: %+v", ns)
-	}
-	w.now = at("2026-11-04T07:01:00+01:00")
-	w.free["m-master"] = false
-	if ns := step(s, ts, w); len(ns) != 0 {
-		t.Fatalf("занят: %+v", ns)
-	}
-	w.free["m-master"] = true
-	ns := step(s, ts, w)
-	if !has(ns, KindMorning, "m-master") {
-		t.Fatalf("утро: %+v", ns)
-	}
-	if strings.Contains(strings.ToLower(ns[0].Line), "лимит") {
-		t.Fatalf("о лимитах мастерам не пишем: %q", ns[0].Line)
-	}
-	if ns := step(s, ts, w); len(ns) != 0 {
-		t.Fatalf("раз в день: %+v", ns)
-	}
-	w.now = w.now.Add(24 * time.Hour)
-	if ns := step(s, ts, w); !has(ns, KindMorning, "m-master") {
-		t.Fatalf("следующее утро: %+v", ns)
-	}
-}
-
-func TestMorningPairs(t *testing.T) {
-	cases := []struct {
-		name       string
-		prio, diff string
-		open       []string
-		want       bool
-	}{
-		{"пара закрыта", "LOW", "HUNT", []string{"LOW-DO"}, false},
-		{"без DIFF, открыта одна пара его PRIO", "LOW", "", []string{"LOW-DO"}, false},
-		{"без DIFF, открыты все пары его PRIO", "LOW", "", []string{"LOW-DO", "LOW-HUNT", "LOW-ARCH"}, true},
-		{"MEDIUM без DIFF, открыты все пары", "MEDIUM", "", []string{"MED-DO", "MED-HUNT", "MED-ARCH"}, true},
-		{"без DIFF, чужой PRIO", "LOW", "", []string{"MED-DO"}, false},
-		{"MEDIUM читается как MED", "MEDIUM", "DO", []string{"MED-DO"}, true},
-		{"всё закрыто", "MED", "DO", nil, false},
-	}
-	for _, c := range cases {
-		w := newWorld(ModeOn)
-		w.now = at("2026-11-04T07:01:00+01:00")
-		w.free["m-master"] = true
-		w.open = c.open
-		s := seeded(w)
-		tk := tick(c.prio, "открыт")
-		tk.Diff = c.diff
-		if got := has(step(s, []Ticket{tk}, w), KindMorning, "m-master"); got != c.want {
-			t.Errorf("%s: %v", c.name, got)
-		}
-	}
-	// Ждущий и закрытый не считаются.
-	for _, st := range []string{"ждёт", "готово", "отклонён", "на проверке"} {
-		w := newWorld(ModeOn)
-		w.now = at("2026-11-04T07:01:00+01:00")
-		w.free["m-master"] = true
-		w.open = []string{"LOW-DO"}
-		s := seeded(w)
-		tk := tick("LOW", st)
-		tk.Diff = "DO"
-		if ns := step(s, []Ticket{tk}, w); has(ns, KindMorning, "m-master") {
-			t.Errorf("статус %s: %+v", st, ns)
-		}
-	}
-	// Живой сессии нет: строки нет, MED и LOW не будят админа.
-	w := newWorld(ModeOn)
-	w.now = at("2026-11-04T07:01:00+01:00")
-	w.live["m-master"] = false
-	w.open = []string{"LOW-DO"}
-	s := seeded(w)
-	tk := tick("LOW", "открыт")
-	tk.Diff = "DO"
-	if ns := step(s, []Ticket{tk}, w); len(ns) != 0 {
-		t.Fatalf("нет сессии: %+v", ns)
 	}
 }
 

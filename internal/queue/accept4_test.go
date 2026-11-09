@@ -62,33 +62,6 @@ func TestSeedFreshHighAdminFromCreated(t *testing.T) {
 	}
 }
 
-// Утренняя отметка журнала не съедает боевую строку: проект вошёл в live в тот же день — мастер её получает, один раз.
-func TestMorningLogThenLiveSameDay(t *testing.T) {
-	w := newWorld(ModeLog)
-	w.now = at("2026-11-04T07:01:00+01:00")
-	w.free["m-master"] = true
-	w.open = []string{"LOW-DO"}
-	s := seeded(w)
-	low := tick("LOW", "открыт")
-	low.Diff = "DO"
-	ts := []Ticket{low}
-	ns := step(s, ts, w)
-	if !has(ns, KindMorning, "m-master") || ns[0].Serious {
-		t.Fatalf("журнал считает как боевой, без письма: %+v", ns)
-	}
-	if ns := step(s, ts, w); len(ns) != 0 {
-		t.Fatalf("в журнале раз в день: %+v", ns)
-	}
-	w.mode = ModeOn
-	ns = step(s, ts, w)
-	if !has(ns, KindMorning, "m-master") || !ns[0].Serious {
-		t.Fatalf("вошёл в live в тот же день: %+v", ns)
-	}
-	if ns := step(s, ts, w); len(ns) != 0 {
-		t.Fatalf("боевая раз в день: %+v", ns)
-	}
-}
-
 // Состояние цело, новый HIGH: 4 ч считаются от первого появления, посев тут ни при чём.
 func TestSeededNewHighWaitsFromSeen(t *testing.T) {
 	w := newWorld(ModeOn)
@@ -106,33 +79,6 @@ func TestSeededNewHighWaitsFromSeen(t *testing.T) {
 }
 
 // Утро считает работу как tk next: чужой «в работе» ему не виден, свой и наступивший «ждёт» видны.
-func TestMorningCountsLikeTkNext(t *testing.T) {
-	cases := []struct {
-		name, status, executor string
-		due, want              bool
-	}{
-		{"открыт", "открыт", "", false, true},
-		{"в работе у мастера", "в работе", "m-master", false, true},
-		{"в работе у мастера, другой регистр", "в работе", "M-Master", false, true},
-		{"в работе у другого", "в работе", "luna:1104-x", false, false},
-		{"в работе без исполнителя", "в работе", "", false, false},
-		{"ждёт, срок наступил", "ждёт", "", true, true},
-		{"ждёт, срок не наступил", "ждёт", "", false, false},
-	}
-	for _, c := range cases {
-		w := newWorld(ModeOn)
-		w.now = at("2026-11-04T07:01:00+01:00")
-		w.free["m-master"] = true
-		w.open = []string{"LOW-DO"}
-		s := seeded(w)
-		low := tick("LOW", c.status)
-		low.Diff, low.Executor, low.WaitDue = "DO", c.executor, c.due
-		if got := has(step(s, []Ticket{low}, w), KindMorning, "m-master"); got != c.want {
-			t.Errorf("%s: %v", c.name, got)
-		}
-	}
-}
-
 // Проект вошёл в live в тот же день, мастер мёртв: строка админу из журнала не заменяет настоящую, пока HIGH моложе 4 ч.
 func TestHighAdminLogThenLive(t *testing.T) {
 	w := newWorld(ModeLog)

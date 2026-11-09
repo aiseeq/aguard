@@ -385,14 +385,14 @@ func TestQueueTkGarbageUsesLastList(t *testing.T) {
 	}
 }
 
-// Поля, по которым tk next решает, виден ли тикет, доходят от tk ls.
-func TestQueueTicketExecutorAndDue(t *testing.T) {
+// Исполнитель доходит от tk ls: по нему «взят» отличается от «не взят».
+func TestQueueTicketExecutor(t *testing.T) {
 	b := newQueueBench(t, `[{"repo":"p","slug":"c","status":"ждёт","prio":"LOW","title":"t","executor":"p-master","overdue":true,"path":"docs/tasks/20261103-1205-LOW-c.md"}]`, "[]")
 	ts, err := b.a.queueTickets(context.Background(), b.c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ts) != 1 || ts[0].Executor != "p-master" || !ts[0].WaitDue {
+	if len(ts) != 1 || ts[0].Executor != "p-master" {
 		t.Fatalf("%+v", ts)
 	}
 }

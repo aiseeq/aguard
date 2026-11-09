@@ -30,13 +30,38 @@ func TestSpaceOpen(t *testing.T) {
 		"сдвиг 1: LOW общих MED не открывает": {[]string{"LOW-DO"}, 1, medAll},
 		"сдвиг 2 открывает всё":               {nil, 2, all},
 	} {
-		got := SpaceOpen(spaceTable(), c.open, map[string]int{"/h/work": c.shift})["/h/work"]
+		got := SpaceOpen(spaceTable(), c.open, map[string]int{"/h/work": c.shift}, false)["/h/work"]
 		if !slices.Equal(got, c.want) || got == nil {
 			t.Errorf("%s: %v, нужно %v", name, got, c.want)
 		}
 	}
-	if got := SpaceOpen(spaceTable(), nil, nil); got == nil || len(got) != 0 {
+	if got := SpaceOpen(spaceTable(), nil, nil, false); got == nil || len(got) != 0 {
 		t.Errorf("без пространств — пустой объект: %v", got)
+	}
+}
+
+func TestSpaceOpenNegativeMargin(t *testing.T) {
+	spaces := map[string]int{"/work": 1}
+	table := spaceTable()
+	cases := []struct {
+		name   string
+		supply Supply
+		other  *Supply
+		open   []string
+		want   bool
+	}{
+		{"отрицательный", Supply{Margin: -1}, nil, nil, false},
+		{"восстановился", Supply{Margin: 0}, nil, nil, true},
+		{"сгорает", Supply{Margin: -1, Burning: true}, nil, nil, true},
+		{"override", Supply{Margin: -1}, nil, []string{"MED-DO"}, true},
+		{"второй поставщик", Supply{Margin: 1}, &Supply{Margin: -1}, nil, false},
+		{"второй сгорает", Supply{Margin: 1}, &Supply{Margin: -1, Burning: true}, nil, true},
+	}
+	for _, c := range cases {
+		got := SpaceOpen(table, c.open, spaces, NegativeMargin(c.supply, c.other))["/work"]
+		if slices.Contains(got, "MED-DO") != c.want {
+			t.Errorf("%s: %v", c.name, got)
+		}
 	}
 }
 
@@ -54,33 +79,6 @@ func TestSpacesConfig(t *testing.T) {
 		c.Spaces = map[string]int{"~/work": bad}
 		if err := c.Validate("/h"); err == nil {
 			t.Fatalf("сдвиг %d принят", bad)
-		}
-	}
-}
-
-func TestMorningByRoot(t *testing.T) {
-	med := func(dir string) Ticket {
-		m := tick("MED", "открыт")
-		m.Diff, m.Dir = "DO", dir
-		return m
-	}
-	view := func(w *world) View {
-		v := w.view()
-		v.OpenByRoot = map[string][]string{"/h/work": {"MED-DO"}, "/h/work/inner": {}}
-		return v
-	}
-	for dir, want := range map[string]bool{
-		"/h/work/p":       true,
-		"/h/work":         true,
-		"/h/work/inner/p": false, // самый длинный корень
-		"/h/work-old/p":   false, // похожее имя — не тот корень
-		"/h/git/p":        false,
-	} {
-		w := newWorld(ModeOn)
-		w.free["m-master"] = true
-		s := &State{Seeded: true}
-		if got := has(s.Step([]Ticket{med(dir)}, view(w)), KindMorning, "m-master"); got != want {
-			t.Errorf("%s: %v, нужно %v", dir, got, want)
 		}
 	}
 }

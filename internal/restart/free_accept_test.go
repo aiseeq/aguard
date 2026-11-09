@@ -1,6 +1,8 @@
 package restart
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -8,6 +10,73 @@ import (
 )
 
 // Приёмка queue-order-guard: признак «свободен». Написана мастером до кода, боец её не правит.
+func TestFreeFreshConsoleNoTranscript(t *testing.T) {
+	now := time.Now()
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 10 * time.Minute})
+	w.link(t, 4242)
+	path := filepath.Join(w.p.projects, "-home-u-git-x", "s1.jsonl")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	j := NewJudge(w.dir)
+	j.paths = &w.p
+	if ok, why := j.Free(&Config{}, 4242, 2*time.Minute, now); !ok {
+		t.Fatalf("нет транскрипта: %s", why)
+	}
+	if err := os.Mkdir(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := j.Free(&Config{}, 4242, 2*time.Minute, now); ok {
+		t.Fatal("ошибка чтения принята за простой")
+	}
+}
+
+// Будильник: фоновая задача или суб-агент держат мастера занятым, монитор артефакта и ожидание команды — как задумано.
+func TestWakeFree(t *testing.T) {
+	now := time.Now()
+	const after = 2 * time.Minute
+	cases := []struct {
+		name, tasks string
+		want        bool
+	}{
+		{"без задач", "", true},
+		{"фоновая задача", `{"tasks":[{"type":"bash","description":"сборка"}]}`, false},
+		{"суб-агент", `{"tasks":[{"type":"subagent","description":"проверка"}]}`, false},
+		{"монитор артефакта", `{"tasks":[{"type":"monitor","description":"live updates for artifact x (auto-armed on publish)"}]}`, true},
+	}
+	for _, c := range cases {
+		w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 10 * time.Minute})
+		w.link(t, 4242)
+		if c.tasks != "" {
+			write(t, filepath.Join(w.p.hookStates, "s1.tasks"), c.tasks)
+		}
+		j := NewJudge(w.dir)
+		j.paths = &w.p
+		got, err := j.WakeFree(&Config{}, 4242, after, now)
+		if err != nil || got != c.want {
+			t.Errorf("%s: %v %v", c.name, got, err)
+		}
+	}
+}
+
+// worker wait на переднем плане — свобода для перезапуска, но не для будильника: мастер в ходе.
+func TestWakeFreeForegroundWaitIsBusy(t *testing.T) {
+	now := time.Now()
+	const after = 2 * time.Minute
+	ts := now.Add(-20 * time.Minute).UTC().Format("2006-01-02T15:04:05.000Z")
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 10 * time.Minute}, use(ts, "1", "Bash", `{"command":"worker wait j --timeout 9m"}`))
+	w.link(t, 4242)
+	write(t, filepath.Join(w.p.hookStates, "s1"), "working\n")
+	j := NewJudge(w.dir)
+	j.paths = &w.p
+	if ok, why := j.Free(&Config{}, 4242, after, now); !ok || why != "ожидание команды" {
+		t.Fatalf("предусловие: %v %s", ok, why)
+	}
+	if got, err := j.WakeFree(&Config{}, 4242, after, now); err != nil || got {
+		t.Fatal(got, err)
+	}
+}
+
 func TestFree(t *testing.T) {
 	const m2 = 2 * time.Minute
 	base := func() facts {

@@ -127,33 +127,6 @@ func TestExternalCritLine(t *testing.T) {
 	}
 }
 
-// Противник, сценарий 1: задача появилась днём — утренней строки сегодня нет, завтра есть; при закрытых воротах нет и завтра.
-func TestExternalMorning(t *testing.T) {
-	task := extTask("MED", "To Do")
-	task.FirstSeen = at("2026-11-04T15:45:00+01:00")
-	ts := []Ticket{task.Ticket("m", "/h/work/m", "m-master", "git-admin")}
-	w := newWorld(ModeOn)
-	w.free["m-master"] = true
-	w.open = []string{"MED-DO", "MED-HUNT", "MED-ARCH"}
-	w.now = at("2026-11-04T15:46:00+01:00")
-	s := seeded(w)
-	if ns := step(s, ts, w); count(ns, KindMorning) != 0 {
-		t.Fatalf("днём: %+v", ns)
-	}
-	w.now = at("2026-11-05T07:01:00+01:00")
-	if ns := step(s, ts, w); count(ns, KindMorning) != 1 {
-		t.Fatalf("утром: %+v", ns)
-	}
-	w = newWorld(ModeOn)
-	w.free["m-master"] = true
-	w.open = []string{"MED-DO"} // без сложности видна, только когда открыты все пары приоритета, как у tk next
-	w.now = at("2026-11-05T07:01:00+01:00")
-	s = seeded(w)
-	if ns := step(s, ts, w); count(ns, KindMorning) != 0 {
-		t.Fatalf("закрыта пара: %+v", ns)
-	}
-}
-
 func TestSetExternalKeepsFirstSeen(t *testing.T) {
 	var s State
 	t1, t2 := at("2026-11-04T10:00:00+01:00"), at("2026-11-04T10:05:00+01:00")

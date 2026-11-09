@@ -1,8 +1,10 @@
 package restart
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -59,23 +61,75 @@ func (j *Judge) Free(cfg *Config, pid int, after time.Duration, now time.Time) (
 	}
 	f.HookState, f.HookTasks, f.HookWaits, f.HookAgents = h.state, h.tasks, h.waits, h.agents
 	file, err := transcriptFile(p, s.SessionID)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
+		f.TurnQuiet = now.Sub(time.UnixMilli(s.StartedAt))
+	} else if err != nil {
 		f.Errors = append(f.Errors, err.Error())
-		return free(f, after)
-	}
-	info, err := os.Stat(file)
-	if err != nil {
-		f.Errors = append(f.Errors, fmt.Sprintf("транскрипт: %v", err))
-		return free(f, after)
-	}
-	f.TurnQuiet = now.Sub(info.ModTime())
-	f.Transcript, err = c.scan.read(file, info, time.UnixMilli(s.StartedAt), now)
-	if err != nil {
-		f.Errors = append(f.Errors, err.Error())
+	} else if info, statErr := os.Stat(file); errors.Is(statErr, os.ErrNotExist) {
+		f.TurnQuiet = now.Sub(time.UnixMilli(s.StartedAt))
+	} else if statErr != nil {
+		f.Errors = append(f.Errors, fmt.Sprintf("транскрипт: %v", statErr))
+	} else {
+		f.TurnQuiet = now.Sub(info.ModTime())
+		f.Transcript, err = c.scan.read(file, info, time.UnixMilli(s.StartedAt), now)
+		if err != nil {
+			f.Errors = append(f.Errors, err.Error())
+		}
 	}
 	f.TTYQuiet, err = ttyQuiet(p, pid, now)
 	if err != nil {
 		f.Errors = append(f.Errors, err.Error())
 	}
 	return free(f, after)
+}
+
+// WakeFree проверяет простой и задачи, оставшиеся на последнем Stop.
+func (j *Judge) WakeFree(cfg *Config, pid int, after time.Duration, now time.Time) (bool, error) {
+	ok, reason := j.Free(cfg, pid, after, now)
+	if !ok || reason == "ожидание команды" {
+		return false, nil
+	}
+	p := j.pathsOf(cfg)
+	s, err := readSession(p.sessions, pid)
+	if err != nil {
+		return false, err
+	}
+	hook, err := readHookState(p, s.SessionID)
+	if err != nil {
+		return false, err
+	}
+	return !hook.tasks, nil // суб-агент — тоже запись в задачах
+}
+
+// transcriptFile ищет файл беседы; нет файла — os.ErrNotExist, отличимый от ошибки обхода папок.
+func transcriptFile(p paths, sessionID string) (string, error) {
+	entries, err := os.ReadDir(p.projects)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", os.ErrNotExist
+	}
+	if err != nil {
+		return "", fmt.Errorf("папки транскриптов: %w", err)
+	}
+	var found string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(p.projects, entry.Name(), filepath.Base(sessionID)+".jsonl")
+		_, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("транскрипт: %w", err)
+		}
+		if found != "" {
+			return "", fmt.Errorf("несколько транскриптов сессии %s", sessionID)
+		}
+		found = path
+	}
+	if found == "" {
+		return "", os.ErrNotExist
+	}
+	return found, nil
 }

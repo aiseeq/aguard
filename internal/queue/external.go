@@ -14,7 +14,7 @@ type ExternalTask struct {
 	Status    string    `json:"status"`
 	Prio      string    `json:"prio"`
 	URL       string    `json:"url"`
-	FirstSeen time.Time `json:"first_seen"` // даты создания источник не даёт: первая встреча вместо неё, для утренней строки
+	FirstSeen time.Time `json:"first_seen"` // даты создания источник не даёт: запоминаем первую встречу
 }
 
 // SetExternal заменяет список проекта ответом трекера; первая встреча известной задачи сохраняется.

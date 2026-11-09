@@ -13,7 +13,6 @@ type Config struct {
 	Live      []string        `toml:"live"`
 	Interval  policy.Duration `toml:"interval"`
 	FreeAfter policy.Duration `toml:"free_after"`
-	Morning   string          `toml:"morning"`
 	GitRoots  []string        `toml:"git_roots"`
 	Dirs      []string        `toml:"dirs"`
 	Skip      []string        `toml:"skip"`
@@ -23,6 +22,7 @@ type Config struct {
 	Spaces   map[string]int `toml:"spaces"`
 	Table    string         `toml:"table"`
 	Override string         `toml:"override"`
+	Frozen   string         `toml:"frozen"`
 	Gate     string         `toml:"gate"`
 	History  string         `toml:"history"`
 	Tk       string         `toml:"tk"`
@@ -37,8 +37,8 @@ func Default(home string) Config {
 		return out
 	}
 	paths := expand("~/git", "~/work", "~/docs", "~/.config/queue/gate.tsv", "~/.config/queue/override.tsv", "~/.local/state/queue/gate.json", "~/.local/state/chooks/limits-history.jsonl", "~/bin/tk")
-	return Config{Mode: ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second), FreeAfter: policy.Duration(2 * time.Minute), Morning: "07:00",
-		GitRoots: paths[:2], Dirs: paths[2:3], Table: paths[3], Override: paths[4], Gate: paths[5], History: paths[6], Tk: paths[7]}
+	return Config{Mode: ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second), FreeAfter: policy.Duration(2 * time.Minute),
+		GitRoots: paths[:2], Dirs: paths[2:3], Table: paths[3], Override: paths[4], Gate: paths[5], History: paths[6], Tk: paths[7], Frozen: policy.ExpandHome("~/.config/queue/frozen", home)}
 }
 
 func (c *Config) Validate(home string) error {
@@ -47,9 +47,6 @@ func (c *Config) Validate(home string) error {
 	}
 	if c.Interval.D() <= 0 || c.FreeAfter.D() < 0 {
 		return fmt.Errorf("queue.interval > 0, queue.free_after >= 0")
-	}
-	if _, err := time.Parse("15:04", c.Morning); err != nil {
-		return fmt.Errorf("queue.morning: %w", err)
 	}
 	for _, ps := range [][]string{c.GitRoots, c.Dirs, c.Skip, c.WeekendCrit} {
 		for i := range ps {
@@ -74,19 +71,11 @@ func (c *Config) Validate(home string) error {
 		spaces[path] = shift
 	}
 	c.Spaces = spaces
-	for _, p := range []*string{&c.Table, &c.Override, &c.Gate, &c.History, &c.Tk} {
+	for _, p := range []*string{&c.Table, &c.Override, &c.Frozen, &c.Gate, &c.History, &c.Tk} {
 		*p = policy.ExpandHome(*p, home)
 	}
 	for i := range c.Live {
 		c.Live[i] = filepath.Base(filepath.Clean(c.Live[i]))
 	}
 	return nil
-}
-
-func (c *Config) MorningOffset() (time.Duration, error) {
-	t, err := time.Parse("15:04", c.Morning)
-	if err != nil {
-		return 0, fmt.Errorf("queue.morning: %w", err)
-	}
-	return time.Duration(t.Hour())*time.Hour + time.Duration(t.Minute())*time.Minute, nil
 }

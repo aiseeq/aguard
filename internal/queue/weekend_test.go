@@ -87,24 +87,6 @@ func TestWeekendCritGoes(t *testing.T) {
 	}
 }
 
-func TestWeekendMorning(t *testing.T) {
-	w := restWorld()
-	w.open = []string{"MED-DO"}
-	s := seeded(w)
-	med := inDir(tick("MED", "открыт"), restRoot+"/p")
-	med.Diff = "DO"
-	if ns := step(s, []Ticket{med}, w); has(ns, KindMorning, "m-master") {
-		t.Fatalf("суббота: %+v", ns)
-	}
-	if ns := step(seeded(w), []Ticket{inDir(med, "/h/git/p")}, w); !has(ns, KindMorning, "m-master") {
-		t.Fatalf("другая папка: %+v", ns)
-	}
-	w.now = at("2026-11-09T10:00:00+01:00")
-	if ns := step(s, []Ticket{med}, w); !has(ns, KindMorning, "m-master") {
-		t.Fatalf("понедельник: %+v", ns)
-	}
-}
-
 // Строка о закрытом — по получателю: мастеру папки выходного ждёт понедельника, мастеру другой папки и лиду идёт.
 func TestWeekendBackByRecipient(t *testing.T) {
 	w := restWorld()
@@ -141,7 +123,6 @@ func TestWeekendCritConfigExpanded(t *testing.T) {
 	}
 }
 
-// Журнал (`journal:true` от tk) — не задача: открытый не даёт строк, закрытый с заказчиком даёт, в утренней строке — только наступивший wait.
 func TestJournalNoLines(t *testing.T) {
 	w := newWorld(ModeOn)
 	w.free["m-master"] = true
@@ -164,24 +145,5 @@ func TestJournalNoLines(t *testing.T) {
 	w.free["lead"] = true
 	if ns := step(s, []Ticket{closedJournal}, w); !has(ns, KindBack, "lead") {
 		t.Fatalf("закрытый журнал заказчику: %+v", ns)
-	}
-}
-
-func TestJournalMorningOnlyWaitDue(t *testing.T) {
-	w := newWorld(ModeOn)
-	w.free["m-master"], w.open = true, []string{"MED-DO"}
-	med := func(status string, due bool) Ticket {
-		j := tick("MED", status)
-		j.Diff, j.Journal, j.WaitDue = "DO", true, due
-		return j
-	}
-	if ns := step(seeded(w), []Ticket{med("открыт", false)}, w); has(ns, KindMorning, "m-master") {
-		t.Fatalf("открытый журнал: %+v", ns)
-	}
-	if ns := step(seeded(w), []Ticket{med("ждёт", false)}, w); has(ns, KindMorning, "m-master") {
-		t.Fatalf("срок не наступил: %+v", ns)
-	}
-	if ns := step(seeded(w), []Ticket{med("ждёт", true)}, w); !has(ns, KindMorning, "m-master") {
-		t.Fatalf("наступивший wait: %+v", ns)
 	}
 }

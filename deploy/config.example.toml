@@ -291,7 +291,6 @@ mode = "on"
 live = ["glint", "graft"]
 interval = "30s"
 free_after = "2m"
-morning = "07:00"
 git_roots = ["~/git", "~/work"]
 dirs = ["~/docs"]
 skip = [] # папки проектов, которые очередь не читает: список — только в конфиге машины
@@ -299,6 +298,7 @@ weekend_crit = [] # папки проектов, где в субботу и в�
 spaces = {} # корень пространства и сдвиг его планки, ступеней приоритета 0..2: {"~/x" = 1}. Папки вне корней — по общим воротам
 table = "~/.config/queue/gate.tsv"
 override = "~/.config/queue/override.tsv"
+frozen = "~/.config/queue/frozen"
 gate = "~/.local/state/queue/gate.json"
 history = "~/.local/state/chooks/limits-history.jsonl"
 tk = "~/bin/tk"

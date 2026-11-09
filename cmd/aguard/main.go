@@ -93,6 +93,8 @@ type app struct {
 	diskWalkLoaded  bool                         // sizes и traces загружены до первого обхода
 	queueCache      queueTicketCache
 	queueExternalAt time.Time // последний обход внешнего трекера
+	queueNext       map[string]queueNextResult
+	queueWorkers    func() ([]string, error)
 
 	queueUnsaved  *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
 	codexStep     time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval

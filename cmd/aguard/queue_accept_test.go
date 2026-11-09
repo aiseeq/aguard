@@ -63,7 +63,7 @@ func newQueueBench(t *testing.T, gitJSON, docsJSON string) *queueBench {
 	}
 	c := &config.Config{Lead: "lead", Admins: map[string]string{filepath.Join(dir, "git"): "git-admin"},
 		Queue: queue.Config{Mode: queue.ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second),
-			FreeAfter: policy.Duration(2 * time.Minute), Morning: "07:00", GitRoots: []string{filepath.Join(dir, "git")},
+			FreeAfter: policy.Duration(2 * time.Minute), GitRoots: []string{filepath.Join(dir, "git")},
 			Dirs: []string{filepath.Join(dir, "docs")}, Table: table, Override: filepath.Join(dir, "override.tsv"),
 			Gate: filepath.Join(dir, "gate.json"), History: hist, Tk: tk}}
 	return &queueBench{a, c, dir}

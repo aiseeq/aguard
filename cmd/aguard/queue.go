@@ -28,14 +28,12 @@ import (
 type queueTicketJSON struct {
 	Repo     string `json:"repo"`
 	Prio     string `json:"prio"`
-	Diff     string `json:"diff"`
 	Back     string `json:"back"`
 	Status   string `json:"status"`
 	Path     string `json:"path"`
 	Slug     string `json:"slug"`
 	Title    string `json:"title"`
 	Executor string `json:"executor"`
-	Overdue  bool   `json:"overdue"`
 	Journal  bool   `json:"journal"`
 }
 
@@ -155,7 +153,7 @@ func (a *app) queueGatePass(c *config.Config, now time.Time, dry bool) (queue.Ga
 	}
 	if inputs.err == nil {
 		open, lane := queue.Compute(inputs.table, inputs.overrides, inputs.claude, openai, now)
-		gate := queue.Gate{Open: open, Lane: lane, OpenByRoot: queue.SpaceOpen(inputs.table, open, c.Queue.Spaces)}
+		gate := queue.Gate{Open: open, Lane: lane, OpenByRoot: queue.SpaceOpen(inputs.table, open, c.Queue.Spaces, queue.NegativeMargin(inputs.claude, openai))}
 		if err := a.writeQueueGate(&c.Queue, now, inputs.claude, openai, gate, inputs.overrides, dry); err != nil {
 			return queue.Gate{}, err
 		}
@@ -463,6 +461,10 @@ func queueDaily(a *app) daily.Store[queueRecord] {
 }
 
 func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart.Judge, gate queue.Gate, dry bool, now time.Time) error {
+	frozen, frozenErr := queue.ReadFrozen(c.Queue.Frozen, a.home)
+	if frozenErr != nil {
+		a.warn("queue", "список замороженных", "err", frozenErr)
+	}
 	statePath := filepath.Join(a.dir("queue"), "state.json")
 	before, oldBytes, err := a.queueNoticeState(statePath, dry, now)
 	if err != nil {
@@ -486,6 +488,8 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		return nil
 	}
 	view := queueView(c, alive, judge, gate, now, a)
+	view.Frozen = func(dir string) (bool, error) { return frozen[filepath.Clean(dir)], frozenErr }
+	view.Projects = func() []queue.Ticket { return a.queueWakeProjects(c) }
 	notices := before.Step(tickets, view)
 	if dry {
 		for _, n := range notices {
@@ -575,11 +579,6 @@ func (a *app) cachedQueueTickets(ctx context.Context, c *config.Config, now time
 
 func queueView(c *config.Config, alive map[string]session.Info, judge *restart.Judge, gate queue.Gate, now time.Time, a *app) queue.View {
 	cfg := &c.Queue
-	morning, err := cfg.MorningOffset()
-	if err != nil {
-		a.warn("queue", "queue.morning", "err", err)
-		morning = 24 * time.Hour
-	}
 	live := slices.Clone(cfg.Live)
 	if cfg.Mode == queue.ModeLog {
 		live = nil
@@ -598,9 +597,59 @@ func queueView(c *config.Config, alive map[string]session.Info, judge *restart.J
 		freeCache[name] = state
 		return state
 	}
-	return queue.View{Now: now, Lead: c.Lead, Open: gate.Open, OpenByRoot: gate.OpenByRoot, Morning: morning, WeekendCrit: cfg.WeekendCrit,
+	var owners map[string]bool
+	var workerErr error
+	var workersRead bool
+	wakeFree := func(name string) bool {
+		if !workersRead {
+			owners, workerErr = a.workerOwners()
+			workersRead = true
+			if workerErr != nil {
+				a.warn("queue", "список бойцов", "err", workerErr)
+			}
+		}
+		in, ok := alive[name]
+		if !ok || workerErr != nil || owners[name] || judge == nil {
+			return false
+		}
+		free, err := judge.WakeFree(&c.Restart, in.Pid, cfg.FreeAfter.D(), now)
+		if err != nil {
+			a.warn("queue", "задачи сессии", "err", err)
+			return false
+		}
+		return free
+	}
+	turnAfter := func(name string, at time.Time) bool {
+		id := alive[name].SessionID
+		paths, err := filepath.Glob(filepath.Join(a.projects, "*", filepath.Base(id)+".jsonl"))
+		if err != nil || len(paths) > 1 {
+			a.warn("queue", "транскрипт сессии", "session", name, "files", len(paths), "err", err)
+			return false
+		}
+		if len(paths) == 0 {
+			return false
+		}
+		info, err := os.Stat(paths[0])
+		if err != nil {
+			a.warn("queue", "транскрипт сессии", "session", name, "err", err)
+			return false
+		}
+		return info.ModTime().After(at)
+	}
+	return queue.View{Now: now, Lead: c.Lead, Open: gate.Open, OpenByRoot: gate.OpenByRoot, WeekendCrit: cfg.WeekendCrit,
 		Serious: func(project string) bool { return slices.Contains(live, project) },
-		Alive:   func(name string) bool { _, ok := alive[name]; return ok }, Free: free}
+		Alive:   func(name string) bool { _, ok := alive[name]; return ok }, Free: free, WakeFree: wakeFree,
+		Session:   func(name string) string { return alive[name].SessionID },
+		Cwd:       func(name string) string { return alive[name].Cwd },
+		TurnAfter: turnAfter,
+		AdminFor:  func(dir string) string { _, admin := orphans.LongestPrefix(c.Admins, dir); return admin },
+		AdminNext: func(name, dir string) (queue.Ticket, bool, error) {
+			return a.nextForAdmin(context.Background(), cfg.Tk, name, dir, now)
+		},
+		Next: func(name, dir string) (queue.Ticket, bool, error) {
+			return a.nextForWake(context.Background(), cfg.Tk, name, dir, now, func(at time.Time) bool { return turnAfter(name, at) })
+		},
+	}
 }
 
 func (a *app) deliverQueueNotices(c *config.Config, alive map[string]session.Info, state *queue.State, view queue.View, notices []queue.Notice, now time.Time) {
@@ -797,7 +846,7 @@ func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticke
 				continue
 			}
 			master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
-			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Diff: r.Diff, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, WaitDue: r.Overdue, Journal: r.Journal})
+			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Journal: r.Journal})
 		}
 		return nil
 	}
@@ -914,4 +963,41 @@ func (a *app) queueJournal(n queue.Notice, at time.Time) {
 	if err := store.Rotate(at, 60*24*time.Hour); err != nil {
 		a.warn("queue", "ротация журнала", "err", err)
 	}
+}
+
+// queueWakeProjects сохраняет путь для опроса, даже когда последний тикет исчез из tk ls.
+func (a *app) queueWakeProjects(c *config.Config) []queue.Ticket {
+	dirs, err := queueFingerprintDirs(&c.Queue)
+	if err != nil {
+		a.warn("queue", "папки задач", "err", err)
+		return nil
+	}
+	table, err := names.ReadTable(filepath.Join(a.home, names.File), a.home)
+	if err != nil {
+		a.warn("queue", "имена", "err", err)
+		return nil
+	}
+	var projects []queue.Ticket
+	for _, tasks := range dirs {
+		st, err := os.Stat(tasks)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			a.warn("queue", "папка задач", "path", tasks, "err", err)
+			continue
+		}
+		if !st.IsDir() {
+			continue
+		}
+		dir := filepath.Dir(tasks)
+		if filepath.Base(dir) == "docs" {
+			dir = filepath.Dir(dir)
+		}
+		master, admin := queueOwners(dir, a.home, c.Lead, table, c.Admins)
+		project := queue.WakeTicket(filepath.Base(dir), dir, "")
+		project.Master, project.Admin = master, admin
+		projects = append(projects, project)
+	}
+	return projects
 }

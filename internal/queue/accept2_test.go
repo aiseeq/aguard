@@ -149,50 +149,6 @@ func TestStateSmall(t *testing.T) {
 }
 
 // Отметки утра не копятся: год работы не раздувает файл.
-func TestMorningMarksPruned(t *testing.T) {
-	w := newWorld(ModeOn)
-	w.free["m-master"] = true
-	w.open = []string{"LOW-DO"}
-	s := seeded(w)
-	tk := tick("LOW", "открыт")
-	tk.Diff = "DO"
-	for range 100 {
-		w.now = w.now.Add(24 * time.Hour)
-		step(s, []Ticket{tk}, w)
-	}
-	p := filepath.Join(t.TempDir(), "state.json")
-	if err := s.Save(p); err != nil {
-		t.Fatal(err)
-	}
-	fi, err := os.Stat(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Size() > 1024 {
-		t.Fatalf("состояние %d байт после 100 утр", fi.Size())
-	}
-}
-
-func TestMorningSeriousIfAnyLive(t *testing.T) {
-	w := newWorld(ModeOn)
-	w.now = at("2026-11-04T07:01:00+01:00")
-	w.free["m-master"] = true
-	w.open = []string{"LOW-DO"}
-	s := seeded(w)
-	var ts []Ticket
-	for _, p := range []string{"a", "glint", "z"} {
-		tk := tick("LOW", "открыт")
-		tk.Diff, tk.Project, tk.Key = "DO", p, p+"/x"
-		ts = append(ts, tk)
-	}
-	view := w.view()
-	view.Serious = func(p string) bool { return p == "glint" }
-	ns := s.Step(ts, view)
-	if len(ns) != 1 || ns[0].Kind != KindMorning || !ns[0].Serious {
-		t.Fatalf("%+v", ns)
-	}
-}
-
 // Клетка считается у каждого поставщика своя: сгорание снимает ограничение только этого поставщика.
 func TestComputeBurningPerProvider(t *testing.T) {
 	tb := table(t)

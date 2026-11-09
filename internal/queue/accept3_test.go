@@ -95,30 +95,6 @@ func TestHighReturnedRestartsClock(t *testing.T) {
 	}
 }
 
-// Новый MED или LOW никого не будит: созданный после утренней границы в счёт строки не идёт.
-func TestMorningIgnoresNewTicket(t *testing.T) {
-	w := newWorld(ModeOn)
-	w.now = at("2026-11-04T15:00:00+01:00")
-	w.free["m-master"] = true
-	w.open = []string{"LOW-DO"}
-	s := seeded(w)
-	fresh := tick("LOW", "открыт")
-	fresh.Diff, fresh.Created = "DO", at("2026-11-04T14:50:00+01:00")
-	if ns := step(s, []Ticket{fresh}, w); len(ns) != 0 {
-		t.Fatalf("новый днём: %+v", ns)
-	}
-	old := tick("LOW", "открыт")
-	old.Diff, old.Key, old.Created = "DO", "m/20261103-0900-old", at("2026-11-03T09:00:00+01:00")
-	if ns := step(s, []Ticket{fresh, old}, w); !has(ns, KindMorning, "m-master") {
-		t.Fatalf("старый тикет, мастер освободился: %+v", ns)
-	}
-	// На следующее утро вчерашний новый уже в счёт.
-	w.now = at("2026-11-05T07:01:00+01:00")
-	if ns := step(s, []Ticket{fresh}, w); !has(ns, KindMorning, "m-master") {
-		t.Fatalf("следующее утро: %+v", ns)
-	}
-}
-
 // Таблица правится руками: значение берётся из клетки поставщика, а не из худшей полосы.
 func TestComputeEditedTable(t *testing.T) {
 	tb, err := ParseTable(strings.NewReader("LOW-DO\tнет\tда\tда\nMED-DO\tда\tбез мастера\tнет\n"))

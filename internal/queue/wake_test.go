@@ -1,0 +1,208 @@
+package queue
+
+import (
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+type wakeWorld struct {
+	view    View
+	state   State
+	ts      []Ticket
+	first   Ticket
+	found   bool
+	err     error
+	calls   int
+	turn    bool
+	session string
+}
+
+func newWakeWorld() *wakeWorld {
+	w := &wakeWorld{state: State{Seeded: true}, found: true, session: "session-1"}
+	w.ts = []Ticket{{Key: "p/base", Project: "p", Dir: "/p", Master: "master", Admin: "admin", Prio: "MED", Status: "открыт"}}
+	w.first = w.ts[0]
+	w.first.Key = "p/first"
+	w.view = View{Now: time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), Lead: "lead", Serious: func(string) bool { return true }, Alive: func(string) bool { return true }, Free: func(string) bool { return true }, WakeFree: func(string) bool { return true }}
+	w.view.Next = func(string, string) (Ticket, bool, error) { w.calls++; return w.first, w.found, w.err }
+	w.view.Session = func(string) string { return w.session }
+	w.view.TurnAfter = func(string, time.Time) bool { return w.turn }
+	return w
+}
+func (w *wakeWorld) step() []Notice { return w.state.Step(w.ts, w.view) }
+func (w *wakeWorld) confirm(ns []Notice) {
+	for _, n := range ns {
+		w.state.Confirm(n, w.view)
+	}
+}
+func TestWakeFreeMasterWithWork(t *testing.T) {
+	w := newWakeWorld()
+	ns := w.step()
+	if !has(ns, KindWake, "master") || len(w.state.Wakes) != 0 {
+		t.Fatalf("письмо и состояние: %+v %+v", ns, w.state.Wakes)
+	}
+	w.confirm(ns)
+	if w.state.Wakes["master"].Ticket != "p/first" {
+		t.Fatal(w.state.Wakes)
+	}
+}
+func TestWakeBusyMasterSkipped(t *testing.T) {
+	w := newWakeWorld()
+	w.view.Free = func(string) bool { return false }
+	if ns := w.step(); len(ns) != 0 || w.calls != 0 {
+		t.Fatalf("%+v вызовов %d", ns, w.calls)
+	}
+}
+func TestWakeNotWakeFreeSkipped(t *testing.T) {
+	w := newWakeWorld()
+	w.view.WakeFree = func(string) bool { return false }
+	if ns := w.step(); len(ns) != 0 || w.calls != 0 {
+		t.Fatalf("%+v вызовов %d", ns, w.calls)
+	}
+}
+
+// Первым стоит тикет, взятый другим исполнителем (бойцом): будить не о чем.
+func TestWakeFirstTakenByOtherSkipped(t *testing.T) {
+	w := newWakeWorld()
+	w.first.Status, w.first.Executor = "в работе", "worker-1"
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatal(ns)
+	}
+	w.first.Executor = "master"
+	if ns := w.step(); !has(ns, KindWake, "master") {
+		t.Fatal("свой «в работе» будит", ns)
+	}
+}
+func TestWakeEmptyOrErrorNoLetter(t *testing.T) {
+	w := newWakeWorld()
+	w.confirm(w.step())
+	original := w.state.Wakes["master"]
+	w.err = errors.New("ошибка")
+	if ns := w.step(); len(ns) != 0 || w.state.Wakes["master"] != original {
+		t.Fatal(ns, w.state.Wakes)
+	}
+	w.err = nil
+	w.found = false
+	if ns := w.step(); len(ns) != 0 || len(w.state.Wakes) != 0 {
+		t.Fatal(ns, w.state.Wakes)
+	}
+}
+func TestWakeSameFirstEscalatesOnce(t *testing.T) {
+	w := newWakeWorld()
+	w.confirm(w.step())
+	w.turn = true
+	ns := w.step()
+	if len(ns) != 1 || !has(ns, KindWakeStuck, "admin") {
+		t.Fatal(ns)
+	}
+	if !has(w.step(), KindWakeStuck, "admin") {
+		t.Fatal("нет повтора при недоставке")
+	}
+	w.confirm(ns)
+	if len(w.step()) != 0 || !w.state.Wakes["master"].Stuck {
+		t.Fatal("сигнал повторился")
+	}
+}
+func TestWakeNoTurnNoEscalation(t *testing.T) {
+	w := newWakeWorld()
+	w.confirm(w.step())
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatal(ns)
+	}
+}
+func TestWakeNewFirstLettersAgain(t *testing.T) {
+	w := newWakeWorld()
+	w.confirm(w.step())
+	w.first.Key = "p/second"
+	if ns := w.step(); !has(ns, KindWake, "master") {
+		t.Fatal(ns)
+	}
+}
+func TestWakeNewSessionLettersAgain(t *testing.T) {
+	w := newWakeWorld()
+	w.confirm(w.step())
+	w.session = "session-2"
+	w.turn = true
+	if ns := w.step(); len(ns) != 1 || !has(ns, KindWake, "master") {
+		t.Fatal(ns)
+	}
+}
+func TestWakeDeadProjectNone(t *testing.T) {
+	w := newWakeWorld()
+	w.view.Alive = func(string) bool { return false }
+	if ns := w.step(); len(ns) != 0 || len(w.state.Wakes) != 0 || w.calls != 0 {
+		t.Fatal(ns)
+	}
+}
+func TestWakeHighSameRoundOneLetter(t *testing.T) {
+	w := newWakeWorld()
+	w.ts[0].Prio = "HIGH"
+	w.ts[0].Created = w.view.Now
+	if ns := w.step(); !has(ns, KindHigh, "master") || has(ns, KindWake, "master") || w.calls != 0 {
+		t.Fatal(ns)
+	}
+}
+func TestWakeWeekendOnlyCrit(t *testing.T) {
+	w := newWakeWorld()
+	w.view.Now = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w.view.WeekendCrit = []string{"/p"}
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatal(ns)
+	}
+	w.first.Prio = "CRIT"
+	if ns := w.step(); !has(ns, KindWake, "master") {
+		t.Fatal(ns)
+	}
+}
+func TestWakeLogModeThenLive(t *testing.T) {
+	w := newWakeWorld()
+	live := false
+	w.view.Serious = func(string) bool { return live }
+	ns := w.step()
+	w.confirm(ns)
+	if len(w.step()) != 0 {
+		t.Fatal("повтор log")
+	}
+	live = true
+	if ns = w.step(); !has(ns, KindWake, "master") || !ns[0].Serious {
+		t.Fatal(ns)
+	}
+}
+func TestWakeStatePersists(t *testing.T) {
+	w := newWakeWorld()
+	w.confirm(w.step())
+	w.turn = true
+	w.confirm(w.step())
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := w.state.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.state = s
+	if !w.state.Wakes["master"].Stuck || len(w.step()) != 0 {
+		t.Fatal(w.state.Wakes)
+	}
+}
+
+// Письмо велит запустить tk next: спрашивать надо папку, где мастер его запустит.
+func TestWakeAsksProjectOfMasterCwd(t *testing.T) {
+	w := newWakeWorld()
+	other := w.ts[0]
+	other.Project, other.Dir, other.Key = "a", "/a", "a/base"
+	w.ts = append([]Ticket{other}, w.ts...)
+	var asked []string
+	w.view.Next = func(_, dir string) (Ticket, bool, error) { asked = append(asked, dir); return w.first, true, nil }
+	w.view.Cwd = func(string) string { return "/p/sub" }
+	if ns := w.step(); !has(ns, KindWake, "master") || len(asked) != 1 || asked[0] != "/p" {
+		t.Fatal(ns, asked)
+	}
+	asked = nil
+	w.view.Cwd = func(string) string { return "/elsewhere" }
+	if w.step(); len(asked) != 1 || asked[0] != "/a" {
+		t.Fatal("вне проектов — устойчивый порядок", asked)
+	}
+}
