@@ -997,10 +997,7 @@ func (a *app) queueWakeProjects(c *config.Config) []queue.Ticket {
 		if !st.IsDir() {
 			continue
 		}
-		dir := filepath.Dir(tasks)
-		if filepath.Base(dir) == "docs" {
-			dir = filepath.Dir(dir)
-		}
+		dir := queueTasksProject(tasks, c.Queue.Dirs)
 		master, admin := queueOwners(dir, a.home, c.Lead, table, c.Admins)
 		project := queue.WakeTicket(filepath.Base(dir), dir, "")
 		project.Master, project.Admin = master, admin

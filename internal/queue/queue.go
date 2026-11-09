@@ -501,6 +501,7 @@ type Wake struct {
 	Mode    string    `json:"mode"`
 	Session string    `json:"session"`
 	Stuck   bool      `json:"stuck,omitempty"`
+	NoOne   bool      `json:"no_one,omitempty"` // строка «некому сообщить» уже в журнале; сигнал ждёт живого получателя
 }
 
 type ProjectWake struct {
@@ -548,10 +549,7 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 	t.Prio = NormPrio(t.Prio)
 	closedTicket := closed(t.Status)
 	if !closedTicket && !alive(v, t.Master) && frozen(v, t.Dir) {
-		delete(s.ProjectWakes, t.Dir)
-		if w, ok := s.Wakes[t.Master]; ok && strings.HasPrefix(w.Ticket, t.Project+"/") {
-			delete(s.Wakes, t.Master)
-		}
+		s.dropFrozenWakes(t)
 		return nil
 	}
 	if closedTicket && t.Back == "" || !closedTicket && t.Prio != "CRIT" && t.Prio != "HIGH" {
@@ -583,6 +581,14 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 		return s.highNotices(t, st, v)
 	}
 	return nil
+}
+
+// dropFrozenWakes снимает отметки о письмах по проекту, который заморожен и без живого мастера.
+func (s *State) dropFrozenWakes(t Ticket) {
+	delete(s.ProjectWakes, t.Dir)
+	if w, ok := s.Wakes[t.Master]; ok && strings.HasPrefix(w.Ticket, t.Project+"/") {
+		delete(s.Wakes, t.Master)
+	}
 }
 
 // restingDir — суббота или воскресенье, и папка проекта в weekend_crit.

@@ -69,6 +69,7 @@ func (a *app) nextForQueue(ctx context.Context, tk, master, dir, cacheKey string
 		Status   string `json:"status"`
 		Executor string `json:"executor"`
 		Prio     string `json:"prio"`
+		Due      string `json:"due"`
 	}
 	if err = json.Unmarshal(b, &raw); err != nil {
 		res.err = fmt.Errorf("tk next %s: %w", dir, err)
@@ -84,6 +85,9 @@ func (a *app) nextForQueue(ctx context.Context, tk, master, dir, cacheKey string
 		res.err = fmt.Errorf("tk next %s: нет ключа", dir)
 		a.warn("queue", "tk next", "err", res.err)
 		return queue.Ticket{}, false, res.err
+	}
+	if raw.Status == "ждёт" && raw.Due != "" { // наступивший tk wait — новое событие: письмо, а не «встал» по старой отметке
+		key += "@" + raw.Due
 	}
 	res.ticket = queue.WakeTicket(project, dir, key)
 	res.ticket.Status, res.ticket.Executor, res.ticket.Prio, res.ticket.Slug = raw.Status, raw.Executor, raw.Prio, raw.Slug
@@ -126,7 +130,7 @@ func (a *app) workerOwners() (map[string]bool, error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("задание бойца %s: %w", id, err)
 		}
 		var job struct {
 			Owner struct {
@@ -134,7 +138,7 @@ func (a *app) workerOwners() (map[string]bool, error) {
 			} `json:"owner"`
 		}
 		if err = json.Unmarshal(data, &job); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("задание бойца %s: %w", id, err)
 		}
 		if job.Owner.Name != "" {
 			owners[job.Owner.Name] = true

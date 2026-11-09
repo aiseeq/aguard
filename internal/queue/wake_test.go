@@ -231,6 +231,44 @@ func TestWakeStuckGoesToProjectAdmin(t *testing.T) {
 }
 
 // Доставлять некому (мастер и админ — один лид): строка в журнал один раз, а не каждый проход.
+// Получатели вернулись — сигнал о вставшем мастере всё-таки уходит, один.
+func TestWakeSignalAfterRecipientsReturn(t *testing.T) {
+	w := newWakeWorld()
+	back := false
+	w.view.Alive = func(n string) bool { return n == "master" || back }
+	w.confirm(w.step())
+	w.turn = true
+	ns := w.step()
+	if len(ns) != 1 || ns[0].Kind != KindUnreachable {
+		t.Fatal(ns)
+	}
+	back = true
+	ns = w.step()
+	if !has(ns, KindWakeStuck, "admin") {
+		t.Fatal("вернувшемуся админу", ns)
+	}
+	w.confirm(ns)
+	if ns = w.step(); len(ns) != 0 {
+		t.Fatal("повтор", ns)
+	}
+}
+
+// Проект известен только по папке: последний тикет исчез из tk ls, а будить мастера и админа всё равно надо.
+func TestWakeProjectsWithoutListedTickets(t *testing.T) {
+	w := newWakeWorld()
+	projects := w.ts
+	w.ts, w.view.Projects = nil, func() []Ticket { return projects }
+	if ns := w.step(); !has(ns, KindWake, "master") {
+		t.Fatal("мастеру", ns)
+	}
+	a := freezeWorld()
+	projects = a.ts
+	a.ts, a.view.Projects = nil, func() []Ticket { return projects }
+	if ns := a.step(); !has(ns, KindWakeAdmin, "admin") {
+		t.Fatal("админу", ns)
+	}
+}
+
 func TestWakeNoOneToSignalOnce(t *testing.T) {
 	w := newWakeWorld()
 	w.ts[0].Master, w.ts[0].Admin, w.first.Admin = "lead", "lead", "lead"

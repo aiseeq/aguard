@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -314,7 +317,7 @@ func TestQueueViewWakeWiring(t *testing.T) {
 func TestQueueNextFieldsAndCacheAge(t *testing.T) {
 	a, _ := testIOApp(t)
 	tk := filepath.Join(a.home, "tk")
-	script := "#!/bin/sh\nprintf x >> " + filepath.Join(a.home, "calls") + "\nprintf '%s\\n' '{\"source\":\"local\",\"path\":\"docs/tasks/20261104-0950-foo.md\",\"slug\":\"foo\",\"prio\":\"CRIT\",\"status\":\"в работе\",\"executor\":\"m\"}'\n"
+	script := "#!/bin/sh\nprintf '%s ' \"$@\" > " + filepath.Join(a.home, "args") + "\nprintf x >> " + filepath.Join(a.home, "calls") + "\nprintf '%s\\n' '{\"source\":\"local\",\"path\":\"docs/tasks/20261104-0950-foo.md\",\"slug\":\"foo\",\"prio\":\"CRIT\",\"status\":\"в работе\",\"executor\":\"m\"}'\n"
 	if err := os.WriteFile(tk, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -323,6 +326,9 @@ func TestQueueNextFieldsAndCacheAge(t *testing.T) {
 	first, found, err := a.nextForWake(context.Background(), tk, "m", a.home, now, never)
 	if err != nil || !found || first.Prio != "CRIT" || first.Status != "в работе" || first.Executor != "m" || first.Slug != "foo" {
 		t.Fatalf("%+v %v %v", first, found, err)
+	}
+	if args, readErr := os.ReadFile(filepath.Join(a.home, "args")); readErr != nil || string(args) != "next --json --by m " {
+		t.Fatalf("tk спрошен не за мастера: %q %v", args, readErr)
 	}
 	calls := func() int {
 		t.Helper()
@@ -357,6 +363,139 @@ func TestQueueWakeLogModeMarks(t *testing.T) {
 	case msg := <-received:
 		t.Fatalf("в log письмо: %s", msg)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// Наступивший tk wait — другой ключ с тем же тикетом: мастер получит письмо, а админ не получит «встал» по старой отметке.
+func TestQueueNextDueWaitOwnKey(t *testing.T) {
+	a, _ := testIOApp(t)
+	tk := filepath.Join(a.home, "tk")
+	answer := func(status, due string) queue.Ticket {
+		t.Helper()
+		body := fmt.Sprintf(`{"source":"local","path":"docs/tasks/20261104-0950-foo.md","slug":"foo","prio":"MED","status":%q,"due":%q}`, status, due)
+		if err := os.WriteFile(tk, []byte("#!/bin/sh\nprintf '%s\\n' '"+body+"'\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		a.queueNext = nil
+		got, found, err := a.nextForWake(context.Background(), tk, "m", a.home, time.Now(), func(time.Time) bool { return false })
+		if err != nil || !found {
+			t.Fatal(found, err)
+		}
+		return got
+	}
+	open, first, second := answer("открыт", "2026-11-09T12:00:00+01:00"), answer("ждёт", "2026-11-09T12:00:00+01:00"), answer("ждёт", "2026-11-10T12:00:00+01:00")
+	if open.Key == first.Key || first.Key == second.Key || !strings.HasPrefix(first.Key, open.Key+"@") {
+		t.Fatalf("%q %q %q", open.Key, first.Key, second.Key)
+	}
+	if noDue := answer("ждёт", ""); noDue.Key != open.Key {
+		t.Fatalf("срока нет: %q", noDue.Key)
+	}
+}
+
+// Настоящий View: ответ tk живёт до хода мастера, сбой списков не прячется, админ — только своего пространства.
+func TestQueueViewAnswersAndErrors(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	b.a.projects = filepath.Join(b.dir, "projects")
+	transcript := filepath.Join(b.a.projects, "-x", "s1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(b.dir, "calls")
+	b.c.Queue.Tk = filepath.Join(b.dir, "tk-next")
+	script := "#!/bin/sh\nprintf x >> " + calls + "\nprintf '%s\\n' '{\"source\":\"local\",\"path\":\"docs/tasks/20261104-0950-foo.md\",\"slug\":\"foo\",\"prio\":\"MED\",\"status\":\"открыт\"}'\n"
+	if err := os.WriteFile(b.c.Queue.Tk, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(b.dir, "git", "p")
+	alive := map[string]session.Info{"m": {Pid: 7, SessionID: "s1", Name: "m", Cwd: project}}
+	now := time.Now()
+	view := func(at time.Time, frozenErr error) queue.View {
+		return queueView(b.c, alive, fakeJudge{free: true, wakeFree: true}, at, b.a, map[string]bool{}, frozenErr)
+	}
+	asked := func(at time.Time, want int) {
+		t.Helper()
+		if _, found, err := view(at, nil).Next("m", project); err != nil || !found {
+			t.Fatal(found, err)
+		}
+		got, err := os.ReadFile(calls)
+		if err != nil || len(got) != want {
+			t.Fatalf("вопросов %d, want %d: %v", len(got), want, err)
+		}
+	}
+	touch := func(at time.Time) {
+		t.Helper()
+		if err := os.Chtimes(transcript, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch(now.Add(-time.Hour))
+	asked(now, 1)
+	asked(now.Add(time.Minute), 1) // хода не было — ответ годен
+	touch(now.Add(2 * time.Minute))
+	asked(now.Add(3*time.Minute), 2) // ход после ответа — спросить заново
+	v := view(now, nil)
+	if v.Cwd("m") != project || v.AdminFor(project) != "git-admin" || v.AdminFor(filepath.Join(b.dir, "other")) != "" {
+		t.Fatalf("папка %q, админ %q, вне пространства %q", v.Cwd("m"), v.AdminFor(project), v.AdminFor(filepath.Join(b.dir, "other")))
+	}
+	wantErr := errors.New("нет файла")
+	if _, err := view(now, wantErr).Frozen(project); !errors.Is(err, wantErr) {
+		t.Fatal("сбой списка спрятан", err)
+	}
+	b.a.queueWorkers = func() ([]string, error) { return nil, errors.New("systemctl") }
+	if view(now, nil).WakeFree("m") {
+		t.Fatal("список бойцов не прочитан — нельзя считать свободным")
+	}
+}
+
+// Плохая строка списка замороженных — предупреждение в журнале демона; строка «некому сообщить» — в журнале очереди.
+func TestQueueFrozenWarningAndNoRecipientLine(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	var logged bytes.Buffer
+	b.a.log = slog.New(slog.NewTextHandler(&logged, nil))
+	b.c.Queue.Frozen = filepath.Join(b.dir, "frozen")
+	if err := os.WriteFile(b.c.Queue.Frozen, []byte("мусор\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b.round(t)
+	if !strings.Contains(logged.String(), "строка списка замороженных") {
+		t.Fatal(logged.String())
+	}
+	const line = "некому сообщить: мастер встал"
+	state := queue.State{Seeded: true}
+	b.a.deliverQueueNotices(b.c, nil, &state, queue.View{Now: time.Now()}, []queue.Notice{{Kind: queue.KindUnreachable, Key: "p/x", Serious: true, Line: line}}, time.Now())
+	files, err := filepath.Glob(filepath.Join(b.a.dir("queue"), "*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inJournal := false
+	for _, f := range files {
+		body, readErr := os.ReadFile(f)
+		if readErr == nil && bytes.Contains(body, []byte(line)) {
+			inJournal = true
+		}
+	}
+	if !inJournal {
+		t.Fatal("строки нет в журнале очереди")
+	}
+}
+
+// Папка из dirs с именем docs — сама проект, как у queueTasksProject; docs/tasks проекта — его корень.
+func TestQueueWakeProjectsMatchTasksProject(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	want := map[string]bool{filepath.Join(b.dir, "git", "p"): false, filepath.Join(b.dir, "docs"): false}
+	for _, p := range b.a.queueWakeProjects(b.c) {
+		if _, ok := want[p.Dir]; !ok {
+			t.Fatalf("чужая папка: %+v", p)
+		}
+		want[p.Dir] = true
+	}
+	for dir, seen := range want {
+		if !seen {
+			t.Fatalf("нет %s", dir)
+		}
 	}
 }
 

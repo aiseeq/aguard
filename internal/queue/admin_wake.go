@@ -2,6 +2,7 @@ package queue
 
 import (
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -37,42 +38,52 @@ func (s *State) adminWakeNotices(ts []Ticket, v View, notices []Notice) []Notice
 		if v.AdminFor != nil {
 			p.Admin = v.AdminFor(dir)
 		}
-		if alive(v, p.Master) {
+		if alive(v, p.Master) || !s.adminMayOffer(p, v, busy) {
 			continue
 		}
-		isFrozen, err := v.Frozen(dir)
-		if err != nil {
-			continue
+		if n, ok := s.adminOffer(p, v); ok {
+			out = append(out, n)
+			busy[p.Admin] = true
 		}
-		if isFrozen {
-			delete(s.ProjectWakes, dir)
-			continue
-		}
-		if busy[p.Admin] || !alive(v, p.Admin) || !v.Free(p.Admin) || !v.WakeFree(p.Admin) {
-			continue
-		}
-		first, found, err := v.AdminNext(p.Admin, dir)
-		if err != nil {
-			continue
-		}
-		if !found {
-			delete(s.ProjectWakes, dir)
-			continue
-		}
-		if first.Status == "в работе" && !strings.EqualFold(first.Executor, p.Admin) {
-			continue
-		}
-		if restingDir(dir, v) && NormPrio(first.Prio) != "CRIT" {
-			continue
-		}
-		serious := v.Serious != nil && v.Serious(p.Project)
-		w, ok := s.ProjectWakes[dir]
-		if ok && w.Ticket == first.Key && !(serious && w.Mode == ModeLog) {
-			continue
-		}
-		line := fmt.Sprintf("проект %s: живого мастера нет, есть работа: cd %s && tk next --by %s. Бери, если не занят, бойцом в отдельном дереве", p.Project, dir, p.Admin)
-		out = append(out, Notice{To: p.Admin, Kind: KindWakeAdmin, Key: first.Key, Dir: dir, Line: line, Serious: serious})
-		busy[p.Admin] = true
 	}
 	return out
+}
+
+// adminMayOffer — проект не заморожен, а его админ жив, свободен и в этом проходе ещё без письма.
+func (s *State) adminMayOffer(p Ticket, v View, busy map[string]bool) bool {
+	isFrozen, err := v.Frozen(p.Dir)
+	if err != nil { // причину как предупреждение уже записал источник: без списка предлагать нельзя
+		slog.Debug("queue: проект без предложения", "dir", p.Dir, "err", err)
+		return false
+	}
+	if isFrozen {
+		delete(s.ProjectWakes, p.Dir)
+		return false
+	}
+	return !busy[p.Admin] && alive(v, p.Admin) && v.Free(p.Admin) && v.WakeFree(p.Admin)
+}
+
+// adminOffer решает по первому тикету проекта: предложить его админу или промолчать.
+func (s *State) adminOffer(p Ticket, v View) (Notice, bool) {
+	first, found, err := v.AdminNext(p.Admin, p.Dir)
+	if err != nil { // причину как предупреждение уже записал источник; отметку не трогаем
+		slog.Debug("queue: проект без предложения", "dir", p.Dir, "err", err)
+		return Notice{}, false
+	}
+	if !found {
+		delete(s.ProjectWakes, p.Dir)
+		return Notice{}, false
+	}
+	if first.Status == "в работе" && !strings.EqualFold(first.Executor, p.Admin) {
+		return Notice{}, false
+	}
+	if restingDir(p.Dir, v) && NormPrio(first.Prio) != "CRIT" {
+		return Notice{}, false
+	}
+	serious := v.Serious != nil && v.Serious(p.Project)
+	if w, ok := s.ProjectWakes[p.Dir]; ok && w.Ticket == first.Key && !(serious && w.Mode == ModeLog) {
+		return Notice{}, false
+	}
+	line := fmt.Sprintf("проект %s: живого мастера нет, есть работа: cd %s && tk next --by %s. Бери, если не занят, бойцом в отдельном дереве", p.Project, p.Dir, p.Admin)
+	return Notice{To: p.Admin, Kind: KindWakeAdmin, Key: first.Key, Dir: p.Dir, Line: line, Serious: serious}, true
 }

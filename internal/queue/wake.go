@@ -2,6 +2,7 @@ package queue
 
 import (
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -49,7 +50,8 @@ func (s *State) wakeNotices(ts []Ticket, v View, notices []Notice) []Notice {
 		}
 		project := wakeProject(masters[master], cwd)
 		first, found, err := v.Next(master, project.Dir)
-		if err != nil { // причину уже записал источник; запись о письме не трогаем
+		if err != nil { // причину как предупреждение уже записал источник; запись о письме не трогаем
+			slog.Debug("queue: мастер пропущен", "master", master, "err", err)
 			continue
 		}
 		if !found {
@@ -103,8 +105,11 @@ func (s *State) wakeDecide(master, session string, first, project Ticket, v View
 	}
 	to := liveRecipient(v, first.Admin, v.Lead, master)
 	line := fmt.Sprintf("мастер %s получил «есть работа» и встал: первым остался %s", master, first.Key)
-	if to == "" { // доставлять некому, поэтому строка в журнал — один раз
-		w.Stuck = true
+	if to == "" { // доставлять некому: строка в журнал — один раз, а сигнал уйдёт, когда получатель вернётся
+		if w.NoOne {
+			return Notice{}, false
+		}
+		w.NoOne = true
 		s.Wakes[master] = w
 		return Notice{Kind: KindUnreachable, Key: first.Key, Serious: serious, Line: "некому сообщить: " + line}, true
 	}
