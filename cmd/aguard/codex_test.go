@@ -198,12 +198,15 @@ func writeFakeAnswer(t *testing.T, path string, used float64, resets time.Time, 
 }
 
 // leadLetters — все письма, принятые лидом к концу прохода: liveLead кладёт письмо в канал до закрытия соединения,
-// а отправка ждёт закрытия, — поэтому считать можно точно, без ожидания.
+// а отправка ждёт закрытия (до 2 с, дольше — ложное падение теста), поэтому считать можно без ожидания.
 func leadLetters(got <-chan string) []string {
 	var msgs []string
 	for {
 		select {
-		case msg := <-got:
+		case msg, ok := <-got:
+			if !ok {
+				return msgs
+			}
 			msgs = append(msgs, msg)
 		default:
 			return msgs
