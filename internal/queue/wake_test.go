@@ -2,6 +2,7 @@ package queue
 
 import (
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ func newWakeWorld() *wakeWorld {
 	w.first = w.ts[0]
 	w.first.Key = "p/first"
 	w.view = View{Now: time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC), Lead: "lead", Serious: func(string) bool { return true }, Alive: func(string) bool { return true }, Free: func(string) bool { return true }, WakeFree: func(string) bool { return true }}
+	w.view.Log = slog.New(slog.DiscardHandler)
 	w.view.Next = func(string, string) (Ticket, bool, error) { w.calls++; return w.first, w.found, w.err }
 	w.view.Session = func(string) string { return w.session }
 	w.view.TurnAfter = func(string, time.Time) bool { return w.turn }

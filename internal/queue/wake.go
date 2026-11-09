@@ -2,7 +2,6 @@ package queue
 
 import (
 	"fmt"
-	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -51,7 +50,7 @@ func (s *State) wakeNotices(ts []Ticket, v View, notices []Notice) []Notice {
 		project := wakeProject(masters[master], cwd)
 		first, found, err := v.Next(master, project.Dir)
 		if err != nil { // причину как предупреждение уже записал источник; запись о письме не трогаем
-			slog.Debug("queue: мастер пропущен", "master", master, "err", err)
+			v.Log.Debug("aguard queue: мастер пропущен", "master", master, "err", err)
 			continue
 		}
 		if !found {

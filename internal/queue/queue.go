@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"math"
 	"os"
@@ -459,6 +460,7 @@ type View struct {
 	Projects             func() []Ticket
 	Cwd                  func(string) string
 	Frozen               func(string) (bool, error)
+	Log                  *slog.Logger // пропуски проекта при ошибке источника: сам источник пишет предупреждение
 	AdminNext            func(string, string) (Ticket, bool, error)
 	AdminFor             func(string) string
 	WeekendCrit          []string // папки проектов: в субботу и воскресенье из строк идут только CRIT

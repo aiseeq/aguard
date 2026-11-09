@@ -2,7 +2,6 @@ package queue
 
 import (
 	"fmt"
-	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -53,7 +52,7 @@ func (s *State) adminWakeNotices(ts []Ticket, v View, notices []Notice) []Notice
 func (s *State) adminMayOffer(p Ticket, v View, busy map[string]bool) bool {
 	isFrozen, err := v.Frozen(p.Dir)
 	if err != nil { // причину как предупреждение уже записал источник: без списка предлагать нельзя
-		slog.Debug("queue: проект без предложения", "dir", p.Dir, "err", err)
+		v.Log.Debug("aguard queue: проект без предложения", "dir", p.Dir, "err", err)
 		return false
 	}
 	if isFrozen {
@@ -67,7 +66,7 @@ func (s *State) adminMayOffer(p Ticket, v View, busy map[string]bool) bool {
 func (s *State) adminOffer(p Ticket, v View) (Notice, bool) {
 	first, found, err := v.AdminNext(p.Admin, p.Dir)
 	if err != nil { // причину как предупреждение уже записал источник; отметку не трогаем
-		slog.Debug("queue: проект без предложения", "dir", p.Dir, "err", err)
+		v.Log.Debug("aguard queue: проект без предложения", "dir", p.Dir, "err", err)
 		return Notice{}, false
 	}
 	if !found {
