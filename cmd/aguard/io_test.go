@@ -428,12 +428,12 @@ func liveLead(t *testing.T, a *app) <-chan string {
 				return
 			}
 			b, err := io.ReadAll(conn)
-			_ = conn.Close()
 			if err != nil {
 				got <- err.Error()
-				continue
+			} else {
+				got <- string(b)
 			}
-			got <- string(b)
+			_ = conn.Close() // после канала: вернувшаяся отправка значит, что письмо уже в нём
 		}
 	}()
 	return got
