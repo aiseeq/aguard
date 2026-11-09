@@ -414,8 +414,33 @@ func TestImportEventSnapshotsToCases(t *testing.T) {
 	}
 }
 
-// liveLead — сессия lead в реестре a: pid этого процесса и абстрактный сокет; канал отдаёт принятое письмо.
+// liveLead — сессия lead в реестре a: pid этого процесса и абстрактный сокет; канал отдаёт письма по мере приёма, все
+// соединения.
 func liveLead(t *testing.T, a *app) <-chan string {
+	t.Helper()
+	ln := registerLiveLead(t, a)
+	got := make(chan string, 32)
+	go func() {
+		defer close(got)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			b, err := io.ReadAll(conn)
+			_ = conn.Close()
+			if err != nil {
+				got <- err.Error()
+				continue
+			}
+			got <- string(b)
+		}
+	}()
+	return got
+}
+
+// registerLiveLead заводит сессию lead и её абстрактный Unix-сокет.
+func registerLiveLead(t *testing.T, a *app) net.Listener {
 	t.Helper()
 	st, err := proc.ReadStat("/proc", os.Getpid())
 	if err != nil {
@@ -438,22 +463,7 @@ func liveLead(t *testing.T, a *app) <-chan string {
 	if err := os.WriteFile(filepath.Join(a.reg.Dir, strconv.Itoa(os.Getpid())+".json"), info, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := make(chan string, 1)
-	go func() {
-		conn, err := ln.Accept()
-		if err != nil {
-			got <- err.Error()
-			return
-		}
-		defer conn.Close()
-		b, err := io.ReadAll(conn)
-		if err != nil {
-			got <- err.Error()
-			return
-		}
-		got <- string(b)
-	}()
-	return got
+	return ln
 }
 
 // Нет диска: предупреждение один раз, повтор — через сутки.

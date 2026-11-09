@@ -129,6 +129,95 @@ func TestCodexFakeAppServer(t *testing.T) {
 	}
 }
 
+// Подставной app-server, живой лид: письмо 1 о быстром расходе и «пора» приходят в сокет по одному разу и по порядку.
+func TestCodexWarnAndFullDelivered(t *testing.T) {
+	fake, err := filepath.Abs("testdata/fake-codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	var logs strings.Builder
+	a := &app{home: dir, stateDir: filepath.Join(dir, "state"), log: slog.New(slog.NewTextHandler(&logs, nil))}
+	if err := os.MkdirAll(a.dir("codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got := liveLead(t, a)
+	answer := filepath.Join(dir, "answer.json")
+	t.Setenv("FAKE_CODEX_ANSWER", answer)
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	resets := start.Add(6 * 24 * time.Hour)
+	at := start
+	noArming(a)
+	a.codexRead = func(ctx context.Context, codex, home string, _ time.Time) (codexwatch.Reading, error) {
+		return readCodex(ctx, codex, home, at)
+	}
+	cfg := oneAccount(dir)
+	cfg.Mode, cfg.Codex, cfg.Lead = codexwatch.ModeAlert, fake, "lead"
+	for ; at.Before(start.Add(8 * time.Hour)); at = at.Add(10 * time.Minute) {
+		used := min(100, float64(int(70+4.5*at.Sub(start).Hours())))
+		body := fmt.Sprintf(`{"rateLimits":{"primary":{"usedPercent":%v,"windowDurationMins":10080,"resetsAt":%d},`+
+			`"planType":"pro"},"accountId":"acc","ordinaryUsageAllowed":%v,`+
+			`"rateLimitResetCredits":{"availableCount":1,"credits":[]}}`, used, resets.Unix(), used < 100)
+		if err := os.WriteFile(answer, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	msgs := receiveLeadMessages(t, got, 2)
+	if !strings.Contains(msgs[0], "100% около") || !strings.Contains(msgs[1], "пора") {
+		t.Fatalf("письма по порядку: %q", msgs)
+	}
+	if strings.Count(logs.String(), `msg="aguard codex: написал"`) != 2 {
+		t.Fatalf("отправок в журнале не две:\n%s", logs.String())
+	}
+}
+
+// Взвод есть, кредита нет: лиду — одно письмо «consume не вызываю», consume не зовётся.
+func TestCodexArmedNoCreditDelivered(t *testing.T) {
+	a, logs, cfg := armedApp(t)
+	cfg.Mode = codexwatch.ModeAlert
+	got := liveLead(t, a)
+	a.codexRead = func(_ context.Context, _, _ string, at time.Time) (codexwatch.Reading, error) {
+		return codexwatch.Reading{At: at, Used: 100, ResetsAt: time.Now().Add(5 * 24 * time.Hour), Available: 0}, nil
+	}
+	a.codexConsume = func(context.Context, string, string, string) (string, error) {
+		t.Error("consume вызван при нулевом числе кредитов")
+		return "", nil
+	}
+	if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	msgs := receiveLeadMessages(t, got, 1)
+	if !strings.Contains(msgs[0], "consume не вызываю") {
+		t.Fatalf("письмо лиду: %q", msgs[0])
+	}
+	if strings.Count(logs.String(), `msg="aguard codex: написал"`) != 1 {
+		t.Fatalf("отправок в журнале не одна:\n%s", logs.String())
+	}
+}
+
+// receiveLeadMessages ждёт указанное число писем; один общий таймаут ограничивает ожидание пятью секундами.
+func receiveLeadMessages(t *testing.T, got <-chan string, n int) []string {
+	t.Helper()
+	msgs := make([]string, 0, n)
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for len(msgs) < n {
+		select {
+		case msg, ok := <-got:
+			if !ok {
+				t.Fatalf("сокет закрылся после %d из %d писем", len(msgs), n)
+			}
+			msgs = append(msgs, msg)
+		case <-timer.C:
+			t.Fatalf("получено %d из %d писем за 5 с: %q", len(msgs), n, msgs)
+		}
+	}
+	return msgs
+}
+
 // noArming — проход без взвода: одобрений нет, consume и тикет — ошибка теста.
 func noArming(a *app) {
 	a.codexApproved = func(string, time.Time) (string, error) { return "", nil }
@@ -539,6 +628,40 @@ func TestCodexAllOutOncePerTransition(t *testing.T) {
 		if count() != step.want {
 			t.Fatalf("used %v: писем %d, ждали %d, журнал:\n%s", step.used, count(), step.want, logs.String())
 		}
+	}
+}
+
+// «Все учётки без лимита» до живого лида: одно письмо на переход, повторный проход без перехода — без письма.
+func TestCodexAllOutDelivered(t *testing.T) {
+	reset := time.Now().Add(5 * 24 * time.Hour)
+	personal := 100.0
+	a, logs, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
+		"work": limit(100, reset, 0),
+		"personal": func(at time.Time) (codexwatch.Reading, error) {
+			return limit(personal, reset.Add(time.Hour), 0)(at)
+		},
+	})
+	cfg.Mode = codexwatch.ModeAlert
+	got := liveLead(t, a)
+	for _, step := range []float64{100, 100, 10, 100} {
+		personal = step
+		if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sent := strings.Count(logs.String(), `msg="aguard codex: написал"`)
+	if sent < 2 {
+		t.Fatalf("число успешных писем не соответствует журналу (%d):\n%s", sent, logs.String())
+	}
+	msgs := receiveLeadMessages(t, got, sent)
+	var allOut int
+	for _, msg := range msgs {
+		if strings.Contains(msg, "все учётки Codex без лимита") {
+			allOut++
+		}
+	}
+	if allOut != 2 || strings.Count(logs.String(), `msg="aguard codex: все учётки Codex без лимита`) != 2 {
+		t.Fatalf("писем «все учётки без лимита»: сокет %d, журнал:\n%s\nписьма: %q", allOut, logs.String(), msgs)
 	}
 }
 

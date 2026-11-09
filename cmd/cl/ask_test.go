@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -20,7 +22,7 @@ func fakeAguard(t *testing.T, reply string) string {
 // fakeAguardFunc — aguard, чей ответ зависит от вопроса.
 func fakeAguardFunc(t *testing.T, answer func(restart.Request) string) string {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "aguard.sock")
+	socket := fmt.Sprintf("@aguard-cl-test-%d-%d", os.Getpid(), time.Now().UnixNano())
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
