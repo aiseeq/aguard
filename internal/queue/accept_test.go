@@ -208,7 +208,6 @@ type world struct {
 	asked      map[string]int
 	mode       string
 	now        time.Time
-	open       []string
 
 	weekendCrit []string
 }
@@ -222,7 +221,7 @@ func newWorld(mode string) *world {
 
 func (w *world) view() View {
 	return View{
-		Now: w.now, Lead: "lead", Open: w.open, WeekendCrit: w.weekendCrit,
+		Now: w.now, Lead: "lead", WeekendCrit: w.weekendCrit,
 		Serious: func(project string) bool { return w.mode == ModeOn },
 		Alive:   func(n string) bool { return w.live[n] },
 		Free:    func(n string) bool { w.asked[n]++; return w.free[n] },
@@ -460,7 +459,6 @@ func TestMedLowWakeNobody(t *testing.T) {
 // Закрытые тикеты «свободен» не спрашивают: чтение транскриптов — только когда есть что слать.
 func TestFreeAskedOnlyForWork(t *testing.T) {
 	w := newWorld(ModeOn)
-	w.open = []string{"MED-DO"}
 	s := seeded(w)
 	w.asked = map[string]int{}
 	step(s, []Ticket{tick("LOW", "готово"), tick("CRIT", "готово")}, w)

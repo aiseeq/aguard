@@ -78,7 +78,6 @@ func TestSeededNewHighWaitsFromSeen(t *testing.T) {
 	}
 }
 
-// Утро считает работу как tk next: чужой «в работе» ему не виден, свой и наступивший «ждёт» видны.
 // Проект вошёл в live в тот же день, мастер мёртв: строка админу из журнала не заменяет настоящую, пока HIGH моложе 4 ч.
 func TestHighAdminLogThenLive(t *testing.T) {
 	w := newWorld(ModeLog)

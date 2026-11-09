@@ -103,8 +103,10 @@ func (s *State) wakeDecide(master, session string, first, project Ticket, v View
 	}
 	to := liveRecipient(v, first.Admin, v.Lead, master)
 	line := fmt.Sprintf("мастер %s получил «есть работа» и встал: первым остался %s", master, first.Key)
-	if to == "" {
-		return Notice{Kind: KindUnreachable, Key: first.Key, Serious: serious, Line: "никто не доступен: " + line}, true
+	if to == "" { // доставлять некому, поэтому строка в журнал — один раз
+		w.Stuck = true
+		s.Wakes[master] = w
+		return Notice{Kind: KindUnreachable, Key: first.Key, Serious: serious, Line: "некому сообщить: " + line}, true
 	}
 	return Notice{To: to, Kind: KindWakeStuck, Master: master, Session: session, Key: first.Key, Serious: serious, Line: line}, true
 }

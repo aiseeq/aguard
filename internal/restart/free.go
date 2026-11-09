@@ -101,7 +101,8 @@ func (j *Judge) WakeFree(cfg *Config, pid int, after time.Duration, now time.Tim
 	return !hook.tasks, nil // суб-агент — тоже запись в задачах
 }
 
-// transcriptFile ищет файл беседы; нет файла — os.ErrNotExist, отличимый от ошибки обхода папок.
+// transcriptFile ищет файл беседы в любой папке проектов: имя папки Claude Code выводит из cwd сам.
+// Нет файла — os.ErrNotExist, отличимый от ошибки обхода папок.
 func transcriptFile(p paths, sessionID string) (string, error) {
 	entries, err := os.ReadDir(p.projects)
 	if errors.Is(err, os.ErrNotExist) {

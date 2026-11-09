@@ -15,22 +15,38 @@ func TestFrozenListParse(t *testing.T) {
 	if err := os.WriteFile(path, []byte("# комментарий\n\n~/git/p\tчеловек\t2026-11-09\tпричина\n/opt/q\tлид\t2026-11-08\tожидание\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	list, err := ReadFrozen(path, "/home/u")
-	if err != nil || len(list) != 2 || !list["/home/u/git/p"] || !list["/opt/q"] {
-		t.Fatal(list, err)
+	list, problems, err := ReadFrozen(path, "/home/u")
+	if err != nil || len(problems) != 0 || len(list) != 2 || !list["/home/u/git/p"] || !list["/opt/q"] {
+		t.Fatal(list, problems, err)
 	}
-	for _, bad := range []string{"/p\tчеловек\t2026-11-09", "relative\tx\t2026-11-09\twhy", "/p\tx\tне дата\twhy", "/p\t\t2026-11-09\twhy"} {
-		if err = os.WriteFile(path, []byte(bad), 0600); err != nil {
+	const good = "/ok\tлид\t2026-11-08\tпричина\n"
+	cases := []struct {
+		bad    string
+		frozen string
+	}{
+		{"/p\tчеловек\t2026-11-09", "/p"},
+		{"/p человек 2026-11-09", "/p"},
+		{"/p\tx\tне дата\twhy", "/p"},
+		{"/p\t\t2026-11-09\twhy", "/p"},
+		{"/p\tx\t2026-11-09\t", "/p"},
+		{"relative\tx\t2026-11-09\twhy", ""},
+	}
+	for _, c := range cases {
+		if err = os.WriteFile(path, []byte(c.bad+"\n"+good), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = ReadFrozen(path, "/home/u"); err == nil {
-			t.Fatalf("принята сломанная строка %q", bad)
+		list, problems, err = ReadFrozen(path, "/home/u")
+		if err != nil || len(problems) != 1 || !list["/ok"] {
+			t.Fatalf("%q: другая строка пострадала: %v %v %v", c.bad, list, problems, err)
+		}
+		if c.frozen != "" && !list[c.frozen] || c.frozen == "" && len(list) != 1 {
+			t.Fatalf("%q: %v", c.bad, list)
 		}
 	}
-	if _, err = ReadFrozen(dir, "/home/u"); err == nil {
+	if _, _, err = ReadFrozen(dir, "/home/u"); err == nil {
 		t.Fatal("ошибка чтения папки не замечена")
 	}
-	if _, err = ReadFrozen(path+"-нет", "/home/u"); err == nil {
+	if _, _, err = ReadFrozen(path+"-нет", "/home/u"); err == nil {
 		t.Fatal("нет файла — ошибка")
 	}
 }
@@ -242,5 +258,42 @@ func TestWakeNoMasterAdminWokenAsMaster(t *testing.T) {
 	ns := w.step()
 	if len(ns) != 1 || !has(ns, KindWake, "admin") {
 		t.Fatal(ns)
+	}
+}
+
+// Без CRIT в том же проходе: админа молчать заставляет именно ошибка списка.
+func TestWakeFrozenErrorNoOfferWithoutCrit(t *testing.T) {
+	w := freezeWorld()
+	w.ts[0].Master = ""
+	w.view.Frozen = func(string) (bool, error) { return false, errors.New("список не читается") }
+	if ns := w.step(); len(ns) != 0 || w.calls != 0 {
+		t.Fatal(ns, w.calls)
+	}
+}
+
+func TestWakeNoMasterWeekendOnlyCrit(t *testing.T) {
+	w := freezeWorld()
+	w.ts[0].Master = ""
+	w.view.Now = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w.view.WeekendCrit = []string{"/p"}
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatal(ns)
+	}
+	w.first.Prio = "CRIT"
+	if ns := w.step(); !has(ns, KindWakeAdmin, "admin") {
+		t.Fatal(ns)
+	}
+}
+
+func TestWakeNoMasterFirstTakenSkipped(t *testing.T) {
+	w := freezeWorld()
+	w.ts[0].Master = ""
+	w.first.Status, w.first.Executor = "в работе", "worker-1"
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatal(ns)
+	}
+	w.first.Executor = "ADMIN"
+	if ns := w.step(); !has(ns, KindWakeAdmin, "admin") {
+		t.Fatal("свой тикет админа предлагается", ns)
 	}
 }

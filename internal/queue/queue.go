@@ -451,7 +451,6 @@ const (
 type View struct {
 	Now                  time.Time
 	Lead                 string
-	Open                 []string
 	Serious, Alive, Free func(string) bool
 	Next                 func(string, string) (Ticket, bool, error)
 	Session              func(string) string
@@ -463,7 +462,6 @@ type View struct {
 	AdminNext            func(string, string) (Ticket, bool, error)
 	AdminFor             func(string) string
 	WeekendCrit          []string // папки проектов: в субботу и воскресенье из строк идут только CRIT
-	OpenByRoot           map[string][]string
 
 	restingSessions map[string]bool // сессии этих папок в такой день, считает Step
 }

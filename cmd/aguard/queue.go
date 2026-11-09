@@ -135,16 +135,14 @@ func (a *app) queueRound(ctx context.Context, c *config.Config, judge *restart.J
 		return nil
 	}
 	now := time.Now()
-	gate, err := a.queueGatePass(c, now, dry)
-	if err != nil {
+	if _, err := a.queueGatePass(c, now, dry); err != nil {
 		return err
 	}
-	return a.queueNotices(ctx, c, judge, gate, dry, now)
+	return a.queueNotices(ctx, c, judge, dry, now)
 }
 
-// queueGatePass считает ворота и пишет gate.json; возвращает open для писем. Письма считают по самому файлу, как tk next:
-// иначе при незаписанном или устаревшем файле мастеру придёт «есть работа» при пустом tk next. Сухой прогон файл не пишет
-// и показывает расчёт.
+// queueGatePass считает ворота и пишет gate.json; возвращает то, что увидит tk next: при сломанном входе — прошлый файл.
+// Сухой прогон файл не пишет и показывает расчёт.
 func (a *app) queueGatePass(c *config.Config, now time.Time, dry bool) (queue.Gate, error) {
 	inputs := a.readQueueInputs(&c.Queue, now)
 	openai, openaiErr := a.queueOpenAI(&c.Codex, now, dry)
@@ -460,10 +458,13 @@ func queueDaily(a *app) daily.Store[queueRecord] {
 	return daily.Store[queueRecord]{Dir: filepath.Join(a.stateDir, "queue"), What: "журнал очереди", At: func(r *queueRecord) time.Time { return r.At }}
 }
 
-func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart.Judge, gate queue.Gate, dry bool, now time.Time) error {
-	frozen, frozenErr := queue.ReadFrozen(c.Queue.Frozen, a.home)
+func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart.Judge, dry bool, now time.Time) error {
+	frozen, problems, frozenErr := queue.ReadFrozen(c.Queue.Frozen, a.home)
 	if frozenErr != nil {
 		a.warn("queue", "список замороженных", "err", frozenErr)
+	}
+	for _, problem := range problems {
+		a.warn("queue", "строка списка замороженных", "problem", problem)
 	}
 	statePath := filepath.Join(a.dir("queue"), "state.json")
 	before, oldBytes, err := a.queueNoticeState(statePath, dry, now)
@@ -487,9 +488,7 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		a.warn("queue", "реестр сессий", "err", err)
 		return nil
 	}
-	view := queueView(c, alive, judge, gate, now, a)
-	view.Frozen = func(dir string) (bool, error) { return frozen[filepath.Clean(dir)], frozenErr }
-	view.Projects = func() []queue.Ticket { return a.queueWakeProjects(c) }
+	view := queueView(c, alive, judge, now, a, frozen, frozenErr)
 	notices := before.Step(tickets, view)
 	if dry {
 		for _, n := range notices {
@@ -577,7 +576,13 @@ func (a *app) cachedQueueTickets(ctx context.Context, c *config.Config, now time
 	return tickets, nil
 }
 
-func queueView(c *config.Config, alive map[string]session.Info, judge *restart.Judge, gate queue.Gate, now time.Time, a *app) queue.View {
+// queueJudge — судья свободы сессии: restart.Judge, в тестах подставной.
+type queueJudge interface {
+	Free(cfg *restart.Config, pid int, after time.Duration, now time.Time) (bool, string)
+	WakeFree(cfg *restart.Config, pid int, after time.Duration, now time.Time) (bool, error)
+}
+
+func queueView(c *config.Config, alive map[string]session.Info, judge queueJudge, now time.Time, a *app, frozen map[string]bool, frozenErr error) queue.View {
 	cfg := &c.Queue
 	live := slices.Clone(cfg.Live)
 	if cfg.Mode == queue.ModeLog {
@@ -609,7 +614,7 @@ func queueView(c *config.Config, alive map[string]session.Info, judge *restart.J
 			}
 		}
 		in, ok := alive[name]
-		if !ok || workerErr != nil || owners[name] || judge == nil {
+		if !ok || workerErr != nil || owners[name] {
 			return false
 		}
 		free, err := judge.WakeFree(&c.Restart, in.Pid, cfg.FreeAfter.D(), now)
@@ -636,9 +641,11 @@ func queueView(c *config.Config, alive map[string]session.Info, judge *restart.J
 		}
 		return info.ModTime().After(at)
 	}
-	return queue.View{Now: now, Lead: c.Lead, Open: gate.Open, OpenByRoot: gate.OpenByRoot, WeekendCrit: cfg.WeekendCrit,
-		Serious: func(project string) bool { return slices.Contains(live, project) },
-		Alive:   func(name string) bool { _, ok := alive[name]; return ok }, Free: free, WakeFree: wakeFree,
+	return queue.View{Now: now, Lead: c.Lead, WeekendCrit: cfg.WeekendCrit,
+		Frozen:   func(dir string) (bool, error) { return frozen[filepath.Clean(dir)], frozenErr },
+		Projects: func() []queue.Ticket { return a.queueWakeProjects(c) },
+		Serious:  func(project string) bool { return slices.Contains(live, project) },
+		Alive:    func(name string) bool { _, ok := alive[name]; return ok }, Free: free, WakeFree: wakeFree,
 		Session:   func(name string) string { return alive[name].SessionID },
 		Cwd:       func(name string) string { return alive[name].Cwd },
 		TurnAfter: turnAfter,

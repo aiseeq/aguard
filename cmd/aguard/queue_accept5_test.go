@@ -193,9 +193,8 @@ func TestQueueTasksProject(t *testing.T) {
 func TestQueueWiring(t *testing.T) {
 	b := newQueueBench(t, `[{"repo":"p","prio":"HIGH","status":"открыт","path":"docs/tasks/20261104-1000-HIGH-j.md","slug":"j","title":"журнал","journal":true}]`, "[]")
 	b.c.Queue.WeekendCrit = []string{"/h/work"}
-	gate := queue.Gate{Open: []string{"MED-DO"}, OpenByRoot: map[string][]string{"/h/work": {"MED-HUNT"}}}
-	v := queueView(b.c, nil, nil, gate, time.Now(), b.a)
-	if !slices.Equal(v.WeekendCrit, b.c.Queue.WeekendCrit) || !slices.Equal(v.Open, gate.Open) || !slices.Equal(v.OpenByRoot["/h/work"], []string{"MED-HUNT"}) {
+	v := queueView(b.c, nil, nil, time.Now(), b.a, nil, nil)
+	if !slices.Equal(v.WeekendCrit, b.c.Queue.WeekendCrit) {
 		t.Fatalf("View: %+v", v)
 	}
 	tasks := filepath.Join(b.dir, "git", "p", "docs", "tasks")

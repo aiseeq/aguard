@@ -274,8 +274,6 @@ func readHookState(p paths, sessionID string) (hookRecord, error) {
 	return rec, nil
 }
 
-// transcriptFile — транскрипт сессии в любой папке проектов: имя папки Claude Code выводит из cwd сам.
-
 func later(a, b time.Time) time.Time {
 	if b.After(a) {
 		return b

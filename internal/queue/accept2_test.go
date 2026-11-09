@@ -148,7 +148,6 @@ func TestStateSmall(t *testing.T) {
 	}
 }
 
-// Отметки утра не копятся: год работы не раздувает файл.
 // Клетка считается у каждого поставщика своя: сгорание снимает ограничение только этого поставщика.
 func TestComputeBurningPerProvider(t *testing.T) {
 	tb := table(t)

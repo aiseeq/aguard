@@ -3,6 +3,7 @@ package queue
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -204,5 +205,70 @@ func TestWakeAsksProjectOfMasterCwd(t *testing.T) {
 	w.view.Cwd = func(string) string { return "/elsewhere" }
 	if w.step(); len(asked) != 1 || asked[0] != "/a" {
 		t.Fatal("вне проектов — устойчивый порядок", asked)
+	}
+}
+
+func TestWakeBusyKinds(t *testing.T) {
+	for _, kind := range []string{KindCrit, KindCritCopy, KindHigh, KindHighAdmin, KindWake, KindWakeStuck} {
+		if !wakeBusy([]Notice{{To: "m", Kind: kind}})["m"] {
+			t.Errorf("%s не будит", kind)
+		}
+	}
+	if wakeBusy([]Notice{{To: "m", Kind: KindBack}})["m"] {
+		t.Error("строка о закрытом — не повод молчать")
+	}
+}
+
+// У настоящего ответа tk next поля Admin нет: сигнал идёт админу проекта, а не лиду.
+func TestWakeStuckGoesToProjectAdmin(t *testing.T) {
+	w := newWakeWorld()
+	w.first.Admin = ""
+	w.confirm(w.step())
+	w.turn = true
+	if ns := w.step(); len(ns) != 1 || !has(ns, KindWakeStuck, "admin") {
+		t.Fatal(ns)
+	}
+}
+
+// Доставлять некому (мастер и админ — один лид): строка в журнал один раз, а не каждый проход.
+func TestWakeNoOneToSignalOnce(t *testing.T) {
+	w := newWakeWorld()
+	w.ts[0].Master, w.ts[0].Admin, w.first.Admin = "lead", "lead", "lead"
+	w.confirm(w.step())
+	w.turn = true
+	ns := w.step()
+	if len(ns) != 1 || ns[0].Kind != KindUnreachable || !strings.Contains(ns[0].Line, "некому сообщить") {
+		t.Fatal(ns)
+	}
+	if ns = w.step(); len(ns) != 0 {
+		t.Fatal("повтор", ns)
+	}
+}
+
+func TestWakeOwnInWorkAnyCase(t *testing.T) {
+	w := newWakeWorld()
+	w.first.Status, w.first.Executor = "в работе", "MASTER"
+	if ns := w.step(); !has(ns, KindWake, "master") {
+		t.Fatal(ns)
+	}
+}
+
+func TestWakeMastersIndependent(t *testing.T) {
+	w := newWakeWorld()
+	other := w.ts[0]
+	other.Project, other.Dir, other.Master, other.Key = "q", "/q", "other", "q/base"
+	w.ts = append(w.ts, other)
+	w.view.Next = func(name, dir string) (Ticket, bool, error) {
+		return Ticket{Key: filepath.Base(dir) + "/first", Admin: "admin"}, name != "other" || w.found, nil
+	}
+	ns := w.step()
+	if len(ns) != 2 || !has(ns, KindWake, "master") || !has(ns, KindWake, "other") {
+		t.Fatal(ns)
+	}
+	w.confirm(ns)
+	w.found = false
+	w.step()
+	if _, kept := w.state.Wakes["master"]; kept == false || len(w.state.Wakes) != 1 {
+		t.Fatal("пустая очередь одного сняла отметку другого", w.state.Wakes)
 	}
 }
