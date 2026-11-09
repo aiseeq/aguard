@@ -81,12 +81,11 @@ func TestWakeEmptyOrErrorNoLetter(t *testing.T) {
 	w := newWakeWorld()
 	w.confirm(w.step())
 	original := w.state.Wakes["master"]
-	w.err = errors.New("ошибка")
+	w.err, w.found = errors.New("ошибка"), false // как настоящий nextForQueue: found ложно, а отметку трогать нельзя
 	if ns := w.step(); len(ns) != 0 || w.state.Wakes["master"] != original {
 		t.Fatal(ns, w.state.Wakes)
 	}
 	w.err = nil
-	w.found = false
 	if ns := w.step(); len(ns) != 0 || len(w.state.Wakes) != 0 {
 		t.Fatal(ns, w.state.Wakes)
 	}
@@ -243,6 +242,18 @@ func TestWakeSignalAfterRecipientsReturn(t *testing.T) {
 	ns := w.step()
 	if len(ns) != 1 || ns[0].Kind != KindUnreachable {
 		t.Fatal(ns)
+	}
+	path := filepath.Join(t.TempDir(), "state.json") // отметка переживает рестарт демона: строка не повторится
+	if err := w.state.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.state = loaded
+	if ns = w.step(); len(ns) != 0 {
+		t.Fatal("строка после рестарта", ns)
 	}
 	back = true
 	ns = w.step()

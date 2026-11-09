@@ -370,9 +370,9 @@ func TestQueueWakeLogModeMarks(t *testing.T) {
 func TestQueueNextDueWaitOwnKey(t *testing.T) {
 	a, _ := testIOApp(t)
 	tk := filepath.Join(a.home, "tk")
-	answer := func(status, due string) queue.Ticket {
+	answer := func(status, waits, due string) queue.Ticket {
 		t.Helper()
-		body := fmt.Sprintf(`{"source":"local","path":"docs/tasks/20261104-0950-foo.md","slug":"foo","prio":"MED","status":%q,"due":%q}`, status, due)
+		body := fmt.Sprintf(`{"source":"local","path":"docs/tasks/20261104-0950-foo.md","slug":"foo","prio":"MED","status":%q,"waits":%q,"due":%q}`, status, waits, due)
 		if err := os.WriteFile(tk, []byte("#!/bin/sh\nprintf '%s\\n' '"+body+"'\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -383,12 +383,21 @@ func TestQueueNextDueWaitOwnKey(t *testing.T) {
 		}
 		return got
 	}
-	open, first, second := answer("открыт", "2026-11-09T12:00:00+01:00"), answer("ждёт", "2026-11-09T12:00:00+01:00"), answer("ждёт", "2026-11-10T12:00:00+01:00")
-	if open.Key == first.Key || first.Key == second.Key || !strings.HasPrefix(first.Key, open.Key+"@") {
-		t.Fatalf("%q %q %q", open.Key, first.Key, second.Key)
+	const waits = "2026-11-09 12:00 ответ"
+	open := answer("открыт", waits, "2026-11-09T12:00:00+01:00")
+	first := answer("ждёт", waits, "2026-11-09T12:00:00+01:00")
+	if open.Key == first.Key || !strings.HasPrefix(first.Key, open.Key+"@") {
+		t.Fatalf("наступивший wait — свой ключ: %q %q", open.Key, first.Key)
 	}
-	if noDue := answer("ждёт", ""); noDue.Key != open.Key {
-		t.Fatalf("срока нет: %q", noDue.Key)
+	// tk пересчитывает due у относительной записи «30m: текст» на каждый вызов: ключ от неё зациклил бы письма.
+	if again := answer("ждёт", waits, "2026-11-09T12:00:01+01:00"); again.Key != first.Key {
+		t.Fatalf("то же ожидание с другим due: %q %q", again.Key, first.Key)
+	}
+	if other := answer("ждёт", "2026-11-10 12:00 ответ", "2026-11-10T12:00:00+01:00"); other.Key == first.Key {
+		t.Fatalf("новое ожидание — новый ключ: %q", other.Key)
+	}
+	if noWaits := answer("ждёт", "", "2026-11-09T12:00:00+01:00"); noWaits.Key != open.Key {
+		t.Fatalf("строки ожидания нет: %q", noWaits.Key)
 	}
 }
 

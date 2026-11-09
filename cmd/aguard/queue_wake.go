@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,7 +70,7 @@ func (a *app) nextForQueue(ctx context.Context, tk, master, dir, cacheKey string
 		Status   string `json:"status"`
 		Executor string `json:"executor"`
 		Prio     string `json:"prio"`
-		Due      string `json:"due"`
+		Waits    string `json:"waits"`
 	}
 	if err = json.Unmarshal(b, &raw); err != nil {
 		res.err = fmt.Errorf("tk next %s: %w", dir, err)
@@ -86,8 +87,8 @@ func (a *app) nextForQueue(ctx context.Context, tk, master, dir, cacheKey string
 		a.warn("queue", "tk next", "err", res.err)
 		return queue.Ticket{}, false, res.err
 	}
-	if raw.Status == "ждёт" && raw.Due != "" { // наступивший tk wait — новое событие: письмо, а не «встал» по старой отметке
-		key += "@" + raw.Due
+	if raw.Status == "ждёт" && raw.Waits != "" { // наступивший tk wait — новое событие: письмо, а не «встал» по старой отметке
+		key += fmt.Sprintf("@wait-%08x", crc32.ChecksumIEEE([]byte(raw.Waits))) // от строки ожидания: due у «30m: …» плывёт
 	}
 	res.ticket = queue.WakeTicket(project, dir, key)
 	res.ticket.Status, res.ticket.Executor, res.ticket.Prio, res.ticket.Slug = raw.Status, raw.Executor, raw.Prio, raw.Slug
