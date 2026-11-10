@@ -244,7 +244,7 @@ func TestIOServiceRoutes(t *testing.T) {
 	}
 	letters := func() int {
 		t.Helper()
-		time.Sleep(50 * time.Millisecond) // письма — своими горутинами
+		s.letters.Wait() // письма — своими горутинами
 		return strings.Count(logged.String(), "написал бы")
 	}
 	s.closed(alertCase(base, 1900))

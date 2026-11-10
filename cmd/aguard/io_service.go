@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/activity"
@@ -161,6 +162,7 @@ type ioService struct {
 	route   *ioroute.Router
 	owners  *ioOwnerFinder
 	tickets *ioTicketer
+	letters sync.WaitGroup // горутины писем: тест дожидается их, прежде чем читать журнал
 	tickAt  time.Time
 }
 

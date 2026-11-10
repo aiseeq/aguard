@@ -509,7 +509,7 @@ func (s *ioService) act(acts []ioroute.Action) {
 		for _, c := range act.Cases {
 			dur = max(dur, c.DurMS)
 		}
-		go func() {
+		s.letters.Go(func() {
 			defer func() {
 				if v := recover(); v != nil {
 					s.a.warn("io", "паника письма", "err", fmt.Sprint(v), "stack", string(debug.Stack()))
@@ -525,7 +525,7 @@ func (s *ioService) act(acts []ioroute.Action) {
 						tk: cfg.Tk, lead: cfg.Lead, log: cfg.Mode == iowatch.ModeLog})
 				}
 			}
-		}()
+		})
 	}
 }
 
