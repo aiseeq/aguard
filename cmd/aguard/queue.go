@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/codexwatch"
@@ -168,7 +169,7 @@ func queueLive(cfg *queue.Config) ([]string, error) {
 	}
 	for _, tasks := range dirs {
 		info, err := os.Stat(tasks)
-		if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) { // нет папки или docs — файл: не проект
 			continue
 		}
 		if err != nil {

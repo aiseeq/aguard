@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -621,5 +623,56 @@ func TestQueueLiveAllFindsNewProject(t *testing.T) {
 	}
 	if !slices.Equal(b.c.Queue.Live, []string{queue.LiveAll, "aisee"}) {
 		t.Fatalf("проход переписал конфиг: %v", b.c.Queue.Live)
+	}
+}
+
+// «*» доходит до писем и опроса трекера развёрнутым: проект p под git_roots опрашивается `tk external`, хотя по имени
+// в live его нет (проверка 10.11: передача исходного конфига в queueNotices выживала).
+func TestQueueLiveAllReachesNotices(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	_, calls := b.externalTk(t, extHigh)
+	b.c.Queue.Live = []string{queue.LiveAll}
+	b.round(t)
+	if n := callCount(t, calls); n != 1 {
+		t.Fatalf("опросов трекера проекта p: %d, ждали 1", n)
+	}
+}
+
+// Находка проектов для «*»: обычный файл docs/tasks или docs — не проект и не сбой; нечитаемый корень или папка docs —
+// ошибка прохода, а не молча урезанный live.
+func TestQueueLiveAllFindErrors(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	mk := func(rel string, file bool) string {
+		p := filepath.Join(b.dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if file {
+			if err := os.WriteFile(p, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	mk("git/tasksfile/docs/tasks", true)
+	mk("git/docsfile/docs", true)
+	b.c.Queue.Live = []string{queue.LiveAll}
+	got, err := queueLive(&b.c.Queue)
+	if err != nil || !slices.Equal(got, []string{"docs", "p"}) {
+		t.Fatalf("live %v, %v; ждали [docs p]", got, err)
+	}
+	for name, path := range map[string]string{"корень": filepath.Join(b.dir, "git"), "docs": mk("git/locked/docs", false)} {
+		if err := os.Chmod(path, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, err := queueLive(&b.c.Queue)
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if !errors.Is(err, fs.ErrPermission) {
+			t.Fatalf("%s без прав: %v, ждали ошибку доступа", name, err)
+		}
 	}
 }
