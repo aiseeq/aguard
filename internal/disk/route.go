@@ -53,15 +53,16 @@ func (c *Config) fastDue(prev FastTold, ok bool, r *Record, now time.Time) bool 
 
 // told — отметка письма о паре (FastLetters уже снял отметки старше fast_every): первое письмо эпизода начинает рост
 // с находки, а убыль — с порога fast (Delta убыли без виновника — за окно, с ростом виновника внутри, сценарий 2),
-// ранний повтор их копит; убыль поэтому не меньше fast. У письма без виновника Bytes 0: удвоение роста не сработает.
+// ранний повтор копит только прирост (очистка между письмами не уводит их в минус — перепроверка 10.11 12:20: письмо
+// на каждом обходе); убыль поэтому не меньше fast. У письма без виновника Bytes 0: удвоение роста не сработает.
 func (c *Config) told(prev FastTold, ok bool, r *Record, now time.Time) FastTold {
 	t := FastTold{At: now, Bytes: r.Bytes, Free: r.Free}
 	if !ok {
 		t.Grown, t.Drop = r.Delta, int64(c.Fast)
 		return t
 	}
-	t.Grown = prev.Grown + r.Bytes - prev.Bytes
-	t.Drop = prev.Drop + prev.Free - r.Free
+	t.Grown = prev.Grown + max(0, r.Bytes-prev.Bytes)
+	t.Drop = prev.Drop + max(0, prev.Free-r.Free)
 	return t
 }
 

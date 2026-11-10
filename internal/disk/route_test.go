@@ -365,3 +365,28 @@ func TestFastSteadyGrowthLetterCount(t *testing.T) {
 		t.Fatalf("писем за час ровного роста: %d, ждали 2–6", letters)
 	}
 }
+
+// Перепроверка 10.11 12:20: удвоение — от первого роста пары (12 ГБ, не порог fast); очистка между письмами (свободное
+// выросло) не уводит рост и убыль эпизода в минус — иначе письмо на каждом обходе по тревоге.
+func TestFastToldEpisode(t *testing.T) {
+	c := routeConfig()
+	t0 := time.Date(2026, 11, 10, 12, 0, 0, 0, time.Local)
+	first := c.told(FastTold{}, false, &Record{Kind: KindFast, Path: "/p", Bytes: 20 << 30, Delta: 12 << 30, Free: 160 << 30}, t0)
+	at := t0.Add(5 * time.Minute)
+	if c.fastDue(first, true, &Record{Kind: KindFast, Path: "/p", Bytes: 32<<30 - 1, Free: 156 << 30}, at) {
+		t.Error("рост на байт меньше первого роста 12 ГБ — письмо раньше удвоения")
+	}
+	// рост записи на 12 ГБ — письмо, хотя свободное выросло (очистка рядом) до 200 ГБ
+	grown := &Record{Kind: KindFast, Path: "/p", Bytes: 32 << 30, Free: 200 << 30}
+	if !c.fastDue(first, true, grown, at) {
+		t.Fatal("рост ровно на первый рост — удвоение, письмо")
+	}
+	second := c.told(first, true, grown, at)
+	if second.Grown != 24<<30 || second.Drop != first.Drop {
+		t.Fatalf("эпизод после очистки: рост %d, убыль %d (ждали 24 ГиБ и прежнюю %d)", second.Grown, second.Drop, first.Drop)
+	}
+	shrunk := c.told(second, true, &Record{Kind: KindFast, Path: "/p", Bytes: 10 << 30, Free: 150 << 30}, at.Add(time.Minute))
+	if shrunk.Grown != second.Grown {
+		t.Fatalf("запись уменьшилась — рост эпизода %d, ждали прежний %d", shrunk.Grown, second.Grown)
+	}
+}
