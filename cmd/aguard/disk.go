@@ -76,9 +76,13 @@ func (a *app) diskCmd(ctx context.Context, args []string) error {
 	return nil
 }
 
-// diskOwners — хозяева записей: таблица конфига, живые сессии, админы, лид.
-func (a *app) diskOwners(cfg *config.Config) *disk.Owners {
-	o := &disk.Owners{Table: cfg.Disk.Owners, Admins: cfg.Admins, Lead: cfg.Lead, Projects: a.diskProjects()}
+// diskOwners — хозяева записей: таблица конфига, живые сессии, админы, лид. Таблица имён битая и прошлой нет — ошибка.
+func (a *app) diskOwners(cfg *config.Config) (*disk.Owners, error) {
+	projects, err := a.diskProjects()
+	if err != nil {
+		return nil, err
+	}
+	o := &disk.Owners{Table: cfg.Disk.Owners, Admins: cfg.Admins, Lead: cfg.Lead, Projects: projects}
 	infos, err := a.reg.List()
 	if err != nil { // часть реестра не прочиталась: хозяева — по остальным
 		a.warn("disk", "реестр сессий", "err", err)
@@ -88,14 +92,16 @@ func (a *app) diskOwners(cfg *config.Config) *disk.Owners {
 			o.Live = append(o.Live, disk.Session{Name: in.Name, ID: in.SessionID, Cwd: in.Cwd})
 		}
 	}
-	return o
+	return o, nil
 }
 
-// diskProjects — имена сессий папок проектов по таблице cl: её папки и проекты прямо в ~/git и ~/work.
-func (a *app) diskProjects() map[string]string {
-	table, err := names.ReadTable(filepath.Join(a.home, names.File), a.home)
-	if err != nil { // без таблицы хозяева — по проектам ~/git и ~/work
-		a.warn("disk", "таблица имён cl", "err", err)
+// diskProjects — имена сессий папок проектов по таблице cl: её папки и проекты прямо в ~/git и ~/work. Таблица битая и
+// прошлой нет — ошибка, не пустая таблица: без неё scratchpad в ~ ушёл бы случайной живой сессии из ~ вместо лида, а
+// переименованный в таблице мастер — несуществующему <проект>-master.
+func (a *app) diskProjects() (map[string]string, error) {
+	table, err := a.namesTable("disk")
+	if err != nil {
+		return nil, err
 	}
 	dirs := slices.Collect(maps.Keys(table))
 	for _, space := range []string{"git", "work"} {
@@ -116,7 +122,7 @@ func (a *app) diskProjects() map[string]string {
 			out[disk.ProjectKey(d)] = name
 		}
 	}
-	return out
+	return out, nil
 }
 
 // diskRound — один проход: свободное место, по сроку или тревоге — обход записей и сигналы в журнал.
@@ -132,15 +138,11 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	if cfg.Disk.FreeMode != disk.FreeOff {
-		if err := a.diskFree(&cfg.Disk, st, now, free); err != nil {
-			a.warn("disk", "сигнал о свободном месте", "err", err)
-		}
+	a.diskFreeSignals(cfg, st, now, free)
+	owners, err := a.diskOwners(cfg)
+	if err != nil { // холодный старт с битой таблицей имён: обход ждёт, состояние не тронуто — следующий проход повторит
+		return err
 	}
-	if err := a.diskForecast(&cfg.Disk, now, free); err != nil {
-		a.warn("disk", "прогноз запаса", "err", err)
-	}
-	owners := a.diskOwners(cfg)
 	// Пауза обхода на занятой машине — internal/yield (общая с замером слежения).
 	yielder := yield.New(procRoot, func(err error) { a.warn("disk", "замер машины для паузы обхода", "err", err) })
 	walkReason := st.WalkDue(&cfg.Disk, now, free)
@@ -208,6 +210,19 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	return store.Rotate(now, cfg.Disk.Keep.D())
 }
 
+// diskFreeSignals — сигнал о свободном месте и прогноз запаса; сбой — WARN, проход идёт. Без хозяев записей: идут и
+// при холодном старте с битой таблицей имён.
+func (a *app) diskFreeSignals(cfg *config.Config, st *disk.State, now time.Time, free int64) {
+	if cfg.Disk.FreeMode != disk.FreeOff {
+		if err := a.diskFree(&cfg.Disk, st, now, free); err != nil {
+			a.warn("disk", "сигнал о свободном месте", "err", err)
+		}
+	}
+	if err := a.diskForecast(&cfg.Disk, now, free); err != nil {
+		a.warn("disk", "прогноз запаса", "err", err)
+	}
+}
+
 func (a *app) diskRoundState(path string, cfg *config.Config, now time.Time, free int64) (*disk.State, error) {
 	if a.diskState == nil {
 		st, loaded, err := disk.LoadRound(path)
@@ -235,7 +250,10 @@ func (a *app) diskRetro(ctx context.Context, cfg *config.Config, days int) error
 	if err != nil {
 		a.warn("disk", "записи", "err", err)
 	}
-	owners := a.diskOwners(cfg)
+	owners, err := a.diskOwners(cfg)
+	if err != nil {
+		return err
+	}
 	y, m, d := time.Now().AddDate(0, 0, -days).Date()
 	from := time.Date(y, m, d, 0, 0, 0, 0, time.Local)
 	var b strings.Builder
@@ -265,7 +283,10 @@ func (a *app) diskDry(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		a.warn("disk", "записи", "err", err)
 	}
-	owners := a.diskOwners(cfg)
+	owners, err := a.diskOwners(cfg)
+	if err != nil {
+		return err
+	}
 	usage := cfg.Disk.MeasureAll(ctx, entries, nil)
 	enc := json.NewEncoder(a.out)
 	for _, e := range entries {
@@ -408,7 +429,10 @@ func (a *app) diskTracesNow(ctx context.Context, cfg *config.Config, all bool) e
 	if err != nil {
 		return err
 	}
-	owners := a.diskOwners(cfg)
+	owners, err := a.diskOwners(cfg)
+	if err != nil {
+		return err
+	}
 	usage := cfg.Disk.MeasureAll(ctx, entries, nil)
 	traces := cfg.Disk.FindTraces(now, entries, usage, a.diskFacts(cfg, owners, entries), owners.Of)
 	var b strings.Builder

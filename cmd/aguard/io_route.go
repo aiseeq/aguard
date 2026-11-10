@@ -28,16 +28,15 @@ type ioOwnerFinder struct {
 	units    map[string]string // служба → сессия ([io] owners)
 	home     string
 	table    map[string]string               // таблица имён cl: папка → сессия
+	tableErr error                           // таблица битая и прошлой нет: хозяина по папке не назвать
 	sessions func(id string) (string, error) // живая сессия по SessionID, "" — нет такой
 }
 
 func (a *app) ioOwners(cfg *iowatch.Config) *ioOwnerFinder {
-	table, err := names.ReadTable(filepath.Join(a.home, names.File), a.home)
-	if err != nil {
-		a.warn("io", "таблица имён cl для хозяев случаев", "err", err)
-		table = map[string]string{}
-	}
-	return &ioOwnerFinder{units: cfg.Owners, home: a.home, table: table,
+	// Холодный старт с битой таблицей — не пустая таблица, а ошибка в случаях с хозяином по папке: случай идёт как без
+	// хозяина (лиду), а не <проект>-master по догадке — мастеру, которого таблица могла переименовать.
+	table, err := a.namesTable("io")
+	return &ioOwnerFinder{units: cfg.Owners, home: a.home, table: table, tableErr: err,
 		jobs: &cpuwatch.Jobs{Dir: filepath.Join(a.home, ".local", "state", "worker"),
 			Units: fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/app.slice", a.uid, a.uid)},
 		sessions: func(id string) (string, error) {
@@ -119,27 +118,35 @@ func (o *ioOwnerFinder) byProcess(d iowatch.ProcessDetails) (string, error) {
 				return name, nil
 			}
 		}
-		if name := o.byProjectKey(m[1]); name != "" {
-			return name, nil
+		if name, err := o.byProjectKey(m[1]); name != "" || err != nil {
+			return name, err
 		}
 	}
 	// cwd ровно ~ хозяина не говорит: из него работают Chrome, Telegram и прочие программы рабочего стола, а по таблице
 	// имён ~ — лид (находка проверки alert-async 08.11: Chrome — 178 случаев за неделю ушли бы лиду).
 	if d.CWD != "" && filepath.Clean(d.CWD) != o.home {
-		return names.For(d.CWD, o.home, o.table), nil
+		return o.nameFor(d.CWD)
 	}
 	return "", nil
 }
 
 // byProjectKey — сессия проекта по ключу папки Claude Code (путь, где / заменён на -): ~/git/<проект>, ~/work/<проект>.
-func (o *ioOwnerFinder) byProjectKey(key string) string {
+func (o *ioOwnerFinder) byProjectKey(key string) (string, error) {
 	homeKey := strings.ReplaceAll(o.home, "/", "-")
 	for _, space := range []string{"git", "work"} {
 		if p, ok := strings.CutPrefix(key, homeKey+"-"+space+"-"); ok && p != "" {
-			return names.For(filepath.Join(o.home, space, p), o.home, o.table)
+			return o.nameFor(filepath.Join(o.home, space, p))
 		}
 	}
-	return ""
+	return "", nil
+}
+
+// nameFor — сессия папки dir по таблице имён; таблицы нет (битая при холодном старте) — ошибка.
+func (o *ioOwnerFinder) nameFor(dir string) (string, error) {
+	if o.tableErr != nil {
+		return "", fmt.Errorf("хозяин %s по таблице имён: %w", dir, o.tableErr)
+	}
+	return names.For(dir, o.home, o.table), nil
 }
 
 func byProc(main, generic string) (string, bool) {

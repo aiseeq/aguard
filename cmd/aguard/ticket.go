@@ -41,7 +41,7 @@ func (a *app) classTicket(ctx context.Context, t classTicket) error {
 	if who == "" {
 		who = t.lead
 	}
-	dir, err := a.sessionDir(who, t.lead)
+	dir, err := a.sessionDir(t.watcher, who, t.lead)
 	redirect := ""
 	if err != nil { // хозяин есть, его папки нет (задание бойца от сессии без проекта): тикет лиду с именем хозяина
 		a.warn(t.watcher, "папка хозяина не найдена, тикет — лиду", "owner", who, "err", err)
@@ -139,11 +139,12 @@ func tkRun(ctx context.Context, tk, dir string, stdin *strings.Reader, args ...s
 }
 
 // sessionDir — папка тикетов сессии: таблица имён cl, папка админа, <проект>-master — ~/git или ~/work, лид — домашняя.
-func (a *app) sessionDir(who, lead string) (string, error) {
+// Таблица битая и прошлой нет — ошибка: тикет уходит лиду с именем хозяина, а не в папку по догадке. watcher — чей тикет.
+func (a *app) sessionDir(watcher, who, lead string) (string, error) {
 	if who == lead {
 		return a.home, nil
 	}
-	table, err := names.ReadTable(filepath.Join(a.home, names.File), a.home)
+	table, err := a.namesTable(watcher)
 	if err != nil {
 		return "", err
 	}

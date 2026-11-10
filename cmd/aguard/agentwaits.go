@@ -69,7 +69,7 @@ func (a *app) agentwaitsRound(cfg *agentwait.Config, dry bool) error {
 	if err != nil {
 		return err
 	}
-	table, err := names.ReadTable(filepath.Join(a.home, names.File), a.home)
+	table, err := a.namesTable("agentwaits") // холодный старт с битой — проход стоит, смещения целы: ничего не теряется
 	if err != nil {
 		return err
 	}

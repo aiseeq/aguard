@@ -4,7 +4,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"flag"
@@ -20,8 +19,9 @@ import (
 )
 
 // saidNames — имя событиям без строки agent-name в прочитанном куске (сессия началась до первого прохода): по реестру
-// живых сессий, иначе по таблице имён cl и папке запуска.
-func (a *app) saidNames(evs []said.Event) {
+// живых сессий, иначе по таблице имён cl и папке запуска. Таблица нужна только безымянным вне реестра; битая и прошлой
+// нет — ошибка: по <проект>-master вместо имени из таблицы реплики легли бы чужой сессии.
+func (a *app) saidNames(evs []said.Event) error {
 	byID := map[string]string{}
 	if infos, err := a.reg.List(); err != nil {
 		a.warn("said", "реестр сессий", "err", err)
@@ -30,15 +30,26 @@ func (a *app) saidNames(evs []said.Event) {
 			byID[infos[i].SessionID] = infos[i].Name
 		}
 	}
-	table, err := names.ReadTable(filepath.Join(a.home, names.File), a.home)
+	need := false
+	for i := range evs {
+		if ev := &evs[i]; ev.Name == "" {
+			ev.Name = byID[ev.Session]
+			need = need || ev.Name == ""
+		}
+	}
+	if !need {
+		return nil
+	}
+	table, err := a.namesTable("said")
 	if err != nil {
-		a.warn("said", "таблица имён", "err", err)
+		return err
 	}
 	for i := range evs {
 		if ev := &evs[i]; ev.Name == "" {
-			ev.Name = cmp.Or(byID[ev.Session], names.For(ev.Cwd, a.home, table))
+			ev.Name = names.For(ev.Cwd, a.home, table)
 		}
 	}
+	return nil
 }
 
 func (a *app) saidCmd(ctx context.Context, args []string) error {
@@ -90,7 +101,9 @@ func (a *app) saidRound(ctx context.Context, c *config.Config, dry bool) error {
 	if err != nil { // ошибки отдельных файлов: остальные реплики всё равно размечаем
 		a.warn("said", "часть транскриптов не прочиталась", "err", err)
 	}
-	a.saidNames(evs)
+	if err := a.saidNames(evs); err != nil { // холодный старт с битой таблицей: проход стоит, смещения не сохранены — реплики не теряются
+		return err
+	}
 	cfg.Collect(st, evs)
 	if dry {
 		enc := json.NewEncoder(a.out)

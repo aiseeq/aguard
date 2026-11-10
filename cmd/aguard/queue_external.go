@@ -28,7 +28,7 @@ const (
 // queueExternal — задачи внешнего трекера как тикеты: то же, что мастер видит в tk next. Правила отбора и доверие к источнику
 // остаются в tk. Сбой проекта — WARN и прошлый список: местные тикеты идут как шли, отметки о письмах целы.
 func (a *app) queueExternal(ctx context.Context, c *config.Config, state *queue.State, now time.Time) ([]queue.Ticket, error) {
-	table, err := a.queueNamesTable()
+	table, err := a.namesTable("queue")
 	if err != nil {
 		return nil, err
 	}

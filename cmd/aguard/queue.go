@@ -240,7 +240,7 @@ func queueDaily(a *app) daily.Store[queueRecord] {
 }
 
 func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart.Judge, dry bool, now time.Time) error {
-	defer a.queueNamesAlert(c, dry, now) // и на выходе до Step: при холодном старте с битой таблицей лид узнаёт, почему письма стоят
+	defer a.namesAlert(c, dry, now) // и на выходе до Step: при холодном старте с битой таблицей лид узнаёт, почему письма стоят; письмо одно на все места демона
 	frozen, problems, frozenErr := queue.ReadFrozen(c.Queue.Frozen, a.home)
 	if frozenErr != nil {
 		a.warn("queue", "список замороженных", "err", frozenErr)
@@ -592,7 +592,7 @@ func queueOwners(dir, home, lead string, table, admins map[string]string) (maste
 
 func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticket, error) {
 	cfg := &c.Queue
-	table, err := a.queueNamesTable()
+	table, err := a.namesTable("queue")
 	if err != nil {
 		return nil, err
 	}
@@ -761,7 +761,7 @@ func (a *app) queueWakeProjects(c *config.Config) []queue.Ticket {
 		a.warn("queue", "папки задач", "err", err)
 		return nil
 	}
-	table, err := a.queueNamesTable()
+	table, err := a.namesTable("queue")
 	if err != nil {
 		a.warn("queue", "имена", "err", err)
 		return nil

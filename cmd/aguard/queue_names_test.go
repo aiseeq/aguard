@@ -138,13 +138,13 @@ func TestQueueNamesAlertRepeat(t *testing.T) {
 	now := time.Now()
 	read := func() {
 		t.Helper()
-		if _, err := b.a.queueNamesTable(); err != nil && b.a.queueNames.loaded {
+		if _, err := b.a.namesTable("queue"); err != nil && b.a.namesMem.loaded {
 			t.Fatal(err)
 		}
 	}
 	letters := func(at time.Time) int {
 		t.Helper()
-		b.a.queueNamesAlert(b.c, false, at)
+		b.a.namesAlert(b.c, false, at)
 		return countWith(drainLetters(got["lead"]), "таблица имён")
 	}
 	b.writeNames(t, "")
@@ -184,16 +184,16 @@ func TestQueueNamesAlertWaitsLead(t *testing.T) {
 	lead := b.c.Lead
 	b.c.Lead = "нет-такого"
 	b.writeNames(t, brokenNamesLine)
-	if _, err := b.a.queueNamesTable(); err == nil {
+	if _, err := b.a.namesTable("queue"); err == nil {
 		t.Fatal("битая таблица без прошлой прочиталась")
 	}
 	now := time.Now()
-	b.a.queueNamesAlert(b.c, false, now)
+	b.a.namesAlert(b.c, false, now)
 	if strings.Contains(log.String(), "level=WARN") {
 		t.Fatalf("WARN без живого лида: %s", log.String())
 	}
 	b.c.Lead = lead
-	b.a.queueNamesAlert(b.c, false, now.Add(time.Minute))
+	b.a.namesAlert(b.c, false, now.Add(time.Minute))
 	if n := countWith(drainLetters(got["lead"]), "таблица имён"); n != 1 {
 		t.Fatalf("письмо лиду после появления: %d", n)
 	}
@@ -203,14 +203,14 @@ func TestQueueNamesAlertWaitsLead(t *testing.T) {
 func TestQueueNamesAlertDry(t *testing.T) {
 	b, got := namesBench(t)
 	b.writeNames(t, brokenNamesLine)
-	if _, err := b.a.queueNamesTable(); err == nil {
+	if _, err := b.a.namesTable("queue"); err == nil {
 		t.Fatal("битая таблица без прошлой прочиталась")
 	}
-	b.a.queueNamesAlert(b.c, true, time.Now())
-	if out := b.a.out.(*strings.Builder).String(); !strings.Contains(out, "names lead: aguard queue: таблица имён") {
+	b.a.namesAlert(b.c, true, time.Now())
+	if out := b.a.out.(*strings.Builder).String(); !strings.Contains(out, "names lead: aguard: таблица имён") {
 		t.Fatalf("вывод: %q", out)
 	}
-	if lead := drainLetters(got["lead"]); len(lead) != 0 || b.a.queueNames.sentErr != "" {
+	if lead := drainLetters(got["lead"]); len(lead) != 0 || b.a.namesMem.sentErr != "" {
 		t.Fatalf("сухой прогон написал лиду: %q", lead)
 	}
 }
@@ -247,19 +247,19 @@ func TestQueueNamesWakeAndExternal(t *testing.T) {
 func TestQueueNamesAlertQuiet(t *testing.T) {
 	b, got := namesBench(t)
 	b.writeNames(t, brokenNamesLine)
-	if _, err := b.a.queueNamesTable(); err == nil {
+	if _, err := b.a.namesTable("queue"); err == nil {
 		t.Fatal("битая таблица без прошлой прочиталась")
 	}
 	writeQuietState(t, b.a, time.Now().Add(time.Hour))
 	now := time.Now()
-	b.a.queueNamesAlert(b.c, false, now)
+	b.a.namesAlert(b.c, false, now)
 	if lead := drainLetters(got["lead"]); len(lead) != 0 {
 		t.Fatalf("письмо в тихом режиме: %q", lead)
 	}
 	if err := os.Remove(b.a.quietPath()); err != nil {
 		t.Fatal(err)
 	}
-	b.a.queueNamesAlert(b.c, false, now.Add(time.Minute))
+	b.a.namesAlert(b.c, false, now.Add(time.Minute))
 	if n := countWith(drainLetters(got["lead"]), "таблица имён"); n != 1 {
 		t.Fatalf("после тихого режима: %d", n)
 	}
