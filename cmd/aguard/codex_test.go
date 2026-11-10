@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -256,8 +257,12 @@ func TestCodexArmedFakeAppServer(t *testing.T) {
 	}
 	cfg := oneAccount(dir)
 	cfg.Codex, cfg.Accounts[0].Approvals, cfg.Lead = fake, approvals, "lead"
+	// consume без ответа: срок первого прохода — свой короткий родительский контекст (тот же исход, что у
+	// codexReadTimeout 20 с, без 20 с ожидания); повторы — на живом контексте.
 	ctx := context.Background()
-	if err := a.codexRound(ctx, &cfg, false); err != nil { // consume без ответа
+	hung, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := a.codexRound(hung, &cfg, false); err != nil {
 		t.Fatal(err)
 	}
 	if a.codexEvery(&cfg) != cfg.Fast.D() {
@@ -279,7 +284,7 @@ func TestCodexArmedFakeAppServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lines) != 2 || !strings.Contains(lines[0], st.Reset.Key) || !strings.Contains(lines[1], st.Reset.Key) {
+	if len(lines) != 2 || st.Reset.Key == "" || consumeKey(t, lines[0]) != st.Reset.Key || consumeKey(t, lines[1]) != st.Reset.Key {
 		t.Fatalf("вызовы consume (ключ %s):\n%s", st.Reset.Key, raw)
 	}
 	if st.Reset.Outcome != "reset" || len(notes) != 1 || !strings.Contains(notes[0], "codex-limit-reset: aguard: consume") {
@@ -683,4 +688,18 @@ func TestCodexStepIsShortest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// consumeKey — idempotencyKey запроса consume из строки вызова подставного codex.
+func consumeKey(t *testing.T, line string) string {
+	t.Helper()
+	var req struct {
+		Params struct {
+			Key string `json:"idempotencyKey"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(line), &req); err != nil {
+		t.Fatalf("строка вызова consume: %v: %s", err, line)
+	}
+	return req.Params.Key
 }
