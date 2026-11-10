@@ -461,10 +461,17 @@ func (s *State) highNotices(t Ticket, st *ticketState, v View) []Notice {
 		line := fmt.Sprintf("aguard: HIGH %s/%s — %s. tk next", t.Project, t.Slug, t.Title)
 		out = append(out, notice(t, v, KindHigh, t.Master, line))
 	}
-	if age >= highWait && !t.Started && v.Now.Sub(t.MasterNote) >= highWait {
+	if age >= highWait && !t.Started && !masterNoted(t, v.Now) {
 		out = append(out, s.highAdminNotice(t, st, v, "не взят за 4 ч, мастер "+t.Master)...)
 	}
 	return out
+}
+
+// masterNoted — мастер писал в журнал тикета меньше 4 ч назад. Запись из будущего (сдвиг часов, ручная правка) не
+// в счёт: tk пишет минуты с отбрасыванием секунд, своя запись позже now не бывает.
+func masterNoted(t Ticket, now time.Time) bool {
+	d := now.Sub(t.MasterNote)
+	return d >= 0 && d < highWait
 }
 
 func (s *State) highAdminNotice(t Ticket, st *ticketState, v View, reason string) []Notice {

@@ -118,12 +118,21 @@ func TestHighMasterNoteCountsAsTaken(t *testing.T) {
 	step(s, []Ticket{high}, w)
 	w.now = w.now.Add(4*time.Hour + time.Minute)
 	noted := high
-	noted.MasterNote = w.now.Add(-time.Hour)
+	noted.MasterNote = w.now.Add(-highWait + time.Minute)
 	if ns := step(s, []Ticket{noted}, w); has(ns, KindHighAdmin, "git-admin") {
-		t.Fatalf("заметка мастера час назад: %+v", ns)
+		t.Fatalf("заметка мастера 3 ч 59 мин назад: %+v", ns)
 	}
 	noted.MasterNote = w.now.Add(-highWait - time.Minute)
 	if ns := step(s, []Ticket{noted}, w); !has(ns, KindHighAdmin, "git-admin") {
 		t.Fatalf("заметка мастера старше 4 ч: %+v", ns)
+	}
+	// Запись из будущего (сдвиг часов) не глушит тревогу: новое состояние, тот же срок.
+	s = seeded(w)
+	w.now = w.now.Add(-4*time.Hour - time.Minute)
+	step(s, []Ticket{high}, w)
+	w.now = w.now.Add(4*time.Hour + time.Minute)
+	noted.MasterNote = w.now.Add(time.Hour)
+	if ns := step(s, []Ticket{noted}, w); !has(ns, KindHighAdmin, "git-admin") {
+		t.Fatalf("заметка мастера из будущего глушит тревогу: %+v", ns)
 	}
 }
