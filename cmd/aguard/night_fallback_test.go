@@ -79,7 +79,7 @@ func TestNightFallbackOnce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(signals) != 1 || signals[0].Key != "dream-fallback:2026-10-31" || !strings.Contains(signals[0].Text, "запустил на Terra") ||
+		if len(signals) != 1 || signals[0].Key != "dream-fallback:2026-10-31" || !strings.Contains(signals[0].Text, "запустил запасной") ||
 			signals[0].To[0] != "dream-master" {
 			t.Fatalf("сигнал запуска: %+v", signals)
 		}
@@ -218,7 +218,7 @@ func TestNightFallbackSaveFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(units.started) != 1 || len(signals) != 1 || !strings.Contains(signals[0].Text, "запустил на Terra") {
+	if len(units.started) != 1 || len(signals) != 1 || !strings.Contains(signals[0].Text, "запустил запасной") {
 		t.Fatalf("после починки: %v %+v", units.started, signals)
 	}
 }

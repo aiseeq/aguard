@@ -245,7 +245,7 @@ func (a *app) fallbackStep(cfg *night.Config, now time.Time, facts night.Facts, 
 			var signals []night.Signal
 			if now.Before(night.FallbackEndAt(now, *cfg)) { // после окна письмо уже ничего не спасёт: только журнал
 				signals = append(signals, night.Signal{Key: "dream-fallback-state:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
-					"Запасной Сон на Terra выключен: %v — не знаю, запускал ли я его уже. Почини или убери файл; до тех пор "+
+					"Запасной Сон выключен: %v — не знаю, запускал ли я его уже. Почини или убери файл; до тех пор "+
 						"без маркера к %s Сон сам не начнётся.", err, cfg.DreamFallbackBy)})
 			}
 			return signals, nil

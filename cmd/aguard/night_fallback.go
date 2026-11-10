@@ -136,7 +136,7 @@ func fallbackRound(cfg *night.Config, now time.Time, facts night.Facts, state fa
 		if err := save(state); err != nil {
 			delete(state, date)
 			return []night.Signal{{Key: "dream-fallback-blocked:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
-					"Сон не стартовал к %s (нет маркера), а запасной на Terra я пока не запустил: не записывается состояние (%v) — без "+
+					"Сон не стартовал к %s (нет маркера), а запасной Сон я пока не запустил: не записывается состояние (%v) — без "+
 						"записи запуск мог бы повториться. Пробую каждую минуту и запущу сам, как только запись пройдёт (до %s); не ждёшь — "+
 						"запусти `%s` сам: при начатом Сне (started или тикет dream-run) он выходит, второго прогона не будет.",
 					cfg.DreamFallbackBy, err, night.FallbackDeadline(*cfg), cfg.DreamFallback)}},
@@ -186,23 +186,23 @@ func fallbackRound(cfg *night.Config, now time.Time, facts night.Facts, state fa
 	return signals, notes
 }
 
-// fallbackSignals — «Сон запущен на Terra» (или не запустился) и, когда кончился, — код и хвост журнала.
+// fallbackSignals — «запасной Сон запущен» (или не запустился) и, когда кончился, — код и хвост журнала.
 func fallbackSignals(cfg *night.Config, date string, rec fallbackRun) []night.Signal {
-	text := fmt.Sprintf("Сон не стартовал к %s (нет маркера) — запустил на Terra: `%s`, unit %s. Смотреть: systemctl --user status %s; "+
+	text := fmt.Sprintf("Сон не стартовал к %s (нет маркера) — запустил запасной: `%s`, unit %s. Смотреть: systemctl --user status %s; "+
 		"journalctl --user -u %s. Повторно за %s не запущу.", cfg.DreamFallbackBy, cfg.DreamFallback, rec.Unit, rec.Unit, rec.Unit, date)
 	if rec.Err != "" {
-		text = fmt.Sprintf("Сон не стартовал к %s (нет маркера), а запасной запуск на Terra не вышел: %s. Повторно за %s не запущу — "+
+		text = fmt.Sprintf("Сон не стартовал к %s (нет маркера), а запасной запуск не вышел: %s. Повторно за %s не запущу — "+
 			"запусти сам: `%s`.", cfg.DreamFallbackBy, rec.Err, date, cfg.DreamFallback)
 	}
 	out := []night.Signal{{Key: "dream-fallback:" + date, To: cfg.DreamTo, Text: text}}
 	switch {
 	case rec.Lost:
 		out = append(out, night.Signal{Key: "dream-fallback-end:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
-			"Сон на Terra (%s) пропал из systemd к %s (перезагрузка или снят руками) — кода нет, кончился ли он, не знаю. "+
+			"Запасной Сон (%s) пропал из systemd к %s (перезагрузка или снят руками) — кода нет, кончился ли он, не знаю. "+
 				"Хвост журнала:\n%s", rec.Unit, rec.EndedAt.Format("15:04"), rec.Tail)})
 	case rec.Done:
 		out = append(out, night.Signal{Key: "dream-fallback-end:" + date, To: cfg.DreamTo, Text: fmt.Sprintf(
-			"Сон на Terra (%s) кончился в %s: код %d, %s. Хвост журнала:\n%s", rec.Unit, rec.EndedAt.Format("15:04"), rec.Code,
+			"Запасной Сон (%s) кончился в %s: код %d, %s. Хвост журнала:\n%s", rec.Unit, rec.EndedAt.Format("15:04"), rec.Code,
 			rec.Result, rec.Tail)})
 	}
 	return out
