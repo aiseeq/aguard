@@ -22,6 +22,7 @@ import (
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/akit/queuegate"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -309,7 +310,7 @@ func supplyMargin(s *queue.Supply) *float64 {
 func (a *app) previousQueueGate(path string, now time.Time) queue.Gate {
 	old, err := queue.ReadGate(path)
 	// Файл старого формата без карты: tk видит только CRIT и HIGH, письма считают так же.
-	if err == nil && old.OpenByRoot != nil && !old.At.After(now) && now.Sub(old.At) <= 26*time.Hour {
+	if err == nil && queuegate.Read(path, now).Valid {
 		return old
 	}
 	return queue.Gate{}
