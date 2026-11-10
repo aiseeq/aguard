@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -174,22 +175,51 @@ func CgroupGone(root, path string) (bool, error) {
 	return false, nil
 }
 
-// Виды профилей. Задачи graft идут в cgroup сессии агента (agent), своего листа у них нет: kind, который graft
-// шлёт в now (`<repo>:<task>`, у exec — `<repo>:exec:<программа>`, graft-master 30.10), профиля здесь не находит;
-// профиль задачи graft — его же stats.jsonl (read_mb, write_mb, user_s по profile).
+// Виды профилей. Лёгкие задачи graft идут в cgroup сессии агента (agent), своего листа у них нет. Тяжёлая работа
+// graft (heavy-задача, `graft exec --heavy`) переезжает в свой scope graft-heavy-<pid>.scope, а вид задачи — тот, что
+// graft шлёт в now (`<repo>:<task>`, у exec — `<repo>:exec:<программа>`), — кладёт в файл <GraftHeavy>/<имя scope>
+// (встречный тикет git/graft/heavy-scope-kind-file): профиль копится под этим видом.
 const (
 	KindAgent         = "agent"
 	kindWorkerPrefix  = "worker:"
 	kindServicePrefix = "service:"
 	// KindWorkerUnknown — боец без класса в job.json: вид известен, класс нет.
 	KindWorkerUnknown = kindWorkerPrefix + "?"
+	// graftHeavyPrefix — scope тяжёлой работы graft (graft internal/iosched: graft-heavy-<pid>.scope).
+	graftHeavyPrefix = "graft-heavy-"
 )
 
+// KindSources — откуда ProfileKind берёт вид сверх пути cgroup.
+type KindSources struct {
+	WorkerState string // ~/.local/state/worker: класс бойца из <job>/job.json
+	GraftHeavy  string // $XDG_RUNTIME_DIR/graft/heavy: вид задачи graft в файле по имени scope
+}
+
+// GraftHeavyDir — папка, куда graft кладёт вид задачи своих тяжёлых scope.
+func GraftHeavyDir(runtime string) string { return filepath.Join(runtime, "graft", "heavy") }
+
+// KindUnknownError — вид годен, но неполон: боец без класса (worker:?) или scope graft без файла вида
+// (service:<unit>). Проход не ошибка: вызывающий предупреждает по Source.
+type KindUnknownError struct {
+	Source string // KindSourceWorker или KindSourceGraft
+	Err    error
+}
+
+// Источники неполного вида (KindUnknownError.Source).
+const (
+	KindSourceWorker = "worker-class"     // нет класса бойца в job.json
+	KindSourceGraft  = "graft-heavy-kind" // нет файла вида задачи graft для scope
+)
+
+func (e *KindUnknownError) Error() string { return e.Err.Error() }
+func (e *KindUnknownError) Unwrap() error { return e.Err }
+
 // ProfileKind — вид cgroup: unit бойца `worker-<job>.service`, повтор `worker-<job>-<N>.service` — `worker:<класс>` из
-// <workerState>/<job>/job.json (id задания — cpuwatch.JobIDs; нет файла или поля — `worker:?`, причина — в noClass:
-// вид известен, класс нет, проход не ошибка); scope сессии агента — agent; иначе `service:<unit>` (unit —
+// <WorkerState>/<job>/job.json (id задания — cpuwatch.JobIDs; нет файла или поля — `worker:?`, причина — в unknown:
+// вид известен, класс нет, проход не ошибка); scope сессии агента — agent; scope graft-heavy-<pid>.scope — вид задачи
+// graft из <GraftHeavy>/<scope> (нет файла — `service:<unit>`, причина — в unknown); иначе `service:<unit>` (unit —
 // systemd-сервис пути или последний компонент; служба worker-settle — тоже).
-func ProfileKind(path, workerState string, noClass func(error)) string {
+func ProfileKind(path string, src KindSources, unknown func(*KindUnknownError)) string {
 	if _, _, ok := proc.SessionScope(path); ok {
 		return KindAgent
 	}
@@ -198,7 +228,7 @@ func ProfileKind(path, workerState string, noClass func(error)) string {
 		var err error
 		for _, id := range ids {
 			var class string
-			class, err = workerClass(filepath.Join(workerState, id, "job.json"))
+			class, err = workerClass(filepath.Join(src.WorkerState, id, "job.json"))
 			if err == nil {
 				return kindWorkerPrefix + class
 			}
@@ -206,13 +236,33 @@ func ProfileKind(path, workerState string, noClass func(error)) string {
 				break
 			}
 		}
-		noClass(err)
+		unknown(&KindUnknownError{Source: KindSourceWorker, Err: err})
 		return KindWorkerUnknown
 	}
 	if unit == "" {
 		unit = filepath.Base(filepath.Clean(path))
 	}
+	if strings.HasPrefix(unit, graftHeavyPrefix) && strings.HasSuffix(unit, ".scope") {
+		kind, err := graftKind(filepath.Join(src.GraftHeavy, unit))
+		if err == nil {
+			return kind
+		}
+		unknown(&KindUnknownError{Source: KindSourceGraft, Err: err})
+	}
 	return kindServicePrefix + unit
+}
+
+// graftKind — вид задачи graft из файла scope: одна непустая строка без пробелов.
+func graftKind(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("вид задачи graft: %w", err)
+	}
+	kind := strings.TrimSpace(string(b))
+	if kind == "" || strings.ContainsAny(kind, " \t\n") {
+		return "", fmt.Errorf("вид задачи graft %s: ждали одну строку без пробелов, а там %q", path, kind)
+	}
+	return kind, nil
 }
 
 // workerClass — поле class из job.json бойца.

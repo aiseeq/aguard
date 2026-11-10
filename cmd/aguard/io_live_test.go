@@ -161,9 +161,9 @@ func TestSeriesProfilesSurviveRestartKeepAndBrokenFile(t *testing.T) {
 func TestCheckCgroupsEndsProfile(t *testing.T) {
 	ctx := t.Context()
 	s, _, _ := ioLiveService(t, ctx)
-	s.cgroupRoot, s.workerState = t.TempDir(), t.TempDir()
+	s.cgroupRoot, s.kindSources.WorkerState = t.TempDir(), t.TempDir()
 	unit := "/user.slice/user-1000.slice/user@1000.service/app.slice/worker-j1.service"
-	writeIOFile(t, filepath.Join(s.workerState, "j1", "job.json"), `{"class":"правка"}`)
+	writeIOFile(t, filepath.Join(s.kindSources.WorkerState, "j1", "job.json"), `{"class":"правка"}`)
 	writeIOFile(t, filepath.Join(s.cgroupRoot, unit, "cgroup.procs"), "1\n")
 	base := time.Now().Add(-time.Minute)
 	for i := range 3 {

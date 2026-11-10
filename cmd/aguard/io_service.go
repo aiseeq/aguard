@@ -14,6 +14,7 @@ import (
 	"github.com/aiseeq/aguard/internal/activity"
 	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/iowatch"
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 // Замер io: свой цикл с тикером без дрейфа (не общий loop «проход + пауза»), детальный проход —
@@ -124,8 +125,14 @@ const (
 	ioPassEvery     = time.Minute      // цикл 100 мс — не safePass: проход в учёт отмечает сам, не чаще
 	ioNoDeviceEvery = 24 * time.Hour   // нет диска из device — напоминание раз в сутки
 	ioCgroupsEvery  = time.Minute      // кончились ли cgroup профилей (папки нет) — не в цикле 100 мс
-	ioWorkerEvery   = 24 * time.Hour   // нет класса бойца в job.json — напоминание раз в сутки
+	ioWorkerEvery   = 24 * time.Hour   // вид cgroup неполон (класс бойца, вид задачи graft) — напоминание раз в сутки
 )
+
+// kindUnknownWhat — предупреждение о неполном виде профиля по источнику (iowatch.KindUnknownError.Source).
+var kindUnknownWhat = map[string]string{
+	iowatch.KindSourceWorker: "класс бойца не найден, вид " + iowatch.KindWorkerUnknown,
+	iowatch.KindSourceGraft:  "вид задачи graft для scope graft-heavy не найден, вид service:<scope>",
+}
 
 // errIORestart — изменились параметры замера (mode, step, detail, ring, device): цикл строится заново.
 var errIORestart = errors.New("io: параметры замера изменились")
@@ -142,8 +149,8 @@ type ioService struct {
 	coverPath    string // учёт покрытия замера
 	seriesPath   string
 	profilesPath string
-	cgroupRoot   string // /sys/fs/cgroup: конец cgroup профиля
-	workerState  string // ~/.local/state/worker: класс бойца из job.json
+	cgroupRoot   string              // /sys/fs/cgroup: конец cgroup профиля
+	kindSources  iowatch.KindSources // класс бойца из job.json, вид задачи graft по scope
 	cfg          iowatch.Config
 	// Ряд, накопление профилей и живое состояние — дольше цикла замера: каждый Recorder получает их
 	// через Attach. live читают и соединения сокета (под своим мьютексом).
@@ -175,7 +182,7 @@ func newIOService(ctx context.Context, a *app) *ioService {
 	return &ioService{route: ioroute.New(def.Route()), owners: a.ioOwners(&def), a: a, ctx: ctx, dir: filepath.Join(state, "events"), path: filepath.Join(state, ioCasesFile),
 		coverPath: filepath.Join(state, ioCoverageFile), cover: iowatch.NewCoverer(iowatch.CoverRecord{}, time.Now()),
 		seriesPath: filepath.Join(state, ioSeriesFile), profilesPath: filepath.Join(state, ioProfilesFile),
-		cgroupRoot: iowatch.SystemRoots().Cgroup, workerState: filepath.Join(a.home, ".local", "state", "worker"),
+		cgroupRoot: iowatch.SystemRoots().Cgroup, kindSources: iowatch.KindSources{WorkerState: filepath.Join(a.home, ".local", "state", "worker"), GraftHeavy: iowatch.GraftHeavyDir(record.RuntimeDir())},
 		series: iowatch.NewSeries(iowatch.Default().SeriesKeep.D()), profiles: iowatch.NewProfiles(), live: iowatch.NewLive(),
 		extra: make(chan func(), 16), warnAt: map[string]time.Time{},
 		tickets: &ioTicketer{a: a, queue: make(chan ioTicketJob, 64)}}
@@ -547,10 +554,8 @@ func (s *ioService) checkCgroups(ctx context.Context, now time.Time) {
 		if !ok {
 			continue
 		}
-		gone[path] = iowatch.ProfileKind(path, s.workerState, func(err error) { // вид годен (worker:?), предупреждение — раз в сутки
-			s.post(ctx, func() {
-				s.warnEvery(now, "worker-class", ioWorkerEvery, "класс бойца не найден, вид "+iowatch.KindWorkerUnknown, err)
-			})
+		gone[path] = iowatch.ProfileKind(path, s.kindSources, func(e *iowatch.KindUnknownError) { // вид годен, но неполон: предупреждение — раз в сутки на источник
+			s.post(ctx, func() { s.warnEvery(now, e.Source, ioWorkerEvery, kindUnknownWhat[e.Source], e.Err) })
 		})
 	}
 	if len(gone) > 0 {

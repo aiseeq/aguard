@@ -24,7 +24,7 @@ func TestNightDryRunDoesNotWriteState(t *testing.T) {
 	cfg.Mode = night.ModeAlert
 	cfg.DreamBy = "00:00"
 	cfg.DreamFallback = ""
-	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
+	cfg.DreamFallbackBy = pastFallbackBy()
 	cfg.DreamMarker = filepath.Join(dir, "absent")
 	cfg.DigestBy = "23:59"
 	if err := a.nightRound(&cfg, true); err != nil {
@@ -56,7 +56,7 @@ func TestNightPausedSilencesDreamAndFallback(t *testing.T) {
 	cfg.Mode = night.ModeAlert
 	cfg.Lead = "lead" // сессия liveLead: без неё письмо не дойдёт до сокета и проверка молчания ничего не ловит
 	cfg.DreamBy = "00:00"
-	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
+	cfg.DreamFallbackBy = pastFallbackBy()
 	cfg.DreamMarker = filepath.Join(dir, "absent-marker")
 	cfg.DreamPaused = pause
 	cfg.DreamPauseCheck = fakePauseCheck(t, dir, "legacy", 0)
@@ -108,7 +108,7 @@ func TestNightPausedSilencesFallbackStateLetter(t *testing.T) {
 	cfg.Mode = night.ModeAlert
 	cfg.Lead = "lead"
 	cfg.DreamBy = "00:00"
-	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
+	cfg.DreamFallbackBy = pastFallbackBy()
 	cfg.DreamMarker = filepath.Join(dir, "absent-marker")
 	cfg.DreamPaused = pause
 	cfg.DreamPauseCheck = fakePauseCheck(t, dir, "legacy", 0)
@@ -171,7 +171,7 @@ func TestNightLogModeOncePerSignal(t *testing.T) {
 	cfg.Mode = night.ModeLog
 	cfg.DreamBy = "00:00"
 	cfg.DreamFallback = ""
-	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
+	cfg.DreamFallbackBy = pastFallbackBy()
 	cfg.DreamMarker = filepath.Join(dir, "absent")
 	cfg.DigestMarker = filepath.Join(dir, "digest")
 	// Дайджест прошёл сегодня и завтра: сигнал один и в 23:59, и после полуночи
@@ -285,7 +285,7 @@ func TestNightProbeLive(t *testing.T) {
 	cfg.AlsoTo = []string{to}
 	cfg.DreamBy = "00:00"
 	cfg.DreamFallback = ""
-	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
+	cfg.DreamFallbackBy = pastFallbackBy()
 	cfg.DreamMarker = filepath.Join(dir, "absent")
 	cfg.DigestBy = "23:59"
 	cfg.DigestMarker = filepath.Join(dir, "absent-digest")
@@ -347,7 +347,7 @@ func TestNightAlertOnlySessionLetters(t *testing.T) {
 	cfg.Lead = "lead"
 	cfg.AlsoTo, cfg.DreamTo, cfg.DreamFallback = nil, nil, ""
 	cfg.DreamBy = "00:00"
-	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
+	cfg.DreamFallbackBy = pastFallbackBy()
 	cfg.DreamMarker = filepath.Join(dir, "absent")
 	cfg.DigestMarker = filepath.Join(dir, "digest")
 	now := time.Now() // Дайджест прошёл сегодня и завтра: сигнал один — о Сне, и после полуночи тоже
@@ -465,7 +465,7 @@ func TestNightPauseByDates(t *testing.T) {
 			mail := liveLead(t, a)
 			cfg := night.Default(dir)
 			cfg.Mode, cfg.Lead, cfg.DreamBy, cfg.DigestBy = night.ModeAlert, "lead", "00:00", "23:59"
-			cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
+			cfg.DreamFallbackBy = pastFallbackBy()
 			cfg.DreamMarker, cfg.DreamPaused = filepath.Join(dir, "absent-marker"), pause
 			cfg.DreamPauseCheck = fakePauseCheck(t, dir, tc.answer, tc.code)
 			if err := a.nightRound(&cfg, false); err != nil {
@@ -489,4 +489,14 @@ func TestNightPauseByDates(t *testing.T) {
 			}
 		})
 	}
+}
+
+// pastFallbackBy — срок запасного Сна, уже наступивший сегодня и с открытым окном (3 ч от срока): час назад, а в первый
+// час суток — 00:00 (час назад — вчера, срок сегодняшней даты ещё впереди: тест падал с 00:00 до 01:00).
+func pastFallbackBy() string {
+	now := time.Now()
+	if now.Hour() == 0 {
+		return "00:00"
+	}
+	return now.Add(-time.Hour).Format("15:04")
 }

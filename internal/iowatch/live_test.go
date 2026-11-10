@@ -188,7 +188,7 @@ func TestProfileFromPassesKindAndEnd(t *testing.T) {
 		if err != nil || !ended {
 			t.Fatalf("кончившаяся cgroup %s: %v %v", path, ended, err)
 		}
-		gone[path] = ProfileKind(path, workerState, func(err error) { t.Fatal(err) })
+		gone[path] = ProfileKind(path, KindSources{WorkerState: workerState}, func(err *KindUnknownError) { t.Fatal(err) })
 	}
 	got := profiles.End(gone, time.Second)
 	if len(got) != 1 || len(profiles.Open()) != 0 {
@@ -262,14 +262,14 @@ func TestProfileKindAgentServiceAndWorkerWithoutClass(t *testing.T) {
 		"/user.slice/user-1000.slice/user@1000.service/app.slice/foo.service":                            "service:foo.service",
 		"/user.slice/user-1000.slice/session-3.scope":                                                    "service:session-3.scope",
 	} {
-		if got := ProfileKind(path, state, func(err error) { t.Error(err) }); got != want {
+		if got := ProfileKind(path, KindSources{WorkerState: state}, func(err *KindUnknownError) { t.Error(err) }); got != want {
 			t.Errorf("%s: %q, ждали %q", path, got, want)
 		}
 	}
 	for _, job := range []string{"noclass", "nofile"} {
-		var noClass error
-		got := ProfileKind("/app.slice/worker-"+job+".service", state, func(err error) { noClass = err })
-		if got != KindWorkerUnknown || noClass == nil {
+		var noClass *KindUnknownError
+		got := ProfileKind("/app.slice/worker-"+job+".service", KindSources{WorkerState: state}, func(err *KindUnknownError) { noClass = err })
+		if got != KindWorkerUnknown || noClass == nil || noClass.Source != KindSourceWorker {
 			t.Errorf("%s: %q %v", job, got, noClass)
 		}
 	}
@@ -292,15 +292,43 @@ func TestProfileKindWorkerRetryAndSettle(t *testing.T) {
 		"worker-1110-1118-2026-11-10-2.service":      "worker:обход-сна",
 		"worker-settle.service":                      "service:worker-settle.service",
 	} {
-		if got := ProfileKind(app+unit, state, func(err error) { t.Errorf("%s: %v", unit, err) }); got != want {
+		if got := ProfileKind(app+unit, KindSources{WorkerState: state}, func(err *KindUnknownError) { t.Errorf("%s: %v", unit, err) }); got != want {
 			t.Errorf("%s: %q, ждали %q", unit, got, want)
 		}
 	}
 	// без класса в своём job.json — worker:?, к соседу с обрезанным хвостом не идём; хвост не число — не повтор
 	for _, unit := range []string{"worker-1110-1200-7.service", "worker-1107-1220-dream-page-dups-x.service", "worker-1107-1220-dream-page-dups-0.service"} {
-		var noClass error
-		if got := ProfileKind(app+unit, state, func(err error) { noClass = err }); got != KindWorkerUnknown || noClass == nil {
+		var noClass *KindUnknownError
+		if got := ProfileKind(app+unit, KindSources{WorkerState: state}, func(err *KindUnknownError) { noClass = err }); got != KindWorkerUnknown || noClass == nil {
 			t.Errorf("%s: %q %v", unit, got, noClass)
+		}
+	}
+}
+
+// Scope тяжёлой работы graft (в agents-graft.slice и app-graft.slice) — вид задачи из файла graft по имени scope; файла
+// нет или он пуст, многострочен — service:<scope> и причина с источником graft; чужой scope с тем же файлом не трогаем.
+func TestProfileKindGraftHeavy(t *testing.T) {
+	src := KindSources{WorkerState: t.TempDir(), GraftHeavy: GraftHeavyDir(t.TempDir())}
+	writeFile(t, filepath.Join(src.GraftHeavy, "graft-heavy-101.scope"), "akit:exec:go\n")
+	writeFile(t, filepath.Join(src.GraftHeavy, "graft-heavy-102.scope"), "aguard:test")
+	writeFile(t, filepath.Join(src.GraftHeavy, "graft-heavy-103.scope"), "\n")
+	writeFile(t, filepath.Join(src.GraftHeavy, "graft-heavy-104.scope"), "a:b\nc:d\n")
+	writeFile(t, filepath.Join(src.GraftHeavy, "other-101.scope"), "akit:exec:go")
+	const user = "/user.slice/user-1000.slice/user@1000.service/"
+	for path, want := range map[string]string{
+		user + "agents.slice/agents-graft.slice/graft-heavy-101.scope": "akit:exec:go",
+		user + "app.slice/app-graft.slice/graft-heavy-102.scope":       "aguard:test",
+		user + "app.slice/other-101.scope":                             "service:other-101.scope",
+	} {
+		if got := ProfileKind(path, src, func(err *KindUnknownError) { t.Errorf("%s: %v", path, err) }); got != want {
+			t.Errorf("%s: %q, ждали %q", path, got, want)
+		}
+	}
+	for _, unit := range []string{"graft-heavy-103.scope", "graft-heavy-104.scope", "graft-heavy-105.scope"} {
+		var unknown *KindUnknownError
+		got := ProfileKind(user+"app.slice/app-graft.slice/"+unit, src, func(err *KindUnknownError) { unknown = err })
+		if got != "service:"+unit || unknown == nil || unknown.Source != KindSourceGraft {
+			t.Errorf("%s: %q %v", unit, got, unknown)
 		}
 	}
 }
