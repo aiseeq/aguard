@@ -187,6 +187,15 @@ func CreatorText(o *record.Owner) string {
 	if o == nil {
 		return "неизвестно (запись старше сторожа)"
 	}
+	name := ""
+	if o.Session != nil {
+		name = o.Session.Name
+	}
+	pid := " (pid " + strconv.Itoa(o.Proc.Pid) + ")"
+	if name != "" && o.Session.Pid == o.Proc.Pid {
+		// командная строка claude называет файл настроек (git-master.json), а не сессию — её читали как имя
+		return "сессия " + name + pid
+	}
 	cmd := o.Proc.Args
 	if cmd == "" {
 		cmd = o.Proc.Comm
@@ -197,7 +206,11 @@ func CreatorText(o *record.Owner) string {
 	if r := []rune(cmd); len(r) > 90 {
 		cmd = string(r[:90]) + "…"
 	}
-	return strings.TrimSpace(cmd) + " (pid " + strconv.Itoa(o.Proc.Pid) + ")"
+	text := strings.TrimSpace(cmd) + pid
+	if name != "" {
+		text += ", сессия " + name
+	}
+	return text
 }
 
 // LinesBytes — сумма размеров записей строк сводки.

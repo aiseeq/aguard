@@ -351,7 +351,7 @@ func TestMessage(t *testing.T) {
 	msg := c.Message(&sum, t0, false)
 	for _, want := range []string{
 		"tmpfs, то есть оперативка",
-		"Ваши записи:\n1. /tmp/claude-tmp/own — 1.5 ГБ, файлов 3, возраст 25 мин, мера 38 ГБ·мин; создал: go arg (pid 5000)",
+		"Ваши записи:\n1. /tmp/claude-tmp/own — 1.5 ГБ, файлов 3, возраст 25 мин, мера 38 ГБ·мин; создал: go arg (pid 5000), сессия lead",
 		"rm -rf /tmp/claude-tmp/own , если не нужна; нужную — mv /tmp/claude-tmp/own в scratchpad на диске",
 		"Записи ваших бойцов:\n2. /tmp/oc",
 		", боец opencode",
@@ -399,6 +399,31 @@ func TestHumanFormats(t *testing.T) {
 	for in, want := range ageCases {
 		if got := HumanAge(in); got != want {
 			t.Errorf("HumanAge(%v) = %q, хотим %q", in, got, want)
+		}
+	}
+}
+
+// TestCreatorTextNamesSession: процесс сессии в «создал» — её имя, не командная строка claude
+// (10.11: «claude --settings …/git-master.json» прочли как сессию git-master).
+func TestCreatorTextNamesSession(t *testing.T) {
+	s := sess(24573, "akit-master", home+"/git/akit")
+	self := &record.Owner{Proc: record.Proc{Pid: 24573, Comm: "claude",
+		Args: "/home/aisee/.local/bin/claude --settings /home/aisee/.config/cl/settings/git-master.json", UID: me}, Session: s}
+	child := &record.Owner{Proc: record.Proc{Pid: 5, Comm: "mkdir", Args: "mkdir", UID: me}, Session: s}
+	noName := &record.Owner{Proc: record.Proc{Pid: 5, Comm: "mkdir", Args: "mkdir", UID: me}, Session: sess(24573, "", "")}
+	noSess := &record.Owner{Proc: record.Proc{Pid: 5, Comm: "mkdir", Args: "mkdir", UID: me}}
+	for _, c := range []struct {
+		o    *record.Owner
+		want string
+	}{
+		{self, "сессия akit-master (pid 24573)"},
+		{child, "mkdir (pid 5), сессия akit-master"},
+		{noName, "mkdir (pid 5)"},
+		{noSess, "mkdir (pid 5)"},
+		{nil, "неизвестно (запись старше сторожа)"},
+	} {
+		if got := CreatorText(c.o); got != c.want {
+			t.Errorf("CreatorText = %q, want %q", got, c.want)
 		}
 	}
 }
