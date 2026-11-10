@@ -227,12 +227,14 @@ func ioWindow(since, until string, now time.Time) (time.Time, time.Time, error) 
 // ioTimeArg — время по timearg, иначе now минус Go Duration; ошибка — от timearg, с подсказкой форм.
 func ioTimeArg(s string, now time.Time) (time.Time, error) {
 	at, err := timearg.Parse(s, now)
-	if err != nil {
-		if d, durErr := time.ParseDuration(s); durErr == nil {
-			return now.Add(-d), nil
-		}
+	if err == nil {
+		return at, nil
 	}
-	return at, err
+	d, durErr := time.ParseDuration(s)
+	if durErr != nil {
+		return at, fmt.Errorf("%w (и не Go Duration: %v)", err, durErr)
+	}
+	return now.Add(-d), nil
 }
 
 // parseIOTime — ЧЧ:ММ[:СС] сегодня по местному времени или RFC3339.
