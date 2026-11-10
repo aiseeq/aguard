@@ -53,6 +53,7 @@ func TestNightPausedSilencesDreamAndFallback(t *testing.T) {
 	mail := liveLead(t, a)
 	cfg := night.Default(dir)
 	cfg.Mode = night.ModeAlert
+	cfg.Lead = "lead" // сессия liveLead: без неё письмо не дойдёт до сокета и проверка молчания ничего не ловит
 	cfg.DreamBy = "00:00"
 	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
 	cfg.DreamMarker = filepath.Join(dir, "absent-marker")
@@ -83,6 +84,37 @@ func TestNightPausedSilencesDreamAndFallback(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "dream-master: сегодня не запускать") {
 		t.Fatalf("в журнале нет первой строки файла: %s", logs.String())
+	}
+}
+
+// Сон снят, а файл состояния запасного Сна битый: письмо «не знаю, запускал ли» тоже молчит — Сна сегодня не ждут.
+func TestNightPausedSilencesFallbackStateLetter(t *testing.T) {
+	dir := t.TempDir()
+	pause := filepath.Join(dir, "night-paused")
+	if err := os.WriteFile(pause, []byte("dream-master: сегодня не запускать\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{home: dir, stateDir: filepath.Join(dir, "state"), log: slog.New(slog.NewTextHandler(&strings.Builder{}, nil)), units: &fakeUnits{}}
+	mail := liveLead(t, a)
+	if err := os.MkdirAll(a.dir("night"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.dir("night"), "fallback.json"), []byte("{битый"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := night.Default(dir)
+	cfg.Mode = night.ModeAlert
+	cfg.Lead = "lead"
+	cfg.DreamBy = "00:00"
+	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
+	cfg.DreamMarker = filepath.Join(dir, "absent-marker")
+	cfg.DreamPaused = pause
+	cfg.DigestBy = "23:59"
+	if err := a.nightRound(&cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(mail) != 0 {
+		t.Fatalf("получено письмо: %q", <-mail)
 	}
 }
 
