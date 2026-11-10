@@ -467,11 +467,19 @@ func (s *State) Pass(c *Config, now time.Time, free int64, entries func() ([]str
 	var out []Record
 	tell := func(r Record, every time.Duration) {
 		key := r.Kind + " " + r.Path
+		r.At, r.Free = now, free
 		if t, ok := s.Told[key]; ok && now.Sub(t) < every {
-			return
+			// Предел журнала fast — против шума строк, не против писем: находка, по которой письмо пары пора раньше
+			// fast_every (сценарий 2: рост удвоился или место убыло ещё на fast), пишется и в окне. База Sizes двигается
+			// всё равно: ранний повтор сравнивает размер и свободное место с прошлым письмом, не с прошлым обходом.
+			if r.Kind != KindFast {
+				return
+			}
+			if r.Owner, r.Why = owner(r.Path); !s.fastLetterDue(c, now, &r) {
+				return
+			}
 		}
 		s.Told[key] = now
-		r.At, r.Free = now, free
 		r.Owner, r.Why = owner(r.Path)
 		out = append(out, r)
 	}

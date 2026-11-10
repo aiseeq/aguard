@@ -320,3 +320,229 @@ func TestDiskRouteLogModeTicketWould(t *testing.T) {
 		t.Fatalf("журнал:\n%s", logged.String())
 	}
 }
+
+// deadSocket — сессия name в реестре жива по pid, но её сокет никто не слушает: письмо ей не уходит.
+func deadSocket(t *testing.T, a *app, name string) {
+	t.Helper()
+	all, err := a.reg.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range all {
+		if in.Name != name {
+			continue
+		}
+		in.SocketPath = fmt.Sprintf("@aguard-test-dead-%s-%d", name, time.Now().UnixNano())
+		b, err := json.Marshal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(a.reg.Dir, strconv.Itoa(in.Pid)+".json"), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatalf("сессии %s нет в реестре", name)
+}
+
+// Дефект 5 проверки 10.11: хозяин в сети по реестру, но письмо ему не ушло (сокет молчит) — то же письмо лиду с
+// пометкой «хозяин не в сети»: срочное не теряется.
+func TestDiskRouteFastOwnerSendFailsToLead(t *testing.T) {
+	a, _ := diskRouteApp(t)
+	got := liveNamed(t, a, "lead", "life-master")
+	deadSocket(t, a, "life-master")
+	cfg := alertDiskConfig()
+	now := time.Now()
+	r := disk.Record{At: now, Kind: disk.KindFast, Path: "/x/w", Bytes: 9 << 30, Delta: 6 << 30, Since: now.Add(-10 * time.Minute),
+		Owner: "life-master", Why: "session", Free: 174 << 30}
+	if err := a.diskRoute(t.Context(), &cfg, &disk.State{}, []disk.Record{r}, now); err != nil {
+		t.Fatal(err)
+	}
+	if m := letter(t, got["lead"], "лиду после неудачи хозяину"); !strings.Contains(m, "Хозяин life-master не в сети — пишу лиду") ||
+		!strings.Contains(m, "/x/w: +6.0 ГБ") {
+		t.Fatalf("письмо лиду: %s", m)
+	}
+}
+
+// Дефект 8: реестр сессий не читается — хозяин считается в сети, письмо адресовано ему (в log — «написал бы» ему, без
+// пометки «не в сети»), а не сразу лиду.
+func TestDiskRouteRegistryErrorOwnerAlive(t *testing.T) {
+	a, logged := diskRouteApp(t)
+	a.reg = session.Registry{Dir: filepath.Join(t.TempDir(), "sessions"), ProcRoot: "/proc"}
+	if err := os.MkdirAll(a.reg.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.reg.Dir, "4242.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.reg.Alive(); err == nil {
+		t.Fatal("реестр читается — тест не проверяет ошибку")
+	}
+	cfg := alertDiskConfig()
+	cfg.Mode = disk.ModeLog
+	now := time.Now()
+	r := disk.Record{At: now, Kind: disk.KindFast, Path: "/x/w", Bytes: 9 << 30, Delta: 6 << 30, Since: now.Add(-10 * time.Minute),
+		Owner: "life-master", Why: "session", Free: 174 << 30}
+	if err := a.diskRoute(t.Context(), &cfg, &disk.State{}, []disk.Record{r}, now); err != nil {
+		t.Fatal(err)
+	}
+	s := logged.String()
+	if !strings.Contains(s, "написал бы\" session=life-master kind=fast") || strings.Contains(s, "не в сети") {
+		t.Fatalf("журнал:\n%s", s)
+	}
+}
+
+// Дефект 4: tk упал — находки не теряются: ждут в tickets.json, повтор не раньше часа, и через час тикет заводится с ними.
+func TestDiskRouteTicketFailureRetries(t *testing.T) {
+	a, _ := diskRouteApp(t)
+	cfg := alertDiskConfig()
+	dir := t.TempDir()
+	broken := filepath.Join(dir, "tk-broken")
+	if err := os.WriteFile(broken, []byte("#!/bin/sh\nexit 3\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tk = broken
+	now := time.Now()
+	recs := []disk.Record{{At: now, Kind: disk.KindStale, Path: filepath.Join(a.home, ".cache/s1"), Bytes: 2 << 30,
+		Since: now.Add(-72 * time.Hour), Owner: "lead", Why: "lead"}}
+	if err := a.diskRoute(t.Context(), &cfg, &disk.State{}, recs, now); err != nil {
+		t.Fatal(err)
+	}
+	var calls string
+	cfg.Tk, calls = fakeTk(t, t.TempDir(), `[]`)
+	if err := a.diskRoute(t.Context(), &cfg, &disk.State{}, nil, now.Add(time.Hour-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(calls); !os.IsNotExist(err) {
+		b, _ := os.ReadFile(calls)
+		t.Fatalf("повтор раньше часа:\n%s", b)
+	}
+	if err := a.diskRoute(t.Context(), &cfg, &disk.State{}, nil, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatalf("через час после сбоя tk тикета нет: %v", err)
+	}
+	if !strings.Contains(string(b), a.home+"|new disk-stale") || !strings.Contains(string(b), "~/.cache/s1 (2.0 ГБ)") {
+		t.Fatalf("тикет после сбоя tk:\n%s", b)
+	}
+}
+
+// forecastSeries — ряд с убылью 10 ГБ/ч за 6 ч до now (сценарий 6): прогноз ~11 ч до free_min при 260 ГБ.
+func forecastSeries(t *testing.T, a *app, now time.Time) string {
+	t.Helper()
+	st := &disk.ForecastState{Told: disk.FreeTold{}}
+	for age := 6 * time.Hour; age > 0; age -= 5 * time.Minute {
+		st.Series = append(st.Series, disk.Point{At: now.Add(-age), Bytes: int64((320 - 10*(6-age.Hours())) * (1 << 30))})
+	}
+	path := filepath.Join(a.dir("disk"), "forecast.json")
+	if err := st.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Дефект 2: mode = log — письма прогноза нет ни лиду, ни free_tell, только журнал «написал бы».
+func TestDiskForecastLogModeNoLetter(t *testing.T) {
+	a, logged := diskRouteApp(t)
+	got := liveNamed(t, a, "lead", "git-admin")
+	cfg := alertDiskConfig()
+	cfg.Mode = disk.ModeLog
+	now := time.Now()
+	forecastSeries(t, a, now)
+	if err := a.diskForecast(&cfg, now, 260<<30); err != nil {
+		t.Fatal(err)
+	}
+	noLetter(t, got["lead"], "лиду в режиме log")
+	noLetter(t, got["git-admin"], "git-admin в режиме log")
+	if s := logged.String(); !strings.Contains(s, "написал бы\" session=lead kind=forecast") ||
+		!strings.Contains(s, "написал бы\" session=git-admin kind=forecast") {
+		t.Fatalf("журнал:\n%s", s)
+	}
+}
+
+// Дефект 3: отметка письма прогноза — ушло — следующее не раньше суток; не ушло (адресата нет) — повтор через час.
+func TestDiskForecastMarkSentAndRetry(t *testing.T) {
+	a, _ := diskRouteApp(t)
+	got := liveNamed(t, a, "lead") // git-admin не в сети: письмо ему не уходит
+	cfg := alertDiskConfig()
+	now := time.Now()
+	path := forecastSeries(t, a, now)
+	told := func() disk.FreeTold {
+		t.Helper()
+		st, err := disk.LoadForecast(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Told
+	}
+	if err := a.diskForecast(&cfg, now, 260<<30); err != nil {
+		t.Fatal(err)
+	}
+	letter(t, got["lead"], "лиду")
+	if tl := told(); !tl["lead"].Equal(now.Add(24*time.Hour)) || !tl["git-admin"].Equal(now.Add(time.Hour)) {
+		t.Fatalf("отметки: %v", tl)
+	}
+	// Через 30 мин git-admin ещё ждёт; через час — повтор ему (снова не ушло — ещё час), лиду — нет до суток.
+	if err := a.diskForecast(&cfg, now.Add(30*time.Minute), 255<<30); err != nil {
+		t.Fatal(err)
+	}
+	if tl := told(); !tl["git-admin"].Equal(now.Add(time.Hour)) {
+		t.Fatalf("повтор git-admin раньше часа: %v", tl)
+	}
+	if err := a.diskForecast(&cfg, now.Add(time.Hour), 250<<30); err != nil {
+		t.Fatal(err)
+	}
+	noLetter(t, got["lead"], "лиду раньше суток")
+	if tl := told(); !tl["git-admin"].Equal(now.Add(2*time.Hour)) || !tl["lead"].Equal(now.Add(24*time.Hour)) {
+		t.Fatalf("отметки через час: %v", tl)
+	}
+}
+
+// Дефект 6: в письме прогноза — grew-находки журнала, а не stale и прочие.
+func TestDiskForecastLetterGrewOnly(t *testing.T) {
+	a, _ := diskRouteApp(t)
+	got := liveNamed(t, a, "lead")
+	cfg := alertDiskConfig()
+	cfg.FreeTell = nil
+	now := time.Now()
+	forecastSeries(t, a, now)
+	recs := []disk.Record{
+		{At: now.Add(-2 * time.Hour), Kind: disk.KindGrew, Path: filepath.Join(a.home, ".cache/go-build"), Bytes: 165 << 30,
+			Delta: 44 << 30, Since: now.Add(-26 * time.Hour), Owner: "lead"},
+		{At: now.Add(-2 * time.Hour), Kind: disk.KindStale, Path: filepath.Join(a.home, ".cache/old-stale"), Bytes: 7 << 30,
+			Since: now.Add(-96 * time.Hour), Owner: "lead"},
+	}
+	if err := disk.NewStore(a.dir("disk")).Append(recs); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.diskForecast(&cfg, now, 260<<30); err != nil {
+		t.Fatal(err)
+	}
+	m := letter(t, got["lead"], "лиду")
+	if !strings.Contains(m, "~/.cache/go-build выросла на 44 ГБ") || strings.Contains(m, "old-stale") {
+		t.Fatalf("письмо прогноза: %s", m)
+	}
+}
+
+// Общий исполнитель classTicket (io и disk): новый тикет — текстом через stdin (`--text -`); хозяин — лид — тикет в
+// домашней папке без пометки «папка хозяина не найдена».
+func TestClassTicketLeadHomeTextStdin(t *testing.T) {
+	a, _ := diskRouteApp(t)
+	tk, calls := fakeTk(t, t.TempDir(), `[]`)
+	err := a.classTicket(t.Context(), classTicket{watcher: "disk", owner: "lead", lead: "lead", tk: tk, base: "disk-grew",
+		title: "Рост", what: "disk-grew", count: 1, unit: "records", note: "заметка",
+		text: func(prev, redirect string) string { return "ТЕКСТ prev=" + prev + " redirect=" + redirect + "\n" }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := a.home + "|new disk-grew --prio MED --diff HUNT --by aguard --title Рост --text -\nТЕКСТ prev= redirect=\n"
+	if string(b) != want {
+		t.Fatalf("вызов tk:\n%s\nждал:\n%s", b, want)
+	}
+}

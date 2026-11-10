@@ -47,6 +47,21 @@ func (c *Config) fastDue(prev FastTold, ok bool, r *Record, now time.Time) bool 
 	return prev.Free-r.Free >= int64(c.Fast)
 }
 
+// letterKey — пара письма о fast-находке: хозяин (нет — лид) и запись.
+func (c *Config) letterKey(r *Record) string {
+	owner := r.Owner
+	if owner == "" {
+		owner = c.Lead
+	}
+	return owner + " " + r.Path
+}
+
+// fastLetterDue — пора ли письмо о fast-находке r с уже определённым хозяином (Pass: предел журнала не держит её).
+func (s *State) fastLetterDue(c *Config, now time.Time, r *Record) bool {
+	prev, ok := s.Letters[c.letterKey(r)]
+	return c.fastDue(prev, ok, r, now)
+}
+
 // FastLetters — письма о fast-находках прохода: одно на хозяина; пара в паузе — только журнал. Хозяин не в сети или
 // его нет — письмо лиду. Отметки — сразу: находка прохода повтора не получит.
 func (s *State) FastLetters(c *Config, now time.Time, recs []Record, alive func(string) bool) []FastLetter {
@@ -65,7 +80,7 @@ func (s *State) FastLetters(c *Config, now time.Time, recs []Record, alive func(
 		if owner == "" {
 			owner = c.Lead
 		}
-		key := owner + " " + r.Path
+		key := c.letterKey(r)
 		prev, ok := s.Letters[key]
 		if !c.fastDue(prev, ok, r, now) {
 			continue

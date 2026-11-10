@@ -2,9 +2,13 @@ package disk
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/policy"
 )
 
 func routeConfig() Config {
@@ -209,5 +213,113 @@ func TestTicketRetryAndTraceMin(t *testing.T) {
 	}
 	if got := ts.Due(t0.Add(time.Hour)); len(got) != 1 {
 		t.Fatalf("повтора через час нет: %+v", got)
+	}
+}
+
+// passLetters — проход Pass и письма по его fast-находкам, как в демоне (diskRound → diskRoute).
+func passLetters(t *testing.T, s *State, c *Config, now time.Time, free int64, sizes map[string]int64) ([]Record, []FastLetter) {
+	t.Helper()
+	list := func() ([]string, error) { return slices.Sorted(maps.Keys(sizes)), nil }
+	owner := func(p string) (string, string) {
+		if p == "" {
+			return c.Lead, "lead"
+		}
+		return "life-master", "session"
+	}
+	recs, _, err := s.Pass(c, now, free, list, fakeMeasure(sizes, now), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recs, s.FastLetters(c, now, recs, allAlive)
+}
+
+func fastOf(recs []Record) []Record {
+	return slices.DeleteFunc(slices.Clone(recs), func(r Record) bool { return r.Kind != KindFast })
+}
+
+// Сценарий 2 противника 10.11 сквозь Pass (дефект 1 проверки 10.11 11:40): +5 ГБ в 12:00 — письмо; через 5 мин ещё
+// +100 ГБ при свободных 151 ГБ — обход по тревоге (walkGap 2 мин) раньше fast_window, и предел журнала fast не должен
+// съесть ни запись, ни второе письмо. Так же убыль без виновника: ещё −6 ГБ через 3 мин после первой — вторая запись и
+// письмо лиду.
+func TestFastEarlyRepeatThroughPass(t *testing.T) {
+	c := testConfig(t, "/home/u")
+	c.Lead = "lead"
+	s := &State{Sizes: map[string][]Point{}, Told: map[string]time.Time{}}
+	p := "/home/u/.cache/claude-tmp/claude-1000/-home-u-git-life/8e689919"
+	sizes := map[string]int64{p: 5 * gb}
+	t0 := time.Date(2026, 11, 10, 11, 50, 0, 0, time.Local)
+	if recs, _ := passLetters(t, s, c, t0, 256*gb, sizes); len(recs) != 0 {
+		t.Fatalf("первый обход: %+v", recs)
+	}
+	sizes[p] = 10 * gb
+	recs, letters := passLetters(t, s, c, t0.Add(10*time.Minute), 250*gb, sizes)
+	if f := fastOf(recs); len(f) != 1 || f[0].Path != p || len(letters) != 1 || letters[0].To != "life-master" {
+		t.Fatalf("первый всплеск: записи %+v, письма %+v", recs, letters)
+	}
+	sizes[p] = 110 * gb
+	recs, letters = passLetters(t, s, c, t0.Add(15*time.Minute), 151*gb, sizes)
+	if f := fastOf(recs); len(f) != 1 || f[0].Path != p || f[0].Delta != 100*gb {
+		t.Fatalf("второй всплеск через 5 мин не записан: %+v", recs)
+	}
+	if len(letters) != 1 || letters[0].To != "life-master" || !strings.Contains(letters[0].Text(c, "/home/u"), "свободно 151 ГБ") {
+		t.Fatalf("второго письма нет: %+v", letters)
+	}
+	// убыль без виновника: первая — письмо лиду; ещё −6 ГБ через 3 мин — снова запись и письмо
+	recs, letters = passLetters(t, s, c, t0.Add(18*time.Minute), 145*gb, sizes)
+	if f := fastOf(recs); len(f) != 1 || f[0].Path != "" || len(letters) != 1 || letters[0].To != "lead" {
+		t.Fatalf("убыль без виновника: записи %+v, письма %+v", recs, letters)
+	}
+	recs, letters = passLetters(t, s, c, t0.Add(21*time.Minute), 139*gb, sizes)
+	if f := fastOf(recs); len(f) != 1 || f[0].Path != "" || len(letters) != 1 || letters[0].To != "lead" {
+		t.Fatalf("вторая убыль без виновника через 3 мин: записи %+v, письма %+v", recs, letters)
+	}
+}
+
+// Предел журнала fast остаётся против шума: запись той же пары в fast_window без раннего повтора письма (рост меньше
+// удвоения, свободное с письма убыло меньше fast) — ни строки, ни письма.
+func TestFastJournalLimitWithoutEarlyRepeat(t *testing.T) {
+	c := testConfig(t, "/home/u")
+	c.Lead = "lead"
+	c.Walk, c.WalkChange = policy.Duration(time.Minute), 1<<30 // плановый обход в окне при тающем месте
+	s := &State{Sizes: map[string][]Point{}, Told: map[string]time.Time{}}
+	p := "/home/u/.cache/farm-hard"
+	sizes := map[string]int64{p: 5 * gb}
+	t0 := time.Date(2026, 11, 10, 12, 0, 0, 0, time.Local)
+	passLetters(t, s, c, t0, 260*gb, sizes)
+	sizes[p] = 10 * gb
+	if recs, letters := passLetters(t, s, c, t0.Add(2*time.Minute), 254*gb, sizes); len(fastOf(recs)) != 1 || len(letters) != 1 {
+		t.Fatalf("первый всплеск: записи %+v, письма %+v", recs, letters)
+	}
+	sizes[p] = 13 * gb
+	recs, letters := passLetters(t, s, c, t0.Add(4*time.Minute), 254*gb-3*gb/2, sizes)
+	if f := fastOf(recs); len(f) != 0 || len(letters) != 0 {
+		t.Fatalf("пара в пределе журнала без раннего повтора: записи %+v, письма %+v", f, letters)
+	}
+	if !s.LastWalk.Equal(t0.Add(4 * time.Minute)) {
+		t.Fatalf("обхода не было: %v — тест не проверяет предел", s.LastWalk)
+	}
+}
+
+// Дефект 7 проверки 10.11: та же находка о том же пути заменяет прежнюю (новый размер), прочие пути класса остаются —
+// в тикете нет дублей и ничего не теряется.
+func TestTicketAddReplacesSamePath(t *testing.T) {
+	c := routeConfig()
+	ts, err := LoadTickets(t.TempDir() + "/нет.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 11, 10, 10, 0, 0, 0, time.Local)
+	ts.Add(&c, []Record{{Kind: KindStale, Path: "/a", Owner: "x", Bytes: 2 << 30}, {Kind: KindStale, Path: "/b", Owner: "x", Bytes: 3 << 30}})
+	ts.Add(&c, []Record{{Kind: KindStale, Path: "/a", Owner: "x", Bytes: 4 << 30}})
+	due := ts.Due(t0)
+	if len(due) != 1 || len(due[0].Recs) != 2 {
+		t.Fatalf("находки: %+v", due)
+	}
+	byPath := map[string]int64{}
+	for _, r := range due[0].Recs {
+		byPath[r.Path] = r.Bytes
+	}
+	if byPath["/a"] != 4<<30 || byPath["/b"] != 3<<30 {
+		t.Fatalf("замена прежней находки пути: %v", byPath)
 	}
 }
