@@ -139,6 +139,7 @@ type ioService struct {
 	ctx          context.Context
 	dir          string // ручные снимки
 	path         string // сводки случаев
+	coverPath    string // учёт покрытия замера
 	seriesPath   string
 	profilesPath string
 	cgroupRoot   string // /sys/fs/cgroup: конец cgroup профиля
@@ -158,6 +159,8 @@ type ioService struct {
 	warnAt    map[string]time.Time
 	passAt    time.Time // следующая отметка прохода в учёте срабатываний
 	cases     []iowatch.Case
+	cover     *iowatch.Coverer // учёт покрытия замера: шаги продлевают интервал, перезапуск цикла — новый
+	offSaveAt time.Time        // mode=off: следующая копия учёта (housekeep не идёт)
 	// Маршрут случаев от alert_min (тикет alert-async): письма хозяину или лиду, тикеты — горутиной tickets.
 	route   *ioroute.Router
 	owners  *ioOwnerFinder
@@ -170,6 +173,7 @@ func newIOService(ctx context.Context, a *app) *ioService {
 	state := a.dir("io")
 	def := iowatch.Default()
 	return &ioService{route: ioroute.New(def.Route()), owners: a.ioOwners(&def), a: a, ctx: ctx, dir: filepath.Join(state, "events"), path: filepath.Join(state, ioCasesFile),
+		coverPath: filepath.Join(state, ioCoverageFile), cover: iowatch.NewCoverer(iowatch.CoverRecord{}, time.Now()),
 		seriesPath: filepath.Join(state, ioSeriesFile), profilesPath: filepath.Join(state, ioProfilesFile),
 		cgroupRoot: iowatch.SystemRoots().Cgroup, workerState: filepath.Join(a.home, ".local", "state", "worker"),
 		series: iowatch.NewSeries(iowatch.Default().SeriesKeep.D()), profiles: iowatch.NewProfiles(), live: iowatch.NewLive(),
@@ -182,6 +186,7 @@ const (
 	ioCasesFile    = "cases.jsonl"
 	ioSeriesFile   = "series.jsonl"
 	ioProfilesFile = "profiles.jsonl"
+	ioCoverageFile = "coverage.json" // учёт покрытия замера: рядом со сводками, срок — cases_keep
 )
 
 // ioLoop — наблюдатель io: mode=off — не замеряет совсем; паника или ошибка цикла — warn и перезапуск.
@@ -215,6 +220,7 @@ func (a *app) ioLoop(ctx context.Context, usr2 <-chan os.Signal) {
 			continue
 		}
 		if c.IO.Mode == iowatch.ModeOff {
+			s.offPass(time.Now())
 			s.wait(ioReloadEvery)
 			continue
 		}
@@ -232,10 +238,27 @@ func (a *app) ioLoop(ctx context.Context, usr2 <-chan os.Signal) {
 	s.saveStop(time.Now())
 }
 
-// saveStop — копии сводок, профилей и ряда при остановке, в горутине цикла.
+// offPass — проход цикла в mode=off: учёт пишет off (пробел mode_off, а не not_running); копия учёта раз в
+// ioSaveEvery — housekeep в off не идёт.
+func (s *ioService) offPass(now time.Time) {
+	s.cover.Mark(now, iowatch.ModeOff)
+	if now.Before(s.offSaveAt) {
+		return
+	}
+	s.offSaveAt = now.Add(ioSaveEvery)
+	rec := s.keptCover(now)
+	go func() {
+		s.postWarn(s.ctx, now, "save-coverage", "учёт покрытия", iowatch.SaveCoverage(s.coverPath, rec))
+	}()
+}
+
+// saveStop — копии сводок, профилей, ряда и учёта покрытия при остановке, в горутине цикла.
 func (s *ioService) saveStop(now time.Time) {
 	if err := iowatch.SaveCases(s.path, s.kept(now)); err != nil {
 		s.a.warn("io", "сводки случаев при остановке", "err", err)
+	}
+	if err := iowatch.SaveCoverage(s.coverPath, s.keptCover(now)); err != nil {
+		s.a.warn("io", "учёт покрытия при остановке", "err", err)
 	}
 	if err := iowatch.SaveProfiles(s.profilesPath, s.keptProfiles(now)); err != nil {
 		s.a.warn("io", "профили cgroup при остановке", "err", err)
@@ -260,11 +283,30 @@ func (s *ioService) load() {
 	for i := range seconds {
 		s.series.Add(seconds[i])
 	}
+	s.loadCover(seconds, now)
 	s.ended = loadIOFile(s, s.profilesPath, "профили cgroup", func(path string) ([]iowatch.Profile, error) {
 		return iowatch.LoadProfiles(path, now.Add(-cfg.ProfilesKeep.D()))
 	})
 	s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
 	s.seedRoute(cfg, now)
+}
+
+// loadCover — учёт покрытия прошлых запусков; файла нет — засев из посекундного ряда (до учёта замер шёл там,
+// где есть секунды ряда); файл битый — отложен, учёт с now (раньше — no_record, а не пустое покрытие).
+func (s *ioService) loadCover(seconds []iowatch.MachineSecond, now time.Time) {
+	rec, err := iowatch.LoadCoverage(s.coverPath)
+	switch {
+	case err != nil:
+		broken := s.coverPath + ".broken-" + now.Format("20060102T150405")
+		s.a.warn("io", "учёт покрытия не прочитан, файл отложен", "err", err, "path", broken)
+		if err := os.Rename(s.coverPath, broken); err != nil {
+			s.a.warn("io", "отложить файл: учёт покрытия", "err", err)
+		}
+		rec = iowatch.CoverRecord{}
+	case rec.Start.IsZero():
+		rec = iowatch.SeedCoverage(seconds)
+	}
+	s.cover = iowatch.NewCoverer(rec, now)
 }
 
 // loadIOFile — копия прошлого запуска; файл не читается — он сохраняется рядом с пометкой, история
@@ -296,6 +338,12 @@ func (s *ioService) kept(now time.Time) []iowatch.Case {
 	return s.cases
 }
 
+// keptCover — учёт в сроке cases_keep на now.
+func (s *ioService) keptCover(now time.Time) iowatch.CoverRecord {
+	s.cover.Trim(now.Add(-s.keepCfg().CasesKeep.D()))
+	return s.cover.Record(now)
+}
+
 // keptProfiles — профили в сроке profiles_keep; свод по видам для now — по ним же.
 func (s *ioService) keptProfiles(now time.Time) []iowatch.Profile {
 	since := now.Add(-s.keepCfg().ProfilesKeep.D())
@@ -306,12 +354,13 @@ func (s *ioService) keptProfiles(now time.Time) []iowatch.Profile {
 	return s.ended
 }
 
-// save — часовая копия сводок и профилей в файлы своей горутиной.
+// save — часовая копия сводок, профилей и учёта покрытия в файлы своей горутиной.
 func (s *ioService) save() {
 	now := time.Now()
-	cases, profiles := slices.Clone(s.kept(now)), slices.Clone(s.keptProfiles(now))
+	cases, profiles, cover := slices.Clone(s.kept(now)), slices.Clone(s.keptProfiles(now)), s.keptCover(now)
 	go func() {
 		s.postWarn(s.ctx, time.Now(), "save", "сводки случаев", iowatch.SaveCases(s.path, cases))
+		s.postWarn(s.ctx, time.Now(), "save-coverage", "учёт покрытия", iowatch.SaveCoverage(s.coverPath, cover))
 		s.postWarn(s.ctx, time.Now(), "save-profiles", "профили cgroup", iowatch.SaveProfiles(s.profilesPath, profiles))
 	}()
 }
@@ -332,9 +381,11 @@ func (s *ioService) wait(d time.Duration) {
 	}
 }
 
-// run — один цикл замера до остановки, перезапуска или паники; идущий случай закрывается.
+// run — один цикл замера до остановки, перезапуска или паники; идущий случай закрывается, интервал учёта
+// покрытия — тоже (следующий цикл начнёт новый).
 func (s *ioService) run(cfg iowatch.Config) (err error) {
 	defer func() {
+		s.cover.Break()
 		if v := recover(); v != nil {
 			err = fmt.Errorf("паника в цикле io: %v\n%s", v, debug.Stack())
 		}
@@ -368,6 +419,7 @@ func (s *ioService) step(st iowatch.Step) {
 		s.a.note("io", activity.KindPass, "", "", 0, "")
 		s.passAt = st.At.Add(ioPassEvery)
 	}
+	s.cover.Mark(st.At, s.cfg.Mode)
 	closed := s.rec.Step(st)
 	for i := range closed {
 		s.closed(closed[i])

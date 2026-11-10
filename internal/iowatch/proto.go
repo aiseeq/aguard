@@ -16,7 +16,7 @@ const (
 	QueryNow      = "now"      // моментальное состояние (Now); kind — ещё свод профилей вида
 	QuerySeries   = "series"   // посекундный ряд с since
 	QueryProfiles = "profiles" // профили вида kind (пусто — все) с концом не раньше since
-	QueryCases    = "cases"    // сводки случаев с концом не раньше since
+	QueryCases    = "cases"    // сводки случаев с концом не раньше since и учёт покрытия замера
 )
 
 // Request — запрос: `now`, `series`, `profiles` или `cases`; для последних трёх поддерживается `since` в RFC3339.
@@ -36,6 +36,8 @@ type Answer struct {
 	Series   []MachineSecond `json:"series,omitempty"`
 	Profiles []Profile       `json:"profiles,omitempty"`
 	Cases    []Case          `json:"cases,omitempty"`
+	// Coverage — учёт покрытия замера на момент ответа cases (всегда в ответе cases; нет — служба старее учёта).
+	Coverage *CoverRecord `json:"coverage,omitempty"`
 }
 
 // CheckRequest — версия и вид запроса; since — разобранное время (ноль — не задано).

@@ -61,20 +61,25 @@ func (s *ioService) answer(line []byte) any {
 		}
 		return iowatch.Answer{V: iowatch.ProtoVersion, Series: rows.Seconds()}
 	case iowatch.QueryCases:
-		cases, err := ioAsk(s, func() []iowatch.Case {
-			kept := s.kept(time.Now())
+		type casesCover struct {
+			cases []iowatch.Case
+			cover iowatch.CoverRecord
+		}
+		got, err := ioAsk(s, func() casesCover {
+			now := time.Now()
+			kept := s.kept(now)
 			filtered := make([]iowatch.Case, 0, len(kept))
 			for i := range kept {
 				if !kept[i].End.Before(since) {
 					filtered = append(filtered, kept[i])
 				}
 			}
-			return filtered
+			return casesCover{filtered, s.keptCover(now)} // учёт — на тот же момент, что сводки
 		})
 		if err != nil {
 			return fail(err)
 		}
-		return iowatch.Answer{V: iowatch.ProtoVersion, Cases: cases}
+		return iowatch.Answer{V: iowatch.ProtoVersion, Cases: got.cases, Coverage: &got.cover}
 	default: // QueryProfiles: CheckRequest других не пропускает
 		profiles, err := ioAsk(s, func() []iowatch.Profile { return iowatch.FilterProfiles(s.ended, req.Kind, since) })
 		if err != nil {

@@ -182,19 +182,43 @@ func ioDecimal(x float64) string {
 	return strings.Replace(strconv.FormatFloat(x, 'f', 1, 64), ".", ",", 1)
 }
 
-// ioLoadCases — сводки случаев: у службы (live), не запущена — из файла как есть.
-func (a *app) ioLoadCases(cfg *iowatch.Config, path string, live bool, since time.Time) ([]iowatch.Case, error) {
+// ioCasesLoad — сводки случаев и учёт покрытия замера с источником (iowatch.CoverService или CoverFile).
+type ioCasesLoad struct {
+	cases  []iowatch.Case
+	cover  iowatch.CoverRecord
+	source string
+}
+
+// ioLoadCases — сводки случаев и учёт покрытия: у службы (live), не запущена — из файлов как есть (учёт — рядом
+// со сводками, ioCoverageFile). Служба без учёта в ответе (старее его) — пустой учёт: no_record на всё окно.
+// withCover — читать ли учёт покрытия из файла: replay маршрута (io route) его не смотрит и на битом учёте не падает.
+func (a *app) ioLoadCases(cfg *iowatch.Config, path string, live, withCover bool, since time.Time) (ioCasesLoad, error) {
 	if live {
 		ans, err := askIO(cfg.Socket, iowatch.Request{Q: iowatch.QueryCases, Since: since.Format(time.RFC3339)})
 		if err == nil {
-			return ans.Cases, nil
+			out := ioCasesLoad{cases: ans.Cases, source: iowatch.CoverService}
+			if ans.Coverage != nil {
+				out.cover = *ans.Coverage
+			}
+			return out, nil
 		}
 		if !errors.Is(err, errIONotRunning) {
-			return nil, err
+			return ioCasesLoad{}, err
 		}
 		a.log.Warn("aguard io: служба не запущена, сводки — из файла как есть")
 	}
-	return iowatch.LoadCases(path)
+	cases, err := iowatch.LoadCases(path)
+	if err != nil {
+		return ioCasesLoad{}, err
+	}
+	out := ioCasesLoad{cases: cases, source: iowatch.CoverFile}
+	if !withCover {
+		return out, nil
+	}
+	if out.cover, err = iowatch.LoadCoverage(filepath.Join(filepath.Dir(path), ioCoverageFile)); err != nil {
+		return ioCasesLoad{}, err
+	}
+	return out, nil
 }
 
 // ioReport — итог случаев [since, until), с who — только случаев, где он виновник (iowatch.FilterCases): live
@@ -207,11 +231,13 @@ func (a *app) ioReport(path string, live bool, since, until time.Time, minDur ti
 	if minDur <= 0 {
 		minDur = cfg.CaseMin.D()
 	}
-	cases, err := a.ioLoadCases(&cfg, path, live, since)
+	got, err := a.ioLoadCases(&cfg, path, live, true, since)
 	if err != nil {
 		return err
 	}
-	sum := iowatch.Summarize(iowatch.FilterCases(cases, who), since, until, minDur)
+	sum := iowatch.Summarize(iowatch.FilterCases(got.cases, who), since, until, minDur)
+	cover := iowatch.Cover(got.cover, got.source, since, until, time.Now().Add(-cfg.CasesKeep.D()))
+	sum.Coverage = &cover
 	if asJSON {
 		enc := json.NewEncoder(a.out)
 		enc.SetIndent("", "  ")
@@ -233,6 +259,9 @@ const ioReportCases = 10
 func writeIOReport(w io.Writer, s *iowatch.Summary) {
 	fmt.Fprintf(w, "Случаи фриза %s — %s: %d, простой всего %s\n", s.Since.Format("02.01 15:04"), s.Until.Format("02.01 15:04"),
 		s.Total, ioSeconds(s.IdleMS))
+	if s.Coverage != nil {
+		writeIOCoverage(w, s.Coverage)
+	}
 	if s.Quiet > 0 {
 		fmt.Fprintf(w, "тихих (простой без обмена с диском, не фриз): %d, простой %s; кто ждал (случаев от %s): %s\n", s.Quiet,
 			ioSeconds(s.QuietIdleMS), ioSeconds(s.Min), ioRankedCases(s.QuietWho, -1))
@@ -284,6 +313,57 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 			writeProcessIOTop(w, "  запись процессов", k.ProcWrite[:min(3, len(k.ProcWrite))], ioBytes, k.ProcessDetails)
 		}
 	}
+}
+
+// ioCoverWhy — причина пробела покрытия человеку.
+var ioCoverWhy = map[string]string{
+	iowatch.GapNotRunning: "замера не было (служба или цикл не шли)",
+	iowatch.GapModeOff:    "mode = off",
+	iowatch.GapBeforeKeep: "глубже cases_keep",
+	iowatch.GapNoRecord:   "до начала учёта (не знаем)",
+}
+
+// ioCoverSource — источник учёта человеку.
+var ioCoverSource = map[string]string{iowatch.CoverService: "служба", iowatch.CoverFile: "файл"}
+
+// ioCoverGaps — сколько пробелов в строке покрытия.
+const ioCoverGaps = 5
+
+// writeIOCoverage — строка покрытия: сколько окна замер шёл и первые пробелы с причиной.
+func writeIOCoverage(w io.Writer, c *iowatch.Coverage) {
+	pct := int64(0)
+	if c.WindowMS > 0 {
+		pct = c.CoveredMS * 100 / c.WindowMS
+	}
+	line := fmt.Sprintf("покрытие замера (%s): %s из %s (%d%%)", ioCoverSource[c.Source], ioSpan(c.CoveredMS), ioSpan(c.WindowMS), pct)
+	if len(c.Modes) > 0 {
+		line += ", режим " + strings.Join(c.Modes, ", ")
+	}
+	if len(c.Gaps) > 0 {
+		parts := make([]string, 0, ioCoverGaps+1)
+		for _, g := range c.Gaps[:min(ioCoverGaps, len(c.Gaps))] {
+			parts = append(parts, fmt.Sprintf("%s–%s %s", g.From.Format("02.01 15:04:05"), g.To.Format("02.01 15:04:05"), ioCoverWhy[g.Why]))
+		}
+		if extra := len(c.Gaps) - ioCoverGaps; extra > 0 {
+			parts = append(parts, fmt.Sprintf("и ещё %d", extra))
+		}
+		line += "; пробелы: " + strings.Join(parts, "; ")
+	}
+	fmt.Fprintln(w, line)
+}
+
+// ioSpan — длительность в мс человеку целыми: «12 с», «5 мин», «2 ч 05 мин».
+func ioSpan(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d с", int64(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%d мин", int64(d/time.Minute))
+	case d%time.Hour < time.Minute:
+		return fmt.Sprintf("%d ч", int64(d/time.Hour))
+	}
+	return fmt.Sprintf("%d ч %02d мин", int64(d/time.Hour), int64(d%time.Hour/time.Minute))
 }
 
 // ioRankedCases — «имя N ед в K случаях, …»; unit < 0 — только число случаев.

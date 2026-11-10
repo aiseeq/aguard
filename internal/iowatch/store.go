@@ -169,6 +169,8 @@ type Summary struct {
 	Capped       int           `json:"capped"`
 	CappedIdleMS int64         `json:"capped_idle_ms"`
 	CappedWho    []RankedCases `json:"capped_who"`
+	// Coverage — за какую часть [Since, Until) замер шёл (Cover); `aguard io report` задаёт всегда.
+	Coverage *Coverage `json:"coverage,omitempty"`
 }
 
 // Bucket — случаи с длительностью в [FromMS, ToMS); ToMS = 0 — без верхней границы.

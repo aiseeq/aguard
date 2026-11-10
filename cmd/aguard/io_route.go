@@ -441,10 +441,11 @@ func (a *app) ioRouteReplay(path string, live bool, since time.Time, verbose boo
 	if err != nil {
 		return err
 	}
-	all, err := a.ioLoadCases(&cfg, path, live, since)
+	got, err := a.ioLoadCases(&cfg, path, live, false, since)
 	if err != nil {
 		return err
 	}
+	all := got.cases
 	owners := a.ioOwners(&cfg)
 	var cases []ioroute.Case
 	var ownerErr error
