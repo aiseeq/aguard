@@ -127,6 +127,9 @@ func TestQueueNamesBrokenCold(t *testing.T) {
 	if admin := drainLetters(got["git-admin"]); countWith(admin, "HIGH p/h — нет живой сессии pm") != 1 {
 		t.Fatalf("после починки HIGH не ушёл: %q", admin)
 	}
+	if lead := drainLetters(got["lead"]); countWith(lead, "таблица имён") != 0 { // починка снимает и ошибку: старой не шлём
+		t.Fatalf("после починки письмо лиду о таблице: %q", lead)
+	}
 }
 
 // Повтор письма лиду: тот же текст — раз в сутки; другой текст — сразу; починка снимает отметку.

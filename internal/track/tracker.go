@@ -37,7 +37,7 @@ type Config struct {
 	RotateBytes int64         // размер owners.jsonl до ротации
 	// Yield — уступка занятой машине в замере (internal/yield): зовётся перед каждой записью и папкой-контейнером и
 	// каждые yieldEvery записей каталога внутри обхода; true — была пауза, отмена ctx обрывает паузу. nil — без уступки.
-	// Зовётся из горутины замера, замеры одного экземпляра идут по одному.
+	// Зовётся из горутины замера; замеры одного экземпляра идут по одному и при перезапуске цикла (stopMeasure).
 	Yield func(context.Context) bool
 }
 
@@ -160,11 +160,13 @@ func Run(ctx context.Context, cfg Config, pair trackfd.Pair, lg *slog.Logger) er
 }
 
 // loop — главная горутина: события, замеры, снимки и сводка.
-func (t *Tracker) loop(ctx context.Context) error {
+func (t *Tracker) loop(parent context.Context) error {
 	evCh := make(chan []fevent, 64)
 	readErr := make(chan error, 1)
 	go t.readLoop(evCh, readErr)
 	doneCh := make(chan measureDone, 1)
+	ctx, cancel := context.WithCancel(parent)
+	defer t.stopMeasure(cancel, doneCh)
 	tick := time.NewTicker(t.cfg.YoungEvery)
 	defer tick.Stop()
 	hourly := time.NewTicker(time.Hour)
@@ -193,6 +195,16 @@ func (t *Tracker) loop(ctx context.Context) error {
 		if t.owners.err != nil {
 			return t.owners.err
 		}
+	}
+}
+
+// stopMeasure — выход цикла: идущий замер отменяется, и цикл ждёт его горутину. Без этого перезапуск цикла через 30 с
+// (trackLoop) шёл бы рядом со старым замером на занятой машине и делил с ним Yield — проверка 10.11: гонка под -race.
+func (t *Tracker) stopMeasure(cancel context.CancelFunc, done <-chan measureDone) {
+	cancel()
+	if t.measuring {
+		<-done
+		t.measuring = false
 	}
 }
 

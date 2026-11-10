@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,8 +96,8 @@ func TestMeasureCancelInPause(t *testing.T) {
 	cancel()
 	select {
 	case d := <-got:
-		if !d.aborted || calls != 2 || len(d.usages) != 1 || d.usages[0].files >= yieldEvery {
-			t.Fatalf("после отмены: aborted %v, уступок %d, записей %d", d.aborted, calls, len(d.usages))
+		if !d.aborted || calls != 2 || len(d.usages) != 1 || d.usages[0].files >= yieldEvery || len(d.listing) != 0 {
+			t.Fatalf("после отмены: aborted %v, уступок %d, записей %d, листинг %d папок", d.aborted, calls, len(d.usages), len(d.listing))
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("замер висит в паузе после отмены")
@@ -162,5 +163,39 @@ func TestStartMeasureUsesConfigYield(t *testing.T) {
 	d := <-done
 	if calls != len(job.items)+3 || len(d.usages) != len(job.items) {
 		t.Fatalf("уступок %d, записей %d", calls, len(d.usages))
+	}
+}
+
+// Проверка 10.11 13:07: цикл слежения вышел (ошибка чтения или журнала), а замер в паузе — выход цикла отменяет замер и
+// ждёт его горутину: перезапуск через 30 с не делит с ней уступку (Yielder не для разных горутин, гонка под -race).
+func TestStopMeasureWaitsGoroutine(t *testing.T) {
+	job := measureFixture(t)
+	entered := make(chan struct{}, 1)
+	var returned atomic.Bool
+	yield := func(ctx context.Context) bool {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-ctx.Done() // пауза занятой машины, пока замер не отменят
+		return true
+	}
+	tr := &Tracker{cfg: Config{Yield: func(ctx context.Context) bool { r := yield(ctx); returned.Store(true); return r }},
+		entries: map[string]*record.Entry{}}
+	for _, it := range job.items {
+		tr.entries[it.path] = &record.Entry{Path: it.path}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan measureDone, 1)
+	tr.startMeasure(ctx, done, true)
+	<-entered
+	tr.stopMeasure(cancel, done)
+	if !returned.Load() || tr.measuring {
+		t.Fatalf("выход цикла не дождался замера: уступка вернулась %v, measuring %v", returned.Load(), tr.measuring)
+	}
+	select {
+	case d := <-done:
+		t.Fatalf("итог замера остался в канале: %+v", d)
+	default:
 	}
 }
