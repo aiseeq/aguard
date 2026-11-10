@@ -182,7 +182,7 @@ func (c *Config) Over(now time.Time, items []Item, factor float64) []Group {
 	return out
 }
 
-// CreatorText — короткое описание создателя для сводки и отчёта.
+// CreatorText — короткое описание создателя для сводки (у отчёта своё — report.creatorName).
 func CreatorText(o *record.Owner) string {
 	if o == nil {
 		return "неизвестно (запись старше сторожа)"
