@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/iowatch"
 )
@@ -177,5 +178,37 @@ func TestIOLetterFailedToTicket(t *testing.T) {
 	case j := <-s.tickets.queue:
 		t.Fatalf("лишний тикет %+v", j)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// Главная cgroup — unit бойца worker (и его повтор): хозяин — мастер из job.json, ему маршрут, а не лиду
+// (io-alert-worker-master: 29 случаев от 2 с у worker-*.service за 29–30.10 доставались только лиду).
+func TestIOOwnerWorkerMaster(t *testing.T) {
+	dir := t.TempDir()
+	writeIOFile(t, filepath.Join(dir, "J", "job.json"), `{"id":"J","master":"sc2go-master","unit":"worker-J"}`)
+	o := &ioOwnerFinder{jobs: &cpuwatch.Jobs{Dir: dir, Units: t.TempDir()}}
+	alive := func(s string) bool { return s == "sc2go-master" || s == "lead" }
+	for _, unit := range []string{"worker-J.service", "worker-J-2.service"} {
+		c := iowatch.Case{Start: time.Now().Add(-2500 * time.Millisecond), End: time.Now(), DurMS: 2500,
+			Culprits: &iowatch.Culprit{Main: "/user.slice/user-1000.slice/user@1000.service/app.slice/" + unit,
+				MainWrite: 400 << 20, MainProc: "go(4242)"}}
+		rc, err := o.routeCase(&c)
+		if err != nil || rc.Owner != "sc2go-master" || rc.Victim {
+			t.Fatalf("%s: %+v %v", unit, rc, err)
+		}
+		def := iowatch.Default()
+		acts := ioroute.New(def.Route()).Route(rc, alive)
+		// 2,5 с — без вреда сейчас: тикет в проект мастера бойца (маршрут agent-mail-async), лиду ничего.
+		if len(acts) != 1 || acts[0].Kind != ioroute.Ticket || acts[0].Owner != "sc2go-master" {
+			t.Fatalf("%s 2,5 с: %+v", unit, acts)
+		}
+		c.Start, c.DurMS = time.Now().Add(-12600*time.Millisecond), 12600
+		if rc, err = o.routeCase(&c); err != nil {
+			t.Fatal(err)
+		}
+		acts = ioroute.New(def.Route()).Route(rc, alive)
+		if len(acts) != 1 || acts[0].Kind != ioroute.Letter || acts[0].To != "sc2go-master" || acts[0].Why != ioroute.WhyUrgent {
+			t.Fatalf("%s 12,6 с: письмо не мастеру бойца: %+v", unit, acts)
+		}
 	}
 }
