@@ -191,6 +191,9 @@ type Ticket struct {
 	External                                                     bool   // задача внешнего трекера: файла тикета нет
 	Started                                                      bool   // внешняя задача уже в работе: письмо мастеру есть, письма админу «не взят» нет
 	Created                                                      time.Time
+	// MasterNote — последняя запись мастера в журнале тикета (tk ls --json, поле actors); моложе 4 ч — мастер ведёт
+	// «открытый» тикет без tk start, письма админу «не взят» нет. Нуль — записей мастера нет.
+	MasterNote time.Time
 }
 
 const (
@@ -458,7 +461,7 @@ func (s *State) highNotices(t Ticket, st *ticketState, v View) []Notice {
 		line := fmt.Sprintf("aguard: HIGH %s/%s — %s. tk next", t.Project, t.Slug, t.Title)
 		out = append(out, notice(t, v, KindHigh, t.Master, line))
 	}
-	if age >= highWait && !t.Started {
+	if age >= highWait && !t.Started && v.Now.Sub(t.MasterNote) >= highWait {
 		out = append(out, s.highAdminNotice(t, st, v, "не взят за 4 ч, мастер "+t.Master)...)
 	}
 	return out

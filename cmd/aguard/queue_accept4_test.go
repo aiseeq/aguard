@@ -507,3 +507,25 @@ func TestQueueLiveAllFindErrors(t *testing.T) {
 		}
 	}
 }
+
+// Время последней записи мастера в журнале (tk ls --json, actors) доходит до очереди; чужие записи не в счёт,
+// битое время — WARN и нуль (письмо админу пойдёт, как без заметки).
+func TestQueueTicketMasterNote(t *testing.T) {
+	list := `[{"repo":"p","slug":"c","status":"открыт","prio":"HIGH","title":"t","actors":{"p-master":"2026-11-10 14:30","git-admin":"2026-11-10 15:00"},"path":"docs/tasks/20261103-1205-HIGH-c.md"},` +
+		`{"repo":"p","slug":"d","status":"открыт","prio":"HIGH","title":"t","actors":{"git-admin":"2026-11-10 15:00"},"path":"docs/tasks/20261103-1206-HIGH-d.md"},` +
+		`{"repo":"p","slug":"e","status":"открыт","prio":"HIGH","title":"t","actors":{"p-master":"10.11 14:30"},"path":"docs/tasks/20261103-1207-HIGH-e.md"}]`
+	b := newQueueBench(t, list, "[]")
+	ts, err := b.a.queueTickets(context.Background(), b.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]time.Time{"c": time.Date(2026, 11, 10, 14, 30, 0, 0, time.Local), "d": {}, "e": {}}
+	if len(ts) != len(want) {
+		t.Fatalf("%+v", ts)
+	}
+	for _, tk := range ts {
+		if tk.Master != "p-master" || !tk.MasterNote.Equal(want[tk.Slug]) {
+			t.Errorf("%s: мастер %s, запись %v", tk.Slug, tk.Master, tk.MasterNote)
+		}
+	}
+}

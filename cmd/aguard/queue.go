@@ -36,6 +36,8 @@ type queueTicketJSON struct {
 	Title    string `json:"title"`
 	Executor string `json:"executor"`
 	Journal  bool   `json:"journal"`
+	// Actors — время последней записи журнала по авторам, «2006-01-02 15:04» местного (akit tk v1.47.0).
+	Actors map[string]string `json:"actors"`
 }
 
 func (a *app) queueCmd(ctx context.Context, args []string) error {
@@ -635,7 +637,8 @@ func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticke
 				continue
 			}
 			master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
-			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Journal: r.Journal})
+			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Journal: r.Journal,
+				MasterNote: a.queueMasterNote(r, master)})
 		}
 		return nil
 	}
@@ -786,4 +789,19 @@ func (a *app) queueWakeProjects(c *config.Config) []queue.Ticket {
 		projects = append(projects, project)
 	}
 	return projects
+}
+
+// queueMasterNote — время последней записи мастера в журнале тикета; записей нет — нуль. Битое время — WARN и нуль:
+// тикет остаётся в очереди, письмо админу «не взят» пойдёт, как без заметки.
+func (a *app) queueMasterNote(r *queueTicketJSON, master string) time.Time {
+	s, ok := r.Actors[master]
+	if !ok {
+		return time.Time{}
+	}
+	at, err := time.ParseInLocation("2006-01-02 15:04", s, time.Local)
+	if err != nil {
+		a.warn("queue", "время записи мастера в журнале тикета", "path", r.Path, "master", master, "err", err)
+		return time.Time{}
+	}
+	return at
 }

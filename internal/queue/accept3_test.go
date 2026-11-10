@@ -108,3 +108,22 @@ func TestBackOnHighAndCrit(t *testing.T) {
 		}
 	}
 }
+
+// Мастер ведёт «открытый» HIGH без tk start (заметки в журнале): запись мастера моложе 4 ч — админу «не взят» нет;
+// старше 4 ч или запись не мастера — тревога, как раньше (aguard-high-not-taken-false, случаи 07.11).
+func TestHighMasterNoteCountsAsTaken(t *testing.T) {
+	w := newWorld(ModeOn)
+	s := seeded(w)
+	high := tick("HIGH", "открыт")
+	step(s, []Ticket{high}, w)
+	w.now = w.now.Add(4*time.Hour + time.Minute)
+	noted := high
+	noted.MasterNote = w.now.Add(-time.Hour)
+	if ns := step(s, []Ticket{noted}, w); has(ns, KindHighAdmin, "git-admin") {
+		t.Fatalf("заметка мастера час назад: %+v", ns)
+	}
+	noted.MasterNote = w.now.Add(-highWait - time.Minute)
+	if ns := step(s, []Ticket{noted}, w); !has(ns, KindHighAdmin, "git-admin") {
+		t.Fatalf("заметка мастера старше 4 ч: %+v", ns)
+	}
+}
