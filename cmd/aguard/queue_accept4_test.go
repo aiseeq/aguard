@@ -641,6 +641,9 @@ func TestQueueLiveAllReachesNotices(t *testing.T) {
 // Находка проектов для «*»: обычный файл docs/tasks или docs — не проект и не сбой; нечитаемый корень или папка docs —
 // ошибка прохода, а не молча урезанный live.
 func TestQueueLiveAllFindErrors(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root читает папки без прав")
+	}
 	b := newQueueBench(t, "[]", "[]")
 	mk := func(rel string, file bool) string {
 		p := filepath.Join(b.dir, rel)

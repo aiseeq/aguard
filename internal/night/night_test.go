@@ -1,6 +1,7 @@
 package night
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -26,6 +27,17 @@ func TestValidateExpandsDreamPausedHome(t *testing.T) {
 	}
 	if cfg.DreamPaused != "/home/u/.claude/improve/state/night-paused" {
 		t.Fatalf("путь паузы не раскрыт: %q", cfg.DreamPaused)
+	}
+	if got := PauseCommand(cfg, local(3, 0)); !slices.Equal(got, []string{"/home/u/.claude/improve/bin/dreamstats", "-improve",
+		"/home/u/.claude/improve", "-night", "2026-10-28", "-pause-check"}) {
+		t.Fatalf("команда статуса паузы: %q", got)
+	}
+	for _, bad := range [][]string{nil, {"dreamstats", "-pause-check"}} {
+		c := testConfig()
+		c.DreamPauseCheck = bad
+		if err := c.Validate("/home/u"); err == nil {
+			t.Fatalf("dream_pause_check %q принят", bad)
+		}
 	}
 }
 

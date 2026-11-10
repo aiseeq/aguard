@@ -15,15 +15,18 @@ import (
 
 // Config — раздел [night] конфига aguard.
 type Config struct {
-	Mode         string          `toml:"mode"`
-	Interval     policy.Duration `toml:"interval"`
-	DreamBy      string          `toml:"dream_by"`
-	DreamMarker  string          `toml:"dream_marker"`
-	DreamPaused  string          `toml:"dream_paused"`
-	DigestBy     string          `toml:"digest_by"`
-	DigestMarker string          `toml:"digest_marker"`
-	TrustWait    policy.Duration `toml:"trust_wait"`
-	AlsoTo       []string        `toml:"also_to"` // кроме лида: сигнал «лид не поднялся» лиду же не поможет
+	Mode        string          `toml:"mode"`
+	Interval    policy.Duration `toml:"interval"`
+	DreamBy     string          `toml:"dream_by"`
+	DreamMarker string          `toml:"dream_marker"`
+	DreamPaused string          `toml:"dream_paused"`
+	// DreamPauseCheck — статус паузы за ночь {date}: dreamstats -pause-check печатает одно из четырёх слов (PauseHolds),
+	// код 2 при битом файле (~/git/dream/docs/night-pause.md). Разбор дат один — в dream; зовётся, только если файл есть.
+	DreamPauseCheck []string        `toml:"dream_pause_check"`
+	DigestBy        string          `toml:"digest_by"`
+	DigestMarker    string          `toml:"digest_marker"`
+	TrustWait       policy.Duration `toml:"trust_wait"`
+	AlsoTo          []string        `toml:"also_to"` // кроме лида: сигнал «лид не поднялся» лиду же не поможет
 	// DreamTo — хозяева ночного прогона: сигнал о Сне идёт и им (лид только шлёт таймер; Сон ведёт dream-master,
 	// ~/git/dream/CLAUDE.md, «Хозяин»).
 	DreamTo []string `toml:"dream_to"`
@@ -46,7 +49,8 @@ func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(time.Minute), DreamBy: "02:50",
 		DreamMarker: filepath.Join(home, ".claude/improve/runs/{date}/started"), DreamPaused: filepath.Join(home, ".claude/improve/state/night-paused"), DigestBy: "07:00",
 		DigestMarker: filepath.Join(home, ".local/state/digest/started"), TrustWait: policy.Duration(5 * time.Minute),
-		AlsoTo: []string{"git-admin"}, DreamTo: []string{"dream-master"},
+		DreamPauseCheck: []string{"~/.claude/improve/bin/dreamstats", "-improve", "~/.claude/improve", "-night", "{date}", "-pause-check"},
+		AlsoTo:          []string{"git-admin"}, DreamTo: []string{"dream-master"},
 		DreamFallback: "~/.claude/improve/run.sh terra", DreamFallbackBy: "03:10"}
 }
 
@@ -121,6 +125,12 @@ func (c *Config) Validate(home string) error {
 	}
 	c.DreamMarker = policy.ExpandHome(c.DreamMarker, home)
 	c.DreamPaused = policy.ExpandHome(c.DreamPaused, home)
+	if len(c.DreamPauseCheck) == 0 || !slices.Contains(c.DreamPauseCheck, "{date}") {
+		return fmt.Errorf("night.dream_pause_check: команда статуса паузы с {date}")
+	}
+	for i := range c.DreamPauseCheck {
+		c.DreamPauseCheck[i] = policy.ExpandHome(c.DreamPauseCheck[i], home)
+	}
 	c.DigestMarker = policy.ExpandHome(c.DigestMarker, home)
 	return nil
 }
@@ -132,6 +142,9 @@ type Facts struct {
 	DreamMarker   bool
 	DreamPaused   bool
 	DreamPausedBy string
+	// DreamPauseErr — файл паузы есть, а статус за ночь не получен (битый файл, сбой команды): ночь держится, как при
+	// паузе, сигнал — хозяевам Сна.
+	DreamPauseErr string
 	DigestText    string
 	TrustEvents   []cllog.TrustEvent
 }
@@ -156,6 +169,11 @@ func Check(now time.Time, cfg Config, facts Facts) []Signal {
 			"%s: сначала проверь, не идёт ли он уже (открытый тикет dream-run-%s в ~/git/dream, ход лида или мастера сна: маркер пишет только шаг 4), "+
 			"и только потом запусти Сон сам по скиллу dream.%s", cfg.DreamBy, DreamPath(cfg, now), cfg.Lead, strings.Join(cfg.DreamTo, ", "),
 			strings.Join(cfg.DreamTo, ", "), now.Format("0102"), fallback)})
+	}
+	if facts.DreamPauseErr != "" {
+		out = append(out, Signal{Key: "dream-pause:" + date, To: cfg.DreamTo, Text: fmt.Sprintf("Файл паузы Сна %s не разобран за ночь %s: %s. "+
+			"aguard держит ночь как снятую: сигнала «Сон не стартовал» и запасного Сна нет. Поправь файл (формат — ~/git/dream/docs/night-pause.md) или удали его.",
+			cfg.DreamPaused, date, facts.DreamPauseErr)})
 	}
 	if due(now, cfg.DigestBy) && !strings.Contains(facts.DigestText, date) {
 		out = append(out, Signal{Key: "digest:" + date, Text: fmt.Sprintf("Дайджест не стартовал к %s: нет сегодняшней даты в %s. "+
@@ -188,4 +206,26 @@ func due(now time.Time, clock string) bool {
 		panic(fmt.Sprintf("night: время %q прошло Validate: %v", clock, err))
 	}
 	return now.Hour()*60+now.Minute() >= t.Hour()*60+t.Minute()
+}
+
+// PauseCommand — команда статуса паузы за местную дату now.
+func PauseCommand(cfg Config, now time.Time) []string {
+	out := slices.Clone(cfg.DreamPauseCheck)
+	for i := range out {
+		out[i] = strings.ReplaceAll(out[i], "{date}", now.Format("2006-01-02"))
+	}
+	return out
+}
+
+// PauseHolds — держит ли ночь ответ команды статуса: ночь в паузе или файл без дат (держит все ночи) — да; ночь вне
+// дат или файла нет — нет; иной ответ — ошибка.
+func PauseHolds(answer string) (bool, error) {
+	switch s := strings.TrimSpace(answer); s {
+	case "paused", "legacy":
+		return true, nil
+	case "outside", "absent":
+		return false, nil
+	default:
+		return false, fmt.Errorf("неизвестный статус паузы %q", s)
+	}
 }

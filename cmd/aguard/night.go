@@ -2,11 +2,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -311,8 +313,14 @@ func (a *app) nightFacts(cfg *night.Config, now time.Time) (night.Facts, error) 
 		if readErr != nil {
 			return night.Facts{}, fmt.Errorf("night: файл паузы Сна %s: %w", cfg.DreamPaused, readErr)
 		}
-		facts.DreamPaused = true
-		facts.DreamPausedBy = strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
+		holds, checkErr := nightPauseHolds(cfg, now)
+		facts.DreamPaused = holds || checkErr != nil // статус не получен — ночь держится, сигнал хозяевам Сна
+		if checkErr != nil {
+			facts.DreamPauseErr = checkErr.Error()
+		}
+		if facts.DreamPaused {
+			facts.DreamPausedBy = strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return night.Facts{}, fmt.Errorf("night: файл паузы Сна %s: %w", cfg.DreamPaused, err)
 	}
@@ -399,4 +407,19 @@ func saveNightState(path string, state nightState) error {
 		return fmt.Errorf("состояние night: %w", err)
 	}
 	return nil
+}
+
+// nightPauseHolds — статус паузы за ночь now от команды dream (night.dream_pause_check): ошибка — её код и stderr.
+func nightPauseHolds(cfg *night.Config, now time.Time) (bool, error) {
+	args := night.PauseCommand(*cfg, now)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var stderr strings.Builder
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("%s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return night.PauseHolds(string(out))
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -58,6 +59,7 @@ func TestNightPausedSilencesDreamAndFallback(t *testing.T) {
 	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
 	cfg.DreamMarker = filepath.Join(dir, "absent-marker")
 	cfg.DreamPaused = pause
+	cfg.DreamPauseCheck = fakePauseCheck(t, dir, "legacy", 0)
 	cfg.DigestBy = "23:59"
 	cfg.DigestMarker = filepath.Join(dir, "digest")
 	if err := os.WriteFile(cfg.DigestMarker, []byte(time.Now().Format("2006-01-02")), 0o600); err != nil {
@@ -109,6 +111,7 @@ func TestNightPausedSilencesFallbackStateLetter(t *testing.T) {
 	cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
 	cfg.DreamMarker = filepath.Join(dir, "absent-marker")
 	cfg.DreamPaused = pause
+	cfg.DreamPauseCheck = fakePauseCheck(t, dir, "legacy", 0)
 	cfg.DigestBy = "23:59"
 	if err := a.nightRound(&cfg, false); err != nil {
 		t.Fatal(err)
@@ -421,5 +424,69 @@ func TestNightLogModeIgnoresBrokenState(t *testing.T) {
 				t.Fatalf("строк о снятом Сне %d, ждали 1 и после перезапуска:\n%s", n, logs.String())
 			}
 		}
+	}
+}
+
+// fakePauseCheck — подставной `dreamstats -pause-check`: печатает answer и выходит с code (2 — битый файл, текст в
+// stderr); аргументы вызова — в dir/pause-args.
+func fakePauseCheck(t *testing.T, dir, answer string, code int) []string {
+	t.Helper()
+	script := filepath.Join(dir, "pause-check")
+	body := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %s/pause-args\n[ %d -ne 0 ] && { echo 'dreamstats: неверная дата \"2026-13-01\"' >&2; exit %d; }\necho %s\n",
+		dir, code, code, answer)
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return []string{script, "-night", "{date}", "-pause-check"}
+}
+
+// Пауза по датам ночей (night-pause-dates): paused — ни письма, ни unit; outside — как без файла (письмо «Сон не
+// стартовал» и запасной unit); битый файл — письмо об ошибке, unit нет. Команде уходит местная дата ночи.
+func TestNightPauseByDates(t *testing.T) {
+	for _, tc := range []struct {
+		answer            string
+		code              int
+		unit              bool
+		letter, notLetter string
+	}{
+		{answer: "paused"},
+		{answer: "outside", unit: true, letter: "Сон не стартовал", notLetter: "Файл паузы"},
+		{answer: "", code: 2, letter: "неверная дата", notLetter: "Звенья:"},
+		{answer: "что-то", letter: "неизвестный статус паузы", notLetter: "Звенья:"},
+	} {
+		t.Run(tc.answer+fmt.Sprint(tc.code), func(t *testing.T) {
+			dir := t.TempDir()
+			pause := filepath.Join(dir, "night-paused")
+			if err := os.WriteFile(pause, []byte("пауза\nnights: 2026-11-07\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			units := &fakeUnits{}
+			a := &app{home: dir, stateDir: filepath.Join(dir, "state"), log: slog.New(slog.DiscardHandler), units: units}
+			mail := liveLead(t, a)
+			cfg := night.Default(dir)
+			cfg.Mode, cfg.Lead, cfg.DreamBy, cfg.DigestBy = night.ModeAlert, "lead", "00:00", "23:59"
+			cfg.DreamFallbackBy = time.Now().Add(-time.Hour).Format("15:04")
+			cfg.DreamMarker, cfg.DreamPaused = filepath.Join(dir, "absent-marker"), pause
+			cfg.DreamPauseCheck = fakePauseCheck(t, dir, tc.answer, tc.code)
+			if err := a.nightRound(&cfg, false); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(units.started) == 1; got != tc.unit {
+				t.Fatalf("запасной unit: %v, ждали %v", units.started, tc.unit)
+			}
+			var letters []string
+			for len(mail) > 0 {
+				letters = append(letters, <-mail)
+			}
+			all := strings.Join(letters, "\n")
+			if tc.letter == "" && len(letters) != 0 || tc.letter != "" && !strings.Contains(all, tc.letter) ||
+				tc.notLetter != "" && strings.Contains(all, tc.notLetter) {
+				t.Fatalf("письма (%d):\n%s", len(letters), all)
+			}
+			args, err := os.ReadFile(filepath.Join(dir, "pause-args"))
+			if err != nil || !strings.Contains(string(args), "-night "+time.Now().Format("2006-01-02")+" ") {
+				t.Fatalf("аргументы команды статуса: %q %v", args, err)
+			}
+		})
 	}
 }
