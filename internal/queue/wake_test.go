@@ -148,7 +148,7 @@ func TestWakeHighSameRoundOneLetter(t *testing.T) {
 func TestWakeWeekendOnlyCrit(t *testing.T) {
 	w := newWakeWorld()
 	w.view.Now = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
-	w.view.WeekendCrit = []string{"/p"}
+	w.view.Rest = cyRest("/p")
 	if ns := w.step(); len(ns) != 0 {
 		t.Fatal(ns)
 	}

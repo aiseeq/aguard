@@ -5,7 +5,8 @@ import (
 	"time"
 )
 
-// Суббота 07.11.2026, понедельник 09.11.2026: в папках из weekend_crit только CRIT, остальным как обычно.
+// Суббота 07.11.2026, понедельник 09.11.2026: в папках из rest_crit только CRIT, остальным как обычно. День — по
+// Europe/Nicosia (+02:00 зимой), на час впереди CET машины.
 const (
 	restRoot = "/h/work"
 	saturday = "2026-11-07T10:00:00+01:00"
@@ -13,7 +14,7 @@ const (
 
 func restWorld() *world {
 	w := newWorld(ModeOn)
-	w.weekendCrit = []string{restRoot}
+	w.rest = cyRest(restRoot)
 	w.now = at(saturday)
 	w.free["m-master"] = true
 	return w
@@ -34,20 +35,20 @@ func TestWeekendHighWaitsForMonday(t *testing.T) {
 			t.Fatalf("выходной +%v: %+v", later, ns)
 		}
 	}
-	w.now = at("2026-11-08T23:59:30+01:00") // проходы идут раз в 30 с, последний в воскресенье — перед полуночью
+	w.now = at("2026-11-08T23:59:30+02:00") // проходы идут раз в 30 с, последний в воскресенье — перед полуночью Никосии
 	if ns := step(s, ts, w); len(ns) != 0 {
 		t.Fatalf("конец воскресенья: %+v", ns)
 	}
-	w.now = at("2026-11-09T00:01:00+01:00")
+	w.now = at("2026-11-09T00:01:00+02:00")
 	ns := step(s, ts, w)
 	if !has(ns, KindHigh, "m-master") || has(ns, KindHighAdmin, "git-admin") {
 		t.Fatalf("понедельник, срок админу с начала дня: %+v", ns)
 	}
-	w.now = at("2026-11-09T03:59:00+01:00")
+	w.now = at("2026-11-09T03:59:00+02:00")
 	if ns := step(s, ts, w); has(ns, KindHighAdmin, "git-admin") {
 		t.Fatalf("3 ч 58 мин: %+v", ns)
 	}
-	w.now = at("2026-11-09T04:02:00+01:00")
+	w.now = at("2026-11-09T04:02:00+02:00")
 	if ns := step(s, ts, w); !has(ns, KindHighAdmin, "git-admin") {
 		t.Fatalf("4 ч 01 мин: %+v", ns)
 	}
@@ -70,7 +71,7 @@ func TestWeekendOtherDirAsUsual(t *testing.T) {
 
 func TestWeekdayRestDirAsUsual(t *testing.T) {
 	w := restWorld()
-	w.now = at("2026-11-06T23:00:00+01:00")
+	w.now = at("2026-11-06T22:30:00+01:00") // 23:30 пятницы в Никосии; 23:00 CET там уже суббота
 	s := seeded(w)
 	if ns := step(s, []Ticket{inDir(tick("HIGH", "открыт"), restRoot+"/p")}, w); !has(ns, KindHigh, "m-master") {
 		t.Fatalf("пятница: %+v", ns)
@@ -111,14 +112,14 @@ func TestWeekendBackByRecipient(t *testing.T) {
 
 func TestWeekendCritConfigExpanded(t *testing.T) {
 	c := Default("/h")
-	c.WeekendCrit = []string{"~/work"}
+	c.RestCrit, c.RestZone, c.RestHolidays = []string{"~/work"}, "Europe/Nicosia", "CY"
 	if err := c.Validate("/h"); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.WeekendCrit) != 1 || c.WeekendCrit[0] != "/h/work" {
-		t.Fatalf("%+v", c.WeekendCrit)
+	if len(c.RestCrit) != 1 || c.RestCrit[0] != "/h/work" {
+		t.Fatalf("%+v", c.RestCrit)
 	}
-	if len(Default("/h").WeekendCrit) != 0 {
+	if len(Default("/h").RestCrit) != 0 {
 		t.Fatal("умолчание должно быть пустым: список — в конфиге машины")
 	}
 }

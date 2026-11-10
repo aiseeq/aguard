@@ -19,8 +19,12 @@ type Config struct {
 	GitRoots  []string        `toml:"git_roots"`
 	Dirs      []string        `toml:"dirs"`
 	Skip      []string        `toml:"skip"`
-	// WeekendCrit — папки проектов, где в субботу и воскресенье из строк идут только CRIT. Список — в конфиге машины.
-	WeekendCrit []string `toml:"weekend_crit"`
+	// RestCrit — папки, где в дни отдыха (суббота, воскресенье, праздники RestHolidays; дата — в поясе RestZone) из
+	// новой работы идёт только CRIT: ворота, будильник и «HIGH не взят». Список — в конфиге машины.
+	RestCrit     []string `toml:"rest_crit"`
+	RestZone     string   `toml:"rest_zone"`
+	RestHolidays string   `toml:"rest_holidays"`
+	rest         Rest
 	// Spaces — корень пространства и его ступень (Level); проект вне корней — по Level. Список — в конфиге машины.
 	Spaces map[string]Level `toml:"spaces"`
 	// Level — ступень вне корней Spaces; по умолчанию HIGH: нет слова пользователя — открыты только CRIT и HIGH.
@@ -52,14 +56,19 @@ func (c *Config) Validate(home string) error {
 	if c.Interval.D() <= 0 || c.FreeAfter.D() < 0 {
 		return fmt.Errorf("queue.interval > 0, queue.free_after >= 0")
 	}
-	for _, ps := range [][]string{c.GitRoots, c.Dirs, c.Skip, c.WeekendCrit} {
+	for _, ps := range [][]string{c.GitRoots, c.Dirs, c.Skip, c.RestCrit} {
 		for i := range ps {
 			ps[i] = policy.ExpandHome(ps[i], home)
 		}
 	}
-	for i := range c.WeekendCrit {
-		c.WeekendCrit[i] = filepath.Clean(c.WeekendCrit[i])
+	for i := range c.RestCrit {
+		c.RestCrit[i] = filepath.Clean(c.RestCrit[i])
 	}
+	rest, err := NewRest(c.RestCrit, c.RestZone, c.RestHolidays)
+	if err != nil {
+		return err
+	}
+	c.rest = rest
 	if _, err := ParseLevel(string(c.Level)); err != nil {
 		return fmt.Errorf("queue.level: %w", err)
 	}
@@ -86,3 +95,6 @@ func (c *Config) Validate(home string) error {
 	}
 	return nil
 }
+
+// Rest — дни отдыха после Validate; до него нулевое значение: дней отдыха нет.
+func (c *Config) Rest() Rest { return c.rest }

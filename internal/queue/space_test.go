@@ -133,11 +133,11 @@ func TestSpacesConfigRoots(t *testing.T) {
 		}
 	}
 	c := Default("/h")
-	c.WeekendCrit = []string{"/h/work/"}
+	c.RestCrit, c.RestZone, c.RestHolidays = []string{"/h/work/"}, "Europe/Nicosia", "CY"
 	if err := c.Validate("/h"); err != nil {
 		t.Fatal(err)
 	}
-	if c.WeekendCrit[0] != "/h/work" {
-		t.Fatalf("корень с косой чертой: %v", c.WeekendCrit)
+	if c.RestCrit[0] != "/h/work" || c.Rest().Roots[0] != "/h/work" {
+		t.Fatalf("корень с косой чертой: %v", c.RestCrit)
 	}
 }

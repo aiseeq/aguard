@@ -102,7 +102,7 @@ func TestExternalStartedNoMaster(t *testing.T) {
 	}
 }
 
-// В выходной в папках weekend_crit только CRIT, в понедельник строка идёт.
+// В выходной в папках rest_crit только CRIT, в понедельник строка идёт.
 func TestExternalWeekend(t *testing.T) {
 	w := restWorld()
 	s := seeded(w)

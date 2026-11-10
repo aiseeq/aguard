@@ -130,7 +130,7 @@ func queueLive(cfg *queue.Config) ([]string, error) {
 // queueGatePass пишет gate.json по слову пользователя (queue.level и queue.spaces) и возвращает то, что увидит tk next:
 // файл не записан — прошлый. Запас, таблица и поправки ворот не читаются. Сухой прогон файл не пишет и показывает расчёт.
 func (a *app) queueGatePass(c *config.Config, now time.Time, dry bool) (queue.Gate, error) {
-	gate := queue.UserGate(c.Queue.Level, c.Queue.Spaces)
+	gate := queue.UserGate(c.Queue.Level, c.Queue.Spaces, c.Queue.Rest(), now)
 	if err := a.writeQueueGate(&c.Queue, now, gate, dry); err != nil {
 		return queue.Gate{}, err
 	}
@@ -155,7 +155,8 @@ func (a *app) writeQueueGate(cfg *queue.Config, now time.Time, gate queue.Gate, 
 	old, oldErr := queue.ReadGate(cfg.Gate)
 	stat, statErr := os.Stat(cfg.Gate)
 	changed := oldErr != nil || !slices.Equal(old.Live, gate.Live) || !slices.Equal(old.Open, gate.Open) || !slices.Equal(old.Lane, gate.Lane) ||
-		old.OpenByRoot == nil || !maps.EqualFunc(old.OpenByRoot, gate.OpenByRoot, slices.Equal[[]string])
+		old.OpenByRoot == nil || !maps.EqualFunc(old.OpenByRoot, gate.OpenByRoot, slices.Equal[[]string]) ||
+		old.CritOnly == nil || !maps.Equal(old.CritOnly, gate.CritOnly)
 	stale := statErr != nil || old.At.After(now) || now.Sub(stat.ModTime()) > time.Hour
 	if !changed && !stale {
 		return nil
@@ -425,7 +426,7 @@ func queueView(c *config.Config, alive map[string]session.Info, judge queueJudge
 		}
 		return info.ModTime().After(at)
 	}
-	return queue.View{Now: now, Lead: c.Lead, WeekendCrit: cfg.WeekendCrit, Log: a.log,
+	return queue.View{Now: now, Lead: c.Lead, Rest: cfg.Rest(), Log: a.log,
 		Frozen:   func(dir string) (bool, error) { return frozen[filepath.Clean(dir)], frozenErr },
 		Projects: func() []queue.Ticket { return a.queueWakeProjects(c) },
 		Serious:  func(project string) bool { return slices.Contains(live, project) },

@@ -39,7 +39,7 @@ func TestParseLevel(t *testing.T) {
 
 // Ворота не зависят ни от чего, кроме конфига: open — ступень вне корней, open_by_root — ступени корней, lane пуст.
 func TestUserGate(t *testing.T) {
-	g := UserGate(LevelHigh, map[string]Level{"/h/git": LevelMed, "/h/work": LevelLow, "/h/x": LevelHigh})
+	g := UserGate(LevelHigh, map[string]Level{"/h/git": LevelMed, "/h/work": LevelLow, "/h/x": LevelHigh}, Rest{}, at("2026-11-14T12:00:00+01:00"))
 	if len(g.Open) != 0 || g.Open == nil || g.Lane == nil || len(g.Lane) != 0 {
 		t.Fatalf("вне корней HIGH и пустой lane: %+v", g)
 	}
@@ -49,7 +49,7 @@ func TestUserGate(t *testing.T) {
 	if pairs, ok := g.OpenByRoot["/h/x"]; !ok || pairs == nil || len(pairs) != 0 {
 		t.Fatalf("корень HIGH в карте пустым списком: tk видит, что планка посчитана: %v", g.OpenByRoot)
 	}
-	if g := UserGate(LevelMed, nil); !slices.Equal(g.Open, LevelMed.Pairs()) || len(g.Lane) != 0 || g.OpenByRoot == nil || len(g.OpenByRoot) != 0 {
+	if g := UserGate(LevelMed, nil, Rest{}, at("2026-11-14T12:00:00+01:00")); !slices.Equal(g.Open, LevelMed.Pairs()) || len(g.Lane) != 0 || g.OpenByRoot == nil || len(g.OpenByRoot) != 0 {
 		t.Fatalf("level MED без пространств: %+v", g)
 	}
 }

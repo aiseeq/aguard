@@ -121,13 +121,26 @@ func (l Level) Pairs() []string {
 }
 
 // UserGate — ворота по слову пользователя: open — ступень вне корней, open_by_root — ступень каждого корня (HIGH тоже:
-// tk видит, что планка посчитана), lane пуст всегда — поле читает lane llmark.
-func UserGate(level Level, spaces map[string]Level) Gate {
-	byRoot := make(map[string][]string, len(spaces))
+// tk видит, что планка посчитана), lane пуст всегда — поле читает lane llmark. В день отдыха корни rest и все корни
+// spaces внутри них — в crit_only с причиной и без открытых пар: tk берёт самый длинный корень проекта, и вложенный
+// корень не должен открыть то, что закрыл внешний.
+func UserGate(level Level, spaces map[string]Level, rest Rest, now time.Time) Gate {
+	byRoot := make(map[string][]string, len(spaces)+len(rest.Roots))
 	for root, l := range spaces {
 		byRoot[root] = l.Pairs()
 	}
-	return Gate{Open: level.Pairs(), Lane: []string{}, OpenByRoot: byRoot}
+	critOnly := map[string]string{}
+	if why := rest.Day(now); why != "" {
+		for _, root := range rest.Roots {
+			byRoot[root] = []string{}
+		}
+		for root := range byRoot {
+			if slices.ContainsFunc(rest.Roots, func(r string) bool { return underRoot(root, r) }) {
+				byRoot[root], critOnly[root] = []string{}, why
+			}
+		}
+	}
+	return Gate{Open: level.Pairs(), Lane: []string{}, OpenByRoot: byRoot, CritOnly: critOnly}
 }
 
 type Gate struct {
@@ -138,6 +151,9 @@ type Gate struct {
 	Lane []string `json:"lane"`
 	// OpenByRoot — планка папок пространства: tk берёт самый длинный корень, куда входит проект, иначе Open.
 	OpenByRoot map[string][]string `json:"open_by_root"`
+	// CritOnly — корни в день отдыха и причина (суббота, воскресенье, праздник): новая работа там — только CRIT,
+	// HIGH тоже закрыт. Корень есть и в OpenByRoot с пустыми парами: tk без этого поля закроет хотя бы MED и LOW.
+	CritOnly map[string]string `json:"crit_only"`
 }
 
 func ReadGate(path string) (Gate, error) {
@@ -164,6 +180,9 @@ func (g Gate) Write(path string) error {
 	}
 	if g.OpenByRoot == nil {
 		g.OpenByRoot = map[string][]string{}
+	}
+	if g.CritOnly == nil {
+		g.CritOnly = map[string]string{}
 	}
 	b, e := json.Marshal(g)
 	if e != nil {
@@ -225,7 +244,7 @@ type View struct {
 	Log                  *slog.Logger // пропуски проекта при ошибке источника: сам источник пишет предупреждение
 	AdminNext            func(string, string) (Ticket, bool, error)
 	AdminFor             func(string) string
-	WeekendCrit          []string // папки проектов: в субботу и воскресенье из строк идут только CRIT
+	Rest                 Rest // дни отдыха папок: из строк идут только CRIT
 
 	restingSessions map[string]bool // сессии этих папок в такой день, считает Step
 }
@@ -339,7 +358,7 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 	}
 	if t.Prio == "HIGH" {
 		if t.Status == "открыт" && restingDir(t.Dir, v) {
-			st.Seen, st.Taken = restEnd(v.Now), false // срок 4 ч пойдёт с понедельника; значение одно на выходные, state.json не переписывается
+			st.Seen, st.Taken = v.Rest.End(v.Now), false // срок 4 ч пойдёт с первого рабочего дня; значение одно на цепочку дней отдыха, state.json не переписывается
 			return nil
 		}
 		return s.highNotices(t, st, v)
@@ -355,22 +374,8 @@ func (s *State) dropFrozenWakes(t Ticket) {
 	}
 }
 
-// restingDir — суббота или воскресенье, и папка проекта в weekend_crit.
-func restingDir(dir string, v View) bool {
-	if day := v.Now.Weekday(); day != time.Saturday && day != time.Sunday {
-		return false
-	}
-	return slices.ContainsFunc(v.WeekendCrit, func(root string) bool { return underRoot(dir, root) })
-}
-
-// restEnd — понедельник 00:00 после субботы или воскресенья now.
-func restEnd(now time.Time) time.Time {
-	days := 2
-	if now.Weekday() == time.Sunday {
-		days = 1
-	}
-	return time.Date(now.Year(), now.Month(), now.Day()+days, 0, 0, 0, 0, now.Location())
-}
+// restingDir — день отдыха, и папка проекта в queue.rest_crit.
+func restingDir(dir string, v View) bool { return v.Rest.Covers(dir, v.Now) }
 
 func underRoot(dir, root string) bool {
 	return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
@@ -501,7 +506,7 @@ func (s *State) backNotices(t Ticket, st *ticketState, v View) []Notice {
 		return nil
 	}
 	if v.restingSessions[t.Back] {
-		st.Closed = restEnd(v.Now) // срок 7 суток не идёт, пока получатель на выходном
+		st.Closed = v.Rest.End(v.Now) // срок 7 суток не идёт, пока получатель на дне отдыха
 		return nil
 	}
 	line := fmt.Sprintf("aguard: закрыт %s/%s (%s) — %s", t.Project, t.Slug, t.Status, t.Title)

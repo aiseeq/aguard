@@ -43,7 +43,7 @@ type world struct {
 	mode       string
 	now        time.Time
 
-	weekendCrit []string
+	rest Rest
 }
 
 func newWorld(mode string) *world {
@@ -55,7 +55,7 @@ func newWorld(mode string) *world {
 
 func (w *world) view() View {
 	return View{
-		Now: w.now, Lead: "lead", WeekendCrit: w.weekendCrit,
+		Now: w.now, Lead: "lead", Rest: w.rest,
 		Serious: func(project string) bool { return w.mode == ModeOn },
 		Alive:   func(n string) bool { return w.live[n] },
 		Free:    func(n string) bool { w.asked[n]++; return w.free[n] },

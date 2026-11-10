@@ -301,7 +301,9 @@ free_after = "2m"
 git_roots = ["~/git", "~/work"]
 dirs = ["~/docs"]
 skip = [] # папки проектов, которые очередь не читает: список — только в конфиге машины
-weekend_crit = [] # папки проектов, где в субботу и воскресенье из строк идут только CRIT
+rest_crit = [] # папки, где в дни отдыха (сб, вс, праздники rest_holidays) из новой работы идёт только CRIT: ворота crit_only, будильник, «HIGH не взят»
+rest_zone = "" # пояс даты дня отдыха, обязателен при rest_crit, например "Europe/Nicosia"
+rest_holidays = "" # календарь праздников, обязателен при rest_crit: "CY"
 level = "HIGH" # ступень ворот вне корней spaces по слову пользователя: HIGH — только CRIT и HIGH, MED — и MED-*, LOW — и LOW-* (docs/spec.md, «Очередь: ворота»)
 spaces = {} # корень пространства и его ступень, те же HIGH, MED, LOW: {"~/x" = "MED"}
 frozen = "~/.config/queue/frozen"

@@ -275,7 +275,7 @@ func TestWakeNoMasterWeekendOnlyCrit(t *testing.T) {
 	w := freezeWorld()
 	w.ts[0].Master = ""
 	w.view.Now = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
-	w.view.WeekendCrit = []string{"/p"}
+	w.view.Rest = cyRest("/p")
 	if ns := w.step(); len(ns) != 0 {
 		t.Fatal(ns)
 	}

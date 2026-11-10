@@ -157,9 +157,12 @@ func TestQueueTasksProject(t *testing.T) {
 // Поля от демона доходят до View и списка тикетов: без этого правила молча не действуют при зелёных тестах логики.
 func TestQueueWiring(t *testing.T) {
 	b := newQueueBench(t, `[{"repo":"p","prio":"HIGH","status":"открыт","path":"docs/tasks/20261104-1000-HIGH-j.md","slug":"j","title":"журнал","journal":true}]`, "[]")
-	b.c.Queue.WeekendCrit = []string{"/h/work"}
+	b.c.Queue.RestCrit, b.c.Queue.RestZone, b.c.Queue.RestHolidays = []string{"/h/work"}, "Europe/Nicosia", "CY"
+	if err := b.c.Queue.Validate("/h"); err != nil {
+		t.Fatal(err)
+	}
 	v := queueView(b.c, nil, nil, time.Now(), b.a, nil, nil)
-	if !slices.Equal(v.WeekendCrit, b.c.Queue.WeekendCrit) {
+	if !slices.Equal(v.Rest.Roots, []string{"/h/work"}) || v.Rest.Zone.String() != "Europe/Nicosia" || len(v.Rest.Holidays) == 0 {
 		t.Fatalf("View: %+v", v)
 	}
 	tasks := filepath.Join(b.dir, "git", "p", "docs", "tasks")
