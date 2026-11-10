@@ -12,6 +12,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/aguard/internal/trackfd"
+	"github.com/aiseeq/aguard/internal/yield"
 )
 
 // trackRetry — пауза перед новой парой: помощник ещё не поднялся или экземпляр упал.
@@ -23,6 +24,19 @@ func (a *app) fetchPair() (trackfd.Pair, error) {
 		return a.trackFetch()
 	}
 	return trackfd.Fetch(trackfd.Socket, 0)
+}
+
+// trackInstances — экземпляры слежения демона: замер каждого уступает занятой машине своим Yielder (замеры экземпляра
+// идут по одному, экземпляры — параллельно).
+func (a *app) trackInstances() []track.Config {
+	insts := track.Instances(a.home)
+	for i := range insts {
+		name := insts[i].Name
+		insts[i].Yield = yield.New(procRoot, func(err error) {
+			a.warn("track", "замер машины для паузы замера", "name", name, "err", err)
+		}).Wait
+	}
+	return insts
 }
 
 // trackLoop ведёт один экземпляр до отмены ctx. Причина простоя пишется один раз на смену: помощника может не быть часами.

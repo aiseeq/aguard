@@ -85,7 +85,7 @@ func TestDeleteReachesLogAndSnapshot(t *testing.T) {
 	if !tr.dirty {
 		t.Fatal("удаление не пометило таблицу изменённой")
 	}
-	tr.startMeasure(make(chan measureDone, 1), false) // молодых нет: замера не будет
+	tr.startMeasure(t.Context(), make(chan measureDone, 1), false) // молодых нет: замера не будет
 	if tr.measuring {
 		t.Fatal("замер запущен без записей")
 	}

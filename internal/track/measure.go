@@ -1,6 +1,7 @@
 package track
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -56,9 +57,52 @@ type inoKey struct {
 	ino uint64
 }
 
+// yieldEvery — через сколько записей каталога обход большой записи спрашивает, не занята ли машина. Вопрос сам по
+// себе дёшев: Yielder меряет машину не чаще раза в секунду, между замерами это сравнение времени. N ограничивает
+// только чтение после того, как секунда прошла: 256 lstat при холодном кэше метаданных — по оценке (~0,1 мс случайного
+// чтения NVMe на lstat, не замер) ~25 мс; у обхода disk 1024 файла: на файл там ещё FIEMAP, вдвое больше вызовов.
+const yieldEvery = 256
+
+// pacer — уступка занятой машине внутри одного замера: перед каждой записью и папкой-контейнером и каждые yieldEvery
+// записей каталога внутри обхода (счёт — на весь замер); паузы и их время — в итог замера.
+type pacer struct {
+	ctx     context.Context
+	yield   func(context.Context) bool // true — была пауза; nil — без уступки
+	seen    int
+	stopped bool // замер отменён: обход сворачивается на ближайшей записи
+	pauses  int
+	paused  time.Duration
+}
+
+// wait — уступка; false — замер отменён (остановка демона), дальше не идём.
+func (p *pacer) wait() bool {
+	if p.ctx.Err() == nil && p.yield != nil { // уже отменён — не меряем машину и не ждём
+		start := time.Now()
+		if p.yield(p.ctx) {
+			p.pauses++
+			p.paused += time.Since(start)
+		}
+	}
+	p.stopped = p.ctx.Err() != nil
+	return !p.stopped
+}
+
+// step — одна запись каталога в обходе: каждая yieldEvery-я — уступка; false — замер отменён (и во вложенной папке:
+// родитель сворачивается на своей следующей записи).
+func (p *pacer) step() bool {
+	if p.stopped {
+		return false
+	}
+	if p.seen++; p.seen%yieldEvery == 0 {
+		return p.wait()
+	}
+	return true
+}
+
 // measure считает du записи: не выходит за пределы файловой системы,
-// жёсткие ссылки внутри записи считает один раз.
-func measure(path string, ino uint64) usage {
+// жёсткие ссылки внутри записи считает один раз. Отмена замера посреди обхода — размер неполон, итог замера
+// помечается прерванным и не применяется (runMeasure).
+func measure(path string, ino uint64, p *pacer) usage {
 	u := usage{path: path, ino: ino}
 	var st unix.Stat_t
 	if unix.Lstat(path, &st) != nil || (ino != 0 && st.Ino != ino) {
@@ -81,25 +125,28 @@ func measure(path string, ino uint64) usage {
 	}
 	add(&st)
 	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-		walk(path, st.Dev, add)
+		walk(path, st.Dev, add, p)
 	}
 	return u
 }
 
-func walk(dir string, dev uint64, add func(*unix.Stat_t)) {
+func walk(dir string, dev uint64, add func(*unix.Stat_t), p *pacer) {
 	ents, err := os.ReadDir(dir)
 	if err != nil { //nolint:silent-error-handling // папку удалили во время замера: в размер идёт то, что успели обойти
 		return
 	}
 	for _, e := range ents {
-		p := filepath.Join(dir, e.Name())
+		if !p.step() {
+			return // замер отменён
+		}
+		path := filepath.Join(dir, e.Name())
 		var st unix.Stat_t
-		if unix.Lstat(p, &st) != nil || st.Dev != dev {
+		if unix.Lstat(path, &st) != nil || st.Dev != dev {
 			continue
 		}
 		add(&st)
 		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-			walk(p, dev, add)
+			walk(path, dev, add, p)
 		}
 	}
 }

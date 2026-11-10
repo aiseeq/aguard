@@ -77,3 +77,17 @@ func (s *syncBuilder) String() string {
 	defer s.mu.Unlock()
 	return s.b.String()
 }
+
+// Замер каждого экземпляра слежения демона уступает занятой машине (тикет io-freeze-aguard).
+func TestTrackInstancesYield(t *testing.T) {
+	a := &app{home: t.TempDir()}
+	insts := a.trackInstances()
+	if len(insts) == 0 {
+		t.Fatal("нет экземпляров")
+	}
+	for _, c := range insts {
+		if c.Yield == nil {
+			t.Fatalf("экземпляр %s без уступки", c.Name)
+		}
+	}
+}

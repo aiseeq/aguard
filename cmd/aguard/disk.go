@@ -27,7 +27,7 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/waits"
-	"github.com/aiseeq/akit/pressure"
+	"github.com/aiseeq/aguard/internal/yield"
 )
 
 func (a *app) diskCmd(ctx context.Context, args []string) error {
@@ -141,18 +141,19 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 		a.warn("disk", "прогноз запаса", "err", err)
 	}
 	owners := a.diskOwners(cfg)
-	yield := a.diskYield(ctx)
+	// Пауза обхода на занятой машине — internal/yield (общая с замером слежения).
+	yielder := yield.New(procRoot, func(err error) { a.warn("disk", "замер машины для паузы обхода", "err", err) })
 	walkReason := st.WalkDue(&cfg.Disk, now, free)
 	measure := func(entries []string) map[string]disk.Usage {
 		readBefore, readErr := iowatch.SelfReadBytes(procRoot)
-		usage := cfg.Disk.MeasureAll(ctx, entries, yield.wait)
+		usage := cfg.Disk.MeasureAll(ctx, entries, func() { yielder.Wait(ctx) })
 		var files, fiemaps int64
 		for _, u := range usage {
 			files += u.Files
 			fiemaps += u.Fiemaps
 		}
 		attrs := []any{"reason", string(walkReason), "entries", len(entries), "files", files, "fiemaps", fiemaps,
-			"took", time.Since(now).Round(time.Second).String(), "paused", yield.paused.String(), "pauses", yield.pauses,
+			"took", time.Since(now).Round(time.Second).String(), "paused", yielder.Paused.String(), "pauses", yielder.Pauses,
 			"interrupted", ctx.Err() != nil}
 		// Цена обхода: read_bytes всего процесса за обход, тикет self-io-reads. Прочие наблюдатели — фон поверх.
 		readAfter, err := iowatch.SelfReadBytes(procRoot)
@@ -524,61 +525,4 @@ func (a *app) diskFreeTest(cfg *disk.Config, minFree, to string) error {
 	}
 	cfg.FreeMode = disk.FreeAlert
 	return a.diskLowFree(cfg, to, msg, free)
-}
-
-// diskYielder — пауза обхода disk на занятой машине: обход ~/.cache — миллионы stat и FIEMAP, при холодном кэше
-// метаданных это чтение диска (30.10 12:47–12:51: 22 МБ/с метаданных btrfs, обход 4+ мин вместо ~20 с, его чтение
-// держало очередь graft heavy — замер akit-master). Машину меряет правило akit (как `busy`), не чаще раза в секунду;
-// занята — 2 с паузы: обход не встаёт насовсем, а идёт урывками.
-type diskYielder struct {
-	ctx    context.Context
-	meter  *pressure.Meter
-	last   time.Time
-	pauses int
-	paused time.Duration
-	warned bool
-	warn   func(error)
-}
-
-const (
-	diskYieldCheck = time.Second
-	diskYieldPause = 2 * time.Second
-)
-
-func (a *app) diskYield(ctx context.Context) *diskYielder {
-	return &diskYielder{ctx: ctx, meter: pressure.NewMeter(procRoot), warn: func(err error) {
-		a.warn("disk", "замер машины для паузы обхода", "err", err)
-	}}
-}
-
-func (y *diskYielder) wait() {
-	if time.Since(y.last) < diskYieldCheck {
-		return
-	}
-	y.last = time.Now()
-	// Пороги пользователя — те же, что у busy и очереди graft ($XDG_CONFIG_HOME/akit/pressure.yaml поверх умолчаний);
-	// файл битый — ошибка, умолчаниями не подменяем.
-	limits, err := pressure.UserLimits()
-	var v pressure.Verdict
-	if err == nil {
-		v, err = y.meter.Check(y.ctx, limits, "", false)
-	}
-	if err != nil {
-		if !y.warned {
-			y.warned = true
-			y.warn(err)
-		}
-		return
-	}
-	if !v.Busy() {
-		return
-	}
-	start := time.Now()
-	select {
-	case <-y.ctx.Done():
-	case <-time.After(diskYieldPause):
-	}
-	y.pauses++
-	y.paused += time.Since(start)
-	y.last = time.Now()
 }

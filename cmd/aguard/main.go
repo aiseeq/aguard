@@ -65,7 +65,6 @@ import (
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/restart"
-	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/aguard/internal/trackfd"
 	"github.com/aiseeq/akit/session"
 )
@@ -298,7 +297,7 @@ func (a *app) run(ctx context.Context) error {
 	wg.Go(func() { a.ioLoop(ctx, usr2) })
 	wg.Go(func() { a.heapLoop(ctx, usr1) })
 	wg.Go(func() { a.guiLoop(ctx) })
-	insts := track.Instances(a.home)
+	insts := a.trackInstances()
 	for i := range insts {
 		wg.Go(func() { a.trackLoop(ctx, &insts[i], trackRetry) }) //nolint:unbounded-goroutine-fanout // экземпляров два, список задан в track.Instances
 	}

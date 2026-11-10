@@ -35,12 +35,18 @@ type Config struct {
 	YoungEvery  time.Duration // частота замера молодых записей
 	Persist     time.Duration // как часто копировать снимок на диск
 	RotateBytes int64         // размер owners.jsonl до ротации
+	// Yield — уступка занятой машине в замере (internal/yield): зовётся перед каждой записью и папкой-контейнером и
+	// каждые yieldEvery записей каталога внутри обхода; true — была пауза, отмена ctx обрывает паузу. nil — без уступки.
+	// Зовётся из горутины замера, замеры одного экземпляра идут по одному.
+	Yield func(context.Context) bool
 }
 
 type counters struct {
 	events, creates, deletes, renames, overflow int
 	procOK, procReaped, procUnknown             int
 	sessPpid, sessCgroup, noSession             int
+	measurePauses                               int // пауз замера на занятой машине
+	measurePaused                               time.Duration
 }
 
 // Tracker — состояние сторожа. Все поля меняет только главная горутина.
@@ -76,6 +82,9 @@ type measureDone struct {
 	job     measureJob
 	usages  []usage
 	listing map[string][]string
+	pauses  int           // уступок занятой машине
+	paused  time.Duration // их время
+	aborted bool          // отменён посреди замера: неполон, не применяется
 }
 
 // pollable — дескриптор как файл с опросом: Read просыпается при Close, горутины чтения не остаются.
@@ -161,7 +170,7 @@ func (t *Tracker) loop(ctx context.Context) error {
 	hourly := time.NewTicker(time.Hour)
 	defer hourly.Stop()
 	t.log.Info(fmt.Sprintf("aguard слежение: следим за %v, контейнеры %v, записей при старте %d", t.cfg.Roots, t.cfg.Containers, len(t.entries)))
-	t.startMeasure(doneCh, true)
+	t.startMeasure(ctx, doneCh, true)
 	for {
 		select {
 		case evs := <-evCh:
@@ -173,7 +182,7 @@ func (t *Tracker) loop(ctx context.Context) error {
 		case d := <-doneCh:
 			t.finishMeasure(d)
 		case <-tick.C:
-			t.startMeasure(doneCh, time.Since(t.lastFull) >= t.cfg.Full)
+			t.startMeasure(ctx, doneCh, time.Since(t.lastFull) >= t.cfg.Full)
 		case <-hourly.C:
 			t.logStats()
 		case <-ctx.Done():
@@ -423,7 +432,7 @@ func (t *Tracker) close(e *record.Entry, ev, to string, now time.Time) {
 }
 
 // startMeasure запускает du в отдельной горутине, чтобы не задерживать разбор событий.
-func (t *Tracker) startMeasure(done chan<- measureDone, full bool) {
+func (t *Tracker) startMeasure(ctx context.Context, done chan<- measureDone, full bool) {
 	if t.measuring {
 		return
 	}
@@ -452,23 +461,53 @@ func (t *Tracker) startMeasure(done chan<- measureDone, full bool) {
 		return
 	}
 	t.measuring = true
-	go func() {
-		d := measureDone{job: job, listing: map[string][]string{}}
-		for _, it := range job.items {
-			d.usages = append(d.usages, measure(it.path, it.ino))
+	go func() { done <- runMeasure(ctx, job, t.cfg.Yield) }()
+}
+
+// runMeasure — замер записей и листинг папок с уступкой занятой машине (yield, nil — без неё): полный замер на старте
+// при холодном кэше метаданных читал сотни МБ за секунды и давал фризы диска (тикет io-freeze-aguard). Уступают и
+// молодые замеры каждого тика: мелкий замер стоит одного сравнения времени на запись и не больше одного замера машины,
+// а в нём бывают и большие записи — свежая распаковка, найденная сверкой и ни разу не замеренная. Отмена ctx — итог
+// прерван.
+func runMeasure(ctx context.Context, job measureJob, yield func(context.Context) bool) measureDone {
+	d := measureDone{job: job, listing: map[string][]string{}}
+	p := &pacer{ctx: ctx, yield: yield}
+	for _, it := range job.items {
+		if !p.wait() {
+			break
 		}
-		for _, dir := range job.dirs {
-			if names, err := listDir(dir); err == nil {
-				d.listing[dir] = names
-			}
+		d.usages = append(d.usages, measure(it.path, it.ino, p))
+	}
+	for _, dir := range job.dirs {
+		if !p.wait() { // отменён — и в первом цикле: дальше не идём
+			break
 		}
-		done <- d
-	}()
+		if names, err := listDir(dir); err == nil {
+			d.listing[dir] = names
+		}
+	}
+	d.pauses, d.paused, d.aborted = p.pauses, p.paused, ctx.Err() != nil
+	return d
 }
 
 func (t *Tracker) finishMeasure(d measureDone) {
 	t.measuring = false
+	if d.aborted {
+		return // остановка демона посреди замера: неполные размеры и листинг не применяем
+	}
 	now := time.Now()
+	t.st.measurePauses += d.pauses
+	t.st.measurePaused += d.paused
+	// Полный замер — строкой INFO: первый (старт демона, переполнение fanotify) всегда — видно, что уступка работала,
+	// следующие — если были паузы. Молодые — каждую минуту: их паузы только в часовой сводке.
+	if d.job.full && (t.lastFull.IsZero() || d.pauses > 0) {
+		var files int64
+		for _, u := range d.usages {
+			files += u.files
+		}
+		t.log.Info("aguard слежение: полный замер", "name", t.cfg.Name, "entries", len(d.job.items), "dirs", len(d.job.dirs),
+			"files", files, "took", now.Sub(d.job.start).Round(time.Second).String(), "paused", d.paused.String(), "pauses", d.pauses)
+	}
 	for _, u := range d.usages {
 		e := t.entries[u.path]
 		if e == nil || !u.ok || (e.Ino != 0 && u.ino != e.Ino) {
@@ -601,9 +640,10 @@ func (t *Tracker) logStats() {
 	tombs, open := t.tombs.size()
 	t.log.Info(fmt.Sprintf("aguard слежение: за час событий %d (создано %d, удалено %d, переименовано %d, переполнений %d); "+
 		"создатель: жив %d, восстановлен %d, неизвестен %d; сессия по ppid %d, по cgroup %d, нет %d; "+
-		"потерь proc connector %d; записей %d; надгробий %d (без выхода %d)",
+		"потерь proc connector %d; записей %d; надгробий %d (без выхода %d); пауз замера на занятой машине %d (%v)",
 		s.events, s.creates, s.deletes, s.renames, s.overflow, s.procOK, s.procReaped, s.procUnknown,
-		s.sessPpid, s.sessCgroup, s.noSession, t.tombs.overrun.Load(), len(t.entries), tombs, open))
+		s.sessPpid, s.sessCgroup, s.noSession, t.tombs.overrun.Load(), len(t.entries), tombs, open,
+		s.measurePauses, s.measurePaused.Round(time.Second)))
 	t.st = counters{}
 }
 
