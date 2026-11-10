@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/iowatch"
+	"github.com/aiseeq/akit/timearg"
 )
 
 // Команды наблюдателя io: запись в переднем плане, итог случаев, ручной снимок службы и окно по нему,
@@ -28,12 +29,18 @@ func (a *app) ioCmd(ctx context.Context, args []string) error {
 	switch cmd {
 	case "report":
 		fl := flag.NewFlagSet("io report", flag.ContinueOnError)
-		since := fl.Duration("since", 24*time.Hour, "глубина")
+		since := fl.String("since", "24h", "с какого времени: 30m, 2h, 3d, ЧЧ:ММ, RFC3339")
+		until := fl.String("until", "", "до какого времени, в тех же формах; пусто — сейчас")
+		who := fl.String("who", "", "только случаи, где подстрока есть в главной cgroup, в имени процесса топов (запись, чтение, своп) или его cmdline")
 		minDur := fl.Duration("min", 0, "случаи от такой длительности — списком и в виновниках (0 — case_min из конфига)")
 		asJSON := fl.Bool("json", false, "итог JSON")
 		file := fl.String("file", cases, "файл сводок; не файл службы — читается как есть, без запроса службе")
 		parse(fl, rest)
-		return a.ioReport(*file, *file == cases, time.Now().Add(-*since), time.Now(), *minDur, *asJSON)
+		from, to, err := ioWindow(*since, *until, time.Now())
+		if err != nil {
+			return err
+		}
+		return a.ioReport(*file, *file == cases, from, to, *minDur, *who, *asJSON)
 	case "route":
 		fl := flag.NewFlagSet("io route", flag.ContinueOnError)
 		since := fl.Duration("since", 7*24*time.Hour, "глубина")
@@ -196,6 +203,36 @@ func (a *app) ioDump(dir string) error {
 		}
 	}
 	return errors.New("aguard io dump: снимок не появился за 10 с (mode = off или служба не отвечает — см. журнал)")
+}
+
+// ioWindow — окно [since, until) из аргументов в формах timearg (30m, 3d, ЧЧ:ММ, RFC3339) или Go Duration (3h45m — так
+// -since report понимал до 10.11); until пусто — now; until раньше since — ошибка.
+func ioWindow(since, until string, now time.Time) (time.Time, time.Time, error) {
+	from, err := ioTimeArg(since, now)
+	if err != nil {
+		return from, now, fmt.Errorf("-since: %w", err)
+	}
+	to := now
+	if until != "" {
+		if to, err = ioTimeArg(until, now); err != nil {
+			return from, to, fmt.Errorf("-until: %w", err)
+		}
+	}
+	if to.Before(from) {
+		return from, to, fmt.Errorf("-until %s раньше -since %s", to.Format(time.RFC3339), from.Format(time.RFC3339))
+	}
+	return from, to, nil
+}
+
+// ioTimeArg — время по timearg, иначе now минус Go Duration; ошибка — от timearg, с подсказкой форм.
+func ioTimeArg(s string, now time.Time) (time.Time, error) {
+	at, err := timearg.Parse(s, now)
+	if err != nil {
+		if d, durErr := time.ParseDuration(s); durErr == nil {
+			return now.Add(-d), nil
+		}
+	}
+	return at, err
 }
 
 // parseIOTime — ЧЧ:ММ[:СС] сегодня по местному времени или RFC3339.

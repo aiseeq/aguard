@@ -57,7 +57,7 @@ func TestIOReportSocketAccept(t *testing.T) {
 	go s.wait(time.Minute) // горутина цикла: исполняет extra
 	acceptWaitSocket(t, socket)
 
-	if err := s.a.ioReport(s.path, true, now.Add(-24*time.Hour), now, 0, true); err != nil {
+	if err := s.a.ioReport(s.path, true, now.Add(-24*time.Hour), now, 0, "", true); err != nil {
 		t.Fatal(err)
 	}
 	if sum := acceptSummary(t, out.Bytes()); sum.Total != 1 || sum.IdleMS != 2500 {
@@ -104,7 +104,7 @@ func TestIOReportSocketNoServiceAccept(t *testing.T) {
 	if err := iowatch.SaveCases(s.path, []iowatch.Case{acceptCase(now, time.Hour, 3000)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.a.ioReport(s.path, true, now.Add(-24*time.Hour), now, 0, true); err != nil {
+	if err := s.a.ioReport(s.path, true, now.Add(-24*time.Hour), now, 0, "", true); err != nil {
 		t.Fatal(err)
 	}
 	if sum := acceptSummary(t, out.Bytes()); sum.Total != 1 || sum.IdleMS != 3000 {
@@ -121,7 +121,7 @@ func TestIOReportSocketBusyAccept(t *testing.T) {
 	}
 	go s.serve() // цикла нет: extra никто не исполняет
 	acceptWaitSocket(t, socket)
-	err := s.a.ioReport(s.path, true, now.Add(-24*time.Hour), now, 0, true)
+	err := s.a.ioReport(s.path, true, now.Add(-24*time.Hour), now, 0, "", true)
 	if err == nil || errors.Is(err, errIONotRunning) {
 		t.Fatalf("занятая служба: %v", err)
 	}

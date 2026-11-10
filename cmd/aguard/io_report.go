@@ -197,8 +197,9 @@ func (a *app) ioLoadCases(cfg *iowatch.Config, path string, live bool, since tim
 	return iowatch.LoadCases(path)
 }
 
-// ioReport — итог случаев [since, until): live запрашивает сводки из службы, без службы читает файл.
-func (a *app) ioReport(path string, live bool, since, until time.Time, minDur time.Duration, asJSON bool) error {
+// ioReport — итог случаев [since, until), с who — только случаев, где он виновник (iowatch.FilterCases): live
+// запрашивает сводки из службы, без службы читает файл.
+func (a *app) ioReport(path string, live bool, since, until time.Time, minDur time.Duration, who string, asJSON bool) error {
 	cfg, err := a.ioConfig()
 	if err != nil {
 		return err
@@ -210,7 +211,7 @@ func (a *app) ioReport(path string, live bool, since, until time.Time, minDur ti
 	if err != nil {
 		return err
 	}
-	sum := iowatch.Summarize(cases, since, until, minDur)
+	sum := iowatch.Summarize(iowatch.FilterCases(cases, who), since, until, minDur)
 	if asJSON {
 		enc := json.NewEncoder(a.out)
 		enc.SetIndent("", "  ")
@@ -272,7 +273,14 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 	for i := range s.Cases[:min(ioReportCases, len(s.Cases))] {
 		c := &s.Cases[i]
 		fmt.Fprintf(w, "- %s\n", ioCaseLine(c))
-		if k := c.Culprits; k != nil && len(k.ProcessDetails) > 0 { // случаи до 31.10 — без команд
+		k := c.Culprits
+		if k == nil || len(k.ProcessDetails) == 0 { // случаи до 31.10 — без команд
+			continue
+		}
+		// главная читала — топ чтения: писатели такого случая — не она (08.11 04:25:48: chrome 4 МБ записи при ugrep 3 355 МБ чтения)
+		if k.ReadMostly() {
+			writeProcessIOTop(w, "  чтение процессов", k.ProcRead[:min(3, len(k.ProcRead))], ioBytes, k.ProcessDetails)
+		} else {
 			writeProcessIOTop(w, "  запись процессов", k.ProcWrite[:min(3, len(k.ProcWrite))], ioBytes, k.ProcessDetails)
 		}
 	}

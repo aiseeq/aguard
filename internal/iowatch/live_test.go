@@ -275,6 +275,36 @@ func TestProfileKindAgentServiceAndWorkerWithoutClass(t *testing.T) {
 	}
 }
 
+// Повтор бойца — unit worker-<job>-<N>.service, а job.json лежит в <job>/: класс оттуда; имя задания с числом на конце
+// (1110-1118-2026-11-10) — своя папка раньше обрезанной. worker-settle.service — служба worker, не боец.
+func TestProfileKindWorkerRetryAndSettle(t *testing.T) {
+	state := t.TempDir()
+	writeFile(t, filepath.Join(state, "1107-1220-dream-page-dups", "job.json"), `{"class":"правка-по-ревью"}`)
+	writeFile(t, filepath.Join(state, "1110-1118-2026-11-10", "job.json"), `{"class":"обход-сна"}`)
+	writeFile(t, filepath.Join(state, "1110-1118-2026", "job.json"), `{"class":"чужой"}`)
+	writeFile(t, filepath.Join(state, "1110-1200-7", "job.json"), `{"id":"x"}`)
+	writeFile(t, filepath.Join(state, "1110-1200", "job.json"), `{"class":"чужой"}`)
+	const app = "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+	for unit, want := range map[string]string{
+		"worker-1107-1220-dream-page-dups-1.service": "worker:правка-по-ревью",
+		"worker-1107-1220-dream-page-dups.service":   "worker:правка-по-ревью",
+		"worker-1110-1118-2026-11-10.service":        "worker:обход-сна",
+		"worker-1110-1118-2026-11-10-2.service":      "worker:обход-сна",
+		"worker-settle.service":                      "service:worker-settle.service",
+	} {
+		if got := ProfileKind(app+unit, state, func(err error) { t.Errorf("%s: %v", unit, err) }); got != want {
+			t.Errorf("%s: %q, ждали %q", unit, got, want)
+		}
+	}
+	// без класса в своём job.json — worker:?, к соседу с обрезанным хвостом не идём; хвост не число — не повтор
+	for _, unit := range []string{"worker-1110-1200-7.service", "worker-1107-1220-dream-page-dups-x.service", "worker-1107-1220-dream-page-dups-0.service"} {
+		var noClass error
+		if got := ProfileKind(app+unit, state, func(err error) { noClass = err }); got != KindWorkerUnknown || noClass == nil {
+			t.Errorf("%s: %q %v", unit, got, noClass)
+		}
+	}
+}
+
 // Свод профилей вида: медиана и p90 по ближайшему рангу, последний конец.
 func TestSummarizeProfilesQuantiles(t *testing.T) {
 	base := time.Date(2026, 10, 29, 21, 0, 0, 0, time.Local)

@@ -95,18 +95,31 @@ func readJob(path string) (*Job, error) {
 
 // ByUnit — задание по unit бойца на ноуте: worker-<id>.service, повтор — worker-<id>-<n>.service.
 func (j *Jobs) ByUnit(unit string) (*Job, error) {
-	id, ok := strings.CutPrefix(strings.TrimSuffix(unit, ".service"), "worker-")
-	if !ok {
-		return nil, nil
+	for _, id := range JobIDs(unit) {
+		if v, err := j.get(id); v != nil || err != nil {
+			return v, err
+		}
 	}
-	if v, err := j.get(id); v != nil || err != nil {
-		return v, err
+	return nil, nil
+}
+
+// settleUnit — служба worker, что подводит итоги заданий (llmark tool/cmd/worker/settle.go): unit worker-*, но не боец.
+const settleUnit = "worker-settle"
+
+// JobIDs — id задания (папка в состоянии worker) по unit бойца на ноуте, по порядку проб: worker-<id>.service — id;
+// повтор worker-<id>-<n>.service — сначала имя целиком (у задания бывает число на конце: 1110-1118-2026-11-10), потом
+// без хвоста -<n>. Не unit бойца (нет префикса worker-, служба worker-settle) — nil.
+func JobIDs(unit string) []string {
+	unit = strings.TrimSuffix(unit, ".service")
+	id, ok := strings.CutPrefix(unit, "worker-")
+	if !ok || unit == settleUnit {
+		return nil
 	}
 	i := strings.LastIndexByte(id, '-')
 	if i <= 0 || !isPid(id[i+1:]) { // хвоста повтора нет
-		return nil, nil
+		return []string{id}
 	}
-	return j.get(id[:i])
+	return []string{id, id[:i]}
 }
 
 // pcSpot — scope задания на PC: <префикс>-<имя дерева>.<16 hex>.scope (llmark tool/internal/pcguard.NewSpot).

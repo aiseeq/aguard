@@ -332,7 +332,7 @@ func TestReportTextAndJSONFromFile(t *testing.T) {
 	if err := iowatch.SaveCases(path, cases); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.ioReport(path, false, base.Add(-time.Minute), time.Now(), 0, false); err != nil {
+	if err := a.ioReport(path, false, base.Add(-time.Minute), time.Now(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
@@ -346,13 +346,79 @@ func TestReportTextAndJSONFromFile(t *testing.T) {
 		}
 	}
 	out.Reset()
-	if err := a.ioReport(path, false, base.Add(-time.Minute), time.Now(), time.Second, true); err != nil {
+	if err := a.ioReport(path, false, base.Add(-time.Minute), time.Now(), time.Second, "", true); err != nil {
 		t.Fatal(err)
 	}
 	var sum iowatch.Summary
 	if err := json.Unmarshal(out.Bytes(), &sum); err != nil || sum.Total != 3 || len(sum.Cases) != 1 || sum.Min != 1000 || len(sum.Hours) != 2 ||
 		sum.Quiet != 1 || len(sum.QuietWho) != 1 || sum.Capped != 1 || sum.CappedIdleMS != 8100 || len(sum.CappedWho) != 1 {
 		t.Fatalf("JSON: %+v %v", sum, err)
+	}
+}
+
+// report -since/-until в формах series (30m, ЧЧ:ММ, RFC3339) — окно [since, until); -who — случаи, где подстрока в главной
+// cgroup, топах процессов или их cmdline, и в тексте, и в -json; until раньше since — ошибка. У случая «в основном
+// чтение» в «самых длинных» — топ чтения, у остальных — записи (08.11 04:25:48: текст называл chrome 4 МБ записи, а
+// читал ugrep 3 355 МБ).
+func TestReportUntilWhoAndReadersOfLongest(t *testing.T) {
+	a, out := testIOApp(t)
+	path := filepath.Join(t.TempDir(), "cases.jsonl")
+	base := time.Now().Add(-2 * time.Hour).Truncate(time.Hour)
+	reader := alertCase(base.Add(30*time.Minute), 3000)
+	reader.Culprits.Main, reader.Culprits.MainRead, reader.Culprits.MainWrite = "/user.slice/agent-dream-1.scope", 3355<<20, 4<<20
+	reader.Culprits.ProcWrite = []iowatch.Ranked{{Name: "chrome(5788)", Value: 4 << 20}}
+	reader.Culprits.ProcRead = []iowatch.Ranked{{Name: "2.1.319(2244828)", Value: 3355 << 20}}
+	reader.Culprits.ProcessDetails = map[string]iowatch.ProcessDetails{"2.1.319(2244828)": {Cmdline: "ugrep -r x /home/aisee/.claude/projects"}}
+	writer := alertCase(base, 2500)
+	writer.Culprits.ProcRead = []iowatch.Ranked{{Name: "cat(3)", Value: 1 << 20}}
+	writer.Culprits.ProcessDetails = map[string]iowatch.ProcessDetails{"dd(2)": {Cmdline: "dd if=/dev/zero"}}
+	if err := iowatch.SaveCases(path, []iowatch.Case{writer, reader, alertCase(base.Add(2*time.Hour), 2600)}); err != nil {
+		t.Fatal(err)
+	}
+	report := func(args ...string) iowatch.Summary {
+		t.Helper()
+		out.Reset()
+		if err := a.ioCmd(context.Background(), append([]string{"report", "-file", path, "-json"}, args...)); err != nil {
+			t.Fatal(err)
+		}
+		var sum iowatch.Summary
+		if err := json.Unmarshal(out.Bytes(), &sum); err != nil {
+			t.Fatal(err)
+		}
+		return sum
+	}
+	since, until := base.Add(-time.Minute).Format(time.RFC3339), base.Add(time.Hour).Format(time.RFC3339)
+	if sum := report("-since", since, "-until", until); sum.Total != 2 || !sum.Until.Equal(base.Add(time.Hour)) {
+		t.Errorf("окно до %s: %d случаев, until %s", until, sum.Total, sum.Until)
+	}
+	if sum := report("-since", "4h", "-until", "1h"); sum.Total != 2 || !sum.Since.Before(base) {
+		t.Errorf("-since 4h -until 1h: %d случаев, %s — %s", sum.Total, sum.Since, sum.Until)
+	}
+	if sum := report("-since", "3h1m", "-until", "1h"); sum.Total != 2 { // Go Duration — как -since report до 10.11
+		t.Errorf("-since 3h1m: %d случаев, %s — %s", sum.Total, sum.Since, sum.Until)
+	}
+	if sum := report("-since", since, "-who", "ugrep"); sum.Total != 1 || len(sum.Cases) != 1 || !sum.Cases[0].Start.Equal(reader.Start) {
+		t.Errorf("-who ugrep: %d случаев %+v", sum.Total, sum.Cases)
+	}
+	if sum := report("-since", since, "-who", "sess7"); sum.Total != 2 {
+		t.Errorf("-who sess7 (главная cgroup): %d случаев", sum.Total)
+	}
+	if err := a.ioCmd(context.Background(), []string{"report", "-file", path, "-since", "10m", "-until", "1h"}); err == nil {
+		t.Error("until раньше since — не ошибка")
+	}
+	out.Reset()
+	if err := a.ioCmd(context.Background(), []string{"report", "-file", path, "-since", since, "-until", until}); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{"(в основном чтение)\n  чтение процессов: 2.1.319(2244828) 3355 МБ\n  cmd 2.1.319(2244828): ugrep",
+		"sess7\n  запись процессов: dd(2) 300 МБ\n  cmd dd(2): dd if=/dev/zero\n"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("нет %q в итоге:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "  запись процессов: chrome(5788)") || strings.Contains(text, "  чтение процессов: cat(3)") {
+		t.Errorf("у читателя — запись или у писателя — чтение:\n%s", text)
 	}
 }
 

@@ -411,3 +411,21 @@ func TestLeadMessageEmpty(t *testing.T) {
 		t.Errorf("сводка при пустом снимке: %s", msg)
 	}
 }
+
+// id задания по unit бойца: повтор — сначала имя целиком, потом без хвоста -<n>; хвост не число или с нуля — не
+// повтор; служба worker-settle и не worker-* — не боец.
+func TestJobIDs(t *testing.T) {
+	for unit, want := range map[string][]string{
+		"worker-1107-1220-dream-page-dups.service":   {"1107-1220-dream-page-dups"},
+		"worker-1107-1220-dream-page-dups-1.service": {"1107-1220-dream-page-dups-1", "1107-1220-dream-page-dups"},
+		"worker-1107-1220-dups-x.service":            {"1107-1220-dups-x"},
+		"worker-1107-1220-dups-0.service":            {"1107-1220-dups-0"},
+		"worker-12":                                  {"12"},
+		"worker-settle.service":                      nil,
+		"foo.service":                                nil,
+	} {
+		if got := JobIDs(unit); !slices.Equal(got, want) {
+			t.Errorf("%s: %q, ждали %q", unit, got, want)
+		}
+	}
+}

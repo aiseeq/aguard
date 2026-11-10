@@ -4,16 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"math"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/akit/proc"
 )
 
@@ -184,23 +185,29 @@ const (
 	KindWorkerUnknown = kindWorkerPrefix + "?"
 )
 
-// ProfileKind — вид cgroup: unit бойца `worker-<job>.service` — `worker:<класс>` из
-// <workerState>/<job>/job.json (нет файла или поля — `worker:?`, причина — в noClass: вид известен,
-// класс нет, проход не ошибка); scope сессии агента — agent; иначе `service:<unit>` (unit —
-// systemd-сервис пути или последний компонент).
+// ProfileKind — вид cgroup: unit бойца `worker-<job>.service`, повтор `worker-<job>-<N>.service` — `worker:<класс>` из
+// <workerState>/<job>/job.json (id задания — cpuwatch.JobIDs; нет файла или поля — `worker:?`, причина — в noClass:
+// вид известен, класс нет, проход не ошибка); scope сессии агента — agent; иначе `service:<unit>` (unit —
+// systemd-сервис пути или последний компонент; служба worker-settle — тоже).
 func ProfileKind(path, workerState string, noClass func(error)) string {
 	if _, _, ok := proc.SessionScope(path); ok {
 		return KindAgent
 	}
 	unit := proc.ServiceUnit(path)
-	if job, ok := strings.CutPrefix(unit, "worker-"); ok {
-		job = strings.TrimSuffix(job, ".service")
-		class, err := workerClass(filepath.Join(workerState, job, "job.json"))
-		if err != nil {
-			noClass(err)
-			return KindWorkerUnknown
+	if ids := cpuwatch.JobIDs(unit); ids != nil {
+		var err error
+		for _, id := range ids {
+			var class string
+			class, err = workerClass(filepath.Join(workerState, id, "job.json"))
+			if err == nil {
+				return kindWorkerPrefix + class
+			}
+			if !errors.Is(err, fs.ErrNotExist) { // файл задания есть, класса нет: соседняя папка — чужое задание
+				break
+			}
 		}
-		return kindWorkerPrefix + class
+		noClass(err)
+		return KindWorkerUnknown
 	}
 	if unit == "" {
 		unit = filepath.Base(filepath.Clean(path))

@@ -11,7 +11,6 @@ import (
 
 	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/linesock"
-	"github.com/aiseeq/akit/timearg"
 )
 
 // Живые запросы к службе через сокет [io] socket: `aguard io now | series | profiles`. Службы нет —
@@ -22,9 +21,9 @@ const ioLiveTimeout = 6 * time.Second
 
 // ioLiveSince — запрос с since из аргумента (30m, 3d, ЧЧ:ММ, RFC3339).
 func (a *app) ioLiveSince(req iowatch.Request, since string, asJSON bool) error {
-	at, err := timearg.Parse(since, time.Now())
+	at, _, err := ioWindow(since, "", time.Now())
 	if err != nil {
-		return fmt.Errorf("-since: %w", err)
+		return err
 	}
 	req.Since = at.Format(time.RFC3339)
 	return a.ioLive(req, asJSON)

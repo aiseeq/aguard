@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -213,6 +214,39 @@ var (
 	bucketEdges  = []int64{0, 300, 500, 1000, 2000, 5000}
 	bucketLabels = []string{"<300 мс", "300–500 мс", "0,5–1 с", "1–2 с", "2–5 с", "≥5 с"}
 )
+
+// FilterCases — случаи, где who есть в пути главной cgroup, в имени процесса топов записи, чтения и свопа или в его
+// cmdline (`aguard io report -who`); случай без виновников (короче case_min) не подходит; who пусто — все случаи.
+func FilterCases(cases []Case, who string) []Case {
+	if who == "" {
+		return cases
+	}
+	out := []Case{}
+	for i := range cases {
+		if cases[i].Culprits.mentions(who) {
+			out = append(out, cases[i])
+		}
+	}
+	return out
+}
+
+// mentions — who в главной cgroup или в процессе топов (имя, cmdline).
+func (c *Culprit) mentions(who string) bool {
+	if c == nil {
+		return false
+	}
+	if strings.Contains(c.Main, who) {
+		return true
+	}
+	for _, list := range [][]Ranked{c.ProcWrite, c.ProcRead, c.ProcMajflt} {
+		for _, p := range list {
+			if strings.Contains(p.Name, who) || strings.Contains(c.ProcessDetails[p.Name].Cmdline, who) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // Summarize — итог случаев, начавшихся в [since, until); у случаев от min — виновники.
 func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary {
