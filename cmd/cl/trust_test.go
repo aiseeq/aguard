@@ -193,9 +193,9 @@ func TestConfirmTrustScreenReader(t *testing.T) {
 		{"", "NO-ENTER", "выбор не встал на «Yes»"},
 	} {
 		t.Run(tc.want, func(t *testing.T) {
-			if tc.echo == "" { // перерисовка без эха y: признак выбора — эхо, а не любой вывод
+			if tc.echo == "" { // перерисовка окна без эха y: признак выбора — эхо, а не любой вывод и не пункт «y.» меню
 				tc.echo = filepath.Join(t.TempDir(), "no-echo.raw")
-				if err := os.WriteFile(tc.echo, []byte("\x1b(B\x0f\x1b[?2004h\x1b[<u\x1b[11G\x1b[13G"), 0o600); err != nil {
+				if err := os.WriteFile(tc.echo, []byte("\x1b(B\x0f\x1b[?2004h\x1b[<u\x1b[11G\x1b[13G\r\n\x1b[3Gy. Yes, I trust this folder\r\n\x1b[3Gn. No, exit"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}

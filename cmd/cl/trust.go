@@ -36,10 +36,10 @@ const (
 
 // Режим экранного чтеца (CLAUDE_AX_SCREEN_READER=1; проба 10.11 на 2.1.322, cl-trust-screen-reader): окно без «❯» —
 // строки «y. Yes, I trust this folder», «n. No, exit» и поле «Enter y/n:»; выбор — клавиша y, Claude Code отвечает её
-// эхом в поле (сдвиг курсора к колонке и « y»), Enter подтверждает.
+// эхом в поле (сдвиг курсора к колонке и « y»), Enter подтверждает. «y.» после сдвига — пункт меню при перерисовке, не эхо.
 var (
 	readerYes  = []byte("y.Yes,Itrustthisfolder")
-	readerEcho = regexp.MustCompile(`\x1b\[[0-9]+G ?y`)
+	readerEcho = regexp.MustCompile(`\x1b\[[0-9]+G ?y([^.]|$)`)
 )
 
 // escSeq — управляющие последовательности терминала: CSI, OSC и двухбайтовые (ESC 7, ESC 8, ESC =).
