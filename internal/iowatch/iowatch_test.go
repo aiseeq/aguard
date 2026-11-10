@@ -936,11 +936,11 @@ func TestCaseSplitByGapShortWithoutCulpritsWaitsDetail(t *testing.T) {
 func TestCaseCloseOnStopAndDump(t *testing.T) {
 	r := NewRecorder(Default())
 	base := time.Now()
-	if got := r.Step(Step{At: base, MemFullUS: 90_000}); len(got) != 0 {
+	if got := r.Step(Step{At: base, IOFullUS: 90_000}); len(got) != 0 {
 		t.Fatalf("случай закрылся сразу: %+v", got)
 	}
 	got := r.Close()
-	if len(got) != 1 || got[0].MemFullMS != 90 || got[0].IdleMS != 90 || !got[0].Quiet {
+	if len(got) != 1 || got[0].IOFullMS != 90 || got[0].IdleMS != 90 || !got[0].Quiet {
 		t.Fatalf("закрытие при остановке (без обмена с диском — тихий): %+v", got)
 	}
 	r.Step(Step{At: base.Add(100 * time.Millisecond), IOFullUS: 90_000, WriteBytes: 2 << 20})
@@ -1400,5 +1400,34 @@ func TestMainProcFromMainCgroup(t *testing.T) {
 	}
 	if got := c.MainProc(""); got != "" {
 		t.Fatalf("без главной: %q", got)
+	}
+}
+
+// Простой памяти без обмена с диском — не тихий (синтетика тикета io-memory-only-quiet: 25 шагов по 100 мс, memory
+// full 2250 мс, обмен 0); записанный тихий случай 02.11 02:12:30 (1699 мс, io full 1104, memory full 523, чтение
+// 272 КиБ) — тихий, как был; граница — половина случая.
+func TestQuietNotMemoryStall(t *testing.T) {
+	r := NewRecorder(Default())
+	base := time.Now()
+	for i := range 25 {
+		r.Step(Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond), MemFullUS: 90_000})
+	}
+	got := r.Close()
+	if len(got) != 1 || got[0].MemFullMS != 2250 || got[0].Quiet {
+		t.Fatalf("простой памяти без обмена: %+v", got)
+	}
+	q := Default().QuietBytes
+	for _, tc := range []struct {
+		c     Case
+		quiet bool
+	}{
+		{Case{DurMS: 1699, IOFullMS: 1104, MemFullMS: 523, ReadB: 278528}, true},
+		{Case{DurMS: 1000, MemFullMS: 499}, true},
+		{Case{DurMS: 1000, MemFullMS: 500}, false},
+		{Case{DurMS: 1000, IOFullMS: 900, WriteB: q}, false},
+	} {
+		if got := quietCase(&tc.c, q); got != tc.quiet {
+			t.Errorf("%+v: тихий %v, ждали %v", tc.c, got, tc.quiet)
+		}
 	}
 }

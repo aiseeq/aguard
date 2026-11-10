@@ -30,8 +30,10 @@ type Case struct {
 	Flushes   int64     `json:"flushes,omitempty"`
 	Dirty     int64     `json:"dirty,omitempty"` // наибольшие Dirty и Writeback за окно виновников, байт
 	Writeback int64     `json:"writeback,omitempty"`
-	// Quiet — обмен с диском за случай меньше quiet_bytes: простой без трафика (одна задача ждёт
-	// датчик, как thinkfan) — PSI считает его 100 % full, а машина не стоит. В письма не идёт.
+	// Quiet — обмен с диском за случай меньше quiet_bytes и memory full меньше половины случая: простой без трафика
+	// (одна задача ждёт датчик, как thinkfan) — PSI считает его 100 % full, а машина не стоит. В письма не идёт.
+	// Простой памяти без обмена (reclaim, сжатие) — не тихий: у 219 тихих случаев от 1 с по cases.jsonl на 10.11
+	// доля memory full не выше 31 % (io-memory-only-quiet).
 	Quiet bool `json:"quiet,omitempty"`
 	// Capped — ожидание под потолком io.max, а не фриз (cappedWait): только у случаев от case_min. OutsideIdleMS —
 	// наибольший простой cgroup вне потолка за случай. В письма и в счёт фризов не идёт.
@@ -309,7 +311,7 @@ func (r *Recorder) ready(covered time.Time) []Case {
 
 // finish — Dirty, Writeback и (от case_min) виновники из детальных записей окна случая.
 func (r *Recorder) finish(c *Case) {
-	c.Quiet = c.ReadB+c.WriteB < r.cfg.QuietBytes
+	c.Quiet = quietCase(c, r.cfg.QuietBytes)
 	from := c.Start.Add(-r.cfg.Context.D())
 	details := r.ring.Details(from, c.End.Add(r.cfg.Detail.D()))
 	for i := range details {
@@ -374,4 +376,9 @@ var farFuture = time.Unix(math.MaxInt64>>1, 0)
 // записан целиком; Wait — дождаться этого.
 func (r *Recorder) Dump(dir string, at time.Time) *Snapshot {
 	return startSnapshot(dir, at, r.ring.Records())
+}
+
+// quietCase — простой без обмена с диском и не простой памяти (Case.Quiet).
+func quietCase(c *Case, quietBytes int64) bool {
+	return c.ReadB+c.WriteB < quietBytes && 2*c.MemFullMS < c.DurMS
 }
