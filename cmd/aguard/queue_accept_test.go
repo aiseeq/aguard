@@ -47,11 +47,6 @@ func newQueueBench(t *testing.T, gitJSON, docsJSON string) *queueBench {
 	git := write("git.json", gitJSON)
 	docs := write("docs.json", docsJSON)
 	tk := write("tk", fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --root ] && { cat %s; exit 0; }; done\ncat %s\n", git, docs))
-	gate, err := os.ReadFile(filepath.Join("..", "..", "deploy", "gate.tsv"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	table := write("gate.tsv", string(gate))
 	now := time.Now()
 	hist := write("limits.jsonl", fmt.Sprintf(`{"at":%q,"sevenDayResetsAt":%q,"sevenDayUsedPercentage":10,"account":"a"}
 {"at":%q,"sevenDayResetsAt":%q,"sevenDayUsedPercentage":20,"account":"a"}
@@ -64,7 +59,7 @@ func newQueueBench(t *testing.T, gitJSON, docsJSON string) *queueBench {
 	c := &config.Config{Lead: "lead", Admins: map[string]string{filepath.Join(dir, "git"): "git-admin"},
 		Queue: queue.Config{Mode: queue.ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second),
 			FreeAfter: policy.Duration(2 * time.Minute), GitRoots: []string{filepath.Join(dir, "git")},
-			Dirs: []string{filepath.Join(dir, "docs")}, Table: table, Override: filepath.Join(dir, "override.tsv"),
+			Dirs: []string{filepath.Join(dir, "docs")}, Level: queue.LevelHigh,
 			Gate: filepath.Join(dir, "gate.json"), History: hist, Tk: tk}}
 	return &queueBench{a, c, dir}
 }
@@ -130,38 +125,6 @@ func TestQueueRoundWritesGate(t *testing.T) {
 	}
 	if b.journal(t, "gate") != 1 {
 		t.Fatalf("обновление по сроку не смена: %d", b.journal(t, "gate"))
-	}
-}
-
-// Сломанный ввод: ворота не считаются из нулей, а файл остаётся прежним; tk по договору откроет всё через 26 ч.
-func TestQueueRoundBadInputKeepsGate(t *testing.T) {
-	cases := map[string]func(*queueBench){
-		"битая история": func(b *queueBench) {
-			if err := os.WriteFile(b.c.Queue.History, []byte("{битая\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"истории нет": func(b *queueBench) { b.c.Queue.History = filepath.Join(b.dir, "absent") },
-		"пустая":      func(b *queueBench) { _ = os.WriteFile(b.c.Queue.History, nil, 0o644) },
-		"таблицы нет": func(b *queueBench) { b.c.Queue.Table = filepath.Join(b.dir, "absent") },
-		"битая поправка": func(b *queueBench) {
-			_ = os.WriteFile(b.c.Queue.Override, []byte("HIGH-DO\tнет\t2030-01-01\tx\ty\n"), 0o644)
-		},
-		"поправка не читается": func(b *queueBench) { _ = os.Mkdir(b.c.Queue.Override, 0o755) },
-	}
-	for name, mod := range cases {
-		b := newQueueBench(t, "[]", "[]")
-		mod(b)
-		b.round(t)
-		if b.gateExists() {
-			data, _ := os.ReadFile(b.c.Queue.Gate)
-			t.Errorf("%s: записан %s", name, data)
-		}
-	}
-	b := newQueueBench(t, "[]", "[]") // поправки нет вовсе: это норма
-	b.round(t)
-	if !b.gateExists() {
-		t.Fatal("нет поправки: ворота считаются")
 	}
 }
 

@@ -21,14 +21,15 @@ type Config struct {
 	Skip      []string        `toml:"skip"`
 	// WeekendCrit — папки проектов, где в субботу и воскресенье из строк идут только CRIT. Список — в конфиге машины.
 	WeekendCrit []string `toml:"weekend_crit"`
-	// Spaces — корень пространства и сдвиг его планки в ступенях приоритета; вне корней планка общих ворот. Список — в конфиге машины.
-	Spaces   map[string]int `toml:"spaces"`
-	Table    string         `toml:"table"`
-	Override string         `toml:"override"`
-	Frozen   string         `toml:"frozen"`
-	Gate     string         `toml:"gate"`
-	History  string         `toml:"history"`
-	Tk       string         `toml:"tk"`
+	// Spaces — корень пространства и его ступень (Level); проект вне корней — по Level. Список — в конфиге машины.
+	Spaces map[string]Level `toml:"spaces"`
+	// Level — ступень вне корней Spaces; по умолчанию HIGH: нет слова пользователя — открыты только CRIT и HIGH.
+	Level  Level  `toml:"level"`
+	Frozen string `toml:"frozen"`
+	Gate   string `toml:"gate"`
+	// History — история лимитов Claude для aguard limit-reset-check; ворота её не читают.
+	History string `toml:"history"`
+	Tk      string `toml:"tk"`
 }
 
 func Default(home string) Config {
@@ -39,9 +40,9 @@ func Default(home string) Config {
 		}
 		return out
 	}
-	paths := expand("~/git", "~/work", "~/docs", "~/.config/queue/gate.tsv", "~/.config/queue/override.tsv", "~/.local/state/queue/gate.json", "~/.local/state/chooks/limits-history.jsonl", "~/bin/tk")
+	paths := expand("~/git", "~/work", "~/docs", "~/.local/state/queue/gate.json", "~/.local/state/chooks/limits-history.jsonl", "~/bin/tk")
 	return Config{Mode: ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second), FreeAfter: policy.Duration(2 * time.Minute),
-		GitRoots: paths[:2], Dirs: paths[2:3], Table: paths[3], Override: paths[4], Gate: paths[5], History: paths[6], Tk: paths[7], Frozen: policy.ExpandHome("~/.config/queue/frozen", home)}
+		GitRoots: paths[:2], Dirs: paths[2:3], Gate: paths[3], History: paths[4], Tk: paths[5], Level: LevelHigh, Frozen: policy.ExpandHome("~/.config/queue/frozen", home)}
 }
 
 func (c *Config) Validate(home string) error {
@@ -59,10 +60,13 @@ func (c *Config) Validate(home string) error {
 	for i := range c.WeekendCrit {
 		c.WeekendCrit[i] = filepath.Clean(c.WeekendCrit[i])
 	}
-	spaces := make(map[string]int, len(c.Spaces))
-	for root, shift := range c.Spaces {
-		if shift < 0 || shift > MaxSpaceShift {
-			return fmt.Errorf("queue.spaces[%s]: сдвиг 0..%d, а не %d", root, MaxSpaceShift, shift)
+	if _, err := ParseLevel(string(c.Level)); err != nil {
+		return fmt.Errorf("queue.level: %w", err)
+	}
+	spaces := make(map[string]Level, len(c.Spaces))
+	for root, level := range c.Spaces {
+		if _, err := ParseLevel(string(level)); err != nil {
+			return fmt.Errorf("queue.spaces[%s]: %w", root, err)
 		}
 		path := filepath.Clean(policy.ExpandHome(root, home))
 		if !filepath.IsAbs(path) {
@@ -71,10 +75,10 @@ func (c *Config) Validate(home string) error {
 		if _, dup := spaces[path]; dup {
 			return fmt.Errorf("queue.spaces: корень %s записан дважды", path)
 		}
-		spaces[path] = shift
+		spaces[path] = level
 	}
 	c.Spaces = spaces
-	for _, p := range []*string{&c.Table, &c.Override, &c.Frozen, &c.Gate, &c.History, &c.Tk} {
+	for _, p := range []*string{&c.Frozen, &c.Gate, &c.History, &c.Tk} {
 		*p = policy.ExpandHome(*p, home)
 	}
 	for i := range c.Live {

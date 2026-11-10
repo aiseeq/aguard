@@ -95,22 +95,6 @@ func TestHighReturnedRestartsClock(t *testing.T) {
 	}
 }
 
-// Таблица правится руками: значение берётся из клетки поставщика, а не из худшей полосы.
-func TestComputeEditedTable(t *testing.T) {
-	tb, err := ParseTable(strings.NewReader("LOW-DO\tнет\tда\tда\nMED-DO\tда\tбез мастера\tнет\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := at("2026-11-03T12:00:00+01:00")
-	mid := &Supply{Margin: 0.5}
-	if open, lane := Compute(tb, nil, Supply{Margin: 5}, mid, now); len(open) != 0 || !eq(lane, []string{"MED-DO"}) {
-		t.Errorf("Claude полон, OpenAI средний: LOW-DO нет и да, MED-DO да и без мастера: open %v, lane %v", open, lane)
-	}
-	if open, _ := Compute(tb, nil, Supply{Margin: -3, Burning: true}, nil, now); !eq(open, []string{"LOW-DO", "MED-DO"}) {
-		t.Errorf("сгорает: открыто всё, и клетка «нет» тоже: %v", open)
-	}
-}
-
 // Заказчик ждёт и закрытый HIGH и CRIT, а не только MED и LOW.
 func TestBackOnHighAndCrit(t *testing.T) {
 	for _, prio := range []string{"HIGH", "CRIT"} {

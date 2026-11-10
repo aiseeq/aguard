@@ -18,8 +18,7 @@ func TestQueueWakeLetterAfterOpenByRootChange(t *testing.T) {
 	a, v, ts, received := wakeSocketWorld(t, false)
 	project := ts[0].Dir
 	b := newQueueBench(t, "[]", "[]")
-	b.writeOverrideAll(t) // общие ворота MED закрыты: открыть его может только планка пространства
-	b.c.Queue.Spaces = map[string]int{project: 0}
+	b.c.Queue.Spaces = map[string]queue.Level{project: queue.LevelHigh} // вне корней level HIGH: MED открывает только ступень корня
 	tk := filepath.Join(a.home, "tk")
 	script := "#!/bin/sh\ngrep -q '\"MED-DO\"' " + b.c.Queue.Gate + " || exit 1\n" +
 		"printf '%s\\n' '{\"source\":\"local\",\"path\":\"docs/tasks/20261104-0950-foo.md\",\"slug\":\"foo\",\"prio\":\"MED\",\"status\":\"открыт\"}'\n"
@@ -63,7 +62,7 @@ func TestQueueWakeLetterAfterOpenByRootChange(t *testing.T) {
 		t.Fatal("MED закрыт: tk next пуст, письма нет", ns, state.Wakes)
 	}
 	silent("MED закрыт")
-	b.c.Queue.Spaces[project] = 1
+	b.c.Queue.Spaces[project] = queue.LevelMed
 	// Ответ tk кэширован на 5 минут: открытие планки видно, когда кэш истёк.
 	ns := pass(6 * time.Minute)
 	if len(ns) != 1 || ns[0].Kind != queue.KindWake || ns[0].Key != "project/20261104-0950-foo" {

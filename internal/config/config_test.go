@@ -9,6 +9,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/restart"
 )
 
@@ -105,5 +106,36 @@ func TestExample(t *testing.T) {
 	}
 	if c.Restart.Mode != restart.ModeLog {
 		t.Errorf("раздел restart примера: %+v", c.Restart)
+	}
+}
+
+// Ступени ворот — слово пользователя: строка HIGH, MED или LOW; прежний сдвиг числом — ошибка с понятным текстом,
+// старые ключи таблицы и поправок — неизвестные ключи (пользователь 10.11: «Только этот механизм должен действовать сейчас»).
+func TestLoadQueueLevels(t *testing.T) {
+	c, err := Load(write(t, "[queue]\nspaces = {\"~/git\" = \"MED\", \"~/work\" = \"LOW\"}\n"), home, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Queue.Spaces["/home/u/git"] != queue.LevelMed || c.Queue.Spaces["/home/u/work"] != queue.LevelLow || c.Queue.Level != queue.LevelHigh {
+		t.Fatalf("ступени: %q %v", c.Queue.Level, c.Queue.Spaces)
+	}
+	if c, err = Load(write(t, "[queue]\nlevel = \"MED\"\n"), home, 1000); err != nil || c.Queue.Level != queue.LevelMed {
+		t.Fatalf("level: %q %v", c.Queue.Level, err)
+	}
+	for name, body := range map[string]string{
+		"число в spaces": "[queue]\nspaces = {\"~/git\" = 1}\n",
+		"неизвестная":    "[queue]\nspaces = {\"~/git\" = \"MEDIUM\"}\n",
+		"число в level":  "[queue]\nlevel = 2\n",
+		"таблица ворот":  "[queue]\ntable = \"~/.config/queue/gate.tsv\"\n",
+		"поправки ворот": "[queue]\noverride = \"~/.config/queue/override.tsv\"\n",
+	} {
+		_, err := Load(write(t, body), home, 1000)
+		if err == nil {
+			t.Errorf("%s: принято", name)
+			continue
+		}
+		if strings.HasPrefix(name, "число") && (!strings.Contains(err.Error(), "HIGH, MED или LOW") || !strings.Contains(err.Error(), "сдвиг")) {
+			t.Errorf("%s: текст не говорит, что нужно: %v", name, err)
+		}
 	}
 }

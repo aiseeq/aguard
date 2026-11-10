@@ -16,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/daily"
 	"github.com/aiseeq/aguard/internal/names"
@@ -51,15 +50,6 @@ func (a *app) queueCmd(ctx context.Context, args []string) error {
 		dry := fl.Bool("dry-run", false, "показать ворота и уведомления без записи")
 		parse(fl, rest)
 		return a.queueRound(ctx, &cfg, restart.NewJudge(a.home), *dry)
-	case "replay":
-		fl := flag.NewFlagSet("queue replay", flag.ContinueOnError)
-		history := fl.String("history", cfg.Queue.History, "JSONL истории лимитов")
-		from := fl.String("from", "", "начальная дата YYYY-MM-DD")
-		to := fl.String("to", "", "конечная дата YYYY-MM-DD")
-		hour := fl.Int("hour", 7, "местный час")
-		zone := fl.String("zone", "+00:00", "часовой пояс")
-		parse(fl, rest)
-		return a.queueReplay(*history, *from, *to, *hour, *zone)
 	case "report":
 		fl := flag.NewFlagSet("queue report", flag.ContinueOnError)
 		since := fl.Duration("since", 168*time.Hour, "глубина отчёта")
@@ -68,52 +58,6 @@ func (a *app) queueCmd(ctx context.Context, args []string) error {
 		return a.queueReport(*since, *asJSON, time.Now())
 	default:
 		return fmt.Errorf("неизвестная команда queue %q", cmd)
-	}
-}
-
-func (a *app) queueReplay(path, from, to string, hour int, zone string) error {
-	rows, err := queue.ReadHistory(path)
-	if err != nil {
-		return err
-	}
-	start, err := time.Parse("2006-01-02", from)
-	if err != nil {
-		return fmt.Errorf("-from: %w", err)
-	}
-	end, err := time.Parse("2006-01-02", to)
-	if err != nil {
-		return fmt.Errorf("-to: %w", err)
-	}
-	if hour < 0 || hour > 23 {
-		return fmt.Errorf("-hour вне 0..23")
-	}
-	zt, err := time.Parse("-07:00", zone)
-	if err != nil {
-		return fmt.Errorf("-zone: ожидается +HH:MM или -HH:MM: %w", err)
-	}
-	_, offset := zt.Zone()
-	loc := time.FixedZone(zone, offset)
-	accounts := queue.Accounts(rows, time.Time{}, 0)
-	counts := map[queue.Band]int{}
-	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
-		at := time.Date(d.Year(), d.Month(), d.Day(), hour, 0, 0, 0, loc)
-		s := queue.Measure(rows, accounts, at)
-		b := queue.BandOf(s.Margin)
-		counts[b]++
-		fmt.Fprintf(a.out, "%s запас %.2f, полоса %s\n", at.Format("2006-01-02"), s.Margin, bandName(b))
-	}
-	fmt.Fprintf(a.out, "от 1: %d, от 0 до 1: %d, меньше 0: %d\n", counts[queue.BandFull], counts[queue.BandMid], counts[queue.BandLow])
-	return nil
-}
-
-func bandName(b queue.Band) string {
-	switch b {
-	case queue.BandFull:
-		return "от 1"
-	case queue.BandMid:
-		return "от 0 до 1"
-	default:
-		return "меньше 0"
 	}
 }
 
@@ -129,8 +73,6 @@ type queueListError struct{ err error }
 
 func (e queueListError) Error() string { return e.err.Error() }
 func (e queueListError) Unwrap() error { return e.err }
-
-const queueHistoryMaxAge = 24 * time.Hour // Живой limits-history: наибольший разрыв между строками — 7,0 ч.
 
 func (a *app) queueRound(ctx context.Context, c *config.Config, judge *restart.Judge, dry bool) error {
 	if c.Queue.Mode == "off" {
@@ -183,110 +125,25 @@ func queueLive(cfg *queue.Config) ([]string, error) {
 	return slices.Compact(out), nil
 }
 
-// queueGatePass считает ворота и пишет gate.json; возвращает то, что увидит tk next: при сломанном входе — прошлый файл.
-// Сухой прогон файл не пишет и показывает расчёт.
+// queueGatePass пишет gate.json по слову пользователя (queue.level и queue.spaces) и возвращает то, что увидит tk next:
+// файл не записан — прошлый. Запас, таблица и поправки ворот не читаются. Сухой прогон файл не пишет и показывает расчёт.
 func (a *app) queueGatePass(c *config.Config, now time.Time, dry bool) (queue.Gate, error) {
-	inputs := a.readQueueInputs(&c.Queue, now)
-	openai, openaiErr := a.queueOpenAI(&c.Codex, now, dry)
-	if openaiErr != nil {
-		a.queueInputWarning(&inputs, "история OpenAI", openaiErr)
+	gate := queue.UserGate(c.Queue.Level, c.Queue.Spaces)
+	if err := a.writeQueueGate(&c.Queue, now, gate, dry); err != nil {
+		return queue.Gate{}, err
 	}
-	if inputs.err == nil {
-		open, lane := queue.Compute(inputs.table, inputs.overrides, inputs.claude, openai, now)
-		gate := queue.Gate{Open: open, Lane: lane, OpenByRoot: queue.SpaceOpen(inputs.table, open, c.Queue.Spaces, queue.NegativeMargin(inputs.claude, openai))}
-		if err := a.writeQueueGate(&c.Queue, now, inputs.claude, openai, gate, inputs.overrides, dry); err != nil {
-			return queue.Gate{}, err
-		}
-		if dry {
-			return gate, nil
-		}
+	if dry {
+		return gate, nil
 	}
 	return a.previousQueueGate(c.Queue.Gate, now), nil
 }
 
-type queueInputs struct {
-	table     queue.Table
-	overrides []queue.Override
-	claude    queue.Supply
-	err       error
-}
-
-func (a *app) readQueueInputs(cfg *queue.Config, now time.Time) queueInputs {
-	var in queueInputs
-	rows, err := queue.ReadHistory(cfg.History)
-	if err != nil {
-		a.queueInputWarning(&in, "история лимитов", err)
-	} else {
-		latest := latestQueueHistoryAt(rows, now)
-		if latest.IsZero() || now.Sub(latest) > queueHistoryMaxAge {
-			a.queueInputWarning(&in, "история лимитов", fmt.Errorf("последний замер старше %s", queueHistoryMaxAge))
-		} else if accounts := queue.Accounts(rows, now, 14*24*time.Hour); len(accounts) == 0 {
-			a.queueInputWarning(&in, "история лимитов", fmt.Errorf("история не содержит актуальных учёток"))
-		} else {
-			in.claude = queue.Measure(rows, accounts, now)
-		}
-	}
-	if err := readQueueTable(cfg.Table, &in.table); err != nil {
-		a.queueInputWarning(&in, "таблица ворот", err)
-	}
-	if err := readQueueOverrides(cfg.Override, &in.overrides); err != nil {
-		a.queueInputWarning(&in, "переопределения ворот", err)
-	}
-	return in
-}
-
-func latestQueueHistoryAt(rows []queue.Row, now time.Time) time.Time {
-	var latest time.Time
-	for _, row := range rows {
-		if !row.At.After(now) && row.At.After(latest) {
-			latest = row.At
-		}
-	}
-	return latest
-}
-
-func (a *app) queueInputWarning(in *queueInputs, what string, err error) {
-	if in.err == nil {
-		in.err = err
-	}
-	a.warn("queue", what, "err", err)
-}
-
-func readQueueTable(path string, table *queue.Table) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("чтение таблицы ворот %s: %w", path, err)
-	}
-	parsed, parseErr := queue.ParseTable(f)
-	if closeErr := f.Close(); parseErr == nil {
-		parseErr = closeErr
-	}
-	*table = parsed
-	return parseErr
-}
-
-func readQueueOverrides(path string, overrides *[]queue.Override) error {
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("чтение поправок ворот %s: %w", path, err)
-	}
-	parsed, parseErr := queue.ParseOverrides(f)
-	if closeErr := f.Close(); parseErr == nil {
-		parseErr = closeErr
-	}
-	*overrides = parsed
-	return parseErr
-}
-
-func (a *app) writeQueueGate(cfg *queue.Config, now time.Time, claude queue.Supply, openai *queue.Supply, gate queue.Gate, overrides []queue.Override, dry bool) error {
+func (a *app) writeQueueGate(cfg *queue.Config, now time.Time, gate queue.Gate, dry bool) error {
 	live := slices.Clone(cfg.Live)
 	if cfg.Mode == queue.ModeLog {
 		live = []string{}
 	}
-	gate.At, gate.Live, gate.Claude, gate.OpenAI = now, live, claude.Margin, supplyMargin(openai)
+	gate.At, gate.Live = now, live
 	if dry {
 		if err := json.NewEncoder(a.out).Encode(gate); err != nil {
 			return fmt.Errorf("печать ворот: %w", err)
@@ -306,7 +163,7 @@ func (a *app) writeQueueGate(cfg *queue.Config, now time.Time, claude queue.Supp
 		return nil
 	}
 	if changed {
-		line := fmt.Sprintf("ворота изменились: запас Claude %.2f, OpenAI %s; open=%s; lane=%s%s", gate.Claude, formatSupply(openai), strings.Join(gate.Open, ","), strings.Join(gate.Lane, ","), formatOpenByRoot(gate.OpenByRoot)+overrideSummary(overrides, now))
+		line := fmt.Sprintf("ворота изменились: open=%s%s", strings.Join(gate.Open, ","), formatOpenByRoot(gate.OpenByRoot))
 		a.queueJournal(queue.Notice{Kind: "gate", Line: line}, now)
 	}
 	return nil
@@ -327,27 +184,6 @@ func formatOpenByRoot(byRoot map[string][]string) string {
 	return "; по корням: " + strings.Join(parts, ", ")
 }
 
-func overrideSummary(overrides []queue.Override, now time.Time) string {
-	var active []string
-	for _, override := range overrides {
-		if !now.After(override.Until) {
-			active = append(active, fmt.Sprintf("%s от %s: %s", override.Pair, override.Who, override.Why))
-		}
-	}
-	if len(active) == 0 {
-		return ""
-	}
-	return "; поправки: " + strings.Join(active, "; ")
-}
-
-func supplyMargin(s *queue.Supply) *float64 {
-	if s == nil {
-		return nil
-	}
-	margin := s.Margin
-	return &margin
-}
-
 func (a *app) previousQueueGate(path string, now time.Time) queue.Gate {
 	old, err := queue.ReadGate(path)
 	// Файл старого формата без карты: tk видит только CRIT и HIGH, письма считают так же.
@@ -355,103 +191,6 @@ func (a *app) previousQueueGate(path string, now time.Time) queue.Gate {
 		return old
 	}
 	return queue.Gate{}
-}
-
-func (a *app) queueOpenAI(cfg *codexwatch.Config, now time.Time, dry bool) (*queue.Supply, error) {
-	hist := filepath.Join(a.dir("queue"), "openai-history.jsonl")
-	existing, err := queue.ReadHistory(hist)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	if errors.Is(err, os.ErrNotExist) {
-		existing = nil
-	}
-	rows := slices.Clone(existing)
-	allKnown := len(cfg.Accounts) > 0
-	var appendRows []queue.Row
-	for _, account := range cfg.Accounts {
-		r, known, e := a.queueOpenAISample(account.Name)
-		if e != nil {
-			return nil, e
-		}
-		if !known {
-			allKnown = false
-			continue
-		}
-		var last *queue.Row
-		for i := range existing {
-			if existing[i].Account == r.Account && (last == nil || existing[i].At.After(last.At)) {
-				last = &existing[i]
-			}
-		}
-		if last == nil || last.Used != r.Used || !last.ResetsAt.Equal(r.ResetsAt) {
-			appendRows = append(appendRows, r)
-		}
-		rows = append(rows, r)
-	}
-	if !allKnown {
-		return nil, nil
-	}
-	if !dry && len(appendRows) > 0 {
-		if err := appendQueueRows(hist, appendRows); err != nil {
-			return nil, err
-		}
-	}
-	accountNames := make([]string, 0, len(cfg.Accounts))
-	for _, account := range cfg.Accounts {
-		accountNames = append(accountNames, account.Name)
-	}
-	short := queue.MeasureShort(rows, accountNames, now)
-	return short, nil
-}
-
-// queueOpenAISample — последний замер учётки. Файла или замера нет — данных нет (known false), файл не прочитан — ошибка.
-func (a *app) queueOpenAISample(account string) (r queue.Row, known bool, err error) {
-	path := filepath.Join(a.dir("codex"), account+".json")
-	if _, err = os.Stat(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return r, false, nil
-		}
-		return r, false, fmt.Errorf("замер учётки %s: %w", account, err)
-	}
-	st, err := codexwatch.LoadState(path)
-	if err != nil {
-		return r, false, err
-	}
-	if len(st.Samples) == 0 || st.ResetsAt.IsZero() {
-		return r, false, nil
-	}
-	sm := st.Samples[len(st.Samples)-1]
-	return queue.Row{At: sm.At, ResetsAt: st.ResetsAt, Used: sm.Used, Account: account}, true, nil
-}
-
-func formatSupply(s *queue.Supply) string {
-	if s == nil {
-		return "нет данных"
-	}
-	return fmt.Sprintf("%.2f", s.Margin)
-}
-
-func appendQueueRows(path string, rows []queue.Row) error {
-	const dirMode = 0o700
-	const fileMode = 0o600
-	if err := os.MkdirAll(filepath.Dir(path), dirMode); err != nil {
-		return fmt.Errorf("создание папки истории %s: %w", filepath.Dir(path), err)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, fileMode)
-	if err != nil {
-		return fmt.Errorf("открытие истории %s: %w", path, err)
-	}
-	e := json.NewEncoder(f)
-	for _, r := range rows {
-		if err = e.Encode(r); err != nil {
-			return errors.Join(fmt.Errorf("запись истории %s: %w", path, err), f.Close())
-		}
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("закрытие истории %s: %w", path, err)
-	}
-	return nil
 }
 
 func (a *app) queueReport(since time.Duration, asJSON bool, now time.Time) error {

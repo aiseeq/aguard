@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -29,24 +28,11 @@ func (b *queueBench) futureGate(t *testing.T, at time.Time) {
 	}
 }
 
-// Метка gate.json в будущем (часы сдвинулись): tk next считает файл сломанным, письма тоже, а живой проход его чинит.
+// Метка gate.json в будущем (часы сдвинулись): tk next считает файл сломанным, проход его переписывает в тот же раз.
 func TestQueueGateFromFuture(t *testing.T) {
-	t.Run("вход сломан: письма не верят файлу", func(t *testing.T) {
+	t.Run("файл переписан, строки о смене нет", func(t *testing.T) {
 		b := newQueueBench(t, "[]", "[]")
-		b.round(t)
-		now := time.Now()
-		b.futureGate(t, now.Add(time.Hour))
-		b.writeHistory(t, map[string]time.Duration{"a": 25 * time.Hour})
-		open, err := gateOpen(b.a.queueGatePass(b.c, now, false))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(open) != 0 {
-			t.Fatalf("метка в будущем: %v", open)
-		}
-	})
-	t.Run("вход цел: файл переписан, строки о смене нет", func(t *testing.T) {
-		b := newQueueBench(t, "[]", "[]")
+		b.c.Queue.Level = queue.LevelMed
 		b.round(t)
 		lines := b.journal(t, "gate")
 		now := time.Now()
@@ -70,18 +56,7 @@ func TestQueueGateFromFuture(t *testing.T) {
 
 func gateOpen(g queue.Gate, err error) ([]string, error) { return g.Open, err }
 
-func (b *queueBench) writeOverrideAll(t *testing.T) {
-	t.Helper()
-	var body strings.Builder
-	for _, pair := range []string{"MED-DO", "MED-HUNT", "MED-ARCH", "LOW-DO", "LOW-HUNT", "LOW-ARCH"} {
-		body.WriteString(pair + "\tнет\t2030-01-01\tx\ty\n")
-	}
-	if err := os.WriteFile(b.c.Queue.Override, []byte(body.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// Сдвиг меняет только настройка, без пересборки и без изменения общих ворот: за один проход карта доходит до gate.json.
+// Ступень корня меняет только настройка, без пересборки и без изменения общих ворот: за один проход карта доходит до gate.json.
 func TestQueueGateOpenByRoot(t *testing.T) {
 	b := newQueueBench(t, "[]", "[]")
 	b.round(t)
@@ -93,17 +68,16 @@ func TestQueueGateOpenByRoot(t *testing.T) {
 		t.Fatalf("без пространств — пустой объект: %v", gate.OpenByRoot)
 	}
 	root := filepath.Join(b.dir, "work")
-	b.writeOverrideAll(t)
-	b.c.Queue.Spaces = map[string]int{root: 0}
+	b.c.Queue.Spaces = map[string]queue.Level{root: queue.LevelHigh}
 	b.round(t)
 	gate, err = queue.ReadGate(b.c.Queue.Gate)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pairs, ok := gate.OpenByRoot[root]; !ok || len(pairs) != 0 || len(gate.Open) != 0 {
-		t.Fatalf("сдвиг 0: %+v", gate)
+		t.Fatalf("HIGH: %+v", gate)
 	}
-	b.c.Queue.Spaces[root] = 1
+	b.c.Queue.Spaces[root] = queue.LevelMed
 	lines := b.journal(t, "gate")
 	b.round(t)
 	gate, err = queue.ReadGate(b.c.Queue.Gate)
@@ -111,19 +85,10 @@ func TestQueueGateOpenByRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Contains(gate.OpenByRoot[root], "MED-DO") || slices.Contains(gate.OpenByRoot[root], "LOW-DO") || len(gate.Open) != 0 {
-		t.Fatalf("сдвиг 1: %+v", gate)
+		t.Fatalf("MED: %+v", gate)
 	}
 	if n := b.journal(t, "gate"); n != lines+1 {
-		t.Fatalf("смена сдвига не в журнале: %d, было %d", n, lines)
-	}
-	// Вход сломан: письма читают из прошлого файла и карту, как tk.
-	b.writeHistory(t, map[string]time.Duration{"a": 25 * time.Hour})
-	got, err := b.a.queueGatePass(b.c, time.Now(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Contains(got.OpenByRoot[root], "MED-DO") {
-		t.Fatalf("сломанный вход: %+v", got)
+		t.Fatalf("смена ступени не в журнале: %d, было %d", n, lines)
 	}
 }
 

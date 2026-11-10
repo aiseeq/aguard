@@ -2,86 +2,9 @@ package queue
 
 import (
 	"encoding/json"
-	"slices"
 	"testing"
 	"time"
 )
-
-func spaceTable() Table {
-	var t Table
-	for _, pair := range []string{"MED-DO", "MED-HUNT", "MED-ARCH", "LOW-DO", "LOW-HUNT", "LOW-ARCH"} {
-		t = append(t, TableRow{Pair: pair})
-	}
-	return t
-}
-
-func TestSpaceOpen(t *testing.T) {
-	medAll := []string{"MED-DO", "MED-HUNT", "MED-ARCH"}
-	all := append(slices.Clone(medAll), "LOW-DO", "LOW-HUNT", "LOW-ARCH")
-	for name, c := range map[string]struct {
-		open  []string
-		shift int
-		want  []string
-	}{
-		"сдвиг 0 повторяет общие":             {[]string{"MED-DO", "LOW-DO"}, 0, []string{"MED-DO", "LOW-DO"}},
-		"сдвиг 0 при закрытых":                {nil, 0, []string{}},
-		"сдвиг 1 при override «только HIGH»":  {nil, 1, medAll},
-		"сдвиг 1: LOW как MED того же DIFF":   {[]string{"MED-HUNT"}, 1, append(slices.Clone(medAll), "LOW-HUNT")},
-		"сдвиг 1: LOW общих MED не открывает": {[]string{"LOW-DO"}, 1, medAll},
-		"сдвиг 2 открывает всё":               {nil, 2, all},
-	} {
-		got := SpaceOpen(spaceTable(), c.open, map[string]int{"/h/work": c.shift}, false)["/h/work"]
-		if !slices.Equal(got, c.want) || got == nil {
-			t.Errorf("%s: %v, нужно %v", name, got, c.want)
-		}
-	}
-	if got := SpaceOpen(spaceTable(), nil, nil, false); got == nil || len(got) != 0 {
-		t.Errorf("без пространств — пустой объект: %v", got)
-	}
-}
-
-func TestSpaceOpenNegativeMargin(t *testing.T) {
-	spaces := map[string]int{"/work": 1}
-	table := spaceTable()
-	cases := []struct {
-		name   string
-		supply Supply
-		other  *Supply
-		open   []string
-		want   bool
-	}{
-		{"отрицательный", Supply{Margin: -1}, nil, nil, false},
-		{"восстановился", Supply{Margin: 0}, nil, nil, true},
-		{"сгорает", Supply{Margin: -1, Burning: true}, nil, nil, true},
-		{"override", Supply{Margin: -1}, nil, []string{"MED-DO"}, true},
-		{"второй поставщик", Supply{Margin: 1}, &Supply{Margin: -1}, nil, false},
-		{"второй сгорает", Supply{Margin: 1}, &Supply{Margin: -1, Burning: true}, nil, true},
-	}
-	for _, c := range cases {
-		got := SpaceOpen(table, c.open, spaces, NegativeMargin(c.supply, c.other))["/work"]
-		if slices.Contains(got, "MED-DO") != c.want {
-			t.Errorf("%s: %v", c.name, got)
-		}
-	}
-}
-
-func TestSpacesConfig(t *testing.T) {
-	c := Default("/h")
-	c.Spaces = map[string]int{"~/work/": 1}
-	if err := c.Validate("/h"); err != nil {
-		t.Fatal(err)
-	}
-	if c.Spaces["/h/work"] != 1 {
-		t.Fatalf("корень не раскрыт: %v", c.Spaces)
-	}
-	for _, bad := range []int{-1, MaxSpaceShift + 1} {
-		c := Default("/h")
-		c.Spaces = map[string]int{"~/work": bad}
-		if err := c.Validate("/h"); err == nil {
-			t.Fatalf("сдвиг %d принят", bad)
-		}
-	}
-}
 
 // За выходные состояние пишется один раз: иначе state.json переписывался бы каждые 30 с.
 func TestWeekendStateStable(t *testing.T) {
@@ -199,9 +122,9 @@ func TestWeekendTakenBackToOpen(t *testing.T) {
 }
 
 func TestSpacesConfigRoots(t *testing.T) {
-	for name, spaces := range map[string]map[string]int{
-		"относительный корень": {"work": 1},
-		"два написания":        {"~/work": 1, "/h/work/": 2},
+	for name, spaces := range map[string]map[string]Level{
+		"относительный корень": {"work": LevelMed},
+		"два написания":        {"~/work": LevelMed, "/h/work/": LevelLow},
 	} {
 		c := Default("/h")
 		c.Spaces = spaces

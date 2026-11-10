@@ -26,7 +26,6 @@ tasks:
       - sh: install -D -m 0644 deploy/aguard.service ~/.config/systemd/user/aguard.service
       - sh: install -D -m 0644 cmd/cl/agents.slice ~/.config/systemd/user/agents.slice
       - sh: '[ -f ~/.config/aguard/config.toml ] || install -D -m 0644 deploy/config.example.toml ~/.config/aguard/config.toml'
-      - sh: '[ -f ~/.config/queue/gate.tsv ] || install -D -m 0644 deploy/gate.tsv ~/.config/queue/gate.tsv'
       - sh: '[ -f ~/.config/cl/config.json ] || install -D -m 0644 cmd/cl/config.json ~/.config/cl/config.json'
       - sh: systemctl --user daemon-reload && systemctl --user enable aguard.service && systemctl --user restart aguard.service
   # Один раз с отпечатком: помощник с дескрипторами root; им же снимаются старые root-службы, снимки переходят пользователю.

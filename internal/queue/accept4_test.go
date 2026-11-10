@@ -148,22 +148,3 @@ func TestReadHistorySkipsNoAccount(t *testing.T) {
 		t.Fatalf("%+v", rows)
 	}
 }
-
-// История меньше суток считается по учётке: файл старый, новая учётка часовая — данных нет, а не расход, размазанный на 72 ч.
-func TestMeasureShortNewAccount(t *testing.T) {
-	now := at("2026-11-04T10:00:00+01:00")
-	resets := now.Add(72 * time.Hour)
-	rows := []Row{
-		{At: now.Add(-72 * time.Hour), ResetsAt: resets, Used: 0, Account: "old"},
-		{At: now.Add(-time.Minute), ResetsAt: resets, Used: 20, Account: "old"},
-		{At: now.Add(-time.Hour), ResetsAt: resets, Used: 0, Account: "new"},
-		{At: now.Add(-time.Minute), ResetsAt: resets, Used: 30, Account: "new"},
-	}
-	if got := MeasureShort(rows, []string{"old", "new"}, now); got != nil {
-		t.Fatalf("новая учётка: %+v", *got)
-	}
-	rows[2].At = now.Add(-25 * time.Hour)
-	if got := MeasureShort(rows, []string{"old", "new"}, now); got == nil {
-		t.Fatal("сутки истории есть, данных нет")
-	}
-}

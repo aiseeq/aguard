@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -505,27 +504,5 @@ func TestQueueWakeProjectsMatchTasksProject(t *testing.T) {
 		if !seen {
 			t.Fatalf("нет %s", dir)
 		}
-	}
-}
-
-// Настоящий проход: отрицательный запас закрывает MED в пространстве со сдвигом.
-func TestQueueNegativeMarginClosesShiftedMed(t *testing.T) {
-	b := newQueueBench(t, "[]", "[]")
-	root := b.c.Queue.GitRoots[0]
-	b.c.Queue.Spaces = map[string]int{root: 1}
-	now := time.Now()
-	history := fmt.Sprintf(`{"at":%q,"sevenDayResetsAt":%q,"sevenDayUsedPercentage":10,"account":"a"}
-{"at":%q,"sevenDayResetsAt":%q,"sevenDayUsedPercentage":95,"account":"a"}
-`, now.Add(-24*time.Hour).Format(time.RFC3339), now.Add(72*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339), now.Add(72*time.Hour).Format(time.RFC3339))
-	if err := os.WriteFile(b.c.Queue.History, []byte(history), 0600); err != nil {
-		t.Fatal(err)
-	}
-	b.round(t)
-	gate, err := queue.ReadGate(b.c.Queue.Gate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gate.Claude >= 0 || slices.Contains(gate.OpenByRoot[root], "MED-DO") {
-		t.Fatalf("%+v", gate)
 	}
 }

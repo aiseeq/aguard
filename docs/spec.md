@@ -152,6 +152,12 @@ Slice устанавливает CPUWeight и IOWeight 40, память не о�
 
 Серверы restart и IO используют общий построчный сокетный транспорт; чтение экрана поддерживает tmux и Konsole. `cl --cl-check` показывает решения для живых сессий; нераспознанные аргументы, которые нельзя безопасно восстановить, запрещают перезапуск (internal/linesock/linesock.go:48, internal/screen/live.go:17, cmd/cl/check.go:20, cmd/cl/args.go:18).
 
+## Очередь: ворота
+
+Проход `queue` раз в `interval` пишет `queue.gate` (`~/.local/state/queue/gate.json`) только из конфига: `open` — пары ступени `queue.level` (умолчание HIGH), `open_by_root` — пары ступени каждого корня `queue.spaces` (раскрытый путь, ступень HIGH — пустой список), `lane` — всегда пустой список: поле читает lane llmark. Ступень HIGH не открывает ни MED, ни LOW (tk даёт только CRIT и HIGH), MED открывает MED-DO, MED-HUNT, MED-ARCH, LOW — их и LOW-DO, LOW-HUNT, LOW-ARCH. Другое значение, в том числе прежний сдвиг числом, — ошибка конфига с именем ключа; ключи `table` и `override` — неизвестные ключи (internal/queue/queue.go `ParseLevel`, `UserGate`; internal/queue/config.go `Validate`).
+
+Запас лимитов, `~/.config/queue/gate.tsv` и `~/.config/queue/override.tsv` проход не читает, поэтому сломанная история лимитов ворота не держит. Файл переписывается при смене `live`, `open`, `lane` или `open_by_root` — тогда же строка «ворота изменились» в журнале очереди — и не реже раза в час; tk берёт самый длинный корень, куда входит проект, иначе `open`. Не записан файл — письма очереди считают по прошлому, как tk (cmd/aguard/queue.go `queueGatePass`, `writeQueueGate`). `aguard queue tick -dry-run` печатает расчёт без записи.
+
 ## Указатель said и общий отчёт
 
 `said` раз в минуту обрабатывает новые реплики человека в сессиях lead, `*-admin`, `*-master`: модель luna размечает правило, решение, обещание или оперативную реплику. Первые три могут записываться с цитатой и ссылкой в `~/.claude/said.tsv`; это указатель, не журнал действующих решений. `off` отключает, `log` пишет разметку и стоимость без изменения указателя, `write` дописывает его (internal/said/said.go:59, internal/said/said.go:28, internal/said/classify.go:95, internal/said/entry.go:16).

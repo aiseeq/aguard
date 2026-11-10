@@ -8,13 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"maps"
-	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,299 +78,64 @@ func Accounts(rows []Row, now time.Time, window time.Duration) []string {
 	return slices.Sorted(maps.Keys(m))
 }
 
-type Supply struct {
-	Margin  float64
-	Burning bool
-}
-
-// NegativeMargin — запас ниже нуля у поставщика, чей остаток не сгорает; те же Supply, что идут в Compute.
-func NegativeMargin(claude Supply, openai *Supply) bool {
-	negative := func(s Supply) bool { return s.Margin < 0 && !s.Burning }
-	return negative(claude) || openai != nil && negative(*openai)
-}
-
-const noBurningRateMargin = 99 // Принятый верхний запас при нулевом расходе.
-func Measure(rows []Row, accounts []string, now time.Time) Supply {
-	return measure(rows, accounts, now, 72*time.Hour)
-}
-func MeasureShort(rows []Row, accounts []string, now time.Time) *Supply {
-	if len(rows) == 0 {
-		return nil
-	}
-	rows = slices.Clone(rows)
-	slices.SortFunc(rows, func(a, b Row) int { return a.At.Compare(b.At) })
-	earliest, latest := map[string]time.Time{}, map[string]time.Time{}
-	for _, r := range rows {
-		if r.At.After(now) {
-			continue
-		}
-		if _, seen := earliest[r.Account]; !seen {
-			earliest[r.Account] = r.At
-		}
-		latest[r.Account] = r.At
-	}
-	for _, account := range accounts {
-		at := latest[account]
-		if at.IsZero() || now.Sub(at) > time.Hour || now.Sub(earliest[account]) < 24*time.Hour {
-			return nil
-		}
-	}
-	span := min(now.Sub(rows[0].At), 72*time.Hour)
-	x := measure(rows, accounts, now, span)
-	return &x
-}
-func measure(rows []Row, accounts []string, now time.Time, span time.Duration) Supply {
-	sortRows := slices.Clone(rows)
-	slices.SortFunc(sortRows, func(a, b Row) int { return a.At.Compare(b.At) })
-	var total, rate float64
-	burn := false
-	until := time.Duration(0)
-	for _, a := range accounts {
-		rem, reset := remaining(sortRows, a, now)
-		total += rem
-		if !reset.IsZero() {
-			d := reset.Sub(now)
-			if until == 0 || d < until {
-				until = d
-			}
-			if d < 24*time.Hour && rem >= 30 {
-				burn = true
-			}
-		}
-		rate += positiveRate(sortRows, a, now, span)
-	}
-	days := span.Hours() / 24
-	daily := rate / days
-	var margin float64
-	if daily == 0 {
-		if total == 0 {
-			margin = 0
-		} else {
-			margin = noBurningRateMargin
-		}
-	} else {
-		margin = total / daily
-	}
-	margin -= until.Hours() / 24
-	return Supply{Margin: margin, Burning: burn}
-}
-
-func remaining(rows []Row, account string, now time.Time) (float64, time.Time) {
-	for i := len(rows) - 1; i >= 0; i-- {
-		r := rows[i]
-		if r.Account == account && !r.At.After(now) {
-			if r.ResetsAt.After(now) {
-				return 100 - r.Used, r.ResetsAt
-			}
-			break
-		}
-	}
-	return 100, time.Time{}
-}
-
-func positiveRate(rows []Row, account string, now time.Time, span time.Duration) float64 {
-	var rate float64
-	var before *Row
-	for i := range rows {
-		r := &rows[i]
-		if r.Account != account || r.At.After(now) || r.At.Before(now.Add(-span)) {
-			continue
-		}
-		if before != nil && r.Used > before.Used {
-			rate += r.Used - before.Used
-		}
-		before = r
-	}
-	return rate
-}
-
-type Band int
+// Level — ступень, с которой пары MED и LOW открыты: слово пользователя в queue.level и queue.spaces, без срока и без
+// расчёта по запасу (пользователь 10.11: «Мы просто меняем планку по моему слову без всяких таймеров»).
+type Level string
 
 const (
-	BandFull Band = iota
-	BandMid
-	BandLow
+	LevelHigh Level = "HIGH" // MED и LOW закрыты: tk даёт только CRIT и HIGH
+	LevelMed  Level = "MED"  // открыты MED-*
+	LevelLow  Level = "LOW"  // открыты MED-* и LOW-*
 )
 
-func BandOf(v float64) Band {
-	if v >= 1 {
-		return BandFull
-	}
-	if v >= 0 {
-		return BandMid
-	}
-	return BandLow
-}
-
-type TableRow struct {
-	Pair           string
-	Full, Mid, Low string
-}
-type Table []TableRow
-
+// pairs — пары ворот в порядке ступеней: первые три открывает MED, все шесть — LOW.
 var pairs = []string{"MED-DO", "MED-HUNT", "MED-ARCH", "LOW-DO", "LOW-HUNT", "LOW-ARCH"}
 
-func validPair(p string) bool { return slices.Contains(pairs, p) }
-func ParseTable(r io.Reader) (Table, error) {
-	sc := bufio.NewScanner(r)
-	var t Table
-	seen := map[string]bool{}
-	n := 0
-	for sc.Scan() {
-		n++
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		c := strings.Split(line, "\t")
-		if len(c) != 4 {
-			return nil, fmt.Errorf("строка %d: нужно 4 колонки", n)
-		}
-		if !validPair(c[0]) {
-			return nil, fmt.Errorf("строка %d: неизвестная пара %q", n, c[0])
-		}
-		if seen[c[0]] {
-			return nil, fmt.Errorf("строка %d: повтор пары %s", n, c[0])
-		}
-		seen[c[0]] = true
-		for _, v := range c[1:] {
-			if v != "да" && v != "нет" && v != "без мастера" {
-				return nil, fmt.Errorf("строка %d: значение %q", n, v)
-			}
-		}
-		t = append(t, TableRow{c[0], c[1], c[2], c[3]})
+// ParseLevel принимает только HIGH, MED и LOW. Число — прежний сдвиг на ступени от формулы: его больше нет, а молча
+// толковать его как ступень значило бы открыть не то, что сказал пользователь.
+func ParseLevel(s string) (Level, error) {
+	switch l := Level(s); l {
+	case LevelHigh, LevelMed, LevelLow:
+		return l, nil
 	}
-	return t, sc.Err()
+	if _, err := strconv.Atoi(s); err == nil {
+		return "", fmt.Errorf("ступень HIGH, MED или LOW, а не %s: сдвиг числом от формулы снят 10.11, пишется сама ступень", s)
+	}
+	return "", fmt.Errorf("ступень HIGH, MED или LOW, а не %q", s)
 }
 
-type Override struct {
-	Pair, Value string
-	Until       time.Time
-	Who, Why    string
+// UnmarshalText — разбор ступени из TOML: число приходит сюда текстом и даёт ошибку ParseLevel с местом в конфиге.
+func (l *Level) UnmarshalText(text []byte) error {
+	v, err := ParseLevel(string(text))
+	if err != nil {
+		return err
+	}
+	*l = v
+	return nil
 }
 
-func ParseOverrides(r io.Reader) ([]Override, error) {
-	sc := bufio.NewScanner(r)
-	var out []Override
-	n := 0
-	for sc.Scan() {
-		n++
-		l := strings.TrimSpace(sc.Text())
-		if l == "" || strings.HasPrefix(l, "#") {
-			continue
-		}
-		c := strings.Split(l, "\t")
-		if len(c) != 5 {
-			return nil, fmt.Errorf("строка %d: нужно 5 колонок", n)
-		}
-		for _, x := range c {
-			if strings.TrimSpace(x) == "" {
-				return nil, fmt.Errorf("строка %d: пустое поле", n)
-			}
-		}
-		if !validPair(c[0]) {
-			return nil, fmt.Errorf("строка %d: неизвестная пара %q", n, c[0])
-		}
-		if c[1] != "да" && c[1] != "нет" && c[1] != "без мастера" {
-			return nil, fmt.Errorf("строка %d: значение %q", n, c[1])
-		}
-		until, e := time.Parse(time.RFC3339, c[2])
-		if e != nil {
-			if d, de := time.ParseInLocation("2006-01-02", c[2], time.Local); de == nil {
-				until = d.AddDate(0, 0, 1).Add(-time.Nanosecond)
-			} else {
-				return nil, fmt.Errorf("строка %d: срок: %w", n, e)
-			}
-		}
-		out = append(out, Override{c[0], c[1], until, c[3], c[4]})
-	}
-	return out, sc.Err()
-}
-func bandValue(r TableRow, b Band) string {
-	switch b {
-	case BandFull:
-		return r.Full
-	case BandMid:
-		return r.Mid
-	default:
-		return r.Low
-	}
-}
-func Compute(t Table, ovs []Override, claude Supply, openai *Supply, now time.Time) (open, lane []string) {
-	for _, r := range t {
-		v := supplierValue(r, claude)
-		if openai != nil {
-			v = worse(v, supplierValue(r, *openai))
-		}
-		for _, o := range ovs {
-			if o.Pair == r.Pair && !now.After(o.Until) {
-				v = o.Value
-			}
-		}
-		if v == "да" {
-			open = append(open, r.Pair)
-		}
-		if strings.HasSuffix(r.Pair, "-DO") && (v == "да" || v == "без мастера") {
-			lane = append(lane, r.Pair)
-		}
-	}
-	return
+// Pairs — открытые на ступени пары; HIGH и неразобранная ступень — пустой список, не nil.
+func (l Level) Pairs() []string {
+	n := map[Level]int{LevelMed: 3, LevelLow: len(pairs)}[l]
+	return slices.Clone(pairs[:n])
 }
 
-// MaxSpaceShift — от LOW до HIGH две ступени: больше сдвигать некуда, такое значение в конфиге — ошибка.
-const MaxSpaceShift = 2
-
-// SpaceOpen — планка каждого корня из общих ворот: пара открыта, если открыта пара того же DIFF на shift приоритетов выше.
-// Выше MED — HIGH; при отрицательном запасе пара открывается только если она уже открыта в общих воротах.
-// Корень со сдвигом 0 тоже в ответе: tk видит, что планка посчитана.
-func SpaceOpen(t Table, open []string, spaces map[string]int, negative bool) map[string][]string {
-	out := make(map[string][]string, len(spaces))
-	for root, shift := range spaces {
-		pairs := []string{}
-		for _, r := range t {
-			if shiftedOpen(r.Pair, open, shift, negative) {
-				pairs = append(pairs, r.Pair)
-			}
-		}
-		out[root] = pairs
+// UserGate — ворота по слову пользователя: open — ступень вне корней, open_by_root — ступень каждого корня (HIGH тоже:
+// tk видит, что планка посчитана), lane пуст всегда — поле читает lane llmark.
+func UserGate(level Level, spaces map[string]Level) Gate {
+	byRoot := make(map[string][]string, len(spaces))
+	for root, l := range spaces {
+		byRoot[root] = l.Pairs()
 	}
-	return out
-}
-
-func shiftedOpen(pair string, open []string, shift int, negative bool) bool {
-	prio, diff, ok := strings.Cut(pair, "-")
-	if !ok {
-		return slices.Contains(open, pair)
-	}
-	rank := map[string]int{"MED": 0, "LOW": 1}[prio] - shift
-	if rank < 0 {
-		return !negative || slices.Contains(open, pair)
-	}
-	return slices.Contains(open, []string{"MED", "LOW"}[rank]+"-"+diff)
-}
-
-func supplierValue(row TableRow, supply Supply) string {
-	if supply.Burning {
-		return "да"
-	}
-	return bandValue(row, BandOf(supply.Margin))
-}
-
-func worse(a, b string) string {
-	rank := map[string]int{"нет": 0, "без мастера": 1, "да": 2}
-	if rank[b] < rank[a] {
-		return b
-	}
-	return a
+	return Gate{Open: level.Pairs(), Lane: []string{}, OpenByRoot: byRoot}
 }
 
 type Gate struct {
-	At     time.Time `json:"at"`
-	Live   []string  `json:"live"`
-	Claude float64   `json:"claude"`
-	OpenAI *float64  `json:"openai"`
-	Open   []string  `json:"open"`
-	Lane   []string  `json:"lane"`
+	At   time.Time `json:"at"`
+	Live []string  `json:"live"`
+	Open []string  `json:"open"`
+	// Lane — пары DO для lane llmark: пуст всегда, пока ворота — только слово пользователя.
+	Lane []string `json:"lane"`
 	// OpenByRoot — планка папок пространства: tk берёт самый длинный корень, куда входит проект, иначе Open.
 	OpenByRoot map[string][]string `json:"open_by_root"`
 }
@@ -400,11 +164,6 @@ func (g Gate) Write(path string) error {
 	}
 	if g.OpenByRoot == nil {
 		g.OpenByRoot = map[string][]string{}
-	}
-	g.Claude = math.Round(g.Claude*100) / 100
-	if g.OpenAI != nil {
-		x := math.Round(*g.OpenAI*100) / 100
-		g.OpenAI = &x
 	}
 	b, e := json.Marshal(g)
 	if e != nil {

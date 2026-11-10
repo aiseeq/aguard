@@ -1,7 +1,6 @@
 package queue
 
 import (
-	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,64 +20,8 @@ func at(s string) time.Time {
 	return t
 }
 
-func TestReplayElevenHistorySamples(t *testing.T) {
-	rows, err := ReadHistory("testdata/limits-history.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	accounts := Accounts(rows, time.Time{}, 0)
-	if len(accounts) != 3 {
-		t.Fatalf("учёток %d", len(accounts))
-	}
-	want := []float64{0.39, -0.18, -0.17, 0.46, 0.07, -0.25, -0.38, -0.08, 0.12, 0.18, 0.29}
-	bands := map[Band]int{}
-	for i, w := range want {
-		now := time.Date(2026, 10, 24+i, 7, 0, 0, 0, plus2)
-		s := Measure(rows, accounts, now)
-		if math.Abs(s.Margin-w) > 0.006 {
-			t.Errorf("%s запас %.3f, образец %.2f", now.Format("02.01"), s.Margin, w)
-		}
-		if s.Burning {
-			t.Errorf("%s сгорающего на истории нет", now.Format("02.01"))
-		}
-		bands[BandOf(s.Margin)]++
-	}
-	if bands[BandFull] != 0 || bands[BandMid] != 6 || bands[BandLow] != 5 {
-		t.Fatalf("утра %v, нужно 0, 6, 5", bands)
-	}
-}
-
 func row(acc, when string, used float64, resets string) Row {
 	return Row{At: at(when), ResetsAt: at(resets), Used: used, Account: acc}
-}
-
-func TestMeasureBurning(t *testing.T) {
-	now := at("2026-11-03T12:00:00+01:00")
-	rows := []Row{row("a", "2026-11-03T11:00:00+01:00", 69, "2026-11-04T10:00:00+01:00")}
-	if s := Measure(rows, []string{"a"}, now); !s.Burning {
-		t.Fatal("31 % остатка, до сброса 22 ч: сгорает")
-	}
-	rows[0].Used = 71
-	if s := Measure(rows, []string{"a"}, now); s.Burning {
-		t.Fatal("29 % остатка: не сгорает")
-	}
-	rows[0].Used, rows[0].ResetsAt = 50, at("2026-11-04T13:00:00+01:00")
-	if s := Measure(rows, []string{"a"}, now); s.Burning {
-		t.Fatal("до сброса больше суток: не сгорает")
-	}
-}
-
-// Расход 0 при нулевом остатке: сессии упёрлись в потолок и встали, это не бесконечный запас.
-func TestMeasureNoBurn(t *testing.T) {
-	now := at("2026-11-03T12:00:00+01:00")
-	empty := []Row{row("a", "2026-10-29T12:00:00+01:00", 100, "2026-11-05T12:00:00+01:00")}
-	if s := Measure(empty, []string{"a"}, now); s.Margin >= 0 {
-		t.Fatalf("остаток 0, сброс через 2 дня: запас %.2f, нужен < 0", s.Margin)
-	}
-	half := []Row{row("a", "2026-10-29T12:00:00+01:00", 50, "2026-11-05T12:00:00+01:00")}
-	if s := Measure(half, []string{"a"}, now); s.Margin < 1 {
-		t.Fatalf("есть остаток и нет расхода: запас %.2f, нужен >= 1", s.Margin)
-	}
 }
 
 // Учётка без свежих строк выпадает: иначе брошенная подписка добавляет 100 % навсегда.
@@ -90,115 +33,6 @@ func TestAccountsWindow(t *testing.T) {
 	}
 	if got := Accounts(rows, now, 14*24*time.Hour); len(got) != 1 || got[0] != "new" {
 		t.Fatalf("учётки %v", got)
-	}
-}
-
-func TestMeasureShort(t *testing.T) {
-	now := at("2026-11-03T12:00:00+01:00")
-	young := []Row{row("w", "2026-11-03T02:00:00+01:00", 1, "2026-11-10T12:00:00+01:00"), row("w", "2026-11-03T11:50:00+01:00", 9, "2026-11-10T12:00:00+01:00")}
-	if s := MeasureShort(young, []string{"w"}, now); s != nil {
-		t.Fatal("меньше суток истории: запас неизвестен")
-	}
-	stale := []Row{row("w", "2026-11-01T02:00:00+01:00", 1, "2026-11-10T12:00:00+01:00"), row("w", "2026-11-03T10:00:00+01:00", 9, "2026-11-10T12:00:00+01:00")}
-	if s := MeasureShort(stale, []string{"w"}, now); s != nil {
-		t.Fatal("последний замер старше часа: запас неизвестен")
-	}
-	// 2 суток истории, расход 20 %: 10 %/сут, не 6,7 (делим на факт, а не на 3 суток). Остаток 80, сброс через 7 суток: 8−7=1.
-	ok := []Row{row("w", "2026-11-01T12:00:00+01:00", 0, "2026-11-10T12:00:00+01:00"), row("w", "2026-11-03T11:50:00+01:00", 20, "2026-11-10T12:00:00+01:00")}
-	s := MeasureShort(ok, []string{"w"}, now)
-	if s == nil || math.Abs(s.Margin-1) > 0.02 {
-		t.Fatalf("запас %+v, нужен 1", s)
-	}
-}
-
-func table(t *testing.T) Table {
-	t.Helper()
-	f, err := os.Open(filepath.Join("..", "..", "deploy", "gate.tsv"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	tb, err := ParseTable(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return tb
-}
-
-func TestParseTableRejects(t *testing.T) {
-	for _, bad := range []string{
-		"MED-DO\tда\tда\n",                         // мало колонок
-		"MED-DO\tда\tда\tможет\n",                  // чужое значение
-		"HIGH-DO\tда\tда\tда\n",                    // HIGH в таблице нет
-		"MED-XX\tда\tда\tда\n",                     // чужая пара
-		"MED-DO\tда\tда\tда\nMED-DO\tда\tда\tда\n", // дубль
-	} {
-		if _, err := ParseTable(strings.NewReader(bad)); err == nil {
-			t.Errorf("должно быть ошибкой: %q", bad)
-		}
-	}
-}
-
-func eq(a, b []string) bool {
-	return strings.Join(a, ",") == strings.Join(b, ",")
-}
-
-func TestComputeBands(t *testing.T) {
-	tb := table(t)
-	now := at("2026-11-03T12:00:00+01:00")
-	all := []string{"MED-DO", "MED-HUNT", "MED-ARCH", "LOW-DO", "LOW-HUNT", "LOW-ARCH"}
-	mid := []string{"MED-DO", "MED-HUNT", "MED-ARCH", "LOW-DO"}
-	do := []string{"MED-DO", "LOW-DO"}
-	cases := []struct {
-		name       string
-		claude     Supply
-		openai     *Supply
-		open, lane []string
-	}{
-		{"от 1", Supply{Margin: 1}, nil, all, do},
-		{"от 0 до 1", Supply{Margin: 0}, nil, mid, do},
-		{"меньше 0", Supply{Margin: -0.1}, nil, nil, do},
-		{"сгорает при минусе", Supply{Margin: -3, Burning: true}, nil, all, do},
-		{"OpenAI от 0 до 1 при полном Claude: худшее", Supply{Margin: 5}, &Supply{Margin: 0.5}, mid, do},
-		{"OpenAI минус при полном Claude", Supply{Margin: 5}, &Supply{Margin: -1}, nil, do},
-		{"сгорает Claude, минус OpenAI: пара стоит", Supply{Margin: -3, Burning: true}, &Supply{Margin: -1}, nil, do},
-	}
-	for _, c := range cases {
-		open, lane := Compute(tb, nil, c.claude, c.openai, now)
-		if !eq(open, c.open) || !eq(lane, c.lane) {
-			t.Errorf("%s: open %v lane %v", c.name, open, lane)
-		}
-	}
-}
-
-func TestOverride(t *testing.T) {
-	tb := table(t)
-	now := at("2026-11-03T12:00:00+01:00")
-	ov, err := ParseOverrides(strings.NewReader(
-		"# пара\tзначение\tдо\tкто\tпочему\n" +
-			"LOW-HUNT\tда\t2026-11-06\tuser\tоткрой до пятницы\n" +
-			"MED-DO\tнет\t2026-11-01\tlead\tистёкшая\n" +
-			"MED-ARCH\tбез мастера\t2026-11-06T18:00:00+01:00\tlead\tтолько дорожка\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	open, lane := Compute(tb, ov, Supply{Margin: -1}, nil, now)
-	if !eq(open, []string{"LOW-HUNT"}) {
-		t.Errorf("open %v", open)
-	}
-	// HUNT и ARCH дорожка не берёт, даже при «без мастера»: только DO.
-	if !eq(lane, []string{"MED-DO", "LOW-DO"}) {
-		t.Errorf("lane %v", lane)
-	}
-	for _, bad := range []string{
-		"HIGH-DO\tнет\t2026-11-06\tuser\tx\n",  // HIGH открыт всегда
-		"MED-DO\tможет\t2026-11-06\tuser\tx\n", // чужое значение
-		"MED-DO\tнет\tзавтра\tuser\tx\n",       // чужая дата
-		"MED-DO\tнет\t2026-11-06\tuser\n",      // нет причины
-	} {
-		if _, err := ParseOverrides(strings.NewReader(bad)); err == nil {
-			t.Errorf("должно быть ошибкой: %q", bad)
-		}
 	}
 }
 
@@ -623,7 +457,7 @@ func TestStateRoundTrip(t *testing.T) {
 
 func TestWriteGate(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "sub", "gate.json")
-	g := Gate{At: at("2026-11-03T12:00:00+01:00"), Live: []string{"glint", "graft"}, Claude: 0.29, Open: []string{"MED-DO"}, Lane: []string{"MED-DO"}}
+	g := Gate{At: at("2026-11-03T12:00:00+01:00"), Live: []string{"glint", "graft"}, Open: []string{"MED-DO"}, Lane: []string{"MED-DO"}}
 	if err := g.Write(p); err != nil {
 		t.Fatal(err)
 	}
@@ -632,15 +466,17 @@ func TestWriteGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := strings.ReplaceAll(string(b), " ", "")
-	for _, want := range []string{`"live":["glint","graft"]`, `"claude":0.29`, `"openai":null`, `"open":["MED-DO"]`, `"lane":["MED-DO"]`, `"at":"2026-11-03T12:00:00+01:00"`} {
+	for _, want := range []string{`"live":["glint","graft"]`, `"open":["MED-DO"]`, `"lane":["MED-DO"]`, `"at":"2026-11-03T12:00:00+01:00"`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("нет %s в %s", want, s)
 		}
 	}
-	if strings.Contains(s, `"mode"`) {
-		t.Errorf("поля mode в договоре нет: %s", s)
+	for _, gone := range []string{`"mode"`, `"claude"`, `"openai"`} { // запаса в договоре нет: ворота от него не зависят
+		if strings.Contains(s, gone) {
+			t.Errorf("поля %s в договоре нет: %s", gone, s)
+		}
 	}
-	empty := Gate{At: g.At, Claude: -1}
+	empty := Gate{At: g.At}
 	if err := empty.Write(p); err != nil {
 		t.Fatal(err)
 	}

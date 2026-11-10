@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -14,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/restart"
 )
@@ -31,19 +29,6 @@ func (b *queueBench) captureLog() *strings.Builder {
 	return &log
 }
 
-func (b *queueBench) writeHistory(t *testing.T, rows map[string]time.Duration) {
-	t.Helper()
-	now := time.Now()
-	var body strings.Builder
-	for account, age := range rows {
-		fmt.Fprintf(&body, `{"at":%q,"sevenDayResetsAt":%q,"sevenDayUsedPercentage":20,"account":%q}`+"\n",
-			now.Add(-age).Format(time.RFC3339), now.Add(72*time.Hour).Format(time.RFC3339), account)
-	}
-	if err := os.WriteFile(b.c.Queue.History, []byte(body.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func (b *queueBench) ageGate(t *testing.T) {
 	t.Helper()
 	stale := time.Now().Add(-2 * time.Hour) // без смены open и lane файл обновляется раз в час
@@ -53,58 +38,6 @@ func (b *queueBench) ageGate(t *testing.T) {
 }
 
 func (b *queueBench) statePath() string { return filepath.Join(b.a.dir("queue"), "state.json") }
-
-// История Claude молчит больше суток: это сбой входа, а не запас 99. gate.json остаётся прежним, журнал говорит о причине.
-func TestQueueStaleHistoryKeepsGate(t *testing.T) {
-	b := newQueueBench(t, "[]", "[]")
-	b.round(t)
-	before, err := os.ReadFile(b.c.Queue.Gate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b.writeHistory(t, map[string]time.Duration{"a": 25 * time.Hour, "b": 30 * time.Hour})
-	b.ageGate(t)
-	log := b.captureLog()
-	b.round(t)
-	after, err := os.ReadFile(b.c.Queue.Gate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(before) != string(after) {
-		t.Fatalf("устаревшая история переписала ворота:\n%s\n%s", before, after)
-	}
-	if !strings.Contains(log.String(), "история лимитов") {
-		t.Fatalf("причины нет в журнале: %s", log)
-	}
-}
-
-// Самая свежая строка моложе суток: история жива, даже если другая учётка молчит дольше. Наибольший разрыв живого файла 7 ч.
-func TestQueueHistoryFreshEnough(t *testing.T) {
-	for name, rows := range map[string]map[string]time.Duration{
-		"23 ч":          {"a": 23 * time.Hour},
-		"вторая молчит": {"a": time.Hour, "b": 30 * time.Hour},
-	} {
-		t.Run(name, func(t *testing.T) {
-			b := newQueueBench(t, "[]", "[]")
-			b.round(t)
-			before, err := queue.ReadGate(b.c.Queue.Gate)
-			if err != nil {
-				t.Fatal(err)
-			}
-			b.writeHistory(t, rows)
-			b.ageGate(t)
-			time.Sleep(10 * time.Millisecond)
-			b.round(t)
-			after, err := queue.ReadGate(b.c.Queue.Gate)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !after.At.After(before.At) {
-				t.Fatalf("ворота не обновлены: %v -> %v", before.At, after.At)
-			}
-		})
-	}
-}
 
 // Битый state.json не останавливает CRIT: файл отложен для разбора, проход идёт с пустого состояния, предупреждение в журнале.
 func TestQueueBrokenStateSetAside(t *testing.T) {
@@ -400,81 +333,11 @@ func TestQueueTicketExecutor(t *testing.T) {
 	}
 }
 
-func (b *queueBench) openAIAccount(t *testing.T) {
-	t.Helper()
-	b.c.Codex.Accounts = []codexwatch.Account{{Name: "w"}}
-	if err := os.MkdirAll(b.a.dir("codex"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// Вход OpenAI не прочитан: это не «данных нет». Открыть пары по одному Claude нельзя, gate.json остаётся прежним.
-func TestQueueOpenAIBrokenKeepsGate(t *testing.T) {
-	for name, spoil := range map[string]func(*testing.T, *queueBench){
-		"битая история": func(t *testing.T, b *queueBench) {
-			if err := os.WriteFile(filepath.Join(b.a.dir("queue"), "openai-history.jsonl"), []byte("{не json\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"битый замер учётки": func(t *testing.T, b *queueBench) {
-			if err := os.WriteFile(filepath.Join(b.a.dir("codex"), "w.json"), []byte("{не json"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		},
-		"замер не прочитать": func(t *testing.T, b *queueBench) {
-			dir := b.a.dir("codex")
-			if err := os.RemoveAll(dir); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(dir, nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			b := newQueueBench(t, "[]", "[]")
-			b.openAIAccount(t)
-			b.round(t)
-			before, err := os.ReadFile(b.c.Queue.Gate)
-			if err != nil {
-				t.Fatal(err)
-			}
-			spoil(t, b)
-			b.ageGate(t)
-			log := b.captureLog()
-			b.round(t)
-			after, err := os.ReadFile(b.c.Queue.Gate)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(before) != string(after) {
-				t.Fatalf("сбой OpenAI переписал ворота:\n%s\n%s", before, after)
-			}
-			if !strings.Contains(log.String(), "история OpenAI") {
-				t.Fatalf("нет предупреждения: %s", log)
-			}
-		})
-	}
-}
-
-// Учётка без файла замера — данных нет, а не сбой: openai null, ворота считаются.
-func TestQueueOpenAIMissingIsNull(t *testing.T) {
-	b := newQueueBench(t, "[]", "[]")
-	b.openAIAccount(t)
-	b.round(t)
-	gate, err := queue.ReadGate(b.c.Queue.Gate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gate.OpenAI != nil {
-		t.Fatalf("запас без замера: %v", *gate.OpenAI)
-	}
-}
-
-// Письма считают open по самому gate.json, как tk next: файл не записан или устарел — MED и LOW нет, хоть расчёт и открыл пары.
+// Письма считают open по самому gate.json, как tk next: файл не записан — MED и LOW нет, хоть слово пользователя их открыло.
 func TestQueueLettersReadGateFile(t *testing.T) {
 	t.Run("файл не записан", func(t *testing.T) {
 		b := newQueueBench(t, "[]", "[]")
+		b.c.Queue.Level = queue.LevelMed
 		block := filepath.Join(b.dir, "file")
 		if err := os.WriteFile(block, nil, 0o644); err != nil {
 			t.Fatal(err)
@@ -490,6 +353,7 @@ func TestQueueLettersReadGateFile(t *testing.T) {
 	})
 	t.Run("файл свежий", func(t *testing.T) {
 		b := newQueueBench(t, "[]", "[]")
+		b.c.Queue.Level = queue.LevelMed
 		open, err := gateOpen(b.a.queueGatePass(b.c, time.Now(), false))
 		if err != nil {
 			t.Fatal(err)
@@ -502,20 +366,9 @@ func TestQueueLettersReadGateFile(t *testing.T) {
 			t.Fatalf("письма %v, файл %v", open, gate.Open)
 		}
 	})
-	t.Run("вход сломан, файл старше 26 ч", func(t *testing.T) {
-		b := newQueueBench(t, "[]", "[]")
-		b.round(t)
-		b.writeHistory(t, map[string]time.Duration{"a": 25 * time.Hour})
-		open, err := gateOpen(b.a.queueGatePass(b.c, time.Now().Add(27*time.Hour), false))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(open) != 0 {
-			t.Fatalf("устаревший файл: %v", open)
-		}
-	})
 	t.Run("сухой прогон показывает расчёт и не пишет", func(t *testing.T) {
 		b := newQueueBench(t, "[]", "[]")
+		b.c.Queue.Level = queue.LevelMed
 		open, err := gateOpen(b.a.queueGatePass(b.c, time.Now(), true))
 		if err != nil {
 			t.Fatal(err)
@@ -524,31 +377,6 @@ func TestQueueLettersReadGateFile(t *testing.T) {
 			t.Fatalf("open %v, файл есть: %v", open, b.gateExists())
 		}
 	})
-}
-
-// Замер учётки без срока сброса — данных нет: в историю не пишем, иначе ReadHistory откажет на этой строке всегда.
-func TestQueueOpenAINoResetNoRow(t *testing.T) {
-	b := newQueueBench(t, "[]", "[]")
-	b.openAIAccount(t)
-	st := codexwatch.State{Samples: []codexwatch.Sample{{At: time.Now().Add(-time.Minute), Used: 40}}}
-	data, err := json.Marshal(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(b.a.dir("codex"), "w.json"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	b.round(t)
-	if _, err := os.Stat(filepath.Join(b.a.dir("queue"), "openai-history.jsonl")); !os.IsNotExist(err) {
-		t.Fatalf("строка без срока сброса в истории: %v", err)
-	}
-	gate, err := queue.ReadGate(b.c.Queue.Gate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gate.OpenAI != nil {
-		t.Fatalf("запас: %v", *gate.OpenAI)
-	}
 }
 
 // state.json не пишется (диск полон, права): отметки живут в памяти демона, письма не идут потоком каждые 30 с.

@@ -302,12 +302,11 @@ git_roots = ["~/git", "~/work"]
 dirs = ["~/docs"]
 skip = [] # папки проектов, которые очередь не читает: список — только в конфиге машины
 weekend_crit = [] # папки проектов, где в субботу и воскресенье из строк идут только CRIT
-spaces = {} # корень пространства и сдвиг его планки, ступеней приоритета 0..2: {"~/x" = 1}. Папки вне корней — по общим воротам
-table = "~/.config/queue/gate.tsv"
-override = "~/.config/queue/override.tsv"
+level = "HIGH" # ступень ворот вне корней spaces по слову пользователя: HIGH — только CRIT и HIGH, MED — и MED-*, LOW — и LOW-* (docs/spec.md, «Очередь: ворота»)
+spaces = {} # корень пространства и его ступень, те же HIGH, MED, LOW: {"~/x" = "MED"}
 frozen = "~/.config/queue/frozen"
 gate = "~/.local/state/queue/gate.json"
-history = "~/.local/state/chooks/limits-history.jsonl"
+history = "~/.local/state/chooks/limits-history.jsonl" # история лимитов Claude для aguard limit-reset-check; ворота её не читают
 tk = "~/bin/tk"
 
 # Сторож старта Сна и Дайджеста, а также зависшего окна доверия после перезапуска cl.

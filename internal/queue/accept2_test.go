@@ -2,7 +2,6 @@ package queue
 
 import (
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -145,56 +144,6 @@ func TestStateSmall(t *testing.T) {
 	}
 	if fi.Size() > 4096 {
 		t.Fatalf("состояние %d байт при 2000 MED и LOW", fi.Size())
-	}
-}
-
-// Клетка считается у каждого поставщика своя: сгорание снимает ограничение только этого поставщика.
-func TestComputeBurningPerProvider(t *testing.T) {
-	tb := table(t)
-	now := at("2026-11-03T12:00:00+01:00")
-	all := []string{"MED-DO", "MED-HUNT", "MED-ARCH", "LOW-DO", "LOW-HUNT", "LOW-ARCH"}
-	mid := []string{"MED-DO", "MED-HUNT", "MED-ARCH", "LOW-DO"}
-	cases := []struct {
-		name   string
-		claude Supply
-		openai *Supply
-		open   []string
-	}{
-		{"сгорает Claude, OpenAI полон", Supply{Margin: -3, Burning: true}, &Supply{Margin: 5}, all},
-		{"сгорает Claude, OpenAI средний", Supply{Margin: -3, Burning: true}, &Supply{Margin: 0.5}, mid},
-		{"сгорает OpenAI, Claude полон", Supply{Margin: 5}, &Supply{Margin: -3, Burning: true}, all},
-		{"сгорает OpenAI, Claude в минусе", Supply{Margin: -1}, &Supply{Margin: -3, Burning: true}, nil},
-		{"сгорают оба", Supply{Margin: -1, Burning: true}, &Supply{Margin: -3, Burning: true}, all},
-	}
-	for _, c := range cases {
-		if open, _ := Compute(tb, nil, c.claude, c.openai, now); !eq(open, c.open) {
-			t.Errorf("%s: open %v", c.name, open)
-		}
-	}
-}
-
-// История длиннее окна: расход за 72 ч делится на 3 суток, не на всю длину истории.
-func TestMeasureShortLongHistory(t *testing.T) {
-	now := at("2026-11-13T12:00:00+01:00")
-	const rs = "2026-11-20T12:00:00+01:00"
-	rows := []Row{
-		row("w", "2026-11-03T12:00:00+01:00", 0, rs),
-		row("w", "2026-11-10T00:00:00+01:00", 40, rs),
-		row("w", "2026-11-11T12:00:00+01:00", 40, rs),
-		row("w", "2026-11-13T11:50:00+01:00", 70, rs),
-	}
-	s := MeasureShort(rows, []string{"w"}, now)
-	if s == nil || math.Abs(s.Margin-(-4)) > 0.02 {
-		t.Fatalf("запас %+v, нужен -4 (остаток 30 при 10 %%/сут, сброс через 7 суток)", s)
-	}
-}
-
-// Одна учётка без замера: запас неизвестен, а не посчитан как свободная на 100 %.
-func TestMeasureShortMissingAccount(t *testing.T) {
-	now := at("2026-11-03T12:00:00+01:00")
-	rows := []Row{row("work", "2026-11-01T12:00:00+01:00", 0, "2026-11-10T12:00:00+01:00"), row("work", "2026-11-03T11:50:00+01:00", 20, "2026-11-10T12:00:00+01:00")}
-	if s := MeasureShort(rows, []string{"work", "personal"}, now); s != nil {
-		t.Fatalf("%+v", s)
 	}
 }
 
