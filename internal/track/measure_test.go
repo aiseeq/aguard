@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -197,5 +198,58 @@ func TestStopMeasureWaitsGoroutine(t *testing.T) {
 	case d := <-done:
 		t.Fatalf("итог замера остался в канале: %+v", d)
 	default:
+	}
+}
+
+// Проба проверки 10.11 13:28 через сам цикл: чтение fanotify кончилось (EOF) при замере в паузе — loop возвращается только
+// после горутины замера; уступка после выхода не идёт, второй цикл с тем же Yield её не делит.
+func TestLoopExitWaitsMeasure(t *testing.T) {
+	job := measureFixture(t)
+	var inside atomic.Int32
+	entered := make(chan struct{}, 8)
+	yield := func(ctx context.Context) bool {
+		inside.Add(1)
+		defer inside.Add(-1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		time.Sleep(50 * time.Millisecond) // уступка доходит до конца не сразу: невыжданная горутина ещё внутри
+		return true
+	}
+	cfg := Config{Name: "probe", Yield: yield, YoungEvery: time.Hour, Full: time.Hour, Young: time.Hour}
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for round := range 2 {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		owners, err := openEventLog(filepath.Join(t.TempDir(), "owners.jsonl"), 1<<20, lg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tr := &Tracker{cfg: cfg, log: lg, entries: map[string]*record.Entry{}, watchKey: map[string]string{},
+			watched: map[string]string{}, containers: map[string]bool{}, started: time.Now(),
+			fan: r, done: make(chan struct{}), owners: owners}
+		for _, it := range job.items {
+			tr.entries[it.path] = &record.Entry{Path: it.path}
+		}
+		res := make(chan error, 1)
+		go func() { res <- tr.loop(t.Context()) }()
+		<-entered
+		start := time.Now()
+		_ = w.Close() // EOF чтения: цикл выходит с ошибкой
+		if err := <-res; err == nil {
+			t.Fatalf("круг %d: цикл вышел без ошибки", round)
+		}
+		if n := inside.Load(); n != 0 {
+			t.Fatalf("круг %d: цикл вышел, а уступка замера ещё идёт (%d)", round, n)
+		}
+		if d := time.Since(start); d > 2*time.Second {
+			t.Fatalf("круг %d: выход цикла затянулся: %v", round, d)
+		}
+		close(tr.done)
+		_ = r.Close()
 	}
 }
