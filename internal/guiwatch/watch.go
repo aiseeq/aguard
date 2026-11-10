@@ -1247,13 +1247,13 @@ func (w *Watcher) createSlice(s *targetState, e *episode) error {
 			return err
 		}
 		old.Errors = unionErrors(old.Errors, nil, lost)
+		e.start = old.Start // до makeSlice: AtMS новых сэмплов — от начала слитого среза, как у старых
 		item := w.makeSlice(s, e, true)
 		old.Merged++
 		old.End = item.End
 		old.DurationMS = old.End.Sub(old.Start).Milliseconds()
 		old.Samples = dedupeSamples(append(old.Samples, item.Samples...))
 		w.markSliceDirty(old.ID)
-		e.start = old.Start
 		e.detected = true
 		e.sliceID = old.ID
 		s.lastWritten = now

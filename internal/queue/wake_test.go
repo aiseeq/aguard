@@ -323,3 +323,22 @@ func TestWakeMastersIndependent(t *testing.T) {
 		t.Fatal("пустая очередь одного сняла отметку другого", w.state.Wakes)
 	}
 }
+
+// «После письма мастер работал» — по времени отметки письма: ход до письма не делает мастера вставшим.
+func TestWakeTurnBeforeLetterNoStuck(t *testing.T) {
+	w := newWakeWorld()
+	turnAt := w.view.Now.Add(-30 * time.Minute)
+	w.view.TurnAfter = func(_ string, at time.Time) bool { return turnAt.After(at) }
+	w.confirm(w.step())
+	if got := w.state.Wakes["master"].At; !got.Equal(w.view.Now) {
+		t.Fatalf("отметка письма %s, проход %s", got, w.view.Now)
+	}
+	w.view.Now = w.view.Now.Add(5 * time.Minute)
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatal("ход до письма принят за ход после", ns)
+	}
+	turnAt = w.view.Now.Add(-time.Minute)
+	if ns := w.step(); len(ns) != 1 || !has(ns, KindWakeStuck, "admin") {
+		t.Fatal("ход после письма — сигнал «встал»", ns)
+	}
+}

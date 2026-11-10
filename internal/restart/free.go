@@ -60,15 +60,11 @@ func (j *Judge) Free(cfg *Config, pid int, after time.Duration, now time.Time) (
 		f.Errors = append(f.Errors, err.Error())
 	}
 	f.HookState, f.HookTasks, f.HookWaits, f.HookAgents = h.state, h.tasks, h.waits, h.agents
-	file, err := transcriptFile(p, s.SessionID)
+	file, info, err := transcriptFile(p, s.SessionID)
 	if errors.Is(err, os.ErrNotExist) {
 		f.TurnQuiet = now.Sub(time.UnixMilli(s.StartedAt))
 	} else if err != nil {
 		f.Errors = append(f.Errors, err.Error())
-	} else if info, statErr := os.Stat(file); errors.Is(statErr, os.ErrNotExist) {
-		f.TurnQuiet = now.Sub(time.UnixMilli(s.StartedAt))
-	} else if statErr != nil {
-		f.Errors = append(f.Errors, fmt.Sprintf("транскрипт: %v", statErr))
 	} else {
 		f.TurnQuiet = now.Sub(info.ModTime())
 		f.Transcript, err = c.scan.read(file, info, time.UnixMilli(s.StartedAt), now)
@@ -102,35 +98,37 @@ func (j *Judge) WakeFree(cfg *Config, pid int, after time.Duration, now time.Tim
 }
 
 // transcriptFile ищет файл беседы в любой папке проектов: имя папки Claude Code выводит из cwd сам.
-// Нет файла — os.ErrNotExist, отличимый от ошибки обхода папок.
-func transcriptFile(p paths, sessionID string) (string, error) {
+// Нет файла — os.ErrNotExist, отличимый от ошибки обхода папок. Сведения о файле — того же stat, что нашёл его:
+// второй stat открывал бы окно, где файл уже другой.
+func transcriptFile(p paths, sessionID string) (string, os.FileInfo, error) {
 	entries, err := os.ReadDir(p.projects)
 	if errors.Is(err, os.ErrNotExist) {
-		return "", os.ErrNotExist
+		return "", nil, os.ErrNotExist
 	}
 	if err != nil {
-		return "", fmt.Errorf("папки транскриптов: %w", err)
+		return "", nil, fmt.Errorf("папки транскриптов: %w", err)
 	}
 	var found string
+	var foundInfo os.FileInfo
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		path := filepath.Join(p.projects, entry.Name(), filepath.Base(sessionID)+".jsonl")
-		_, err := os.Stat(path)
+		info, err := os.Stat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return "", fmt.Errorf("транскрипт: %w", err)
+			return "", nil, fmt.Errorf("транскрипт: %w", err)
 		}
 		if found != "" {
-			return "", fmt.Errorf("несколько транскриптов сессии %s", sessionID)
+			return "", nil, fmt.Errorf("несколько транскриптов сессии %s", sessionID)
 		}
-		found = path
+		found, foundInfo = path, info
 	}
 	if found == "" {
-		return "", os.ErrNotExist
+		return "", nil, os.ErrNotExist
 	}
-	return found, nil
+	return found, foundInfo, nil
 }

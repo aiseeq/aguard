@@ -874,6 +874,51 @@ func TestMergedEpisodeKeepsCounterAndSamples(t *testing.T) {
 	}
 }
 
+// Слияние двух эпизодов D по 10 с с паузой 8 с: каждый сэмпл слитого среза (Start+AtMS) — на моменте опроса с тем же
+// состоянием, без дублей. Опросы второго эпизода сдвинуты на 37 мс от сетки первого, как у настоящего таймера: отсчёт AtMS
+// от начала нового эпизода ставит их на моменты, где опроса не было (тикет merge-atms).
+func TestMergedSliceSamplesOnTimeline(t *testing.T) {
+	root, dir, _, at := fixture(t)
+	w := New(root, dir, Default(), nil)
+	ctx := w.Config.Context.D()
+	state := func(m time.Time) string {
+		if !m.Before(at) && !m.After(at.Add(10*time.Second)) || !m.Before(at.Add(18*time.Second)) && !m.After(at.Add(28*time.Second)) {
+			return "D"
+		}
+		return "S"
+	}
+	polls := map[time.Time]string{}
+	var old []Sample
+	for m := at.Add(-ctx); !m.After(at.Add(10*time.Second + ctx)); m = m.Add(100 * time.Millisecond) {
+		polls[m] = state(m)
+		old = append(old, Sample{At: m, AtMS: m.Sub(at).Milliseconds(), State: state(m)})
+	}
+	var ring []Sample
+	for m := at.Add(10*time.Second + ctx + 37*time.Millisecond); !m.After(at.Add(28*time.Second + ctx)); m = m.Add(100 * time.Millisecond) {
+		polls[m] = state(m)
+		ring = append(ring, Sample{At: m, State: state(m)})
+	}
+	w.now = func() time.Time { return at.Add(28*time.Second + ctx) }
+	w.document.Slices = []Slice{{ID: "first", Target: "victim", PID: 4321, Starttime: 100, Start: at, End: at.Add(10 * time.Second), Samples: old}}
+	s := &targetState{Target: Target{Name: "victim", PID: 4321, Start: 100}, ring: ring}
+	if err := w.writeSlice(s, &episode{start: at.Add(18 * time.Second), end: at.Add(28 * time.Second), kind: "D"}); err != nil {
+		t.Fatal(err)
+	}
+	got := w.document.Slices[0]
+	if got.Merged != 1 || len(got.Samples) != len(polls) {
+		t.Fatalf("слияние %d, сэмплов %d, опросов %d", got.Merged, len(got.Samples), len(polls))
+	}
+	seen := map[int64]bool{}
+	for _, x := range got.Samples {
+		m := got.Start.Add(time.Duration(x.AtMS) * time.Millisecond)
+		st, ok := polls[m]
+		if !ok || st != x.State || seen[x.AtMS] {
+			t.Fatalf("сэмпл AtMS %d (%s): опрос %v, состояние опроса %q, дубль %v", x.AtMS, x.State, ok, st, seen[x.AtMS])
+		}
+		seen[x.AtMS] = true
+	}
+}
+
 func TestMergedCountSurvivesLaterSliceUpdateOnDisk(t *testing.T) {
 	root, dir, _, at := fixture(t)
 	w := New(root, dir, Default(), nil)

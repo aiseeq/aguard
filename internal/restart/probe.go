@@ -173,14 +173,9 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 	}
 	f.HookState, f.HookTasks, f.HookWaits, f.HookAgents = hook.state, hook.tasks, hook.waits, hook.agents
 	latest = later(latest, hook.written)
-	transcript, err := transcriptFile(p, s.SessionID)
+	transcript, info, err := transcriptFile(p, s.SessionID)
 	if err != nil {
 		fail(err)
-		return
-	}
-	info, err := os.Stat(transcript)
-	if err != nil {
-		fail(fmt.Errorf("транскрипт: %w", err))
 		return
 	}
 	latest = later(latest, info.ModTime())

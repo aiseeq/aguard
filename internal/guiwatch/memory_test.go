@@ -89,7 +89,8 @@ func TestCompactSliceMergeAndUpdate(t *testing.T) {
 		t.Fatalf("срезы отчёта: %#v", doc.Slices)
 	}
 	got := doc.Slices[0]
-	if got.Merged != 1 || len(got.Samples) != 4 || got.Samples[0].AtMS != -1000 || len(got.Threads) != 1 {
+	// сэмпл at+2 с — один, от начала слитого среза (2000), а не ещё раз как 0 от начала второго эпизода (merge-atms)
+	if got.Merged != 1 || len(got.Samples) != 3 || got.Samples[0].AtMS != -1000 || got.Samples[1].AtMS != 2000 || got.Samples[2].AtMS != 4000 || len(got.Threads) != 1 {
 		t.Fatalf("потеряны данные при склейке или дополнении: %#v", got)
 	}
 }

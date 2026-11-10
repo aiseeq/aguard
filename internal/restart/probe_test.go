@@ -64,11 +64,11 @@ func TestParseStat(t *testing.T) {
 func TestTranscriptFile(t *testing.T) {
 	dir := t.TempDir()
 	p := paths{projects: dir}
-	if _, err := transcriptFile(p, "s1"); err == nil {
+	if _, _, err := transcriptFile(p, "s1"); err == nil {
 		t.Error("нет транскрипта — ошибка")
 	}
 	write(t, filepath.Join(dir, "-home-u", "s1.jsonl"), "")
-	if f, err := transcriptFile(p, "s1"); err != nil || f != filepath.Join(dir, "-home-u", "s1.jsonl") {
+	if f, info, err := transcriptFile(p, "s1"); err != nil || f != filepath.Join(dir, "-home-u", "s1.jsonl") || info == nil || info.IsDir() {
 		t.Errorf("transcriptFile = %q %v", f, err)
 	}
 }
