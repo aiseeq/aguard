@@ -193,9 +193,14 @@ func TestConfirmTrustScreenReader(t *testing.T) {
 		{"", "NO-ENTER", "выбор не встал на «Yes»"},
 	} {
 		t.Run(tc.want, func(t *testing.T) {
-			if tc.echo == "" { // перерисовка окна без эха y: признак выбора — эхо, а не любой вывод и не пункт «y.» меню
+			if tc.echo == "" { // перерисовка окна без эха y: признак выбора — эхо, а не любой вывод, не пункт «y.» меню и не «y» в тексте
+				dialog, err := os.ReadFile("testdata/trust-dialog-sr-2.1.322.raw")
+				if err != nil {
+					t.Fatal(err)
+				}
 				tc.echo = filepath.Join(t.TempDir(), "no-echo.raw")
-				if err := os.WriteFile(tc.echo, []byte("\x1b(B\x0f\x1b[?2004h\x1b[<u\x1b[11G\x1b[13G\r\n\x1b[3Gy. Yes, I trust this folder\r\n\x1b[3Gn. No, exit"), 0o600); err != nil {
+				redraw := append(dialog, "\x1b(B\x0f\x1b[?2004h\x1b[<u\x1b[11G\x1b[13G\r\n\x1b[3Gy. Yes, I trust this folder\r\n\x1b[3Gn. No, exit\r\n\x1b[5Gyou\x1b[7Gy/n:\x1b[3Gy"...)
+				if err := os.WriteFile(tc.echo, redraw, 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -207,7 +212,7 @@ func TestConfirmTrustScreenReader(t *testing.T) {
 				t.Fatal("терминал не распознан")
 			}
 			cmd := exec.Command("sh", "-c",
-				`stty raw -echo; cat "$0"; k=$(dd bs=1 count=1 2>/dev/null); [ "$k" = y ] || { echo "KEY-$k"; exit 0; }; cat "$1"; if timeout --foreground 2 dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' ' | grep -q '^13$'; then echo ENTER-OK; else echo NO-ENTER; fi`,
+				`stty raw -echo; cat "$0"; k=$(dd bs=1 count=1 2>/dev/null); [ "$k" = y ] || { echo "KEY-$k"; exit 0; }; cat "$1"; v=$(timeout --foreground 2 dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' '); case "$v" in 13) echo ENTER-OK;; '') echo NO-ENTER;; *) echo "KEY2-$v";; esac`,
 				"testdata/trust-dialog-sr-2.1.322.raw", tc.echo)
 			finish, err := c.start(cmd, "/home/alice")
 			if err != nil {

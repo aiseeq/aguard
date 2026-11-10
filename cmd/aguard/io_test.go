@@ -406,6 +406,17 @@ func TestReportUntilWhoAndReadersOfLongest(t *testing.T) {
 	if err := a.ioCmd(context.Background(), []string{"report", "-file", path, "-since", "10m", "-until", "1h"}); err == nil {
 		t.Error("until раньше since — не ошибка")
 	}
+	for _, bad := range [][]string{{"-since", "bogus"}, {"-since", "1h", "-until", "bogus"}} {
+		if err := a.ioCmd(context.Background(), append([]string{"report", "-file", path}, bad...)); err == nil {
+			t.Errorf("%v — не ошибка, а пустое окно", bad)
+		}
+	}
+	if sum := report("-since", since, "-until", since); sum.Total != 0 { // пустое окно — не ошибка
+		t.Errorf("until = since: %d случаев", sum.Total)
+	}
+	if _, _, err := ioWindow("23:59", "", time.Date(2026, 11, 10, 0, 30, 0, 0, time.Local)); err == nil || !strings.Contains(err.Error(), "в будущем") {
+		t.Errorf("будущий -since без -until: %v", err)
+	}
 	out.Reset()
 	if err := a.ioCmd(context.Background(), []string{"report", "-file", path, "-since", since, "-until", until}); err != nil {
 		t.Fatal(err)

@@ -219,6 +219,9 @@ func ioWindow(since, until string, now time.Time) (time.Time, time.Time, error) 
 		}
 	}
 	if to.Before(from) {
+		if until == "" {
+			return from, to, fmt.Errorf("-since %s в будущем", from.Format(time.RFC3339))
+		}
 		return from, to, fmt.Errorf("-until %s раньше -since %s", to.Format(time.RFC3339), from.Format(time.RFC3339))
 	}
 	return from, to, nil
