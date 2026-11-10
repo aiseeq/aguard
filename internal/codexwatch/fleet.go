@@ -40,7 +40,7 @@ func (f *Fleet) Apply(rs []Reading, failed []string) string {
 		parts = append(parts, fmt.Sprintf("%s — плановый сброс %s, досрочных %d", r.Account.Name, local(r.ResetsAt), r.Available))
 	}
 	return "aguard codex: все учётки Codex без лимита: " + strings.Join(parts, "; ") +
-		". worker отказывает новым задачам Luna и Terra: задачу — --model deepseek или Opus."
+		". worker отказывает новым задачам моделей Codex (sol, terra, luna): задачу — --model deepseek или opus."
 }
 
 // Others — запас других учёток для письма об учётке self; других нет — пусто.
