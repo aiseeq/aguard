@@ -8,6 +8,9 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 )
 
+// LiveAll в queue.live — все проекты с папкой задач под git_roots и dirs, кроме skip.
+const LiveAll = "*"
+
 type Config struct {
 	Mode      string          `toml:"mode"`
 	Live      []string        `toml:"live"`

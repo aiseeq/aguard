@@ -121,3 +121,16 @@ func TestFreeTranscriptReadErrors(t *testing.T) {
 		})
 	}
 }
+
+// Обычный файл в папке транскриптов (в проде — ~/.claude/projects/subcount.tsv) — не папка проекта: свобода сессии от него не
+// зависит.
+func TestFreeIgnoresPlainFileInProjects(t *testing.T) {
+	now := time.Now()
+	const after = 2 * time.Minute
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 10 * time.Minute})
+	w.link(t, 4242)
+	write(t, filepath.Join(w.p.projects, "subcount.tsv"), "x\t1\n")
+	if ok, why := w.freeNow(t, after, now); !ok {
+		t.Fatalf("файл в папке транскриптов помешал: %s", why)
+	}
+}

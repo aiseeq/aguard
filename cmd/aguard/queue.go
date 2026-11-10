@@ -136,10 +136,50 @@ func (a *app) queueRound(ctx context.Context, c *config.Config, judge *restart.J
 		return nil
 	}
 	now := time.Now()
+	live, err := queueLive(&c.Queue)
+	if err != nil {
+		return err
+	}
+	rc := *c
+	rc.Queue.Live = live
+	c = &rc
 	if _, err := a.queueGatePass(c, now, dry); err != nil {
 		return err
 	}
 	return a.queueNotices(ctx, c, judge, dry, now)
+}
+
+// queueLive — список live прохода. «*» в нём — все проекты с папкой задач под git_roots и dirs, кроме skip: новый проект
+// идёт в боевой режим и ворота tk next сам (пользователь 04.11 «все агенты», queue-live-allowlist). Остальные имена списка
+// добавляются как есть: имена, под которыми tk видит проект вне корней (папка лида), находом не выводятся.
+func queueLive(cfg *queue.Config) ([]string, error) {
+	if !slices.Contains(cfg.Live, queue.LiveAll) {
+		return slices.Clone(cfg.Live), nil
+	}
+	dirs, err := queueFingerprintDirs(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("queue.live «*»: %w", err)
+	}
+	var out []string
+	for _, name := range cfg.Live {
+		if name != queue.LiveAll {
+			out = append(out, name)
+		}
+	}
+	for _, tasks := range dirs {
+		info, err := os.Stat(tasks)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("queue.live «*»: %w", err)
+		}
+		if info.IsDir() {
+			out = append(out, filepath.Base(queueTasksProject(tasks, cfg.Dirs)))
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out), nil
 }
 
 // queueGatePass считает ворота и пишет gate.json; возвращает то, что увидит tk next: при сломанном входе — прошлый файл.

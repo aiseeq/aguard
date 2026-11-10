@@ -1,5 +1,6 @@
-// Наблюдатель disk: рост папок кэшей и состояний, остатки временного, быстрое наполнение (internal/disk). Режим log:
-// журнал ~/.local/state/aguard/disk/<день>.jsonl — кому и что сообщил бы; замеры между проходами — state.json там же.
+// Наблюдатель disk: рост папок кэшей и состояний, остатки временного, быстрое наполнение, прогноз запаса (internal/disk).
+// Журнал ~/.local/state/aguard/disk/<день>.jsonl; режим log — кому и что сообщил бы, alert — письма и тикеты
+// (disk_route.go); замеры между проходами — state.json там же.
 package main
 
 import (
@@ -136,6 +137,9 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 			a.warn("disk", "сигнал о свободном месте", "err", err)
 		}
 	}
+	if err := a.diskForecast(&cfg.Disk, now, free); err != nil {
+		a.warn("disk", "прогноз запаса", "err", err)
+	}
 	owners := a.diskOwners(cfg)
 	yield := a.diskYield(ctx)
 	walkReason := st.WalkDue(&cfg.Disk, now, free)
@@ -183,6 +187,9 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 	}
 	for i := range recs {
 		a.log.Info("aguard disk: " + recs[i].Line(a.home))
+	}
+	if err := a.diskRoute(ctx, &cfg.Disk, st, recs, now); err != nil {
+		a.warn("disk", "маршрут находок", "err", err)
 	}
 	store := disk.NewStore(a.dir("disk"))
 	if err := store.Append(recs); err != nil {
@@ -460,10 +467,16 @@ func (a *app) diskFree(cfg *disk.Config, st *disk.State, now time.Time, free int
 
 // diskLowFree — письмо «свободно меньше free_min» сессии to; в log — только журнал «написал бы». Ошибка — письмо не ушло.
 func (a *app) diskLowFree(cfg *disk.Config, to, msg string, free int64) error {
+	return a.diskSend(cfg, cfg.FreeMode == disk.FreeAlert, to, "free", msg, free)
+}
+
+// diskSend — письмо disk сессии to (kind — free, fast, forecast: учёт <kind>_sent и т. п.); не alert — только журнал
+// «написал бы». Ошибка — письмо не ушло; тишина — errQuiet без учёта (его ведёт вызывающий).
+func (a *app) diskSend(cfg *disk.Config, alert bool, to, kind, msg string, free int64) error {
 	gb := free >> 30
-	if cfg.FreeMode != disk.FreeAlert {
-		a.log.Info("aguard disk: написал бы", "session", to, "msg", msg)
-		a.note("disk", "free_would_send", "", to, gb, "GiB")
+	if !alert {
+		a.log.Info("aguard disk: написал бы", "session", to, "kind", kind, "msg", msg)
+		a.note("disk", kind+"_would_send", "", to, gb, "GiB")
 		return nil
 	}
 	alive, err := a.reg.Alive()
@@ -474,11 +487,11 @@ func (a *app) diskLowFree(cfg *disk.Config, to, msg string, free int64) error {
 		if errors.Is(err, errQuiet) {
 			return err
 		}
-		a.note("disk", "free_send_failed", "", to, gb, "GiB")
+		a.note("disk", kind+"_send_failed", "", to, gb, "GiB")
 		return err
 	}
-	a.log.Info("aguard disk: написал", "session", to, "msg", msg)
-	a.note("disk", "free_sent", "", to, gb, "GiB")
+	a.log.Info("aguard disk: написал", "session", to, "kind", kind, "msg", msg)
+	a.note("disk", kind+"_sent", "", to, gb, "GiB")
 	return nil
 }
 

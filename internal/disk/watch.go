@@ -28,6 +28,8 @@ const (
 	KindTrace     = "trace"      // след встречен впервые: учтён
 	KindTraceGone = "trace_gone" // след исчез с диска: убран хозяином или кем-то ещё
 	KindFinding   = "finding"    // находка о работе по классу следов хозяина, раз в сутки
+	// Прогноз запаса (forecast.go): строка — при смене вывода (появился, пропал, сменились целые сутки до free_min).
+	KindForecast = "forecast"
 )
 
 // Повтор того же сигнала о той же записи — не чаще: рост и остаток — раз в сутки, быстрое наполнение — раз в окно.
@@ -72,6 +74,8 @@ type State struct {
 	LastWindow   string               `json:"last_window,omitempty"`
 	Told         map[string]time.Time `json:"told"`             // вид и путь -> когда записан
 	Traces       map[string]Trace     `json:"traces,omitempty"` // учтённые следы, путь -> последний замер
+	// Letters — письма о быстрой убыли: хозяин и запись -> последнее письмо (route.go); моложе fast_every.
+	Letters map[string]FastTold `json:"letters,omitempty"`
 }
 
 // freeRetry — письмо о свободном месте не дошло (адресата нет среди живых сессий) — повтор через столько.
@@ -116,6 +120,11 @@ func (t FreeTold) Due(c *Config, now time.Time, free int64, to []string) []strin
 		clear(t)
 		return nil
 	}
+	return t.Pending(now, to)
+}
+
+// Pending — кому из to пора письмо: отметки нет или её срок прошёл.
+func (t FreeTold) Pending(now time.Time, to []string) []string {
 	var due []string
 	for _, n := range to {
 		if next, ok := t[n]; (!ok || !now.Before(next)) && !slices.Contains(due, n) {
@@ -167,6 +176,7 @@ type roundState struct {
 	LastWalkFree int64                `json:"last_walk_free"`
 	LastWindow   string               `json:"last_window,omitempty"`
 	Told         map[string]time.Time `json:"told"`
+	Letters      map[string]FastTold  `json:"letters,omitempty"`
 }
 
 // LoadRound читает частое состояние; без sidecar загружает старый полный файл.
@@ -180,7 +190,7 @@ func LoadRound(path string) (*State, bool, error) {
 		return st, true, err
 	}
 	return &State{Sizes: map[string][]Point{}, Free: frequent.Free, LastWalk: frequent.LastWalk,
-		LastWalkFree: frequent.LastWalkFree, LastWindow: frequent.LastWindow, Told: frequent.Told}, false, nil
+		LastWalkFree: frequent.LastWalkFree, LastWindow: frequent.LastWindow, Told: frequent.Told, Letters: frequent.Letters}, false, nil
 }
 
 // Load читает полное состояние. round.json имеет приоритет над одноимёнными полями старого state.json.
@@ -208,7 +218,7 @@ func Load(path string) (*State, error) {
 	if !exists {
 		return s, nil
 	}
-	s.Free, s.Told = frequent.Free, frequent.Told
+	s.Free, s.Told, s.Letters = frequent.Free, frequent.Told, frequent.Letters
 	if frequent.LastWalk.After(s.LastWalk) {
 		s.LastWalk, s.LastWalkFree, s.LastWindow = frequent.LastWalk, frequent.LastWalkFree, frequent.LastWindow
 	}
@@ -256,7 +266,7 @@ func (s *State) SaveWalk(path string) error {
 // SaveFrequent пишет данные прохода атомарно.
 func (s *State) SaveFrequent(path string) error {
 	frequent := roundState{Free: s.Free, LastWalk: s.LastWalk, LastWalkFree: s.LastWalkFree,
-		LastWindow: s.LastWindow, Told: s.Told}
+		LastWindow: s.LastWindow, Told: s.Told, Letters: s.Letters}
 	b, err := json.Marshal(frequent)
 	if err != nil {
 		return fmt.Errorf("состояние disk: %w", err)

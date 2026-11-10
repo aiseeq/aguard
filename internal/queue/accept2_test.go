@@ -213,3 +213,25 @@ func TestFingerprintCompact(t *testing.T) {
 		t.Fatalf("отпечаток %d байт: нужен хеш", len(f))
 	}
 }
+
+// Тикет папки лида: мастер и админ — сам лид. HIGH не взят за 4 ч — напоминание живому лиду, а не «никто не доступен»;
+// лид не в сети — журнал один раз (queue-lead-unreachable).
+func TestHighLeadFolderNotUnreachable(t *testing.T) {
+	w := newWorld(ModeOn)
+	s := seeded(w)
+	lt := tick("HIGH", "открыт")
+	lt.Master, lt.Admin = "lead", "lead"
+	ts := []Ticket{lt}
+	step(s, ts, w)
+	w.now = w.now.Add(5 * time.Hour)
+	ns := step(s, ts, w)
+	if has(ns, KindUnreachable, "") || !has(ns, KindHighAdmin, "lead") {
+		t.Fatalf("живой лид: %+v", ns)
+	}
+	w2 := newWorld(ModeOn)
+	s2 := seeded(w2)
+	w2.live["lead"] = false
+	if ns := step(s2, ts, w2); !has(ns, KindUnreachable, "") || has(ns, KindHighAdmin, "lead") {
+		t.Fatalf("лид не в сети: %+v", ns)
+	}
+}

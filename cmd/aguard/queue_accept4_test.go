@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -587,5 +588,38 @@ func TestQueueStateWriteFailNoFlood(t *testing.T) {
 	}
 	if len(loaded.Tickets) != 1 {
 		t.Fatalf("отметки из памяти не записаны: %+v", loaded.Tickets)
+	}
+}
+
+// «*» в live: новый проект с папкой задач под корнем — в списке прохода сам, проект без папки задач и skip — нет,
+// явное имя вне корней остаётся (queue-live-allowlist).
+func TestQueueLiveAllFindsNewProject(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	for _, d := range []string{"git/fresh/docs/tasks", "git/notes", "git/frozen/docs/tasks"} {
+		if err := os.MkdirAll(filepath.Join(b.dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.c.Queue.Live = []string{queue.LiveAll, "aisee"}
+	b.c.Queue.Skip = []string{filepath.Join(b.dir, "git", "frozen")}
+	got, err := queueLive(&b.c.Queue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"aisee", "docs", "fresh", "p"}; !slices.Equal(got, want) {
+		t.Fatalf("live %v, ждали %v", got, want)
+	}
+	if err := b.a.queueRound(context.Background(), b.c, restart.NewJudge(b.dir), false); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := queue.ReadGate(b.c.Queue.Gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(gate.Live, "fresh") || slices.Contains(gate.Live, queue.LiveAll) {
+		t.Fatalf("gate.json live: %v", gate.Live)
+	}
+	if !slices.Equal(b.c.Queue.Live, []string{queue.LiveAll, "aisee"}) {
+		t.Fatalf("проход переписал конфиг: %v", b.c.Queue.Live)
 	}
 }

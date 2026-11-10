@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"maps"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -211,147 +208,16 @@ func (t *ioTicketer) add(job ioTicketJob) {
 }
 
 func (t *ioTicketer) apply(ctx context.Context, job ioTicketJob) error {
-	who := job.owner
-	if who == "" {
-		who = job.lead
-	}
-	dir, err := t.a.sessionDir(who, job.lead)
-	if err != nil { // хозяин есть, его папки нет (задание бойца от сессии без проекта): тикет лиду с именем хозяина
-		t.a.warn("io", "папка хозяина не найдена, тикет — лиду", "owner", who, "err", err)
-		dir, job.lead = t.a.home, job.lead+" (за "+who+")"
-	}
-	base := "io-freeze-" + job.class
-	if job.log {
-		t.a.log.Info("aguard io: завёл бы тикет", "dir", dir, "slug", base, "cases", len(job.cases))
-		t.a.note("io", "ticket_would", job.class, who, int64(len(job.cases)), "cases")
-		return nil
-	}
-	open, next, prev, err := t.find(ctx, job.tk, dir, base)
-	if err != nil {
-		return err
-	}
-	if open != "" {
-		if err := tkRun(ctx, job.tk, dir, nil, "note", open, ioTicketNote(job), "--by", "aguard"); err != nil {
-			return err
-		}
-		t.a.note("io", "ticket_note", open, who, int64(len(job.cases)), "cases")
-		return nil
-	}
-	text := ioTicketText(job, prev)
-	args := []string{"new", next, "--prio", "MED", "--diff", "HUNT", "--by", "aguard", "--title", ioTicketTitle(job), "--text", "-"}
-	if err := tkRun(ctx, job.tk, dir, strings.NewReader(text), args...); err != nil {
-		return err
-	}
-	t.a.note("io", "ticket_new", next, who, int64(len(job.cases)), "cases")
-	return nil
-}
-
-type tkRow struct {
-	Slug   string `json:"slug"`
-	Status string `json:"status"`
-}
-
-var tkClosed = map[string]bool{"готово": true, "отклонён": true, "перенесён": true}
-
-// find — открытый тикет класса (base или base-N); иначе свободный slug и последний закрытый (ссылка в новом).
-func (t *ioTicketer) find(ctx context.Context, tk, dir, base string) (open, next, prev string, err error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, tk, "ls", "--all", "--slug", base, "--json")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return "", "", "", fmt.Errorf("tk ls в %s: %w", dir, err)
-	}
-	var rows []tkRow
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return "", "", "", fmt.Errorf("tk ls в %s: %w", dir, err)
-	}
-	maxN := 0
-	for _, r := range rows {
-		n, ok := classSlugN(r.Slug, base)
-		if !ok {
-			continue
-		}
-		if !tkClosed[r.Status] {
-			return r.Slug, "", "", nil
-		}
-		if n >= maxN {
-			maxN, prev = n, r.Slug
-		}
-	}
-	if prev == "" {
-		return "", base, "", nil
-	}
-	return "", base + "-" + strconv.Itoa(maxN+1), prev, nil
-}
-
-// classSlugN — slug класса base: сам base (номер 1) или base-N; иное (base-gopls) — не класс.
-func classSlugN(slug, base string) (int, bool) {
-	if slug == base {
-		return 1, true
-	}
-	rest, ok := strings.CutPrefix(slug, base+"-")
-	if !ok {
-		return 0, false
-	}
-	n, err := strconv.Atoi(rest)
-	return n, err == nil && n > 1
-}
-
-func tkRun(ctx context.Context, tk, dir string, stdin *strings.Reader, args ...string) error {
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, tk, args...)
-	cmd.Dir = dir
-	if stdin != nil {
-		cmd.Stdin = stdin
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("tk %s в %s: %w: %s", args[0], dir, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// sessionDir — папка тикетов сессии: таблица имён cl, папка админа, <проект>-master — ~/git или ~/work, лид — домашняя.
-func (a *app) sessionDir(who, lead string) (string, error) {
-	if who == lead {
-		return a.home, nil
-	}
-	table, err := names.ReadTable(filepath.Join(a.home, names.File), a.home)
-	if err != nil {
-		return "", err
-	}
-	for _, dir := range slices.Sorted(maps.Keys(table)) {
-		if table[dir] == who {
-			return dir, nil
-		}
-	}
-	c, err := a.config()
-	if err != nil {
-		return "", err
-	}
-	for _, dir := range slices.Sorted(maps.Keys(c.Admins)) {
-		if c.Admins[dir] == who {
-			return dir, nil
-		}
-	}
-	if p, ok := strings.CutSuffix(who, "-master"); ok && p != "" {
-		for _, space := range []string{"git", "work"} {
-			dir := filepath.Join(a.home, space, p)
-			if st, err := os.Stat(dir); err == nil && st.IsDir() && names.For(dir, a.home, table) == who {
-				return dir, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("папка сессии %s не найдена (таблица имён cl, admins, ~/git|~/work/<проект>)", who)
+	return t.a.classTicket(ctx, classTicket{watcher: "io", owner: job.owner, lead: job.lead, tk: job.tk, log: job.log,
+		base: "io-freeze-" + job.class, title: ioTicketTitle(job), what: job.class, count: int64(len(job.cases)), unit: "cases",
+		text: func(prev, redirect string) string { return ioTicketText(job, prev, redirect) }, note: ioTicketNote(job)})
 }
 
 func ioTicketTitle(job ioTicketJob) string {
 	return "Фризы диска от " + job.class + " (aguard io)"
 }
 
-func ioTicketText(job ioTicketJob, prev string) string {
+func ioTicketText(job ioTicketJob, prev, redirect string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "aguard io: случаи фриза диска (PSI full io), главный виновник — %s", job.class)
 	if job.owner == "" {
@@ -360,8 +226,8 @@ func ioTicketText(job ioTicketJob, prev string) string {
 		fmt.Fprintf(&b, " у %s", job.owner)
 	}
 	b.WriteString(". Несрочные: письма нет (тикет alert-async в aguard); новые случаи класса — заметками сюда.\n")
-	if strings.Contains(job.lead, " (за ") {
-		fmt.Fprintf(&b, "Папка хозяина не найдена — тикет лиду: %s.\n", job.lead)
+	if redirect != "" {
+		fmt.Fprintf(&b, "Папка хозяина не найдена — тикет лиду: %s.\n", redirect)
 	}
 	if job.why == ioroute.WhyOffline {
 		b.WriteString("Был и срочный случай, хозяин не был в сети: лиду ушло письмо.\n")

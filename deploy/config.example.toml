@@ -115,7 +115,7 @@ keep = "1440h"         # 60 дней
 # (FIEMAP): reflink-копии внутри записи считаются один раз, длины — до сжатия. Только журнал: кому и что сообщил бы.
 # Задним числом: aguard disk retro -days 7.
 [disk]
-mode = "log"
+mode = "log"           # log — «написал бы / завёл бы» в журнал; alert — fast письмом хозяину, grew/stale/следы — тикетом в его репо
 interval = "1m"        # замер свободного места
 walk = "1h"            # минимум между обходами; раньше — если место тает быстро (с walk_window не действует)
 walk_change = "2G"     # изменение свободного места для обхода после walk (с walk_window не действует)
@@ -140,6 +140,12 @@ track = ["/run/user/1000/aguard/track-home/state.json", "~/.local/state/aguard/t
 free_min = "150G"
 free_mode = "alert"    # off | log (только журнал «написал бы») | alert
 free_tell = ["git-admin"]
+fast_every = "1h"      # письмо о той же записи хозяина — не чаще; раньше — если её рост удвоился или место убыло ещё на fast
+# Прогноз запаса: темп убыли за forecast_window, если убыль идёт и за последний forecast_recent; до free_min меньше
+# forecast_within — письмо лиду и free_tell раз в сутки (по mode). tk для тикетов — [io] tk.
+forecast_window = "6h"
+forecast_recent = "1h"
+forecast_within = "48h"
 
 [disk.owners]          # папка -> сессия-хозяин; остальных хозяин ищется по сессиям и таблице имён cl, иначе — лид
 "~/.cache/farm-hard" = "llmark-master"
@@ -286,6 +292,7 @@ ticket_root = "~/git"
 ticket = "codex-limit-reset"
 
 # Ворота очереди: серьёзными считаются только live проекты; остальные только журналируются.
+# "*" в live — все проекты с папкой задач под git_roots и dirs, кроме skip; рядом — имена, под которыми tk видит проект вне корней.
 [queue]
 mode = "on"
 live = ["glint", "graft"]

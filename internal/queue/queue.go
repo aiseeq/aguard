@@ -710,6 +710,9 @@ func (s *State) highAdminNotice(t Ticket, st *ticketState, v View, reason string
 		return nil
 	}
 	to := liveRecipient(v, t.Admin, v.Lead, t.Master)
+	if to == "" && alive(v, v.Lead) { // живой лид не нашёлся получателем, только когда он сам мастер (папка лида): выше никого — напоминание ему
+		to = v.Lead
+	}
 	if to == "" {
 		if !st.Unreachable {
 			st.Unreachable = true

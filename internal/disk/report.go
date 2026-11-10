@@ -12,36 +12,37 @@ import (
 
 // Line — строка сигнала: что хозяин получил бы. home сворачивается в ~.
 func (r *Record) Line(home string) string {
-	path := short(r.Path, home)
 	at := r.At.Local().Format("02.01 15:04")
-	var what string
-	switch r.Kind {
-	case KindGrew:
-		what = fmt.Sprintf("%s выросла на %s с %s, теперь %s", path, policy.HumanBytes(r.Delta),
-			r.Since.Local().Format("02.01 15:04"), policy.HumanBytes(r.Bytes))
-	case KindStale:
-		what = fmt.Sprintf("%s (%s) не менялась с %s — остаток временного?", path, policy.HumanBytes(r.Bytes),
-			r.Since.Local().Format("02.01 15:04"))
-	case KindFast:
-		if path == "" {
-			what = fmt.Sprintf("свободное место убыло на %s с %s, ни одна запись так не выросла", policy.HumanBytes(r.Delta),
-				r.Since.Local().Format("15:04"))
-		} else {
-			what = fmt.Sprintf("%s выросла на %s с %s — место тает быстро", path, policy.HumanBytes(r.Delta),
-				r.Since.Local().Format("15:04"))
-		}
-	case KindTrace, KindTraceGone:
-		what = traceLine(r, path)
-	case KindFinding:
-		what = r.Text
-	default:
-		what = r.Kind + " " + path
-	}
 	to := r.Owner + " (" + r.Why + ")"
 	if r.Admin != "" && r.Admin != r.Owner {
 		to += " через " + r.Admin
 	}
-	return fmt.Sprintf("%s %-5s %s → %s; свободно %s", at, r.Kind, what, to, policy.HumanBytes(r.Free))
+	return fmt.Sprintf("%s %-5s %s → %s; свободно %s", at, r.Kind, r.What(home), to, policy.HumanBytes(r.Free))
+}
+
+// What — находка словами, без времени и адресата: строка журнала, письма и тикета.
+func (r *Record) What(home string) string {
+	path := short(r.Path, home)
+	switch r.Kind {
+	case KindGrew:
+		return fmt.Sprintf("%s выросла на %s с %s, теперь %s", path, policy.HumanBytes(r.Delta),
+			r.Since.Local().Format("02.01 15:04"), policy.HumanBytes(r.Bytes))
+	case KindStale:
+		return fmt.Sprintf("%s (%s) не менялась с %s — остаток временного?", path, policy.HumanBytes(r.Bytes),
+			r.Since.Local().Format("02.01 15:04"))
+	case KindFast:
+		if path == "" {
+			return fmt.Sprintf("свободное место убыло на %s с %s, ни одна запись так не выросла", policy.HumanBytes(r.Delta),
+				r.Since.Local().Format("15:04"))
+		}
+		return fmt.Sprintf("%s выросла на %s с %s — место тает быстро", path, policy.HumanBytes(r.Delta),
+			r.Since.Local().Format("15:04"))
+	case KindTrace, KindTraceGone:
+		return traceLine(r, path)
+	case KindFinding, KindForecast:
+		return r.Text
+	}
+	return r.Kind + " " + path
 }
 
 // traceLine — след: род, путь, размер, кто оставил, срок уборки.

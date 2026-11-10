@@ -2,7 +2,8 @@
 // вроде бы aguard должен за этим всем следить»). Записи — дети папок кэшей и состояний (~/.cache/*,
 // ~/.local/state/*, /var/tmp/*) и дети папок-контейнеров (scratchpad сессий, worktree). Три сигнала: запись выросла
 // за сутки сверх порога (grew), большая запись днями без изменений — остаток временного (stale), свободное место
-// быстро тает — кто его ест (fast). Режим log: только журнал, кому и что сообщил бы.
+// быстро тает — кто его ест (fast). Режим log: только журнал, кому и что сообщил бы; alert — fast письмом хозяину, grew,
+// stale и следы — тикетом в его репо (route.go), прогноз запаса — письмом лиду (forecast.go).
 package disk
 
 import (
@@ -23,7 +24,7 @@ import (
 
 // Config — раздел [disk].
 type Config struct {
-	Mode       string          `toml:"mode"`        // log — только журнал
+	Mode       string          `toml:"mode"`        // log — только журнал «написал бы / завёл бы»; alert — письма и тикеты
 	Interval   policy.Duration `toml:"interval"`    // замер свободного места
 	Walk       policy.Duration `toml:"walk"`        // минимальный промежуток между обходами записей
 	WalkChange policy.Size     `toml:"walk_change"` // изменение свободного места для обхода
@@ -60,8 +61,17 @@ type Config struct {
 	FreeMin  policy.Size `toml:"free_min"`
 	FreeMode string      `toml:"free_mode"` // off | log | alert
 	FreeTell []string    `toml:"free_tell"` // кому сверх лида
-	Lead     string      `toml:"-"`
-	SendAuth bool        `toml:"-"`
+	// FastEvery — письмо о быстрой убыли одной пары (хозяин, запись) не чаще; раньше — если рост с прошлого письма не
+	// меньше роста в нём (удвоение) или свободное убыло с него ещё на fast.
+	FastEvery policy.Duration `toml:"fast_every"`
+	// Прогноз запаса: скорость убыли свободного места — за forecast_window, и только если убыль есть и за последний
+	// forecast_recent; до free_min меньше forecast_within — письмо лиду и free_tell раз в сутки.
+	ForecastWindow policy.Duration `toml:"forecast_window"`
+	ForecastRecent policy.Duration `toml:"forecast_recent"`
+	ForecastWithin policy.Duration `toml:"forecast_within"`
+	Lead           string          `toml:"-"`
+	SendAuth       bool            `toml:"-"`
+	Tk             string          `toml:"-"` // tk для тикетов хозяевам — [io] tk: один на демон
 }
 
 // defaultFreeMin — 150 ГБ: стоп-линия свободного места на /home (backlog.md, go-build до полки 300–500 ГБ).
@@ -73,8 +83,11 @@ const (
 	FreeAlert = "alert"
 )
 
-// ModeLog — только журнал.
-const ModeLog = "log"
+// Режимы наблюдателя: log — только журнал, alert — письма и тикеты.
+const (
+	ModeLog   = "log"
+	ModeAlert = "alert"
+)
 
 // Default — значения по умолчанию: пороги по замеру за неделю до 26.10 (docs/design.md, наблюдатель disk).
 func Default() Config {
@@ -94,6 +107,9 @@ func Default() Config {
 		TraceMin: 1 << 30,
 		Track:    []string{filepath.Join(record.TrackRunDir("track-home"), record.StateFile), "~/.local/state/aguard/track-home/" + record.StateFile},
 		FreeMin:  defaultFreeMin, FreeMode: FreeAlert, FreeTell: []string{"git-admin"},
+		FastEvery:      policy.Duration(time.Hour),
+		ForecastWindow: policy.Duration(6 * time.Hour), ForecastRecent: policy.Duration(time.Hour),
+		ForecastWithin: policy.Duration(48 * time.Hour),
 	}
 }
 
@@ -132,9 +148,6 @@ func (c *Config) validateThresholds() error {
 		}
 		c.walkWindowStart, c.walkWindowEnd = start, end
 	}
-	if c.Mode != ModeLog {
-		return fmt.Errorf("disk.mode = %q: есть только %q", c.Mode, ModeLog)
-	}
 	if c.Interval.D() < 10*time.Second || c.Walk.D() < c.Interval.D() || c.WalkMax.D() < c.Walk.D() || c.FastWindow.D() < c.Interval.D() {
 		return errors.New("disk: interval >= 10s, walk и fast_window не меньше interval, walk_max не меньше walk")
 	}
@@ -152,6 +165,17 @@ func (c *Config) validateThresholds() error {
 	}
 	if c.FreeMin <= 0 {
 		return errors.New("disk.free_min > 0")
+	}
+	return c.validateRoute()
+}
+
+// validateRoute — режим, пауза писем о быстрой убыли и окна прогноза.
+func (c *Config) validateRoute() error {
+	if c.Mode != ModeLog && c.Mode != ModeAlert {
+		return fmt.Errorf("disk.mode = %q: log или alert", c.Mode)
+	}
+	if c.FastEvery.D() <= 0 || c.ForecastRecent.D() <= 0 || c.ForecastWindow.D() <= c.ForecastRecent.D() || c.ForecastWithin.D() <= 0 {
+		return errors.New("disk: fast_every, forecast_recent, forecast_within > 0, forecast_window > forecast_recent")
 	}
 	return nil
 }
