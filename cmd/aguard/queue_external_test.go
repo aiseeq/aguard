@@ -179,7 +179,8 @@ func TestQueueExternalSeesTkDir(t *testing.T) {
 	}
 }
 
-// Проверка 04.11: при сбое таблицы имён проход пропускается целиком: внешние без мастера стёрли бы отметки о письмах.
+// Проверка 04.11: внешние без мастера стёрли бы отметки о письмах. С 10.11 (queue-names-table-stops) прогретый демон идёт
+// на прошлой таблице: внешние с теми же хозяевами, отметки целы.
 func TestQueueExternalBrokenNames(t *testing.T) {
 	b := newQueueBench(t, "[]", "[]")
 	b.externalTk(t, extHigh)
@@ -207,7 +208,7 @@ func TestQueueExternalBrokenNames(t *testing.T) {
 	if string(after) != string(before) {
 		t.Fatalf("состояние изменилось:\n%s\n%s", before, after)
 	}
-	if !strings.Contains(log.String(), "внешний трекер") {
+	if !strings.Contains(log.String(), "таблица имён битая, иду на прошлой") {
 		t.Fatalf("журнал: %s", log.String())
 	}
 }

@@ -199,7 +199,7 @@ func TestConfirmTrustScreenReader(t *testing.T) {
 					t.Fatal(err)
 				}
 				tc.echo = filepath.Join(t.TempDir(), "no-echo.raw")
-				redraw := append(dialog, "\x1b(B\x0f\x1b[?2004h\x1b[<u\x1b[11G\x1b[13G\r\n\x1b[3Gy. Yes, I trust this folder\r\n\x1b[3Gn. No, exit\r\n\x1b[5Gyou\x1b[7Gy/n:\x1b[3Gy"...)
+				redraw := append(dialog, "\x1b(B\x0f\x1b[?2004h\x1b[<u\x1b[11G\x1b[13G\r\n\x1b[3Gy. Yes, I trust this folder\r\n\x1b[3Gn. No, exit\r\n\x1b[5Gyou\x1b[7Gy/n:\x1b[1;12H y\x1b[13G\x1b[3Gy"...)
 				if err := os.WriteFile(tc.echo, redraw, 0o600); err != nil {
 					t.Fatal(err)
 				}
