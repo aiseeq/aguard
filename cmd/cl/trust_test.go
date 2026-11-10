@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -176,4 +177,48 @@ func waitTrustNote(t *testing.T, mu *sync.Mutex, notes *[]string, want string) {
 	mu.Lock()
 	defer mu.Unlock()
 	t.Errorf("в журнале нет %q: %q", want, *notes)
+}
+
+// Режим экранного чтеца (запись 2.1.322, CLAUDE_AX_SCREEN_READER=1): окно без «❯», выбор — клавиша y, её эхо в поле
+// «Enter y/n:» — признак выбора, после него Enter (cl-trust-screen-reader: 04.11 стрелка вниз не меняла выбор, и cl
+// не нажал Enter). Без эха — Enter не нажимается.
+func TestConfirmTrustScreenReader(t *testing.T) {
+	oldWait := trustSelectWait
+	trustSelectWait = 500 * time.Millisecond
+	t.Cleanup(func() { trustSelectWait = oldWait })
+	for _, tc := range []struct {
+		echo, want, note string
+	}{
+		{"testdata/trust-y-sr-2.1.322.raw", "ENTER-OK", "подтвердил доверие к /home/alice"},
+		{"", "NO-ENTER", "выбор не встал на «Yes»"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			if tc.echo == "" { // перерисовка без эха y: признак выбора — эхо, а не любой вывод
+				tc.echo = filepath.Join(t.TempDir(), "no-echo.raw")
+				if err := os.WriteFile(tc.echo, []byte("\x1b(B\x0f\x1b[?2004h\x1b[<u\x1b[11G\x1b[13G"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, tty, shown := outerTerminal(t)
+			var mu sync.Mutex
+			var notes []string
+			c := openConsole(tty, tty, func(s string) { mu.Lock(); notes = append(notes, s); mu.Unlock() })
+			if c == nil {
+				t.Fatal("терминал не распознан")
+			}
+			cmd := exec.Command("sh", "-c",
+				`stty raw -echo; cat "$0"; k=$(dd bs=1 count=1 2>/dev/null); [ "$k" = y ] || { echo "KEY-$k"; exit 0; }; cat "$1"; if timeout --foreground 2 dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' ' | grep -q '^13$'; then echo ENTER-OK; else echo NO-ENTER; fi`,
+				"testdata/trust-dialog-sr-2.1.322.raw", tc.echo)
+			finish, err := c.start(cmd, "/home/alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			shown.wait(t, tc.want)
+			if err := cmd.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			finish()
+			waitTrustNote(t, &mu, &notes, tc.note)
+		})
+	}
 }

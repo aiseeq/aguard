@@ -18,12 +18,14 @@ import (
 // Маршрут находок (тикет disk-alert-forecast, решение agent-mail-async 08.11): срочное — fast, место тает сейчас —
 // письмом хозяину; несрочное — grew, stale, следы от trace_min — тикетом класса в его репо, как у io.
 
-// FastTold — последнее письмо о паре (хозяин, запись): когда, размер записи и рост в письме, свободное место.
+// FastTold — последнее письмо о паре (хозяин, запись): когда, размер записи и свободное место в нём; Grown и Drop —
+// рост записи и убыль свободного за эпизод (с первого письма паузы fast_every) к этому письму.
 type FastTold struct {
 	At    time.Time `json:"at"`
 	Bytes int64     `json:"bytes,omitempty"`
-	Delta int64     `json:"delta,omitempty"`
 	Free  int64     `json:"free"`
+	Grown int64     `json:"grown,omitempty"`
+	Drop  int64     `json:"drop"`
 }
 
 // FastLetter — письмо о быстрой убыли за проход: все записи хозяина одним письмом (сценарий 8 противника 10.11).
@@ -34,17 +36,33 @@ type FastLetter struct {
 	Free      int64
 }
 
-// fastDue — пора ли письмо о паре: письма не было, пауза fast_every прошла, рост записи с прошлого письма не меньше
-// роста в нём (удвоение) или свободное убыло с него ещё на fast (сценарий 2: +5 ГБ, через 10 мин ещё +100 ГБ).
+// fastDue — пора ли письмо о паре: письма не было, пауза fast_every прошла или рост эпизода удвоился с прошлого письма —
+// рост записи с него не меньше Grown или убыль свободного не меньше Drop (сценарий 2: +5 ГБ, через 10 мин ещё
+// +100 ГБ). Удвоение, а не «ещё fast»: обход по тревоге сам требует убыли fast, и ровный рост писал бы на каждый обход
+// (проверка 10.11 12:09: 31 письмо за час при 2,5 ГБ/мин).
 func (c *Config) fastDue(prev FastTold, ok bool, r *Record, now time.Time) bool {
 	if !ok || now.Sub(prev.At) >= c.FastEvery.D() {
 		return true
 	}
-	// У убыли без записи Bytes 0, а Delta письма — убыль: удвоение не срабатывает, только ещё fast свободного.
-	if r.Bytes-prev.Bytes >= prev.Delta {
+	// У убыли без записи Bytes 0, а Grown — её Delta: удвоение роста не срабатывает, только убыли.
+	if r.Bytes-prev.Bytes >= prev.Grown {
 		return true
 	}
-	return prev.Free-r.Free >= int64(c.Fast)
+	return prev.Free-r.Free >= prev.Drop
+}
+
+// told — отметка письма о паре (FastLetters уже снял отметки старше fast_every): первое письмо эпизода начинает рост
+// с находки, а убыль — с порога fast (Delta убыли без виновника — за окно, с ростом виновника внутри, сценарий 2),
+// ранний повтор их копит; убыль поэтому не меньше fast. У письма без виновника Bytes 0: удвоение роста не сработает.
+func (c *Config) told(prev FastTold, ok bool, r *Record, now time.Time) FastTold {
+	t := FastTold{At: now, Bytes: r.Bytes, Free: r.Free}
+	if !ok {
+		t.Grown, t.Drop = r.Delta, int64(c.Fast)
+		return t
+	}
+	t.Grown = prev.Grown + r.Bytes - prev.Bytes
+	t.Drop = prev.Drop + prev.Free - r.Free
+	return t
 }
 
 // letterKey — пара письма о fast-находке: хозяин (нет — лид) и запись.
@@ -85,7 +103,7 @@ func (s *State) FastLetters(c *Config, now time.Time, recs []Record, alive func(
 		if !c.fastDue(prev, ok, r, now) {
 			continue
 		}
-		s.Letters[key] = FastTold{At: now, Bytes: r.Bytes, Delta: r.Delta, Free: r.Free}
+		s.Letters[key] = c.told(prev, ok, r, now)
 		l := byOwner[owner]
 		if l == nil {
 			l = &FastLetter{Owner: owner, To: owner}

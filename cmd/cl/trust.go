@@ -34,6 +34,14 @@ const (
 	keyDown = "\x1b[B"
 )
 
+// Режим экранного чтеца (CLAUDE_AX_SCREEN_READER=1; проба 10.11 на 2.1.322, cl-trust-screen-reader): окно без «❯» —
+// строки «y. Yes, I trust this folder», «n. No, exit» и поле «Enter y/n:»; выбор — клавиша y, Claude Code отвечает её
+// эхом в поле (сдвиг курсора к колонке и « y»), Enter подтверждает.
+var (
+	readerYes  = []byte("y.Yes,Itrustthisfolder")
+	readerEcho = regexp.MustCompile(`\x1b\[[0-9]+G ?y`)
+)
+
 // escSeq — управляющие последовательности терминала: CSI, OSC и двухбайтовые (ESC 7, ESC 8, ESC =).
 var escSeq = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b[^\\[\\]]")
 
@@ -58,6 +66,7 @@ type trustWatch struct {
 	needles      [][]byte
 	buf          []byte
 	done         bool
+	reader       bool // окно в режиме экранного чтеца: выбор клавишей y
 	found        func()
 }
 
@@ -74,7 +83,7 @@ func (w *trustWatch) Write(p []byte) (int, error) {
 	w.selectMu.Lock()
 	if w.selecting {
 		w.selectBuf = append(w.selectBuf, p...)
-		if bytes.Contains(plainText(w.selectBuf), []byte("❯Yes,Itrustthisfolder")) {
+		if w.reader && readerEcho.Match(w.selectBuf) || !w.reader && bytes.Contains(plainText(w.selectBuf), []byte("❯Yes,Itrustthisfolder")) {
 			w.selecting = false
 			w.selectedOnce.Do(func() { close(w.selected) })
 		} else if len(w.selectBuf) > trustScanMax {
@@ -95,6 +104,9 @@ func (w *trustWatch) Write(p []byte) (int, error) {
 			return len(p), nil
 		}
 	}
+	w.selectMu.Lock()
+	w.reader = bytes.Contains(text, readerYes)
+	w.selectMu.Unlock()
 	w.done, w.buf = true, nil
 	go w.found()
 	return len(p), nil
@@ -113,9 +125,13 @@ func (c *console) confirmTrust(dir string, w *trustWatch) {
 	w.selectMu.Lock()
 	w.selectBuf = nil
 	w.selecting = true
+	key := keyDown
+	if w.reader {
+		key = "y"
+	}
 	w.selectMu.Unlock()
 	defer w.stopSelecting()
-	if err := c.write(keyDown); err != nil {
+	if err := c.write(key); err != nil {
 		c.say(cllog.TrustWriteFailed(dir, err))
 		return
 	}

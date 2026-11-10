@@ -48,7 +48,7 @@ func TestFastLetterOwnerAndEarlyRepeat(t *testing.T) {
 func TestFastDueBoundaries(t *testing.T) {
 	c := routeConfig()
 	t0 := time.Date(2026, 11, 10, 10, 0, 0, 0, time.Local)
-	prev := FastTold{At: t0, Bytes: 10 << 30, Delta: 5 << 30, Free: 200 << 30}
+	prev := FastTold{At: t0, Bytes: 10 << 30, Grown: 5 << 30, Drop: 5 << 30, Free: 200 << 30}
 	cases := []struct {
 		name  string
 		at    time.Duration
@@ -69,6 +69,16 @@ func TestFastDueBoundaries(t *testing.T) {
 		r := Record{Kind: KindFast, Path: tc.path, Bytes: tc.bytes, Free: tc.free}
 		if got := c.fastDue(prev, true, &r, t0.Add(tc.at)); got != tc.want {
 			t.Errorf("%s: %v, ждал %v", tc.name, got, tc.want)
+		}
+	}
+	// убыль эпизода больше fast: ранний повтор — по её удвоению, не по fast
+	big := FastTold{At: t0, Free: 200 << 30, Grown: 8 << 30, Drop: 8 << 30}
+	for _, tc := range []struct {
+		free int64
+		want bool
+	}{{192 << 30, true}, {192<<30 + 1, false}} {
+		if got := c.fastDue(big, true, &Record{Kind: KindFast, Free: tc.free}, t0.Add(5*time.Minute)); got != tc.want {
+			t.Errorf("убыль эпизода 8 ГБ, свободно %d: %v, ждал %v", tc.free, got, tc.want)
 		}
 	}
 	if !c.fastDue(FastTold{}, false, &Record{Kind: KindFast, Path: "/p"}, t0) {
@@ -321,5 +331,37 @@ func TestTicketAddReplacesSamePath(t *testing.T) {
 	}
 	if byPath["/a"] != 4<<30 || byPath["/b"] != 3<<30 {
 		t.Fatalf("замена прежней находки пути: %v", byPath)
+	}
+}
+
+// Ровный рост одной записи 2,5 ГБ/мин час подряд (проверка 10.11 12:09: 31 письмо, по одному на обход по тревоге):
+// ранний повтор — по удвоению роста эпизода с первого письма, писем — по логарифму роста, не на каждый обход.
+func TestFastSteadyGrowthLetterCount(t *testing.T) {
+	c := testConfig(t, "/home/u")
+	c.Lead = "lead"
+	s := &State{Sizes: map[string][]Point{}, Told: map[string]time.Time{}}
+	p := "/home/u/.cache/claude-tmp/claude-1000/-home-u-git-life/steady"
+	sizes := map[string]int64{p: 5 * gb}
+	t0 := time.Date(2026, 11, 10, 13, 0, 0, 0, time.Local)
+	free := int64(400 * gb)
+	passLetters(t, s, c, t0, free, sizes)
+	letters, walks := 0, 0
+	for m := 2; m <= 58; m += 2 {
+		sizes[p] += 5 * gb
+		free -= 5 * gb
+		at := t0.Add(time.Duration(m) * time.Minute)
+		_, ls := passLetters(t, s, c, at, free, sizes)
+		if s.LastWalk.Equal(at) {
+			walks++
+		}
+		letters += len(ls)
+	}
+	if walks < 25 {
+		t.Fatalf("обходов %d из 29 — тест не проверяет обходы по тревоге", walks)
+	}
+	t.Logf("писем за час ровного роста: %d, обходов %d", letters, walks)
+	// эпизод 5 → 10 → 20 → 40 → 80 → 160 ГБ: письма на 2, 4, 8, 16, 32 мин и по свободному так же — не больше 6
+	if letters < 2 || letters > 6 {
+		t.Fatalf("писем за час ровного роста: %d, ждали 2–6", letters)
 	}
 }
