@@ -166,7 +166,7 @@ func (a *app) writeQueueGate(cfg *queue.Config, now time.Time, gate queue.Gate, 
 		return nil
 	}
 	if changed {
-		line := fmt.Sprintf("ворота изменились: open=%s%s", strings.Join(gate.Open, ","), formatOpenByRoot(gate.OpenByRoot))
+		line := fmt.Sprintf("ворота изменились: open=%s%s%s", strings.Join(gate.Open, ","), formatOpenByRoot(gate.OpenByRoot), formatCritOnly(gate.CritOnly))
 		a.queueJournal(queue.Notice{Kind: "gate", Line: line}, now)
 	}
 	return nil
@@ -185,6 +185,18 @@ func formatOpenByRoot(byRoot map[string][]string) string {
 		parts = append(parts, root+"="+pairs)
 	}
 	return "; по корням: " + strings.Join(parts, ", ")
+}
+
+// formatCritOnly — корни дня отдыха с причиной для строки о смене ворот; в рабочий день пусто.
+func formatCritOnly(critOnly map[string]string) string {
+	if len(critOnly) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(critOnly))
+	for _, root := range slices.Sorted(maps.Keys(critOnly)) {
+		parts = append(parts, root+" ("+critOnly[root]+")")
+	}
+	return "; только CRIT: " + strings.Join(parts, ", ")
 }
 
 func (a *app) previousQueueGate(path string, now time.Time) queue.Gate {

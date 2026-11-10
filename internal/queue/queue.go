@@ -381,7 +381,7 @@ func underRoot(dir, root string) bool {
 	return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
 }
 
-// restingSessions — мастера и админы папок на выходном: строка о закрытом им ждёт понедельника. Лиду идёт всегда.
+// restingSessions — мастера и админы папок в день отдыха: строка о закрытом им ждёт первого рабочего дня. Лиду идёт всегда.
 func restingSessions(ts []Ticket, v View) map[string]bool {
 	out := map[string]bool{}
 	for i := range ts {

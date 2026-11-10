@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,5 +247,51 @@ func TestQueueGateJournalNamesRoots(t *testing.T) {
 	}
 	if formatOpenByRoot(nil) != "" {
 		t.Fatal("без корней — без хвоста")
+	}
+}
+
+// Корень отдыха на ступени HIGH: open_by_root в пятницу и субботу одинаково пуст, меняется только crit_only — gate.json
+// переписан в первый же проход субботы, а не через час по возрасту, и строка о смене называет причину (находка проверки
+// work-holiday-gate). Даты в прошлом: файл моложе часа по своему mtime, переписать его может только смена. Строку
+// ищем в журнале субботы: журнал пятницы ротация уже сжала.
+func TestQueueGateCritOnlyChange(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	work := filepath.Join(b.dir, "work")
+	b.c.Queue.Spaces = map[string]queue.Level{work: queue.LevelHigh}
+	b.c.Queue.RestCrit, b.c.Queue.RestZone, b.c.Queue.RestHolidays = []string{work}, "Europe/Nicosia", "CY"
+	if err := b.c.Queue.Validate(b.dir); err != nil {
+		t.Fatal(err)
+	}
+	friday, err := time.Parse(time.RFC3339, "2026-11-06T12:00:00+01:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.a.queueGatePass(b.c, friday, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.a.queueGatePass(b.c, friday.Add(24*time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := queue.ReadGate(b.c.Queue.Gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gate.CritOnly[work] != "суббота" || len(gate.OpenByRoot[work]) != 0 {
+		t.Fatalf("суббота не дошла до gate.json: %+v", gate)
+	}
+	names, err := filepath.Glob(filepath.Join(b.a.dir("queue"), "20*.jsonl*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all strings.Builder
+	for _, name := range names {
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all.Write(data)
+	}
+	if !strings.Contains(all.String(), "только CRIT: "+work+" (суббота)") {
+		t.Fatalf("строка о смене без причины: %s", all.String())
 	}
 }
