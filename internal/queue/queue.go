@@ -232,6 +232,8 @@ const (
 
 type View struct {
 	Now                  time.Time
+	BootAt               time.Time
+	BootGrace            time.Duration
 	Lead                 string
 	Serious, Alive, Free func(string) bool
 	Next                 func(string, string) (Ticket, bool, error)
@@ -248,6 +250,12 @@ type View struct {
 
 	restingSessions map[string]bool // сессии этих папок в такой день, считает Step
 }
+
+func (v View) bootGrace() bool {
+	age := v.Now.Sub(v.BootAt)
+	return !v.BootAt.IsZero() && age >= 0 && age < v.BootGrace
+}
+
 type Notice struct {
 	To, Kind, Key, Line string
 	Serious             bool
@@ -459,6 +467,9 @@ func (s *State) highNotices(t Ticket, st *ticketState, v View) []Notice {
 		st.Admin = mark{}
 	}
 	if !alive(v, t.Master) {
+		if v.bootGrace() {
+			return nil
+		}
 		return s.highAdminNotice(t, st, v, "нет живой сессии "+t.Master)
 	}
 	var out []Notice

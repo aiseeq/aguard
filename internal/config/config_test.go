@@ -96,6 +96,19 @@ func TestLoadMissing(t *testing.T) {
 	if c.Tmp.Escalation.Admins["/home/u/git"] != "git-admin" {
 		t.Errorf("админы по умолчанию: %v", c.Tmp.Escalation.Admins)
 	}
+	if c.Queue.BootGrace.D() != time.Hour {
+		t.Errorf("queue.boot_grace по умолчанию %s, хотим 1h", c.Queue.BootGrace.D())
+	}
+}
+
+func TestLoadQueueBootGrace(t *testing.T) {
+	c, err := Load(write(t, "[queue]\nboot_grace = \"45m\"\n"), home, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Queue.BootGrace.D() != 45*time.Minute {
+		t.Errorf("queue.boot_grace = %s, хотим 45m", c.Queue.BootGrace.D())
+	}
 }
 
 // TestExample — пример из deploy читается без ошибок: он же ставится первым конфигом.

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -286,6 +287,12 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		return nil
 	}
 	view := queueView(c, alive, judge, now, a, frozen, frozenErr)
+	if bootAt, bootErr := systemBootTime(); bootErr != nil {
+		a.warn("queue", "время загрузки системы", "err", bootErr)
+	} else {
+		view.BootAt = bootAt
+		view.BootGrace = c.Queue.BootGrace.D()
+	}
 	notices := before.Step(tickets, view)
 	if dry {
 		for _, n := range notices {
@@ -307,6 +314,24 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		a.queueUnsaved = nil
 	}
 	return nil
+}
+
+func systemBootTime() (time.Time, error) {
+	data, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("чтение /proc/stat: %w", err)
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "btime" {
+			seconds, err := strconv.ParseInt(fields[1], 10, 64)
+			if err != nil {
+				return time.Time{}, fmt.Errorf("/proc/stat btime: %w", err)
+			}
+			return time.Unix(seconds, 0), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("/proc/stat: нет btime")
 }
 
 // queueNoticeState — состояние для прохода писем. Прошлая запись не удалась — берётся память демона: иначе каждые 30 с

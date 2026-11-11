@@ -42,6 +42,8 @@ type world struct {
 	asked      map[string]int
 	mode       string
 	now        time.Time
+	BootAt     time.Time
+	BootGrace  time.Duration
 
 	rest Rest
 }
@@ -55,7 +57,7 @@ func newWorld(mode string) *world {
 
 func (w *world) view() View {
 	return View{
-		Now: w.now, Lead: "lead", Rest: w.rest,
+		Now: w.now, BootAt: w.BootAt, BootGrace: w.BootGrace, Lead: "lead", Rest: w.rest,
 		Serious: func(project string) bool { return w.mode == ModeOn },
 		Alive:   func(n string) bool { return w.live[n] },
 		Free:    func(n string) bool { w.asked[n]++; return w.free[n] },

@@ -298,6 +298,7 @@ mode = "on"
 live = ["glint", "graft"]
 interval = "30s"
 free_after = "2m"
+boot_grace = "1h" # не слать HIGH «нет живой сессии» столько после загрузки системы
 git_roots = ["~/git", "~/work"]
 dirs = ["~/docs"]
 skip = [] # папки проектов, которые очередь не читает: список — только в конфиге машины

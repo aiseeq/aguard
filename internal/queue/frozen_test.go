@@ -141,6 +141,23 @@ func TestWakeNoMasterLettersAdmin(t *testing.T) {
 		t.Fatal(ns, w.state.ProjectWakes)
 	}
 }
+
+func TestWakeNoMasterAdminBootGrace(t *testing.T) {
+	w := freezeWorld()
+	w.state.init()
+	w.view.BootAt = w.view.Now.Add(-30 * time.Minute)
+	w.view.BootGrace = time.Hour
+	w.state.ProjectWakes["/p"] = ProjectWake{Ticket: "p/old", At: w.view.Now.Add(-time.Hour), Mode: ModeOn}
+	before := w.state.ProjectWakes["/p"]
+	if ns := w.step(); len(ns) != 0 || w.state.ProjectWakes["/p"] != before {
+		t.Fatalf("во время льготного срока письмо или изменение отметки: notices=%+v wakes=%+v", ns, w.state.ProjectWakes)
+	}
+	w.view.Now = w.view.BootAt.Add(w.view.BootGrace + time.Minute)
+	if ns := w.step(); !has(ns, KindWakeAdmin, "admin") {
+		t.Fatalf("после льготного срока предложение не пришло: %+v", ns)
+	}
+}
+
 func TestWakeNoMasterAdminBusyOrDead(t *testing.T) {
 	for _, reason := range []string{"занят", "задачи", "мёртв"} {
 		t.Run(reason, func(t *testing.T) {

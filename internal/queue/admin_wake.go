@@ -37,7 +37,11 @@ func (s *State) adminWakeNotices(ts []Ticket, v View, notices []Notice) []Notice
 		if v.AdminFor != nil {
 			p.Admin = v.AdminFor(dir)
 		}
-		if alive(v, p.Master) || !s.adminMayOffer(p, v, busy) {
+		masterAlive := alive(v, p.Master)
+		if !masterAlive && v.bootGrace() {
+			continue
+		}
+		if masterAlive || !s.adminMayOffer(p, v, busy) {
 			continue
 		}
 		if n, ok := s.adminOffer(p, v); ok {

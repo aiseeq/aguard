@@ -16,6 +16,7 @@ type Config struct {
 	Live      []string        `toml:"live"`
 	Interval  policy.Duration `toml:"interval"`
 	FreeAfter policy.Duration `toml:"free_after"`
+	BootGrace policy.Duration `toml:"boot_grace"`
 	GitRoots  []string        `toml:"git_roots"`
 	Dirs      []string        `toml:"dirs"`
 	Skip      []string        `toml:"skip"`
@@ -45,7 +46,7 @@ func Default(home string) Config {
 		return out
 	}
 	paths := expand("~/git", "~/work", "~/docs", "~/.local/state/queue/gate.json", "~/.local/state/chooks/limits-history.jsonl", "~/bin/tk")
-	return Config{Mode: ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second), FreeAfter: policy.Duration(2 * time.Minute),
+	return Config{Mode: ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second), FreeAfter: policy.Duration(2 * time.Minute), BootGrace: policy.Duration(time.Hour),
 		GitRoots: paths[:2], Dirs: paths[2:3], Gate: paths[3], History: paths[4], Tk: paths[5], Level: LevelHigh, Frozen: policy.ExpandHome("~/.config/queue/frozen", home)}
 }
 
@@ -53,8 +54,8 @@ func (c *Config) Validate(home string) error {
 	if c.Mode != "off" && c.Mode != ModeLog && c.Mode != ModeOn {
 		return fmt.Errorf("queue.mode: off, log или on")
 	}
-	if c.Interval.D() <= 0 || c.FreeAfter.D() < 0 {
-		return fmt.Errorf("queue.interval > 0, queue.free_after >= 0")
+	if c.Interval.D() <= 0 || c.FreeAfter.D() < 0 || c.BootGrace.D() < 0 {
+		return fmt.Errorf("queue.interval > 0, queue.free_after и queue.boot_grace >= 0")
 	}
 	for _, ps := range [][]string{c.GitRoots, c.Dirs, c.Skip, c.RestCrit} {
 		for i := range ps {
