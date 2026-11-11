@@ -1,4 +1,4 @@
-<!-- lex: собран из /home/aisee/.claude/codex/manifest/git-aguard-CLAUDE.md.yaml. Правь фрагменты в /home/aisee/.claude/codex/frag и запусти `lex build --codex /home/aisee/.claude/codex`; правку прямо в этом файле перенеси во фрагменты: `lex absorb --codex /home/aisee/.claude/codex <этот файл>` -->
+<!-- lex: собран из ~/.claude/codex/manifest/git-aguard-CLAUDE.md.yaml. Правь фрагменты в ~/.claude/codex/frag и запусти `lex build --codex ~/.claude/codex`; правку прямо в этом файле перенеси во фрагменты: `lex absorb --codex ~/.claude/codex <этот файл>` -->
 # aguard — страж агентов
 
 Прочитать перед работой: `docs/design.md` — замысел, три слоя (хуки, aguard, cl), что входит, порядок работ и открытые вопросы.
