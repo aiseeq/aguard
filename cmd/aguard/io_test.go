@@ -936,6 +936,12 @@ func TestIOSignalViaSystemd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
+	if err := ioSignal(0); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(calls); strings.Contains(string(got), " kill ") {
+		t.Errorf("сигнал 0 (служба запущена?) — systemctl kill; вызовы:\n%s", got)
+	}
 	if err := ioSignal(syscall.SIGUSR2); err != nil {
 		t.Fatal(err)
 	}
