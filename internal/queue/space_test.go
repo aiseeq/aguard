@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -139,5 +140,11 @@ func TestSpacesConfigRoots(t *testing.T) {
 	}
 	if c.RestCrit[0] != "/h/work" || c.Rest().Roots[0] != "/h/work" {
 		t.Fatalf("корень с косой чертой: %v", c.RestCrit)
+	}
+	// Относительный корень в gate.json crit_only queuegate счёл бы недоверенным: CRIT и HIGH открыты всюду.
+	c = Default("/h")
+	c.RestCrit, c.RestZone, c.RestHolidays = []string{"work"}, "Europe/Nicosia", "CY"
+	if err := c.Validate("/h"); err == nil || !strings.Contains(err.Error(), "rest_crit") {
+		t.Errorf("относительный rest_crit: %v", err)
 	}
 }

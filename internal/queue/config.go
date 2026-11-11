@@ -61,8 +61,11 @@ func (c *Config) Validate(home string) error {
 			ps[i] = policy.ExpandHome(ps[i], home)
 		}
 	}
-	for i := range c.RestCrit {
-		c.RestCrit[i] = filepath.Clean(c.RestCrit[i])
+	for i, root := range c.RestCrit {
+		c.RestCrit[i] = filepath.Clean(root)
+		if !filepath.IsAbs(c.RestCrit[i]) {
+			return fmt.Errorf("queue.rest_crit[%s]: корень — полный путь или от ~", root)
+		}
 	}
 	rest, err := NewRest(c.RestCrit, c.RestZone, c.RestHolidays)
 	if err != nil {
