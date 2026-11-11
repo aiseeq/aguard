@@ -389,10 +389,10 @@ func (a *app) sigguardSend(cfg *sigguard.Config, g sigguard.Group) {
 
 // sigguardRoute находит живую сессию или мастера задания бойца; иначе возвращает лида.
 func sigguardRoute(d sigguard.Deny, lead string, alive map[string]session.Info, jobs *cpuwatch.Jobs) (string, string) {
-	// unit бойца — worker-<id>.service; длинное имя строка защиты обрезает (…-1.serv), его ищет ByUnitPrefix
-	// (задания нет — обрезан другой unit worker-*: ищем сессию по root, как у прочих)
+	// unit бойца — worker-<id>.service (защита пишет имя целиком: NAME_LEN 128 с 11.11 18:58, до того 47 символов
+	// резали его, и письмо уходило лиду); задания нет — ищем сессию по root, как у прочих unit
 	if len(cpuwatch.JobIDs(d.Unit)) > 0 && !strings.HasSuffix(d.Unit, ".scope") && jobs != nil {
-		if j, err := jobs.ByUnitPrefix(d.Unit); err == nil && j != nil {
+		if j, err := jobs.ByUnit(d.Unit); err == nil && j != nil {
 			if _, live := alive[j.Master]; live {
 				return j.Master, j.ID
 			}

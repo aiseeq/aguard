@@ -34,7 +34,7 @@ func TestRouteSigguard(t *testing.T) {
 	}
 	jobs := &cpuwatch.Jobs{Dir: dir}
 	alive := map[string]session.Info{"session-a": {Pid: 42, Name: "session-a"}, "worker-master": {Pid: 43, Name: "worker-master"}}
-	for _, tc := range []struct{ unit, root, want, job string }{{"agent-session-42.scope", "42", "session-a", ""}, {"graft-heavy-1.scope", "42", "session-a", ""}, {"run-u123.scope", "42", "session-a", ""}, {"worker-io-abc.scope", "42", "session-a", ""}, {"worker-settle.service", "42", "session-a", ""}, {"app-foo.scope", "42", "session-a", ""}, {"worker-job-123.service", "42", "worker-master", "job-123"}, {"worker-job-123.serv", "42", "worker-master", "job-123"}, {"worker-io-3428722.sc", "42", "session-a", ""}, {"run-any.scope", "999", "leader", ""}, {"run-u123.scope", "999", "leader", ""}, {"agent-old-9.scope", "999", "leader", ""}} {
+	for _, tc := range []struct{ unit, root, want, job string }{{"agent-session-42.scope", "42", "session-a", ""}, {"graft-heavy-1.scope", "42", "session-a", ""}, {"run-u123.scope", "42", "session-a", ""}, {"worker-io-abc.scope", "42", "session-a", ""}, {"worker-settle.service", "42", "session-a", ""}, {"app-foo.scope", "42", "session-a", ""}, {"worker-job-123.service", "42", "worker-master", "job-123"}, {"worker-io-3428722.service", "42", "session-a", ""}, {"run-any.scope", "999", "leader", ""}, {"run-u123.scope", "999", "leader", ""}, {"agent-old-9.scope", "999", "leader", ""}} {
 		got, job := sigguardRoute(sigguard.Deny{Unit: tc.unit, Root: tc.root}, "leader", alive, jobs)
 		if got != tc.want || job != tc.job {
 			t.Errorf("%s: got %s %s, want %s %s", tc.unit, got, job, tc.want, tc.job)
