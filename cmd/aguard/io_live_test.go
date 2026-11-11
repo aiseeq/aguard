@@ -210,3 +210,28 @@ func writeIOFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// Профиль без меры IO (лист без io.stat) — «IO не мерено», а не W 0; свод в now — пик W по
+// замеренным с их числом, нет замеренных — «пик W не мерен».
+func TestIOProfilesNoIOText(t *testing.T) {
+	var b strings.Builder
+	writeIOProfiles(&b, []iowatch.Profile{{Kind: "graft:gate", Name: "graft-heavy-1.scope", NoIO: true, DurMS: 78_000, CPUMS: 60_000}})
+	if line := b.String(); !strings.Contains(line, "IO не мерено") || strings.Contains(line, "W 0 МБ") {
+		t.Fatalf("профиль без IO: %q", line)
+	}
+	for _, c := range []struct {
+		st   iowatch.ProfileStats
+		want string
+	}{
+		{iowatch.ProfileStats{Kind: "graft:gate", Count: 6}, "graft:gate: 6 проф., пик W не мерен"},
+		{iowatch.ProfileStats{Kind: "graft:gate", Count: 6, IOCount: 2, PeakWriteBps: iowatch.Quantiles{P50: 3 << 20, P90: 9 << 20}}, "graft:gate: 6 проф., пик W p50/p90 3/9 МБ/с (по 2)"},
+		{iowatch.ProfileStats{Kind: "agent", Count: 4, IOCount: 4, PeakWriteBps: iowatch.Quantiles{P50: 1 << 20, P90: 2 << 20}}, "agent: 4 проф., пик W p50/p90 1/2 МБ/с\n"},
+	} {
+		b.Reset()
+		st := c.st
+		writeIONow(&b, &iowatch.Now{Profile: &st})
+		if !strings.Contains(b.String(), c.want) {
+			t.Fatalf("свод %+v: %q, ждали %q", c.st, b.String(), c.want)
+		}
+	}
+}

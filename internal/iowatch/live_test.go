@@ -439,3 +439,34 @@ func TestCheckRequestVersionQueryAndSince(t *testing.T) {
 		t.Errorf("since: %v %v", since, err)
 	}
 }
+
+// Лист без io.stat (контроллер io у слайса не включён: scope graft-heavy в agents-graft.slice) —
+// чтение и запись не мерены: профиль помечен no_io, свод считает квантили записи только по
+// замеренным, а IOCount говорит, по скольким.
+func TestProfileNoIOAndSummaryOverMeasured(t *testing.T) {
+	p := NewProfiles()
+	base := time.Date(2026, 11, 11, 7, 0, 0, 0, time.Local)
+	const blind, seen = "/agents.slice/agents-graft.slice/graft-heavy-1.scope", "/app.slice/go-test.scope"
+	for i := range 3 {
+		p.detail(&Step{At: base.Add(time.Duration(i) * 10 * time.Second), Cgroups: []Cgroup{
+			{Path: blind, CPUUS: 30_000_000, NoIO: i == 1}, {Path: seen, WriteBytes: 40 << 20, CPUUS: 30_000_000}}}, 10*time.Second)
+	}
+	got := p.End(map[string]string{blind: "graft:gate", seen: "graft:gate"}, 10*time.Second)
+	if len(got) != 2 {
+		t.Fatalf("профили: %+v", got)
+	}
+	byPath := map[string]Profile{got[0].Path: got[0], got[1].Path: got[1]}
+	if !byPath[blind].NoIO || byPath[seen].NoIO {
+		t.Fatalf("no_io: %+v", got)
+	}
+	list := append(got, Profile{Kind: "graft:gate", NoIO: true}, Profile{Kind: "graft:gate", NoIO: true})
+	st := SummarizeProfiles(list)["graft:gate"]
+	if st.Count != 4 || st.IOCount != 1 || st.PeakWriteBps != (Quantiles{4 << 20, 4 << 20}) || st.WriteB != (Quantiles{120 << 20, 120 << 20}) ||
+		st.CPUMS != (Quantiles{0, 90_000}) {
+		t.Fatalf("свод по замеренным: %+v", st)
+	}
+	none := SummarizeProfiles([]Profile{{Kind: "x", NoIO: true, CPUMS: 5}})["x"]
+	if none.Count != 1 || none.IOCount != 0 || none.PeakWriteBps != (Quantiles{}) || none.CPUMS != (Quantiles{5, 5}) {
+		t.Fatalf("свод без замеренных: %+v", none)
+	}
+}

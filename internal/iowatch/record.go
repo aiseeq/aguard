@@ -89,6 +89,8 @@ type Cgroup struct {
 	CPUUS      int64  `json:"cpu_us,omitempty"` // usage_usec из cpu.stat
 	AnonB      int64  `json:"anon,omitempty"`   // anon из memory.stat на момент прохода, байт
 	Cap        Cap    `json:"cap,omitzero"`     // потолок io.max листа или предка на момент прохода
+	// NoIO — у листа нет io.stat (у родителя не включён контроллер io): чтение и запись не мерены, нули в них — не ноль.
+	NoIO bool `json:"no_io,omitempty"`
 }
 
 // Record — строка снимка: {"k":"s"|"d", поля Step}.

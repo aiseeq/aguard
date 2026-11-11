@@ -108,7 +108,15 @@ func writeIONow(w io.Writer, n *iowatch.Now) {
 		line += "; пишут: " + strings.Join(writers, ", ")
 	}
 	if p := n.Profile; p != nil {
-		line += fmt.Sprintf("; %s: %d проф., пик W p50/p90 %.0f/%.0f МБ/с", p.Kind, p.Count, megabytes(p.PeakWriteBps.P50), megabytes(p.PeakWriteBps.P90))
+		line += fmt.Sprintf("; %s: %d проф., ", p.Kind, p.Count)
+		if p.IOCount == 0 {
+			line += "пик W не мерен"
+		} else {
+			line += fmt.Sprintf("пик W p50/p90 %.0f/%.0f МБ/с", megabytes(p.PeakWriteBps.P50), megabytes(p.PeakWriteBps.P90))
+			if p.IOCount < p.Count {
+				line += fmt.Sprintf(" (по %d)", p.IOCount)
+			}
+		}
 	}
 	fmt.Fprintln(w, line)
 }
@@ -135,9 +143,13 @@ func writeIOProfiles(w io.Writer, profiles []iowatch.Profile) {
 	}
 	for i := range profiles {
 		p := &profiles[i]
-		line := fmt.Sprintf("%s  %s  %s  %s  W %.0f МБ (пик %.0f МБ/с)  R %.0f МБ (пик %.0f МБ/с)  простой IO %d мс  swapin %d  CPU %s мин (пик %s ядра)",
-			p.End.Format("02.01 15:04"), ioSeconds(p.DurMS), p.Kind, p.Name, megabytes(p.WriteB), megabytes(p.PeakWriteBps),
-			megabytes(p.ReadB), megabytes(p.PeakReadBps), p.IOFullMS, p.SwapIn, ioDecimal(float64(p.CPUMS)/float64(time.Minute.Milliseconds())), ioDecimal(float64(p.PeakCPUMilli)/1000))
+		rw := "IO не мерено (нет io.stat)"
+		if !p.NoIO {
+			rw = fmt.Sprintf("W %.0f МБ (пик %.0f МБ/с)  R %.0f МБ (пик %.0f МБ/с)", megabytes(p.WriteB), megabytes(p.PeakWriteBps), megabytes(p.ReadB), megabytes(p.PeakReadBps))
+		}
+		line := fmt.Sprintf("%s  %s  %s  %s  %s  простой IO %d мс  swapin %d  CPU %s мин (пик %s ядра)",
+			p.End.Format("02.01 15:04"), ioSeconds(p.DurMS), p.Kind, p.Name, rw, p.IOFullMS, p.SwapIn,
+			ioDecimal(float64(p.CPUMS)/float64(time.Minute.Milliseconds())), ioDecimal(float64(p.PeakCPUMilli)/1000))
 		if len(p.Procs) > 0 {
 			procs := make([]string, len(p.Procs))
 			for j, r := range p.Procs {

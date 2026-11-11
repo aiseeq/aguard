@@ -576,6 +576,9 @@ func TestDeltaCgroupNewLeafFullCounters(t *testing.T) {
 	if got["/user.slice/short.scope"] != 500 || got["/user.slice/idle.scope"] != 0 || len(got) != 1 {
 		t.Fatalf("новый лист: %v", got)
 	}
+	if s.Cgroups[0].NoIO {
+		t.Fatalf("лист с io.stat помечен no_io: %+v", s.Cgroups)
+	}
 	leaf("user.slice/idle.scope", "3\n", "7300")
 	s = Step{At: now.Add(2 * time.Second)}
 	if skipped, err := r.read(&s); err != nil || skipped != nil {
@@ -613,8 +616,8 @@ func TestDeltaCgroupCPUAndAnon(t *testing.T) {
 	if skipped, err := r.read(&s); err != nil || skipped != nil {
 		t.Fatal(err, skipped)
 	}
-	if len(s.Cgroups) != 1 || s.Cgroups[0].Path != "/glint.service" || s.Cgroups[0].CPUUS != 3_000_000 || s.Cgroups[0].AnonB != 3<<20 {
-		t.Fatalf("CPU и anon: %+v", s.Cgroups)
+	if len(s.Cgroups) != 1 || s.Cgroups[0].Path != "/glint.service" || s.Cgroups[0].CPUUS != 3_000_000 || s.Cgroups[0].AnonB != 3<<20 || !s.Cgroups[0].NoIO {
+		t.Fatalf("CPU и anon, без io.stat — no_io: %+v", s.Cgroups)
 	}
 	writeFile(t, filepath.Join(root, "glint.service", "cpu.stat"), "user_usec 1\n")
 	s = Step{At: now.Add(2 * time.Second)}

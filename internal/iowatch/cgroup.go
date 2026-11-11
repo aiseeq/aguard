@@ -221,6 +221,7 @@ func (r *cgroupReader) readGroup(rel string, g *cgroupEntry) (Cgroup, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return item, fmt.Errorf("io.stat %s: %w", rel, err)
 	}
+	item.NoIO = err != nil
 	var mem memStat
 	if r.buf, data, err = g.memStat.read(r.buf); err == nil {
 		mem, err = parseMemStat(data)

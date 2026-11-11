@@ -39,6 +39,8 @@ type Profile struct {
 	PeakCPUMilli int64     `json:"peak_cpu_milli"` // наибольшая за проход загрузка, тысячных ядра: 3650 — 3,65 ядра
 	PeakAnonB    int64     `json:"peak_anon_b"`    // наибольший anon из memory.stat за проходы, байт
 	Majflt       int64     `json:"majflt"`         // своего листа
+	// NoIO — хотя бы в одном проходе у листа не было io.stat: чтение, запись и их пики не мерены.
+	NoIO bool `json:"no_io,omitempty"`
 	// MachineSwapIn — swap-in всей машины за жизнь профиля (быстрые шаги), страниц: не вина задачи,
 	// а что было с машиной, пока она шла.
 	MachineSwapIn int64 `json:"machine_swapin"`
@@ -64,6 +66,7 @@ type cgroupAcc struct {
 	rd, wr, peakRd, peakWr, ioFull, swap int64
 	cpuUS, peakCPU, peakAnon, majflt     int64
 	swapFrom, swapTo                     int64
+	noIO                                 bool             // Profile.NoIO
 	procs                                map[string]int64 // comm → запись
 }
 
@@ -102,6 +105,7 @@ func (p *Profiles) detail(s *Step, interval time.Duration) {
 		acc.peakCPU = max(acc.peakCPU, perSecond(g.CPUUS, interval)/1000) // мкс CPU в секунду → тысячные ядра
 		acc.peakAnon = max(acc.peakAnon, g.AnonB)
 		acc.majflt += g.Majflt
+		acc.noIO = acc.noIO || g.NoIO
 	}
 	p.passSwap = p.swap
 	for i := range s.Processes {
@@ -145,7 +149,7 @@ func (p *Profiles) End(gone map[string]string, interval time.Duration) []Profile
 		pr := Profile{Name: CgroupName(path), Path: path, Kind: gone[path], Start: start, End: acc.last,
 			DurMS: acc.last.Sub(start).Milliseconds(), ReadB: acc.rd, WriteB: acc.wr, PeakReadBps: acc.peakRd,
 			PeakWriteBps: acc.peakWr, IOFullMS: acc.ioFull / 1000, SwapIn: acc.swap, CPUMS: acc.cpuUS / 1000,
-			PeakCPUMilli: acc.peakCPU, PeakAnonB: acc.peakAnon, Majflt: acc.majflt, MachineSwapIn: acc.swapTo - acc.swapFrom}
+			PeakCPUMilli: acc.peakCPU, PeakAnonB: acc.peakAnon, Majflt: acc.majflt, MachineSwapIn: acc.swapTo - acc.swapFrom, NoIO: acc.noIO}
 		if pr.ReadB+pr.WriteB < profileMinBytes && pr.Dur() < profileMinDur && pr.CPUMS < profileMinCPUMS {
 			continue
 		}
@@ -287,6 +291,7 @@ func workerClass(path string) (string, error) {
 type ProfileStats struct {
 	Kind          string    `json:"kind"`
 	Count         int       `json:"count"`
+	IOCount       int       `json:"io_count"` // профилей с мерой IO (без NoIO): по ним PeakWriteBps и WriteB; 0 — запись не мерена
 	PeakWriteBps  Quantiles `json:"peak_wr_bps"`
 	WriteB        Quantiles `json:"wr_b"`
 	DurMS         Quantiles `json:"dur_ms"`
@@ -299,18 +304,20 @@ type ProfileStats struct {
 }
 
 // profileStatFields — поля профиля, которые сводятся квантилями, и их место в ProfileStats.
+// io — поле меры IO: его квантили только по профилям без NoIO.
 var profileStatFields = [...]struct {
 	value func(*Profile) int64
 	stat  func(*ProfileStats) *Quantiles
+	io    bool
 }{
-	{func(p *Profile) int64 { return p.PeakWriteBps }, func(s *ProfileStats) *Quantiles { return &s.PeakWriteBps }},
-	{func(p *Profile) int64 { return p.WriteB }, func(s *ProfileStats) *Quantiles { return &s.WriteB }},
-	{func(p *Profile) int64 { return p.DurMS }, func(s *ProfileStats) *Quantiles { return &s.DurMS }},
-	{func(p *Profile) int64 { return p.CPUMS }, func(s *ProfileStats) *Quantiles { return &s.CPUMS }},
-	{func(p *Profile) int64 { return p.PeakCPUMilli }, func(s *ProfileStats) *Quantiles { return &s.PeakCPUMilli }},
-	{func(p *Profile) int64 { return p.PeakAnonB }, func(s *ProfileStats) *Quantiles { return &s.PeakAnonB }},
-	{func(p *Profile) int64 { return p.Majflt }, func(s *ProfileStats) *Quantiles { return &s.Majflt }},
-	{func(p *Profile) int64 { return p.MachineSwapIn }, func(s *ProfileStats) *Quantiles { return &s.MachineSwapIn }},
+	{func(p *Profile) int64 { return p.PeakWriteBps }, func(s *ProfileStats) *Quantiles { return &s.PeakWriteBps }, true},
+	{func(p *Profile) int64 { return p.WriteB }, func(s *ProfileStats) *Quantiles { return &s.WriteB }, true},
+	{func(p *Profile) int64 { return p.DurMS }, func(s *ProfileStats) *Quantiles { return &s.DurMS }, false},
+	{func(p *Profile) int64 { return p.CPUMS }, func(s *ProfileStats) *Quantiles { return &s.CPUMS }, false},
+	{func(p *Profile) int64 { return p.PeakCPUMilli }, func(s *ProfileStats) *Quantiles { return &s.PeakCPUMilli }, false},
+	{func(p *Profile) int64 { return p.PeakAnonB }, func(s *ProfileStats) *Quantiles { return &s.PeakAnonB }, false},
+	{func(p *Profile) int64 { return p.Majflt }, func(s *ProfileStats) *Quantiles { return &s.Majflt }, false},
+	{func(p *Profile) int64 { return p.MachineSwapIn }, func(s *ProfileStats) *Quantiles { return &s.MachineSwapIn }, false},
 }
 
 // Quantiles — медиана и 90-й перцентиль (ближайший ранг).
@@ -333,10 +340,19 @@ func SummarizeProfiles(profiles []Profile) map[string]ProfileStats {
 				st.Last = p.End
 			}
 		}
-		values := make([]int64, len(list))
+		measured := slices.DeleteFunc(slices.Clone(list), func(p *Profile) bool { return p.NoIO })
+		st.IOCount = len(measured)
+		values := make([]int64, 0, len(list))
 		for _, f := range profileStatFields {
-			for i, p := range list {
-				values[i] = f.value(p)
+			of := list
+			if f.io {
+				if of = measured; len(of) == 0 {
+					continue // запись не мерена ни в одном: нули квантилей, IOCount 0
+				}
+			}
+			values = values[:0]
+			for _, p := range of {
+				values = append(values, f.value(p))
 			}
 			*f.stat(&st) = quantiles(values)
 		}
