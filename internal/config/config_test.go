@@ -11,6 +11,7 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/aguard/internal/sigguard"
 )
 
 const home = "/home/u"
@@ -98,6 +99,23 @@ func TestLoadMissing(t *testing.T) {
 	}
 	if c.Queue.BootGrace.D() != time.Hour {
 		t.Errorf("queue.boot_grace по умолчанию %s, хотим 1h", c.Queue.BootGrace.D())
+	}
+}
+
+func TestSigguardConfig(t *testing.T) {
+	c, err := Load(write(t, "[sigguard]\nmode = \"log\"\nwindow = \"7s\"\nstale = \"12m\"\n"), home, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Sigguard.Mode != "log" || c.Sigguard.Window.D() != 7*time.Second || c.Sigguard.Stale.D() != 12*time.Minute || c.Sigguard.Lead != c.Lead {
+		t.Fatalf("sigguard config: %+v", c.Sigguard)
+	}
+	defaults, err := Load(filepath.Join(t.TempDir(), "absent"), home, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.Sigguard.Mode != sigguard.ModeAlert || defaults.Sigguard.Window.D() != 3*time.Second || defaults.Sigguard.Stale.D() != 10*time.Minute {
+		t.Fatalf("sigguard defaults: %+v", defaults.Sigguard)
 	}
 }
 

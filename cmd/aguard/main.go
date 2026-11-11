@@ -60,6 +60,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/activity"
 	"github.com/aiseeq/aguard/internal/config"
+	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/journal"
 	"github.com/aiseeq/aguard/internal/memwatch"
@@ -102,6 +103,11 @@ type app struct {
 	codexConsume  codexConsumer  // досрочный сброс Codex; подменяется в тестах
 	codexApproved codexApprovals // «да» на окно из файла одобрений
 	codexNote     codexNoter     // строка исхода в тикет
+	sigSource     sigguardSource
+	sigSend       sigguardSender
+	sigJobs       *cpuwatch.Jobs
+	sigPause      func(context.Context, time.Duration) bool
+	sigAlive      func() (map[string]session.Info, error)
 }
 
 func main() {
@@ -282,7 +288,7 @@ func (a *app) run(ctx context.Context) error {
 	defer signal.Stop(usr1)
 	signal.Notify(usr2, syscall.SIGUSR2)
 	defer signal.Stop(usr2)
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "sigguard", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -298,6 +304,7 @@ func (a *app) run(ctx context.Context) error {
 	wg.Go(func() { a.ioLoop(ctx, usr2) })
 	wg.Go(func() { a.heapLoop(ctx, usr1) })
 	wg.Go(func() { a.guiLoop(ctx) })
+	wg.Go(func() { a.sigguardLoop(ctx) })
 	insts := a.trackInstances()
 	for i := range insts {
 		wg.Go(func() { a.trackLoop(ctx, &insts[i], trackRetry) }) //nolint:unbounded-goroutine-fanout // экземпляров два, список задан в track.Instances

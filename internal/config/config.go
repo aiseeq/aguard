@@ -29,6 +29,7 @@ import (
 	"github.com/aiseeq/aguard/internal/remotebroken"
 	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/aguard/internal/said"
+	"github.com/aiseeq/aguard/internal/sigguard"
 	"github.com/aiseeq/aguard/internal/waits"
 )
 
@@ -46,17 +47,18 @@ type Config struct {
 	// Agentwaits — ожидания, которые агенты заводят сами: циклы sleep, wfor, фоновые команды, ответы сессий.
 	Agentwaits agentwait.Config `toml:"agentwaits"`
 	// Compact — своё сжатие сессий в простое, пока кэш подсказки жив.
-	Compact restart.CompactConfig `toml:"compact"`
-	Disk    disk.Config           `toml:"disk"`   // рост папок кэшей и состояний, остатки временного
-	Said    said.Config           `toml:"said"`   // указатель сказанного пользователем
-	Bgtask  bgtask.Config         `toml:"bgtask"` // забытые фоновые задачи Bash: письмо владельцу
-	Cpu     cpuwatch.Config       `toml:"cpu"`    // перегрузка процессора ноута и PC: письмо тем, чья она
-	IO      iowatch.Config        `toml:"io"`     // телеметрия диска, свопа и фризов
-	GUI     guiwatch.Config       `toml:"gui"`    // потоки графического интерфейса
-	Remote  remotebroken.Config   `toml:"remote"` // сломанный путь graft на PC: письмо владельцу и сводка лиду
-	Codex   codexwatch.Config     `toml:"codex"`  // недельный лимит Codex: письмо лиду перед досрочным 100% и при нём
-	Queue   queue.Config          `toml:"queue"`
-	Night   night.Config          `toml:"night"` // Сон, Дайджест и окна доверия
+	Compact  restart.CompactConfig `toml:"compact"`
+	Disk     disk.Config           `toml:"disk"`   // рост папок кэшей и состояний, остатки временного
+	Said     said.Config           `toml:"said"`   // указатель сказанного пользователем
+	Bgtask   bgtask.Config         `toml:"bgtask"` // забытые фоновые задачи Bash: письмо владельцу
+	Cpu      cpuwatch.Config       `toml:"cpu"`    // перегрузка процессора ноута и PC: письмо тем, чья она
+	IO       iowatch.Config        `toml:"io"`     // телеметрия диска, свопа и фризов
+	GUI      guiwatch.Config       `toml:"gui"`    // потоки графического интерфейса
+	Remote   remotebroken.Config   `toml:"remote"` // сломанный путь graft на PC: письмо владельцу и сводка лиду
+	Codex    codexwatch.Config     `toml:"codex"`  // недельный лимит Codex: письмо лиду перед досрочным 100% и при нём
+	Queue    queue.Config          `toml:"queue"`
+	Night    night.Config          `toml:"night"` // Сон, Дайджест и окна доверия
+	Sigguard sigguard.Config       `toml:"sigguard"`
 }
 
 // Path — путь конфига в домашней папке.
@@ -87,6 +89,7 @@ func Default(home string) Config {
 		Codex:      codexwatch.Default(home),
 		Queue:      queue.Default(home),
 		Night:      night.Default(home),
+		Sigguard:   sigguard.Default(),
 	}
 }
 
@@ -145,6 +148,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Remote.Lead, c.Remote.SendAuth = c.Lead, c.SendAuth
 	c.Codex.Lead, c.Codex.SendAuth = c.Lead, c.SendAuth
 	c.Night.Lead, c.Night.SendAuth = c.Lead, c.SendAuth
+	c.Sigguard.Lead, c.Sigguard.SendAuth = c.Lead, c.SendAuth
 	if err := c.Orphans.Compile(home); err != nil {
 		return fmt.Errorf("orphans: %w", err)
 	}
@@ -192,6 +196,9 @@ func (c *Config) finish(home string, uid int) error {
 	}
 	if err := c.Night.Validate(home); err != nil {
 		return err
+	}
+	if err := c.Sigguard.Validate(); err != nil {
+		return fmt.Errorf("sigguard: %w", err)
 	}
 	return c.Compact.Validate()
 }
