@@ -693,10 +693,8 @@ func TestIOCaseCleanerAttributionAndAlertRecipient(t *testing.T) {
 		t.Fatalf("снапшоты с главной: %+v %v", rc, err)
 	}
 	r := ioroute.New(cfg.Route())
-	for _, act := range r.Route(rc, func(string) bool { return true }) {
-		if act.Kind == ioroute.Ticket {
-			t.Fatalf("снапшоты: тикет %+v", act)
-		}
+	if acts := r.Route(rc, func(string) bool { return true }); len(acts) != 1 || acts[0].Kind != ioroute.Summary || acts[0].Class != "btrfs-snapshot" {
+		t.Fatalf("несрочные снапшоты — только сводка: %+v", acts)
 	}
 	rc.DurMS = cfg.Route().UrgentMin.Milliseconds()
 	acts := r.Route(rc, func(string) bool { return true })
