@@ -117,7 +117,7 @@ func readTask(dir string) (*Task, error) {
 	if err != nil {
 		return t, err
 	}
-	t.Cgroup = parseCgroup(string(cg))
+	t.Cgroup = proc.ParseCgroup(string(cg))
 	env, err := readProc(filepath.Join(dir, "environ"))
 	if err != nil {
 		return t, err
@@ -172,15 +172,6 @@ func runnable(taskDir string) (int, error) {
 		}
 	}
 	return n, nil
-}
-
-func parseCgroup(s string) string {
-	for l := range strings.SplitSeq(s, "\n") {
-		if v, ok := strings.CutPrefix(l, "0::"); ok {
-			return v
-		}
-	}
-	return ""
 }
 
 // parseEnviron — CLAUDE_PID и SSH_CONNECTION из окружения процесса.

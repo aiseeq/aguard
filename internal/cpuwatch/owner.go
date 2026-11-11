@@ -350,7 +350,7 @@ func (r *Resolver) sshClient(conn string) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	t.Cgroup = parseCgroup(string(cg))
+	t.Cgroup = proc.ParseCgroup(string(cg))
 	env, err := readProc(filepath.Join(dir, "environ"))
 	if err != nil {
 		return nil, err
