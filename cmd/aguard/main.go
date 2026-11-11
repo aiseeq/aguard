@@ -83,6 +83,8 @@ type app struct {
 	projects        string
 	reg             session.Registry
 	uid             int
+	workerJobsDir   string
+	workerUnitsDir  string
 	log             *slog.Logger
 	out             io.Writer                    // вывод команд для человека и агента (dry-run, report)
 	act             *activity.Recorder           // учёт срабатываний; только у демона, у команд nil

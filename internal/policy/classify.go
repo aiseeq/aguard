@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -93,10 +94,14 @@ func (c *Config) fighter(o *record.Owner) string {
 
 // Item — живая запись с классом и ключом владельца.
 type Item struct {
-	Entry    record.Entry
-	Class    Class
-	Fighter  string
-	OwnerKey string
+	Entry        record.Entry
+	Class        Class
+	Fighter      string
+	OwnerKey     string
+	WorkerMaster string
+	WorkerCwd    string
+	WorkerJobID  string
+	WorkerLive   bool
 }
 
 // GBMin — текущий размер записи, умноженный на её возраст.
@@ -130,6 +135,41 @@ func OwnerKey(cl Class, e *record.Entry) string {
 		return "u:" + strconv.Itoa(e.UID) + ":" + e.Owner.Proc.Comm
 	}
 	return "e:" + e.Path
+}
+
+func workerUnit(cgroup string) string {
+	unit := filepath.Base(cgroup)
+	if strings.HasPrefix(unit, "worker-") && strings.HasSuffix(unit, ".service") {
+		return unit
+	}
+	return ""
+}
+
+// ResolveWorkerJobs определяет заказчика и живость задания до группировки по порогу.
+func ResolveWorkerJobs(items []Item, live Live) error {
+	var errs []error
+	for i := range items {
+		it := &items[i]
+		if it.Class != ClassNonAgent || it.Entry.Owner == nil {
+			continue
+		}
+		unit := workerUnit(it.Entry.Owner.Proc.Cgroup)
+		if unit == "" {
+			continue
+		}
+		job, ok, err := live.WorkerByUnit(unit)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("unit %s: %w", unit, err))
+			continue
+		}
+		if !ok || job.Master == "" {
+			continue
+		}
+		it.WorkerMaster, it.WorkerCwd, it.WorkerJobID, it.WorkerLive =
+			job.Master, job.Cwd, job.ID, job.Live
+		it.OwnerKey = "w:" + job.Master
+	}
+	return errors.Join(errs...)
 }
 
 // Items классифицирует живые записи, отбрасывая игнорируемые.

@@ -73,6 +73,8 @@ func sectionTitle(l *Line) string {
 		return "Записи завершившейся сессии " + name + " (вы следующая ступень, уберите за неё):"
 	case RelIgnored:
 		return fmt.Sprintf("Записи сессии %s, не убранные за %d сводки (напомните ей или уберите сами):", name, l.Sent)
+	case RelWorkerLive:
+		return "Идущие задания worker:"
 	case RelNonAgent:
 		return "Записи не агентов (процессы пользователя вне сессий Claude):"
 	case RelOtherUID:
@@ -87,8 +89,16 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 	if test {
 		b.WriteString(TestMark + "\n\n")
 	}
-	b.WriteString("aguard: сводка по временным записям. /tmp и /tmp/claude-tmp — tmpfs, то есть оперативка; " +
-		"записи ниже держат её дольше порога. Ненужное удалите, нужное перенесите на диск в scratchpad сессии.\n")
+	onlyLiveJobs := len(s.Lines) > 0
+	for i := range s.Lines {
+		onlyLiveJobs = onlyLiveJobs && s.Lines[i].Rel == RelWorkerLive
+	}
+	if onlyLiveJobs {
+		b.WriteString("aguard: временные папки заданий worker.\n")
+	} else {
+		b.WriteString("aguard: сводка по временным записям. /tmp и /tmp/claude-tmp — tmpfs, то есть оперативка; " +
+			"записи ниже держат её дольше порога. Ненужное удалите, нужное перенесите на диск в scratchpad сессии.\n")
+	}
 	listed := 0
 	section := ""
 	for i := range s.Lines {
@@ -102,6 +112,12 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 		}
 		listed++
 		e := &l.Item.Entry
+		if l.Rel == RelWorkerLive {
+			fmt.Fprintf(&b, "%d. задание %s идёт, папку уберёт worker — %s, %s, возраст %s",
+				listed, l.WorkerJobID, e.Path, HumanBytes(e.Bytes), HumanAge(now.Sub(e.Born)))
+			b.WriteString("\n")
+			continue
+		}
 		fmt.Fprintf(&b, "%d. %s — %s", listed, e.Path, HumanBytes(e.Bytes))
 		if e.Dir {
 			fmt.Fprintf(&b, ", файлов %d", e.Files)
@@ -128,8 +144,10 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 		fmt.Fprintf(&b, "\nПорог %s ГБ·мин на владельца (1 ГБ на %s ≈ 100 МБ на %s ≈ 10 МБ на %s).",
 			budget, minutes(1), minutes(100.0/1024), minutes(10.0/1024))
 	}
-	fmt.Fprintf(&b, " Сводка раз в %s; не убранное за %d сводки уходит выше: сессия-создатель, админ пространства, %s.",
-		HumanAge(c.Interval.D()), c.Escalation.After, c.Lead)
+	if !onlyLiveJobs {
+		fmt.Fprintf(&b, " Сводка раз в %s; не убранное за %d сводки уходит выше: сессия-создатель, админ пространства, %s.",
+			HumanAge(c.Interval.D()), c.Escalation.After, c.Lead)
+	}
 	return b.String()
 }
 

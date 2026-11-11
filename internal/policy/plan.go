@@ -22,12 +22,20 @@ func (t Target) Key() string {
 	return "pid " + strconv.Itoa(t.Pid)
 }
 
-// Live — что user-часть знает о живых сессиях (в тестах подменяется).
+// WorkerJob — сведения о задании worker, связанные с unit создателя записи.
+type WorkerJob struct {
+	ID, Master, Cwd string
+	Live            bool
+}
+
+// Live — что user-часть знает о живых сессиях и заданиях worker.
 type Live interface {
 	// ByPid — живая сессия с этим pid и временем старта.
 	ByPid(pid int, procStart string) (Target, bool)
 	// ByName — живая сессия с этим именем.
 	ByName(name string) (Target, bool)
+	// WorkerByUnit — заказчик и состояние задания по unit создателя записи.
+	WorkerByUnit(unit string) (WorkerJob, bool, error)
 }
 
 // AlertState — сколько сводок уже ушло о записи и кому последняя.
@@ -53,13 +61,14 @@ type Relation int
 
 // Отношения адресата к записи.
 const (
-	RelOwn       Relation = iota // создала сама сессия-адресат
-	RelFighter                   // создал боец этой сессии
-	RelDeadOwner                 // сессия-создатель завершилась, адресат — ступень выше
-	RelIgnored                   // создатель жив, но не убрал за несколько сводок
-	RelNonAgent                  // создатель вне сессий Claude
-	RelOtherUID                  // другая учётка
-	RelNoCreator                 // запись старше сторожа
+	RelOwn        Relation = iota // создала сама сессия-адресат
+	RelFighter                    // создал боец этой сессии
+	RelDeadOwner                  // сессия-создатель завершилась, адресат — ступень выше
+	RelIgnored                    // создатель жив, но не убрал за несколько сводок
+	RelNonAgent                   // создатель вне сессий Claude
+	RelOtherUID                   // другая учётка
+	RelNoCreator                  // запись старше сторожа
+	RelWorkerLive                 // папку живого задания уберёт worker
 )
 
 // Line — строка сводки.
@@ -67,6 +76,7 @@ type Line struct {
 	Item        Item
 	Rel         Relation
 	CreatorName string // имя сессии-создателя (для эскалации)
+	WorkerJobID string // задание worker, пока unit жив
 	Sent        int    // сколько сводок о записи уже было
 }
 
@@ -96,6 +106,21 @@ func (c *Config) ladder(it *Item, live Live) (steps []step, creatorName string, 
 		}
 		seen[t.Key()] = true
 		steps = append(steps, step{t: t, creator: creator})
+	}
+	if it.WorkerMaster != "" {
+		creatorName = it.WorkerMaster
+		if t, ok := live.ByName(it.WorkerMaster); ok {
+			add(t, true)
+		}
+		if admin := c.adminFor(it.WorkerCwd); admin != "" {
+			if t, ok := live.ByName(admin); ok {
+				add(t, false)
+			}
+		}
+		if t, ok := live.ByName(c.Lead); ok {
+			add(t, false)
+		}
+		return steps, creatorName, false
 	}
 	if it.Class == ClassSession || it.Class == ClassFighter {
 		s := it.Entry.Owner.Session
@@ -145,6 +170,25 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 		for i := range g.Items {
 			it := &g.Items[i]
 			key := EntryKey(it)
+			if it.WorkerLive {
+				as := st.Alerts[key]
+				if as == nil {
+					as = &AlertState{}
+					st.Alerts[key] = as
+				}
+				line := Line{Item: *it, Rel: RelWorkerLive, CreatorName: it.WorkerMaster,
+					WorkerJobID: it.WorkerJobID, Sent: as.Sent}
+				if !as.LastSent.IsZero() && as.LastTarget == it.WorkerMaster &&
+					now.Sub(as.LastSent) < c.Escalation.TopRepeat.D() {
+					deferB.add(Target{Name: it.WorkerMaster}, line, as.LastSent.Add(c.Escalation.TopRepeat.D()))
+					continue
+				}
+				if t, ok := live.ByName(it.WorkerMaster); ok {
+					sendB.add(t, line, time.Time{})
+					as.LastTarget, as.LastSent = t.Key(), now
+				}
+				continue
+			}
 			steps, cname, calive := c.ladder(it, live)
 			if len(steps) == 0 {
 				continue // некому писать: ни создателя, ни лида

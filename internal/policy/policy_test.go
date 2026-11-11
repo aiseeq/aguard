@@ -188,13 +188,19 @@ func TestPressureFactor(t *testing.T) {
 type fakeLive struct {
 	byPid  map[int]Target
 	byName map[string]Target
+	worker map[string]WorkerJob
+}
+
+func (f *fakeLive) WorkerByUnit(unit string) (WorkerJob, bool, error) {
+	j, ok := f.worker[unit]
+	return j, ok, nil
 }
 
 func (f *fakeLive) ByPid(pid int, _ string) (Target, bool) { t, ok := f.byPid[pid]; return t, ok }
 func (f *fakeLive) ByName(n string) (Target, bool)         { t, ok := f.byName[n]; return t, ok }
 
 func newLive(ts ...Target) *fakeLive {
-	f := &fakeLive{byPid: map[int]Target{}, byName: map[string]Target{}}
+	f := &fakeLive{byPid: map[int]Target{}, byName: map[string]Target{}, worker: map[string]WorkerJob{}}
 	for _, t := range ts {
 		f.byPid[t.Pid] = t
 		f.byName[t.Name] = t
@@ -260,6 +266,97 @@ func TestPlanEscalation(t *testing.T) {
 	st.Forget(nil)
 	if len(st.Alerts) != 0 {
 		t.Errorf("состояние убранной записи не забыто: %v", st.Alerts)
+	}
+}
+
+func TestLiveWorkerJobTmpRouting(t *testing.T) {
+	c := cfg()
+	c.Policy.BudgetGBM = 1
+	c.Policy.MinOwner = Size(1)
+	c.Escalation.After = 2
+	master := Target{Name: "alpha-master", Pid: 14, Socket: "/s/14.sock"}
+	admin := Target{Name: "work-admin", Pid: 12, Socket: "/s/12.sock"}
+	live := newLive(tLead, master, admin)
+	live.worker["worker-J-2.service"] = WorkerJob{ID: "J", Master: master.Name, Cwd: home + "/work/project", Live: true}
+	c.Escalation.Admins[home+"/work"] = admin.Name
+	owner := plainOwner("go", me)
+	owner.Proc.Cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/worker-J-2.service"
+	e := entry("/tmp/w-J-go", gib, 10*time.Minute, owner)
+	items := c.Items([]record.Entry{e}, me)
+	if err := ResolveWorkerJobs(items, live); err != nil {
+		t.Fatal(err)
+	}
+	groups := c.Over(t0, items, 1)
+	if len(groups) != 1 || groups[0].Key != "w:alpha-master" {
+		t.Fatalf("группировка живого задания: %+v", groups)
+	}
+	st := &UserState{}
+	sums, _ := c.Plan(t0, groups, live, st, 1)
+	if got := targets(sums); len(got) != 1 || got[0] != "alpha-master" {
+		t.Fatalf("живое задание адресовано %v", got)
+	}
+	msg := c.Message(&sums[0], t0, false)
+	if !strings.Contains(msg, "задание J идёт, папку уберёт worker") ||
+		!strings.Contains(msg, "1.0 ГБ") || !strings.Contains(msg, "возраст 10 мин") ||
+		strings.Contains(msg, "rm -rf") || strings.Contains(msg, "work-admin") || strings.Contains(msg, "lead") {
+		t.Fatalf("неверное письмо живого задания: %s", msg)
+	}
+	if sums, deferred := c.Plan(t0.Add(c.Interval.D()), groups, live, st, 1); len(sums) != 0 || len(deferred) != 1 {
+		t.Fatalf("повтор раньше срока: send=%v deferred=%v", targets(sums), targets(deferred))
+	}
+	if st.Alerts[EntryKey(&items[0])].Sent != 0 {
+		t.Fatal("письма об идущем задании не должны расходовать ступени эскалации")
+	}
+
+	live.worker["worker-J-2.service"] = WorkerJob{ID: "J", Master: master.Name, Cwd: home + "/work/project"}
+	if err := ResolveWorkerJobs(items, live); err != nil {
+		t.Fatal(err)
+	}
+	groups = c.Over(t0.Add(time.Hour), items, 1)
+	sums, _ = c.Plan(t0.Add(time.Hour), groups, live, &UserState{}, 1)
+	if got := targets(sums); len(got) != 1 || got[0] != master.Name ||
+		!strings.Contains(c.Message(&sums[0], t0.Add(time.Hour), false), "rm -rf") {
+		t.Fatalf("завершённое задание не перешло на обычную лестницу: %v", targets(sums))
+	}
+	st = &UserState{}
+	for i := range 3 {
+		sums, _ = c.Plan(t0.Add(time.Duration(i)*c.Interval.D()), groups, live, st, 1)
+	}
+	if got := targets(sums); len(got) != 1 || got[0] != admin.Name {
+		t.Fatalf("после двух сводок адресат %v, хотим админа", got)
+	}
+
+	// Разные заказчики не складывают меру друг с другом.
+	other := plainOwner("go", me)
+	other.Proc.Cgroup = "/app.slice/worker-K.service"
+	live.worker["worker-K.service"] = WorkerJob{ID: "K", Master: "akit-master", Live: true}
+	two := c.Items([]record.Entry{entry("/tmp/w-J-go", gib, 10*time.Minute, owner),
+		entry("/tmp/w-K-go", gib, 10*time.Minute, other)}, me)
+	if err := ResolveWorkerJobs(two, live); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Over(t0, two, 1); len(got) != 2 {
+		t.Fatalf("заказчики должны иметь отдельные пороги: %+v", got)
+	}
+}
+
+func TestWorkerJobWithoutMasterFallsBackToLead(t *testing.T) {
+	c := cfg()
+	c.Policy.MinEntry, c.Policy.MinOwner, c.Policy.BudgetGBM = 1, 1, 1
+	owner := plainOwner("go", me)
+	owner.Proc.Cgroup = "/app.slice/worker-J.service"
+	items := c.Items([]record.Entry{entry("/tmp/w-J-go", gib, 10*time.Minute, owner)}, me)
+	live := newLive(tLead)
+	live.worker["worker-J.service"] = WorkerJob{ID: "J"}
+	if err := ResolveWorkerJobs(items, live); err != nil {
+		t.Fatal(err)
+	}
+	if items[0].OwnerKey != "c:go" || items[0].WorkerMaster != "" {
+		t.Fatalf("нет заказчика — запись должна остаться обычной: %+v", items[0])
+	}
+	sums, _ := c.Plan(t0, c.Over(t0, items, 1), live, &UserState{}, 1)
+	if got := targets(sums); len(got) != 1 || got[0] != sLead {
+		t.Fatalf("без заказчика адресат %v, хотим лида", got)
 	}
 }
 

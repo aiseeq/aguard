@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/report"
@@ -84,6 +85,7 @@ type liveSessions struct {
 	reg    session.Registry
 	log    *slog.Logger
 	byName map[string]session.Info
+	jobs   *cpuwatch.Jobs
 }
 
 func (l *liveSessions) ByPid(pid int, procStart string) (policy.Target, bool) {
@@ -101,6 +103,22 @@ func (l *liveSessions) ByPid(pid int, procStart string) (policy.Target, bool) {
 	return policy.Target{Name: in.Name, Pid: in.Pid, Socket: in.SocketPath}, true
 }
 
+func (l *liveSessions) WorkerByUnit(unit string) (policy.WorkerJob, bool, error) {
+	job, err := l.jobs.ByUnit(unit)
+	if err != nil || job == nil {
+		return policy.WorkerJob{}, false, err
+	}
+	unitLive, err := l.jobs.UnitLive(job.Unit)
+	if err != nil {
+		return policy.WorkerJob{}, false, err
+	}
+	cwd := ""
+	if in, ok := l.byName[job.Master]; ok {
+		cwd = in.Cwd
+	}
+	return policy.WorkerJob{ID: job.ID, Master: job.Master, Cwd: cwd, Live: unitLive}, true, nil
+}
+
 func (l *liveSessions) ByName(name string) (policy.Target, bool) {
 	in, ok := l.byName[name]
 	if !ok || in.SocketPath == "" {
@@ -114,7 +132,15 @@ func (a *app) live() (*liveSessions, error) {
 	if err != nil {
 		return nil, fmt.Errorf("живые сессии: %w", err)
 	}
-	return &liveSessions{reg: a.reg, log: a.log, byName: m}, nil
+	jobsDir := a.workerJobsDir
+	if jobsDir == "" {
+		jobsDir = filepath.Join(a.home, ".local", "state", "worker")
+	}
+	unitsDir := a.workerUnitsDir
+	if unitsDir == "" {
+		unitsDir = fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/app.slice", a.uid, a.uid)
+	}
+	return &liveSessions{reg: a.reg, log: a.log, byName: m, jobs: &cpuwatch.Jobs{Dir: jobsDir, Units: unitsDir}}, nil
 }
 
 // tmpFactor — множитель порога по давлению памяти. Давление не прочиталось —
@@ -184,6 +210,10 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 	}
 	prev := copyAlerts(st.Alerts)
 	items := cfg.Items(snap.Entries, a.uid)
+	if err := policy.ResolveWorkerJobs(items, live); err != nil {
+		a.warn("tmp", "часть заданий worker не прочиталась, записи сгруппированы прежним способом", "err", err)
+		a.note("tmp", "worker_lookup_failed", "", "", 1, "errors")
+	}
 	factor := a.tmpFactor(cfg)
 	groups := cfg.Over(now, items, factor)
 	sums, deferred := cfg.Plan(now, groups, live, st, factor)

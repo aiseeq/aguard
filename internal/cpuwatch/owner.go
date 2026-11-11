@@ -214,6 +214,21 @@ func (j *Jobs) readLive() error {
 	return errors.Join(errs...)
 }
 
+// UnitLive — работает ли unit задания или его повтор <unit>-<n>; unit — имя из job.json без .service.
+func (j *Jobs) UnitLive(unit string) (bool, error) {
+	units, err := os.ReadDir(j.Units)
+	if err != nil {
+		return false, fmt.Errorf("unit бойцов: %w", err)
+	}
+	live := map[string]bool{}
+	for _, u := range units {
+		if name, ok := strings.CutSuffix(u.Name(), ".service"); ok && u.IsDir() {
+			live[name] = true
+		}
+	}
+	return unitLive(live, strings.TrimSuffix(unit, ".service")), nil
+}
+
 // unitLive — работает unit бойца или его повтор <unit>-<n>.
 func unitLive(live map[string]bool, unit string) bool {
 	if live[unit] {
