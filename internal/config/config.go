@@ -15,6 +15,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/agentwait"
 	"github.com/aiseeq/aguard/internal/bgtask"
+	ceilingwatch "github.com/aiseeq/aguard/internal/ceiling"
 	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/disk"
@@ -59,6 +60,7 @@ type Config struct {
 	Queue    queue.Config          `toml:"queue"`
 	Night    night.Config          `toml:"night"` // Сон, Дайджест и окна доверия
 	Sigguard sigguard.Config       `toml:"sigguard"`
+	Ceiling  ceilingwatch.Config   `toml:"ceiling"`
 }
 
 // Path — путь конфига в домашней папке.
@@ -90,6 +92,7 @@ func Default(home string) Config {
 		Queue:      queue.Default(home),
 		Night:      night.Default(home),
 		Sigguard:   sigguard.Default(),
+		Ceiling:    ceilingwatch.Default(),
 	}
 }
 
@@ -199,6 +202,9 @@ func (c *Config) finish(home string, uid int) error {
 	}
 	if err := c.Sigguard.Validate(); err != nil {
 		return fmt.Errorf("sigguard: %w", err)
+	}
+	if err := c.Ceiling.Validate(); err != nil {
+		return fmt.Errorf("ceiling: %w", err)
 	}
 	return c.Compact.Validate()
 }

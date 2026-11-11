@@ -1,8 +1,7 @@
 // Package memwatch пишет память сессий агентов: раз в интервал по каждому
 // scope сессии в agents.slice (agent-<имя>-<pid>.scope, так их запускает cl) —
 // пик памяти группы за интервал, текущую память, своп, события memory.high/max/oom
-// и самые крупные процессы. По этим записям потом выбирается мягкий потолок
-// памяти на сессию (docs/design.md, «Открытые вопросы»).
+// и самые крупные процессы. Отдельный наблюдатель ceiling управляет заданным cl потолком.
 package memwatch
 
 import (
@@ -15,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aiseeq/aguard/internal/ceiling"
 	"github.com/aiseeq/aguard/internal/cgroupstats"
 	"github.com/aiseeq/akit/proc"
 )
@@ -32,27 +32,6 @@ func listScopes(slice string) ([]string, error) {
 		}
 	}
 	return out, nil
-}
-
-// readInt — число из файла cgroup ("max" — -1).
-func readInt(path string) (int64, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, fmt.Errorf("cgroup: %w", err)
-	}
-	return parseInt(string(b))
-}
-
-func parseInt(s string) (int64, error) {
-	s = strings.TrimSpace(s)
-	if s == "max" {
-		return -1, nil
-	}
-	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("cgroup: число %q: %w", s, err)
-	}
-	return v, nil
 }
 
 // readKeyed — файл вида «ключ число» построчно (memory.stat, memory.events).
@@ -125,7 +104,7 @@ func (p *peakReader) take() (int64, error) {
 	if err != nil && !errors.Is(err, io.EOF) {
 		return 0, fmt.Errorf("memory.peak: %w", err)
 	}
-	v, err := parseInt(string(buf[:n]))
+	v, err := ceiling.ParseInt(string(buf[:n]))
 	if err != nil {
 		return 0, err
 	}

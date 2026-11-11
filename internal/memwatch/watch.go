@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/ceiling"
 	"github.com/aiseeq/aguard/internal/daily"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/akit/proc"
@@ -62,7 +63,7 @@ type Proc struct {
 }
 
 // Sample — запись о сессии за интервал. Память — байты группы cgroup
-// (с файловым кешем: его же считает и MemoryHigh).
+// (с файловым кешем; ceiling отдельно учитывает shmem для tmpfs).
 type Sample struct {
 	At       time.Time        `json:"at"`
 	Scope    string           `json:"scope"`
@@ -179,16 +180,16 @@ func (w *Watcher) details(cfg *Config, s *Sample) error {
 // groupMemory — текущая память, пик за жизнь, состав и события группы.
 func (w *Watcher) groupMemory(dir string, s *Sample) error {
 	var err error
-	if s.Lifetime, err = readInt(filepath.Join(dir, "memory.peak")); err != nil {
+	if s.Lifetime, err = ceiling.ReadInt(filepath.Join(dir, "memory.peak")); err != nil {
 		return err
 	}
-	if s.Current, err = readInt(filepath.Join(dir, "memory.current")); err != nil {
+	if s.Current, err = ceiling.ReadInt(filepath.Join(dir, "memory.current")); err != nil {
 		return err
 	}
-	if s.Swap, err = readInt(filepath.Join(dir, "memory.swap.current")); err != nil {
+	if s.Swap, err = ceiling.ReadInt(filepath.Join(dir, "memory.swap.current")); err != nil {
 		return err
 	}
-	if s.High, err = readInt(filepath.Join(dir, "memory.high")); err != nil {
+	if s.High, err = ceiling.ReadInt(filepath.Join(dir, "memory.high")); err != nil {
 		return err
 	}
 	st, err := readKeyed(filepath.Join(dir, "memory.stat"))

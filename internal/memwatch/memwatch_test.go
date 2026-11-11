@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/ceiling"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -16,7 +17,7 @@ func TestParseKeyed(t *testing.T) {
 	if err != nil || m["anon"] != 100 || m["file"] != 200 {
 		t.Fatalf("parseKeyed: %v %v", m, err)
 	}
-	if v, err := parseInt("max\n"); err != nil || v != -1 {
+	if v, err := ceiling.ParseInt("max\n"); err != nil || v != -1 {
 		t.Errorf("max: %d %v", v, err)
 	}
 }

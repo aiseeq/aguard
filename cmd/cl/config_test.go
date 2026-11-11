@@ -1,12 +1,15 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/ceiling"
 )
 
 func TestRestartArgs(t *testing.T) {
@@ -113,6 +116,55 @@ func TestLoadConfig(t *testing.T) {
 	}
 	if cfg, err := loadConfig(file, "/home/u"); err == nil || cfg.Restart.CompactMode != modeLog {
 		t.Errorf("неизвестный режим сжатия — ошибка и журнал: %+v %v", cfg.Restart, err)
+	}
+}
+
+func TestJournalConfigErrorOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cl.log")
+	at := time.Now()
+	for range 3 {
+		journalErrorOnce(path, at, "memory.max bad", "конфиг cl: memory.max bad")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(data), "memory.max bad"); count != 1 {
+		t.Fatalf("duplicate config error lines: %d", count)
+	}
+}
+
+func TestLoadMemoryConfig(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "cl.json")
+	for _, tc := range []struct {
+		json, max string
+		bad       bool
+	}{{`{"memory":{}}`, "", false}, {`{"memory":{"max":"34%"}}`, "34%", false}, {`{"memory":{"max":"12G"}}`, "12G", false}, {`{"memory":{"max":"broken"}}`, "", true}} {
+		if err := os.WriteFile(file, []byte(tc.json), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfig(file, "/home/u")
+		if (err != nil) != tc.bad || cfg.Memory.Max != tc.max {
+			t.Errorf("load %s -> memory=%+v err=%v", tc.json, cfg.Memory, err)
+		}
+	}
+	if err := os.WriteFile(file, []byte(`{"memory":{"max":"broken"},"restart":{"mode":"act"},"roles":[{"names":["lead"],"text":"keep role"}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(file, "/home/u")
+	if !errors.Is(err, errMemoryConfig) || cfg.Restart.Mode != modeAct || len(cfg.Roles) != 1 || cfg.Memory.Max != "" {
+		t.Errorf("invalid memory must only disable ceiling: cfg=%+v err=%v", cfg, err)
+	}
+	total, terr := ceiling.HostMemoryTotal()
+	if terr != nil {
+		t.Fatal(terr)
+	}
+	if n, err := ceiling.ParseSize("34%", total); err != nil || n <= 0 {
+		t.Fatalf("percentage: %d %v", n, err)
+	}
+	if n, err := ceiling.ParseSize("12G", total); err != nil || n != 12<<30 {
+		t.Fatalf("size: %d %v", n, err)
 	}
 }
 

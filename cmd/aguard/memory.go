@@ -1,6 +1,6 @@
 // Наблюдатель memory: пики памяти сессий агентов в дневные файлы
-// ~/.local/state/aguard/memory/<день>.jsonl. Ничего не ограничивает: по этим
-// записям потом выбирается мягкий потолок (docs/design.md, «Открытые вопросы»).
+// ~/.local/state/aguard/memory/<день>.jsonl. Потолок управляется отдельно:
+// отчёт строится командой aguard memory report; жёсткий потолок ведёт ceiling.
 package main
 
 import (
@@ -16,6 +16,9 @@ import (
 
 func (a *app) memoryCmd(args []string) error {
 	cmd, rest := sub(args)
+	if cmd == "ceiling" {
+		return a.ceilingCmd(rest)
+	}
 	cfg, err := a.config()
 	if err != nil {
 		return err

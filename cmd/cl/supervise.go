@@ -138,7 +138,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 		if out.compact {
 			sig, err := l.compactSession(sigs, strconv.Itoa(os.Getpid())+"-c"+strconv.Itoa(n+1), keep, out)
 			if err != nil {
-				cfg, cfgErr := loadConfig(l.configFile, l.home)
+				cfg, cfgErr := l.readConfig()
 				journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: %v — поднимаю без сжатия", out.name, errors.Join(err, cfgErr)))
 			}
 			if sig != 0 {
@@ -164,7 +164,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 // journalLost пишет строку на каждый таймер out.lost: перезапуск их не вернёт; withRole — подъём получил строку роли.
 // Пишется при сборке подъёма, а не при решении: только тогда известно, будет ли строка роли.
 func (l launcher) journalLost(out outcome, withRole bool) {
-	cfg, err := loadConfig(l.configFile, l.home)
+	cfg, err := l.readConfig()
 	now := time.Now()
 	if err != nil {
 		journal(cfg.Restart.Journal, now, fmt.Sprintf("%s: %v — журнал по умолчанию", out.name, err))
@@ -179,18 +179,27 @@ func (l launcher) journalLost(out outcome, withRole bool) {
 // строка в журнал. TERM или HUP (закрыли вкладку) во время сжатия — сжатие остановить и выйти: сигнал возвращается
 // (0 — подъём). Ошибка — сжатие не запустилось.
 func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []string, out outcome) (syscall.Signal, error) {
-	cfg, err := loadConfig(l.configFile, l.home)
+	cfg, err := l.readConfig()
 	if err != nil {
 		journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: %v — журнал по умолчанию", out.name, err))
 	}
 	args := l.withRoleFlags(append(append(sessionFlags(l.home), keep...), "-p", "--resume", out.sessionID, "/compact"), out.name)
-	cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, out.name, unit, args)[1:]...)
+	argv, env := prepareScope(l.home, l.systemdRun, l.claude, out.name, unit, args, cfg.Memory, os.Environ(), func(e error) {
+		journal(cfg.Restart.Journal, time.Now(), "потолок памяти не поставлен: "+e.Error())
+	})
+	cmd := exec.Command(l.systemdRun, argv[1:]...)
+	cmd.Env = env
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output
 	fmt.Fprintln(os.Stderr, "cl: сжимаю беседу (/compact) и подниму её снова — до", compactTimeout)
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("сжатие не запустилось: %w", err)
+	}
+	if cfg.Memory.Max != "" {
+		if err := updateScopeClaudePID(l.home, scopeUnit(out.name, unit), cmd.Process.Pid); err != nil {
+			journal(cfg.Restart.Journal, time.Now(), "pid Claude в состоянии потолка: "+err.Error())
+		}
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -227,7 +236,7 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 // подъёма-другого потерялся бы на ближайшем сжатии. Свой флаг системного промпта в аргументах или роли нет — промпта
 // нет. Файл настроек — флагом --settings (settingsFlags).
 func (l launcher) withRoleFlags(args []string, name string) []string {
-	cfg, err := loadConfig(l.configFile, l.home)
+	cfg, err := l.readConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cl: роль:", err)
 		return args
@@ -371,7 +380,7 @@ func (l launcher) withRoleLine(args []string, name, event string, out outcome) [
 }
 
 func (l launcher) roleLine(name, event string, out outcome) (string, error) {
-	cfg, err := loadConfig(l.configFile, l.home)
+	cfg, err := l.readConfig()
 	if err != nil {
 		return "", err
 	}
@@ -416,10 +425,23 @@ func (l launcher) start(n int, args []string) (*os.Process, func(), error) {
 	if n > 0 {
 		unit += "-r" + strconv.Itoa(n)
 	}
-	cmd := exec.Command(l.systemdRun, scopeArgv(l.systemdRun, l.claude, l.name, unit, l.withRoleFlags(args, l.name))[1:]...)
+	cfg, configErr := l.readConfig()
+	if configErr != nil {
+		journal(cfg.Restart.Journal, time.Now(), "конфиг cl: "+configErr.Error())
+	}
+	argv, env := prepareScope(l.home, l.systemdRun, l.claude, l.name, unit, l.withRoleFlags(args, l.name), cfg.Memory, os.Environ(), func(e error) {
+		journal(cfg.Restart.Journal, time.Now(), "потолок памяти не поставлен: "+e.Error())
+	})
+	cmd := exec.Command(l.systemdRun, argv[1:]...)
+	cmd.Env = env
 	finish, err := l.launch(cmd)
 	if err != nil {
 		return nil, nil, fmt.Errorf("запуск claude: %w", err)
+	}
+	if cfg.Memory.Max != "" {
+		if err := updateScopeClaudePID(l.home, scopeUnit(l.name, unit), cmd.Process.Pid); err != nil {
+			journal(cfg.Restart.Journal, time.Now(), "pid Claude в состоянии потолка: "+err.Error())
+		}
 	}
 	return cmd.Process, finish, nil
 }
@@ -481,7 +503,7 @@ func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem str
 	done := make(chan error, 1)
 	go func() { done <- wait(proc) }()
 	pid := proc.Pid
-	cfg, err := loadConfig(l.configFile, l.home)
+	cfg, err := l.readConfig()
 	if err != nil {
 		journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: %v — проверка с умолчаниями, режим log", l.name, pid, err))
 	}
@@ -511,7 +533,7 @@ func (l launcher) watch(proc *os.Process, sigs <-chan os.Signal, argsProblem str
 				continue
 			}
 			var err error
-			if cfg, err = loadConfig(l.configFile, l.home); err != nil {
+			if cfg, err = l.readConfig(); err != nil {
 				last.verdict = journalOnce(cfg, last.verdict, "config", fmt.Sprintf("%s pid=%d: %v — не перезапускаю", l.name, pid, err))
 				continue
 			}
@@ -546,7 +568,7 @@ func (l *launcher) openPty() {
 		return
 	}
 	adopted := l.upgraded != nil && l.upgraded.Master > 0
-	if cfg, err := loadConfig(l.configFile, l.home); adopted || err == nil && matchAny(cfg.Restart.PtyNames, l.name) {
+	if cfg, err := l.readConfig(); adopted || err == nil && matchAny(cfg.Restart.PtyNames, l.name) {
 		l.console = openConsole(os.Stdin, os.Stdout, func(s string) {
 			// pid cl — aguard night отличает окно, на котором claude стоит, от закрытой консоли
 			journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: %s", l.name, os.Getpid(), s))
@@ -742,6 +764,34 @@ func journalLine(mode, name string, pid int, a restart.Answer) string {
 		word = "не перезапускаю"
 	}
 	return head + word + ": " + strings.Join(restart.Texts(a.Against), "; ")
+}
+
+// journalErrorOnce дописывает повтор ошибки конфигурации один раз, пока её текст есть в журнале.
+func journalErrorOnce(file string, now time.Time, key, line string) {
+	if f, err := os.Open(file); err == nil {
+		if info, statErr := f.Stat(); statErr == nil {
+			const journalTail = int64(64 << 10)
+			if info.Size() > journalTail {
+				if _, seekErr := f.Seek(-journalTail, io.SeekEnd); seekErr != nil {
+					_ = f.Close()
+					fmt.Fprintln(os.Stderr, "cl: переход к концу журнала:", seekErr)
+					journal(file, now, line)
+					return
+				}
+			}
+			data, readErr := io.ReadAll(f)
+			_ = f.Close()
+			if readErr == nil && strings.Contains(string(data), key) {
+				return
+			}
+		} else {
+			_ = f.Close()
+			fmt.Fprintln(os.Stderr, "cl: проверка журнала:", statErr)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintln(os.Stderr, "cl: проверка журнала:", err)
+	}
+	journal(file, now, line)
 }
 
 // journal дописывает строку с местным временем; сбой журнала — в stderr, работе сессии он не мешает.

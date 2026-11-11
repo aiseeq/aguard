@@ -13,17 +13,25 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+
 	"syscall"
+	"time"
 
 	"github.com/aiseeq/aguard/internal/names"
 	"github.com/aiseeq/akit/session"
 )
 
 func main() {
+	if args, ok := oomPrefixArgs(os.Args[0], os.Args[1:]); ok {
+		runOOMPrefix(args)
+		return
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fail(err)
@@ -54,8 +62,14 @@ func main() {
 		fail(err)
 	}
 	if !interactive(args) {
-		argv := scopeArgv(l.systemdRun, claude, nameArg(args), fmt.Sprint(os.Getpid()), printArgs(home, args))
-		if err := syscall.Exec(l.systemdRun, argv, os.Environ()); err != nil {
+		cfg, configErr := l.readConfig()
+		if configErr != nil {
+			journal(cfg.Restart.Journal, time.Now(), "конфиг cl: "+configErr.Error())
+		}
+		argv, env := prepareScope(home, l.systemdRun, claude, nameArg(args), fmt.Sprint(os.Getpid()), printArgs(home, args), cfg.Memory, os.Environ(), func(e error) {
+			journal(cfg.Restart.Journal, time.Now(), "потолок памяти не поставлен: "+e.Error())
+		})
+		if err := syscall.Exec(l.systemdRun, argv, env); err != nil {
 			fail(err)
 		}
 	}
@@ -81,6 +95,55 @@ func main() {
 		pre = append(pre, "-n", l.name)
 	}
 	os.Exit(l.supervise(pre, args))
+}
+
+func oomPrefixArgs(argv0 string, args []string) ([]string, bool) {
+	if filepath.Base(argv0) == "cl-oom-prefix" {
+		return args, true
+	}
+	if len(args) > 0 && args[0] == "oom-prefix" {
+		return args[1:], true
+	}
+	return nil, false
+}
+
+func runOOMPrefix(args []string) {
+	writeErr, execErr := executeOOMPrefix(args, writeOOMScoreAdj, syscall.Exec, os.Environ())
+	if writeErr != nil {
+		fmt.Fprintln(os.Stderr, "cl oom-prefix:", writeErr)
+	}
+	if execErr != nil {
+		fmt.Fprintln(os.Stderr, "cl oom-prefix:", execErr)
+		os.Exit(oomExecFailure)
+	}
+}
+
+const oomExecFailure = 127
+
+func writeOOMScoreAdj(value []byte) error {
+	f, err := os.OpenFile("/proc/self/oom_score_adj", os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open oom_score_adj: %w", err)
+	}
+	n, writeErr := f.Write(value)
+	if writeErr == nil && n != len(value) {
+		writeErr = io.ErrShortWrite
+	}
+	return errors.Join(writeErr, f.Close())
+}
+
+func executeOOMPrefix(args []string, writeAdj func([]byte) error, execFn func(string, []string, []string) error, env []string) (error, error) {
+	writeErr := writeAdj([]byte("1000"))
+	var argv []string
+	if len(args) == 1 {
+		argv = []string{"/bin/bash", "-c", args[0]}
+	} else {
+		argv = args
+	}
+	if len(argv) == 0 {
+		return writeErr, nil
+	}
+	return writeErr, execFn(argv[0], argv, env)
 }
 
 func fail(err error) {

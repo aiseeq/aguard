@@ -23,6 +23,7 @@ tasks:
     run:
       - {install: bin/aguard, to: ~/.local/bin}
       - {install: bin/cl}
+      - sh: ln -sfn ~/bin/cl ~/bin/cl-oom-prefix
       - sh: install -D -m 0644 deploy/aguard.service ~/.config/systemd/user/aguard.service
       - sh: install -D -m 0644 cmd/cl/agents.slice ~/.config/systemd/user/agents.slice
       - sh: '[ -f ~/.config/aguard/config.toml ] || install -D -m 0644 deploy/config.example.toml ~/.config/aguard/config.toml'

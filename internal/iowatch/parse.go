@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/aiseeq/aguard/internal/meminfo"
 	"math"
 	"os"
 	"path/filepath"
@@ -401,36 +403,16 @@ type memInfo struct{ dirty, writeback, available, swapTotal, swapFree int64 }
 // swapUsed — занятый своп, байты.
 func (m memInfo) swapUsed() int64 { return m.swapTotal - m.swapFree }
 
-// memInfoKeys — поля meminfo в порядке memInfo; нет любого — ошибка (ядро без них — не наше).
-var memInfoKeys = [...][]byte{[]byte("Dirty:"), []byte("Writeback:"), []byte("MemAvailable:"), []byte("SwapTotal:"), []byte("SwapFree:")}
-
 // parseMemInfo — Dirty, Writeback, MemAvailable, SwapTotal и SwapFree из /proc/meminfo, байты.
 func parseMemInfo(data []byte) (memInfo, error) {
-	var m memInfo
-	dst := [len(memInfoKeys)]*int64{&m.dirty, &m.writeback, &m.available, &m.swapTotal, &m.swapFree}
-	seen := 0
-	for len(data) > 0 && seen < len(memInfoKeys) {
-		var line []byte
-		line, data = nextLine(data)
-		key, rest := nextField(line)
-		for i, want := range memInfoKeys {
-			if !bytes.Equal(key, want) {
-				continue
-			}
-			value, _ := nextField(rest)
-			n, err := parseIntBytes(value)
-			if err != nil {
-				return memInfo{}, fmt.Errorf("meminfo %s: %w", key, err)
-			}
-			*dst[i] = n * 1024
-			seen++
-			break
-		}
+	values, err := meminfo.Parse(data, "Dirty:", "Writeback:", "MemAvailable:", "SwapTotal:", "SwapFree:")
+	if err != nil {
+		return memInfo{}, err
 	}
-	if seen < len(memInfoKeys) {
-		return memInfo{}, fmt.Errorf("meminfo: из %d полей (Dirty, Writeback, MemAvailable, SwapTotal, SwapFree) найдено %d", len(memInfoKeys), seen)
-	}
-	return m, nil
+	return memInfo{
+		dirty: values["Dirty:"], writeback: values["Writeback:"], available: values["MemAvailable:"],
+		swapTotal: values["SwapTotal:"], swapFree: values["SwapFree:"],
+	}, nil
 }
 
 // cachedFile — открытый файл счётчика: ядро пересчитывает содержимое на каждое чтение с нуля,

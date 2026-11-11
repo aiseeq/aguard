@@ -102,7 +102,7 @@ func (l launcher) upgrade(n int, args []string) {
 	if !ok && err == nil {
 		return
 	}
-	cfg, cfgErr := loadConfig(l.configFile, l.home)
+	cfg, cfgErr := l.readConfig()
 	if ok {
 		err = l.reexec(cfg.Restart.Journal, path, upgrade{V: upgradeV, Name: l.name, N: n, Args: args})
 	}
@@ -178,6 +178,6 @@ func (l launcher) adopt(u upgrade) (*os.Process, func(), error) {
 // journalUpgradeFail — сбой подхвата в новом бинаре — в журнал перезапусков: по нему решается откат на прежний
 // cl (тикет cl-upgrade-fallback, «делать при первом сбое»); в stderr консоли его никто не читает.
 func (l launcher) journalUpgradeFail(err error, then string) {
-	cfg, cfgErr := loadConfig(l.configFile, l.home)
+	cfg, cfgErr := l.readConfig()
 	journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s pid=%d: подхват не удался: %v — %s", l.name, os.Getpid(), errors.Join(err, cfgErr), then))
 }

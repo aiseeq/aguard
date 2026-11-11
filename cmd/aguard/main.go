@@ -6,7 +6,9 @@
 //
 //   - tmp — записи в /tmp по снимку слежения и сводки владельцам (бывший tmpguard); слежение (internal/track) — тоже здесь;
 //
-//   - memory — пики памяти сессий для выбора мягкого потолка;
+//   - memory — пики памяти сессий;
+//
+//   - ceiling — безопасное изменение потолка с учётом shmem и письма об OOM;
 //
 //   - restart — ответ cl в сокет, можно ли перезапустить сессию на новую версию Claude Code;
 //
@@ -31,6 +33,7 @@
 //     aguard orphans tick [-dry-run] [-min-dead 0s]      один проход сирот
 //     aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
 //     aguard memory tick [-dry-run] | report [-since 168h]
+//     aguard memory ceiling [размер]
 //     aguard restart ask -pid N [-name имя]              вопрос, как его задаёт cl
 //     aguard waits tick [-dry-run] | report [-since 24h]
 //     aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время]
@@ -59,6 +62,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/activity"
+	"github.com/aiseeq/aguard/internal/ceiling"
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/disk"
@@ -73,31 +77,46 @@ import (
 const procRoot = "/proc"
 
 type app struct {
-	home            string
-	cfgPath         string
-	stateDir        string          // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
-	nightSent       nightState      // отправленное ночным сторожем; nil — ещё не прочитано из state.json
-	nightLogged     map[string]bool // mode=log: ключи, о которых уже написал «написал бы»
-	nightFb         fallbackState   // запуски запасного Сна; nil — ещё не прочитано из fallback.json
-	units           unitRunner      // запуск запасного Сна отдельным unit; nil — запасной Сон не запускается (ошибка)
-	projects        string
-	reg             session.Registry
-	uid             int
-	workerJobsDir   string
-	workerUnitsDir  string
-	log             *slog.Logger
-	out             io.Writer                    // вывод команд для человека и агента (dry-run, report)
-	act             *activity.Recorder           // учёт срабатываний; только у демона, у команд nil
-	cpu             map[string]*cpuHost          // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
-	strayRead       strayReader                  // замер процессов без родителя; подменяется в тестах
-	trackFetch      func() (trackfd.Pair, error) // пара дескрипторов слежения; подменяется в тестах
-	diskState       *disk.State                  // состояние наблюдателя disk; загружается один раз демоном
-	diskWalkLoaded  bool                         // sizes и traces загружены до первого обхода
-	queueCache      queueTicketCache
-	queueExternalAt time.Time // последний обход внешнего трекера
-	queueNext       map[string]queueNextResult
-	queueWorkers    func() ([]string, error)
-	namesMem        namesMemory // таблица имён cl: прошлая удачная и письмо лиду о битой
+	home                 string
+	procDir              string // подменяется в тестах потолка; пусто — /proc
+	cgroupDir            string // подменяется в тестах потолка; пусто — /sys/fs/cgroup
+	ceilingAlive         map[string]session.Info
+	ceilingAliveAt       time.Time
+	ceilingAliveErr      error
+	ceilingNotified      map[string]int64
+	ceilingPIDs          map[string]map[int]time.Time
+	ceilingLimits        map[string]int64
+	ceilingShmem         map[string]int64
+	ceilingBaseline      map[string]int64
+	ceilingCursors       map[string]string
+	ceilingUnpersisted   map[string]bool
+	ceilingSeedRetries   map[string]ceilingSeedRetry
+	ceilingJournalSource func(context.Context, string, time.Time) ([]oomVictim, time.Time, error)
+	ceilingNoticeSend    func(ceiling.State, []oomVictim, int64, int64, int64, map[string]session.Info, error) error
+	cfgPath              string
+	stateDir             string          // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
+	nightSent            nightState      // отправленное ночным сторожем; nil — ещё не прочитано из state.json
+	nightLogged          map[string]bool // mode=log: ключи, о которых уже написал «написал бы»
+	nightFb              fallbackState   // запуски запасного Сна; nil — ещё не прочитано из fallback.json
+	units                unitRunner      // запуск запасного Сна отдельным unit; nil — запасной Сон не запускается (ошибка)
+	projects             string
+	reg                  session.Registry
+	uid                  int
+	workerJobsDir        string
+	workerUnitsDir       string
+	log                  *slog.Logger
+	out                  io.Writer                    // вывод команд для человека и агента (dry-run, report)
+	act                  *activity.Recorder           // учёт срабатываний; только у демона, у команд nil
+	cpu                  map[string]*cpuHost          // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
+	strayRead            strayReader                  // замер процессов без родителя; подменяется в тестах
+	trackFetch           func() (trackfd.Pair, error) // пара дескрипторов слежения; подменяется в тестах
+	diskState            *disk.State                  // состояние наблюдателя disk; загружается один раз демоном
+	diskWalkLoaded       bool                         // sizes и traces загружены до первого обхода
+	queueCache           queueTicketCache
+	queueExternalAt      time.Time // последний обход внешнего трекера
+	queueNext            map[string]queueNextResult
+	queueWorkers         func() ([]string, error)
+	namesMem             namesMemory // таблица имён cl: прошлая удачная и письмо лиду о битой
 
 	queueUnsaved  *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
 	codexStep     time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval
@@ -219,6 +238,7 @@ func usage() {
   aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
   aguard track check
   aguard memory tick [-dry-run] | report [-since 168h]
+  aguard memory ceiling [размер]
   aguard restart ask -pid N [-name имя]
   aguard waits tick [-dry-run] | report [-since 24h]
   aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время RFC3339]
@@ -290,7 +310,7 @@ func (a *app) run(ctx context.Context) error {
 	defer signal.Stop(usr1)
 	signal.Notify(usr2, syscall.SIGUSR2)
 	defer signal.Stop(usr2)
-	for _, n := range []string{"orphans", "tmp", "memory", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "sigguard", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "ceiling", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "sigguard", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -307,6 +327,7 @@ func (a *app) run(ctx context.Context) error {
 	wg.Go(func() { a.heapLoop(ctx, usr1) })
 	wg.Go(func() { a.guiLoop(ctx) })
 	wg.Go(func() { a.sigguardLoop(ctx) })
+	wg.Go(func() { a.ceilingLoop(ctx) })
 	insts := a.trackInstances()
 	for i := range insts {
 		wg.Go(func() { a.trackLoop(ctx, &insts[i], trackRetry) }) //nolint:unbounded-goroutine-fanout // экземпляров два, список задан в track.Instances

@@ -18,7 +18,7 @@ import (
 const checkFlag = "--cl-check"
 
 func runCheck(l launcher) int {
-	cfg, err := loadConfig(l.configFile, l.home)
+	cfg, err := l.readConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cl:", err)
 		return 1

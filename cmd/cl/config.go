@@ -33,6 +33,7 @@ const (
 // config — ~/.config/cl/config.json: тексты ролей и настройки перезапуска. Тексты ролей живут только здесь, в коде
 // их нет. Файл перечитывается на каждой проверке: режим и тексты меняются без перезапуска консолей.
 type config struct {
+	Memory  memoryConfig  `json:"memory"`
 	Restart restartConfig `json:"restart"`
 	// Roles — роли по имени сессии, первая подходящая; сессия без роли строки не получает.
 	Roles []role `json:"roles"`
@@ -42,6 +43,11 @@ type config struct {
 	// следующей беседе; {name} — имя сессии, {dir} — restart.resume_dir. Путь знал только скилл work-supervisor, и
 	// мастер, которого пользователь просил напрямую, клал файл в scratchpad (shop-master 27.10 14:21 CET, задание лида).
 	ResumePrompt string `json:"resume_prompt"`
+}
+
+type memoryConfig struct {
+	Max     string `json:"max"`
+	SwapMax string `json:"swap_max"`
 }
 
 // restartConfig — как cl перезапускает сессию на новую версию Claude Code; когда можно — решает aguard (его
@@ -94,7 +100,10 @@ type roleSettings struct {
 	File string   `json:"file"`
 }
 
+var errMemoryConfig = errors.New("cl memory configuration")
+
 // defaultConfig — без файла: только журнал, без строк ролей.
+
 func defaultConfig(home string) config {
 	return config{Restart: restartConfig{
 		Mode:         modeLog,
@@ -122,6 +131,13 @@ func loadConfig(file, home string) (config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return defaultConfig(home), fmt.Errorf("конфиг cl %s: %w", file, err)
 	}
+	var memoryErr error
+	if cfg.Memory.Max != "" {
+		if _, _, err := memoryLimits(cfg.Memory); err != nil {
+			cfg.Memory = memoryConfig{}
+			memoryErr = fmt.Errorf("%w: конфиг cl %s: memory.max: %w", errMemoryConfig, file, err)
+		}
+	}
 	if cfg.Restart.Mode != modeLog && cfg.Restart.Mode != modeAct {
 		return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.mode %q, нужно %q или %q", file, cfg.Restart.Mode, modeLog, modeAct)
 	}
@@ -145,7 +161,17 @@ func loadConfig(file, home string) (config, error) {
 			}
 		}
 	}
-	return cfg, nil
+	return cfg, memoryErr
+}
+
+// readConfig оставляет конфигурацию целой при ошибке одного потолка памяти.
+func (l launcher) readConfig() (config, error) {
+	cfg, err := loadConfig(l.configFile, l.home)
+	if errors.Is(err, errMemoryConfig) {
+		journalErrorOnce(cfg.Restart.Journal, time.Now(), err.Error(), "конфиг cl: "+err.Error())
+		return cfg, nil
+	}
+	return cfg, err
 }
 
 func (c restartConfig) interval() time.Duration {
