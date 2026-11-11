@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/akit/timearg"
+	"golang.org/x/sys/unix"
 )
 
 // Команды наблюдателя io: запись в переднем плане, итог случаев, ручной снимок службы и окно по нему,
@@ -162,7 +163,9 @@ func (s *ioRecordSink) sampleErr(_ string, err error) {
 	s.a.log.Warn("aguard io: замер", "err", err)
 }
 
-// ioSignal — сигнал службе aguard; служба не запущена — ошибка errIONotRunning.
+// ioSignal — сигнал службе aguard (0 — только проверка, что она запущена); служба не запущена — ошибка
+// errIONotRunning. Сигнал шлёт systemd, не этот процесс: agent-signal-guard отказывает агенту в kill(2)
+// чужому unit (тикет aguard-io-dump-signal-guard).
 func ioSignal(sig syscall.Signal) error {
 	out, err := exec.Command("systemctl", "--user", "show", "-p", "MainPID", "--value", "aguard").Output()
 	if err != nil {
@@ -173,8 +176,13 @@ func ioSignal(sig syscall.Signal) error {
 	if err != nil || pid <= 0 {
 		return fmt.Errorf("%w (MainPID=%q)", errIONotRunning, value)
 	}
-	if err := syscall.Kill(pid, sig); err != nil {
-		return fmt.Errorf("сигнал службе %d: %w", pid, err)
+	if sig == 0 {
+		return nil
+	}
+	out, err = exec.Command("systemctl", "--user", "kill", "--kill-whom=main", "--signal="+unix.SignalName(sig),
+		"aguard.service").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("сигнал службе %d: %w: %s", pid, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

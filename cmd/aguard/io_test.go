@@ -10,10 +10,12 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -912,5 +914,41 @@ func TestIOOwnerOfflineSavedForSeed(t *testing.T) {
 	next.load()
 	if len(next.cases) != 1 || !next.cases[0].OwnerOffline {
 		t.Fatalf("после перезапуска: %+v", next.cases)
+	}
+}
+
+// Сигнал службе — через systemd (`systemctl --user kill --kill-whom=main`), не kill(2) из процесса агента:
+// agent-signal-guard отказывает агенту в сигнале чужому unit. systemctl подменён: пишет аргументы, MainPID —
+// свой ребёнок sleep, который прямой сигнал оборвал бы.
+func TestIOSignalViaSystemd(t *testing.T) {
+	child := exec.Command("sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	})
+	bin := t.TempDir()
+	calls := filepath.Join(bin, "calls")
+	script := "#!/bin/sh\necho \"$*\" >>'" + calls + "'\n[ \"$2\" = show ] && echo " + strconv.Itoa(child.Process.Pid) + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	if err := ioSignal(syscall.SIGUSR2); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "--user kill --kill-whom=main --signal=SIGUSR2 aguard.service") {
+		t.Errorf("сигнал не через systemctl kill; вызовы:\n%s", got)
+	}
+	time.Sleep(50 * time.Millisecond)
+	var ws syscall.WaitStatus
+	if pid, _ := syscall.Wait4(child.Process.Pid, &ws, syscall.WNOHANG, nil); pid != 0 {
+		t.Errorf("ребёнок получил сигнал напрямую: %v", ws)
 	}
 }
