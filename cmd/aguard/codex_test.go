@@ -257,13 +257,20 @@ func TestCodexArmedFakeAppServer(t *testing.T) {
 	}
 	cfg := oneAccount(dir)
 	cfg.Codex, cfg.Accounts[0].Approvals, cfg.Lead = fake, approvals, "lead"
-	// consume без ответа: срок первого прохода — свой короткий родительский контекст (тот же исход, что у
-	// codexReadTimeout 20 с, без 20 с ожидания); повторы — на живом контексте.
+	// consume без ответа обрывает свой срок вызова codexReadTimeout (укорочен до 2 с), а не родитель: у
+	// родителя запасной срок 15 с — без codexReadTimeout проход упрётся в него и тест краснеет по времени
+	// (порог 6 с — тройной запас над сроком вызова).
+	defer func(d time.Duration) { codexReadTimeout = d }(codexReadTimeout)
+	codexReadTimeout = 2 * time.Second
 	ctx := context.Background()
-	hung, cancel := context.WithTimeout(ctx, time.Second)
+	hung, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	start := time.Now()
 	if err := a.codexRound(hung, &cfg, false); err != nil {
 		t.Fatal(err)
+	}
+	if took := time.Since(start); took > 6*time.Second {
+		t.Fatalf("consume без ответа оборван не сроком вызова: %v", took)
 	}
 	if a.codexEvery(&cfg) != cfg.Fast.D() {
 		t.Fatalf("шаг после consume без ответа: %v", a.codexEvery(&cfg))

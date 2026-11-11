@@ -16,7 +16,8 @@ import (
 )
 
 // codexReadTimeout — срок одного вызова app-server: отвечает меньше чем за 8 с (замер 02.11), как в dreamstats.
-const codexReadTimeout = 20 * time.Second
+// Переменная — тест зависшего consume укорачивает её, чтобы проверить срок без 20 с ожидания.
+var codexReadTimeout = 20 * time.Second
 
 // codexReader — один замер лимита учётки с CODEX_HOME=home через app-server по пути codex.
 type codexReader func(ctx context.Context, codex, home string, now time.Time) (codexwatch.Reading, error)
