@@ -412,6 +412,41 @@ func TestLeadMessageEmpty(t *testing.T) {
 	}
 }
 
+// Обрезанное имя unit из строки agent-signal-guard (47 символов, 11.11 18:37): обрывок «.serv» и обрыв внутри id —
+// задание всё равно находится; обрыв, подходящий к двум заданиям, — никого.
+func TestByUnitPrefix(t *testing.T) {
+	dir := t.TempDir()
+	for _, id := range []string{"1111-1825-signal-guard-deny-alert", "1111-1900-very-long-task-name-cut-a", "1111-1900-very-long-task-name-cut-b"} {
+		if err := os.MkdirAll(filepath.Join(dir, id), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, id, "job.json"), []byte(`{"id":"`+id+`","master":"m-`+id+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobs := &Jobs{Dir: dir}
+	for unit, want := range map[string]string{
+		"worker-1111-1825-signal-guard-deny-alert-1.serv":  "1111-1825-signal-guard-deny-alert",
+		"worker-1111-1825-signal-guard-deny-alert.s":       "1111-1825-signal-guard-deny-alert",
+		"worker-1111-1825-signal-guard-de":                 "1111-1825-signal-guard-deny-alert",
+		"worker-1111-1825-signal-guard-deny-alert.service": "1111-1825-signal-guard-deny-alert",
+		"worker-1111-1900-very-long-task-name-cu":          "",
+		"worker-io-1.scope":                                "",
+	} {
+		v, err := jobs.ByUnitPrefix(unit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := ""
+		if v != nil {
+			got = v.ID
+		}
+		if got != want {
+			t.Errorf("%s: %q, ждали %q", unit, got, want)
+		}
+	}
+}
+
 // id задания по unit бойца: повтор — сначала имя целиком, потом без хвоста -<n>; хвост не число или с нуля — не
 // повтор; служба worker-settle и не worker-* — не боец.
 func TestJobIDs(t *testing.T) {

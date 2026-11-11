@@ -389,19 +389,15 @@ func (a *app) sigguardSend(cfg *sigguard.Config, g sigguard.Group) {
 
 // sigguardRoute находит живую сессию или мастера задания бойца; иначе возвращает лида.
 func sigguardRoute(d sigguard.Deny, lead string, alive map[string]session.Info, jobs *cpuwatch.Jobs) (string, string) {
-	workerUnit := strings.HasSuffix(d.Unit, ".service") && len(cpuwatch.JobIDs(d.Unit)) > 0
-	if workerUnit {
-		if jobs == nil {
-			return lead, ""
-		}
-		j, err := jobs.ByUnit(d.Unit)
-		if err == nil && j != nil {
+	// unit бойца — worker-<id>.service; длинное имя строка защиты обрезает (…-1.serv), его ищет ByUnitPrefix
+	// (задания нет — обрезан другой unit worker-*: ищем сессию по root, как у прочих)
+	if len(cpuwatch.JobIDs(d.Unit)) > 0 && !strings.HasSuffix(d.Unit, ".scope") && jobs != nil {
+		if j, err := jobs.ByUnitPrefix(d.Unit); err == nil && j != nil {
 			if _, live := alive[j.Master]; live {
 				return j.Master, j.ID
 			}
 			return lead, j.ID
 		}
-		return lead, ""
 	}
 	if pid, e := strconv.Atoi(d.Root); e == nil {
 		for _, name := range slices.Sorted(maps.Keys(alive)) {

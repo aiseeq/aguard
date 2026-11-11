@@ -103,6 +103,46 @@ func (j *Jobs) ByUnit(unit string) (*Job, error) {
 	return nil, nil
 }
 
+// ByUnitPrefix — задание по unit бойца, чьё имя могло прийти обрезанным: строка agent-signal-guard держит 47 символов
+// (worker-1111-1825-signal-guard-deny-alert-1.serv). Обрывок «.service» на конце снимается, дальше как ByUnit; не
+// нашлось — единственная папка задания, чьё имя начинается с остатка. Несколько или ни одной — nil.
+func (j *Jobs) ByUnitPrefix(unit string) (*Job, error) {
+	if v, err := j.ByUnit(unit); v != nil || err != nil {
+		return v, err
+	}
+	rest, ok := strings.CutPrefix(unit, "worker-")
+	if !ok || rest == "" || strings.HasSuffix(rest, ".service") || strings.HasSuffix(rest, ".scope") {
+		return nil, nil // имя целое или не бойца: ByUnit уже искал
+	}
+	for k := len(".service") - 1; k > 0; k-- {
+		if strings.HasSuffix(rest, ".service"[:k]) {
+			rest = rest[:len(rest)-k]
+			break
+		}
+	}
+	if v, err := j.ByUnit("worker-" + rest + ".service"); v != nil || err != nil {
+		return v, err
+	}
+	entries, err := os.ReadDir(j.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("задания worker: %w", err)
+	}
+	found := ""
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), rest) {
+			continue
+		}
+		if found != "" {
+			return nil, nil // обрезанное имя подходит к нескольким заданиям: чьё — не сказать
+		}
+		found = e.Name()
+	}
+	if found == "" {
+		return nil, nil // задания нет: убрано или не боец
+	}
+	return j.get(found)
+}
+
 // settleUnit — служба worker, что подводит итоги заданий (llmark tool/cmd/worker/settle.go): unit worker-*, но не боец.
 const settleUnit = "worker-settle"
 
