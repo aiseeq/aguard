@@ -19,7 +19,15 @@ type Rest struct {
 }
 
 // restCalendars — календари праздников queue.rest_holidays.
-var restCalendars = map[string][]*cal.Holiday{"CY": cy.Holidays}
+var restCalendars = map[string][]*cal.Holiday{"CY": cyHolidays}
+
+// cyHolidays — календарь Кипра rickar/cal (14 дней) и два официальных дня, которых в нём нет: пасхальный вторник —
+// в списке банковских выходных Центробанка Кипра, сочельник — в списке госслужбы (CySEC); сверка 11.11.2026, тикет
+// cy-holidays-official-coverage.
+var cyHolidays = append(slices.Clone(cy.Holidays),
+	&cal.Holiday{Name: "Τρίτη του Πάσχα", Type: cal.ObservancePublic, Func: cal.CalcEasterOffset, Julian: true, Offset: 2},
+	&cal.Holiday{Name: "Παραμονή Χριστουγέννων", Type: cal.ObservancePublic, Month: time.December, Day: 24, Func: cal.CalcDayOfMonth},
+)
 
 // Day — причина отдыха дня now в поясе Zone; пусто — рабочий день или папок отдыха нет.
 func (r Rest) Day(now time.Time) string {
