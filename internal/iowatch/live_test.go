@@ -462,7 +462,7 @@ func TestProfileNoIOAndSummaryOverMeasured(t *testing.T) {
 	list := append(got, Profile{Kind: "graft:gate", NoIO: true}, Profile{Kind: "graft:gate", NoIO: true})
 	st := SummarizeProfiles(list)["graft:gate"]
 	if st.Count != 4 || st.IOCount != 1 || st.PeakWriteBps != (Quantiles{4 << 20, 4 << 20}) || st.WriteB != (Quantiles{120 << 20, 120 << 20}) ||
-		st.CPUMS != (Quantiles{0, 90_000}) {
+		st.CPUMS != (Quantiles{0, 90_000}) || st.DurMS != (Quantiles{0, 30_000}) {
 		t.Fatalf("свод по замеренным: %+v", st)
 	}
 	none := SummarizeProfiles([]Profile{{Kind: "x", NoIO: true, CPUMS: 5}})["x"]
