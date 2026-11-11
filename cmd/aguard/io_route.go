@@ -53,12 +53,17 @@ func (a *app) ioOwners(cfg *iowatch.Config) *ioOwnerFinder {
 		}}
 }
 
-// routeCase — случай для маршрута. Хозяина нет, когда главную cgroup не к кому отнести; главная — возможная жертва
-// (удаление снимка btrfs, чтение главной — подкачка) — хозяин есть, но с пометкой Victim; сбой поиска задания бойца или сессии
-// по scratchpad — хозяина нет, ошибка наверх.
+// routeCase — случай для маршрута. Хозяина нет, когда главную cgroup не к кому отнести или запись устройства —
+// удаление снимков btrfs (главная тут не виновник: 11.11 01:21:33 farm.test прочёл 6 МБ при 2166 МБ фона ядра, а
+// хозяину ушёл тикет); чтение главной — подкачка — хозяин есть, но с пометкой Victim; сбой поиска задания бойца или
+// сессии по scratchpad — хозяина нет, ошибка наверх.
 func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 	rc := ioroute.Case{Start: c.Start, End: c.End, DurMS: c.DurMS, Text: ioCaseLine(c)}
 	cul := c.Culprits
+	if cul.SnapshotDeletion() {
+		rc.Class, rc.Generic = "btrfs-snapshot", true
+		return rc, nil
+	}
 	if cul == nil || cul.Main == "" {
 		rc.Class, rc.Generic = "unknown", true
 		if cul.KernelOver() {
@@ -66,7 +71,7 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 		}
 		return rc, nil
 	}
-	rc.Victim = cul.SnapshotDeletion() || c.PagingVictim()
+	rc.Victim = c.PagingVictim()
 	unit := proc.ServiceUnit(cul.Main)
 	if name, _, ok := proc.SessionScope(cul.Main); ok {
 		rc.Class, rc.Generic = byProc(cul.MainProc, "session")

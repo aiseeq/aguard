@@ -683,9 +683,25 @@ func TestIOCaseCleanerAttributionAndAlertRecipient(t *testing.T) {
 		t.Fatalf("разбор не содержит CPU cleaner:\n%s", detail.String())
 	}
 
+	// Удаление снапшотов — случай без хозяина (фриз 11.11 01:21:33: тикет farm-test у llmark при 6 МБ чтения
+	// главной и 2166 МБ фона ядра): несрочный — только в сводку, срочный — письмо лиду, тикета хозяину главной нет.
 	a, _ := testIOApp(t)
-	if o := routeOwner(t, a, c); o != "" {
-		t.Fatalf("письмо cleaner адресовано только лиду: хозяин %q", o)
+	cfg := iowatch.Default()
+	cfg.Lead = "lead"
+	rc, err := a.ioOwners(&cfg).routeCase(&c)
+	if err != nil || rc.Owner != "" || rc.Class != "btrfs-snapshot" || !rc.Generic {
+		t.Fatalf("снапшоты с главной: %+v %v", rc, err)
+	}
+	r := ioroute.New(cfg.Route())
+	for _, act := range r.Route(rc, func(string) bool { return true }) {
+		if act.Kind == ioroute.Ticket {
+			t.Fatalf("снапшоты: тикет %+v", act)
+		}
+	}
+	rc.DurMS = cfg.Route().UrgentMin.Milliseconds()
+	acts := r.Route(rc, func(string) bool { return true })
+	if len(acts) != 1 || acts[0].Kind != ioroute.Letter || acts[0].To != "lead" || acts[0].Why != ioroute.WhyNoOwner {
+		t.Fatalf("срочные снапшоты: %+v", acts)
 	}
 }
 
