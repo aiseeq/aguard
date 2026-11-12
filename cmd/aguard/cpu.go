@@ -34,6 +34,72 @@ type cpuHost struct {
 	strays   cpuwatch.StrayWatch
 	strayAt  time.Time // когда смотрели процессы без родителя
 	strayBad bool      // прошлый замер не удался: о сбое пишется раз
+	spinner  spinnerWatch
+}
+
+type spinnerRecord struct {
+	at  time.Time
+	cpu float64
+}
+type spinnerWatch map[string]spinnerRecord
+
+func (w *spinnerWatch) find(now time.Time, root string, ps []cpuwatch.Process, owner func(*cpuwatch.Task) cpuwatch.Owner, cfg *cpuwatch.Config) ([]cpuwatch.Spinner, error) {
+	if *w == nil {
+		*w = spinnerWatch{}
+	}
+	seen := map[string]bool{}
+	var out []cpuwatch.Spinner
+	var errs []error
+	for i := range ps {
+		p := ps[i]
+		key := fmt.Sprintf("%d:%d", p.Pid, p.Start)
+		seen[key] = true
+		r, known := (*w)[key]
+		rate := 0.0
+		if known {
+			dt := now.Sub(r.at).Seconds()
+			if dt > 0 && dt <= 2*cfg.Interval.D().Seconds() {
+				rate = cpuwatch.CPUGrowth(r.cpu, p.CPU, true) / dt
+			} else if p.Age > 0 {
+				rate = p.CPU / p.Age.Seconds()
+			}
+		} else if p.Age > 0 {
+			rate = p.CPU / p.Age.Seconds()
+		}
+		(*w)[key] = spinnerRecord{at: now, cpu: p.CPU}
+		if p.Age < cfg.SpinnerAfter.D() || rate < cfg.SpinnerCPU {
+			continue
+		}
+		if err := cpuwatch.ReadProcessIO(root, &p); err != nil {
+			if !cpuwatch.IsTransientProcessError(err) {
+				errs = append(errs, fmt.Errorf("pid %d: %w", p.Pid, err))
+			}
+			continue
+		}
+		if !p.IOKnown || p.Rchar+p.Wchar >= cfg.SpinnerIO {
+			continue
+		}
+		if err := cpuwatch.ReadProcessOwner(root, &p); err != nil {
+			if !cpuwatch.IsTransientProcessError(err) {
+				errs = append(errs, fmt.Errorf("pid %d: %w", p.Pid, err))
+			}
+			continue
+		}
+		o := owner(&p.Task)
+		if o.Master != "" {
+			cmd := p.Cmdline
+			if cmd == "" {
+				cmd = p.Comm
+			}
+			out = append(out, cpuwatch.Spinner{Pid: p.Pid, Owner: o, Cmd: cmd, Age: p.Age, StartedAt: p.StartedAt, Rchar: p.Rchar, Wchar: p.Wchar})
+		}
+	}
+	for k := range *w {
+		if !seen[k] {
+			delete(*w, k)
+		}
+	}
+	return out, errors.Join(errs...)
 }
 
 func (a *app) cpuCmd(ctx context.Context, args []string) error {
@@ -82,9 +148,8 @@ func (a *app) cpuHosts(cfg *cpuwatch.Config) []*cpuHost {
 	return out
 }
 
-// cpuSample — замер машины h: load average и потоки машины, а в перегрузку (или all) — готовые потоки. Без
-// перегрузки потоки не обходит: владельцы нужны только ей, а обход ~5600 потоков — 80 мс процессора (замер 27.10
-// 23:2x CET).
+// cpuSample — load average читает всегда; без перегрузки это два файла /proc и возврат. В перегрузку читает готовые
+// потоки и stat каждого процесса; IO и подробности владельца — только у долгих CPU-кандидатов.
 func (a *app) cpuSample(ctx context.Context, h *cpuHost, now time.Time, all bool) (*cpuwatch.Sample, error) {
 	s := &cpuwatch.Sample{At: now}
 	var err error
@@ -110,6 +175,12 @@ func (a *app) cpuSample(ctx context.Context, h *cpuHost, now time.Time, all bool
 	// готовые задачи — в момент снимка, а не минутой раньше: письмо говорит о тех же потоках, что и разбор владельцев
 	if err = s.ReadLoad(h.root); err != nil {
 		return nil, err
+	}
+	if h.ssh == "" {
+		s.Processes, err = cpuwatch.ReadProcessStats(h.root, now)
+		if err != nil {
+			a.warn("cpu", "часть stat процессов не прочиталась", "err", err)
+		}
 	}
 	return s, nil
 }
@@ -185,6 +256,13 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 			owner = r.RemoteOwner
 		}
 		v := h.win.Judge(s, owner)
+		if h.ssh == "" {
+			var e error
+			v.Spinners, e = h.spinner.find(now, h.root, s.Processes, owner, cfg)
+			if e != nil {
+				a.warn("cpu", "часть кандидатов долгой загрузки не прочиталась", "err", e)
+			}
+		}
 		a.cpuAct(cfg, &h.win, &v, now)
 		if err := saveCPUState(h.state, &h.win); err != nil {
 			a.warn("cpu", "состояние окна не сохранено", "host", h.win.Name, "err", err)
@@ -319,6 +397,14 @@ func (a *app) cpuDry(ctx context.Context, cfg *cpuwatch.Config) error {
 		if h.ssh != "" {
 			owner = r.RemoteOwner
 		}
+		var spinners []cpuwatch.Spinner
+		if h.ssh == "" {
+			var e error
+			spinners, e = h.spinner.find(now, h.root, s.Processes, owner, cfg)
+			if e != nil {
+				a.warn("cpu", "часть кандидатов долгой загрузки не прочиталась", "err", e)
+			}
+		}
 		fmt.Fprintf(a.out, "%s: load average за минуту %.2f, готовых сейчас %d при %d потоках, перегружена: %v\n",
 			h.win.Name, s.Load.Avg1, s.Runnable, s.Threads, s.Over())
 		a.strayDry(ctx, cfg, r, h)
@@ -327,6 +413,7 @@ func (a *app) cpuDry(ctx context.Context, cfg *cpuwatch.Config) error {
 		}
 		win := cpuwatch.Host{Name: h.win.Name} // своя перегрузка: окно демона пробой не трогается; письма — какими были бы через after
 		if v := win.Judge(s, owner); v.Over {
+			v.Spinners = spinners
 			cpuDryLetters(a.out, cfg, &win, &v, now)
 		}
 	}

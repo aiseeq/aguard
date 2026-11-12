@@ -24,16 +24,19 @@ const (
 
 // Config — раздел [cpu] конфига aguard.
 type Config struct {
-	Mode     string          `toml:"mode"`
-	Interval policy.Duration `toml:"interval"` // как часто читать load average и, в перегрузку, снимать готовые потоки
-	After    policy.Duration `toml:"after"`    // письма — когда перегрузка держится подряд не меньше
-	Repeat   policy.Duration `toml:"repeat"`   // письма одному адресату о машине — не чаще
-	Notify   float64         `toml:"notify"`   // мастеру — если его готовых задач в снимке не меньше этой доли потоков машины
-	Hosts    []string        `toml:"hosts"`    // машины по ssh сверх своей
-	Workers  string          `toml:"workers"`  // папка заданий worker
-	Strays   StrayConfig     `toml:"strays"`   // процессы без родителя (stray.go)
-	Lead     string          `toml:"-"`
-	SendAuth bool            `toml:"-"`
+	Mode         string          `toml:"mode"`
+	Interval     policy.Duration `toml:"interval"`      // как часто читать load average и, в перегрузку, снимать готовые потоки
+	After        policy.Duration `toml:"after"`         // письма — когда перегрузка держится подряд не меньше
+	Repeat       policy.Duration `toml:"repeat"`        // письма одному адресату о машине — не чаще
+	Notify       float64         `toml:"notify"`        // мастеру — если его готовых задач в снимке не меньше этой доли потоков машины
+	Hosts        []string        `toml:"hosts"`         // машины по ssh сверх своей
+	Workers      string          `toml:"workers"`       // папка заданий worker
+	Strays       StrayConfig     `toml:"strays"`        // процессы без родителя (stray.go)
+	SpinnerAfter policy.Duration `toml:"spinner_after"` // минимальный возраст долгого процесса
+	SpinnerCPU   float64         `toml:"spinner_cpu"`   // доля одного ядра между проходами
+	SpinnerIO    int64           `toml:"spinner_io"`    // максимум rchar+wchar
+	Lead         string          `toml:"-"`
+	SendAuth     bool            `toml:"-"`
 }
 
 // Default — замер раз в минуту (как и load average за минуту), письма — после 10 минут перегрузки подряд, повтор не
@@ -42,7 +45,7 @@ func Default(home string) Config {
 	return Config{
 		Mode: ModeAlert, Interval: policy.Duration(time.Minute), After: policy.Duration(10 * time.Minute),
 		Repeat: policy.Duration(30 * time.Minute), Notify: 0.25, Hosts: []string{"pc"}, Workers: home + "/.local/state/worker",
-		Strays: DefaultStrays(),
+		Strays: DefaultStrays(), SpinnerAfter: policy.Duration(10 * time.Minute), SpinnerCPU: 0.8, SpinnerIO: 1 << 20,
 	}
 }
 
@@ -56,6 +59,9 @@ func (c *Config) Validate(home string) error {
 	}
 	if c.Notify <= 0 || c.Notify > 1 {
 		return errors.New("cpu.notify в (0, 1]")
+	}
+	if c.SpinnerAfter.D() <= 0 || c.SpinnerCPU <= 0 || c.SpinnerCPU > 1 || c.SpinnerIO <= 0 {
+		return errors.New("cpu.spinner_after и cpu.spinner_io должны быть положительными, cpu.spinner_cpu — в (0, 1]")
 	}
 	c.Workers = policy.ExpandHome(c.Workers, home)
 	return c.Strays.Validate()
@@ -106,8 +112,19 @@ type Load struct {
 
 // Comm — процесс владельца и его готовые потоки.
 type Comm struct {
-	Name string
-	N    int
+	Name  string
+	N     int
+	Procs int
+}
+
+// Spinner — процесс владельца, долго занятый CPU при малом rchar+wchar.
+type Spinner struct {
+	Pid          int
+	Owner        Owner
+	Cmd          string
+	Age          time.Duration
+	StartedAt    time.Time
+	Rchar, Wchar int64
 }
 
 // Verdict — перегрузка машины на момент замера по минутному load average; runnable — снимок для разбора владельцев.
@@ -121,6 +138,7 @@ type Verdict struct {
 	Runnable int           // готовых к работе задач в момент снимка
 	Threads  int
 	Loads    []Load // снимок по владельцам, больше — раньше
+	Spinners []Spinner
 }
 
 // Long — перегрузка держится подряд не меньше after: о ней пора писать.
@@ -152,21 +170,25 @@ func (h *Host) Judge(s *Sample, owner func(*Task) Owner) Verdict {
 // Owners — готовые потоки снимка по владельцам, больше — раньше.
 func Owners(tasks []Task, owner func(*Task) Owner) []Load {
 	by := map[Owner]int{}
-	comms := map[Owner]map[string]int{}
+	comms := map[Owner]map[string]Comm{}
 	for i := range tasks {
 		t := &tasks[i]
 		o := owner(t)
 		by[o] += t.N
 		if comms[o] == nil {
-			comms[o] = map[string]int{}
+			comms[o] = map[string]Comm{}
 		}
-		comms[o][t.Comm] += t.N
+		c := comms[o][t.Comm]
+		c.Name = t.Comm
+		c.N += t.N
+		c.Procs++
+		comms[o][t.Comm] = c
 	}
 	var out []Load
 	for o, n := range by {
 		l := Load{Owner: o, N: n}
-		for c, k := range comms[o] {
-			l.Comms = append(l.Comms, Comm{Name: c, N: k})
+		for _, c := range comms[o] {
+			l.Comms = append(l.Comms, c)
 		}
 		slices.SortFunc(l.Comms, func(a, b Comm) int { return cmp.Or(cmp.Compare(b.N, a.N), cmp.Compare(a.Name, b.Name)) })
 		out = append(out, l)
@@ -267,11 +289,26 @@ func MasterMessage(host string, v *Verdict, m *Master, now time.Time, first bool
 	}
 	fmt.Fprintf(&b, "aguard: %s %s %s подряд — load average за минуту %s, сейчас готовых к работе задач %d при %d потоках. Твоих сейчас %d: %s.",
 		host, state, bgtask.Span(now.Sub(v.Since)), dec(v.Avg1), v.Runnable, v.Threads, m.N, parts(m.Parts))
-	b.WriteString(" Ничего не останавливаю и не понижаю: посмотри, почему твои задачи дают столько, и не добавляй новых")
+	b.WriteString(" Это подсказка: aguard ничего не останавливает и не понижает нагрузку; посмотри, почему твои задачи дают столько, и не добавляй новых")
 	if host == HostLocal {
 		b.WriteString("; тяжёлое — на PC (`worker run --pc`, `worker pc --`)")
 	}
 	b.WriteString(".")
+	var spinners []Spinner
+	for _, s := range v.Spinners {
+		if s.Owner.Master == m.Name {
+			spinners = append(spinners, s)
+		}
+	}
+	slices.SortFunc(spinners, func(a, b Spinner) int { return cmp.Or(cmp.Compare(b.Age, a.Age), cmp.Compare(a.Pid, b.Pid)) })
+	for i, s := range spinners {
+		if i == strayShown {
+			n := len(spinners) - strayShown
+			fmt.Fprintf(&b, "\n… ещё %d %s", n, russianCount(n, "долгий процесс", "долгих процесса", "долгих процессов"))
+			break
+		}
+		fmt.Fprintf(&b, "\nДолгий процесс без заметного ввода-вывода: pid %d, работает %d мин (с %s), команда `%s`, rchar %s, wchar %s.", s.Pid, int(s.Age.Minutes()), s.StartedAt.Format("15:04"), CleanCmd(s.Cmd), humanBytes(s.Rchar), humanBytes(s.Wchar))
+	}
 	return b.String()
 }
 
@@ -319,9 +356,42 @@ func parts(ls []Load) string {
 				cs = append(cs, c.Name+" "+fmt.Sprint(c.N))
 			}
 		}
+		if len(l.Comms) > 3 {
+			extra := 0
+			for _, c := range l.Comms[3:] {
+				extra += c.Procs
+			}
+			cs = append(cs, fmt.Sprintf("ещё %d %s", extra, russianCount(extra, "процесс", "процесса", "процессов")))
+		}
 		out = append(out, name+" — "+fmt.Sprint(l.N)+" ("+strings.Join(cs, ", ")+")")
 	}
 	return strings.Join(out, "; ")
+}
+
+func russianCount(n int, one, few, many string) string {
+	n = n % 100
+	if n >= 11 && n <= 14 {
+		return many
+	}
+	switch n % 10 {
+	case 1:
+		return one
+	case 2, 3, 4:
+		return few
+	default:
+		return many
+	}
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f МБ", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0f КБ", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d Б", n)
+	}
 }
 
 // dec — load average с одним знаком: 23.4.

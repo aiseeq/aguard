@@ -304,13 +304,20 @@ func (w *StrayWatch) treeUse(root int, byPid map[int]*Proc, kids map[int][]int, 
 		u.count++
 		u.live = u.live || q.Comm == agentComm || exclude.MatchString(q.Comm)
 		u.cpu += q.CPU
-		if prev, ok := w.cpu[pid]; ok {
-			u.grew += max(0, q.CPU-prev)
-		} else if !first { // родился между проходами: весь его процессор — за этот проход
-			u.grew += q.CPU
+		if !first {
+			previous, known := w.cpu[pid]
+			u.grew += CPUGrowth(previous, q.CPU, known)
 		}
 	}
 	return u
+}
+
+// CPUGrowth возвращает положительный прирост cputime с прошлого наблюдения.
+func CPUGrowth(previous, current float64, known bool) float64 {
+	if known {
+		return max(0, current-previous)
+	}
+	return max(0, current)
 }
 
 // tree — pid и все потомки; seen — снимок ps не атомарен, петля по ppid не должна его подвесить.

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/queue"
@@ -137,6 +138,13 @@ func TestExample(t *testing.T) {
 	}
 	if c.Restart.Mode != restart.ModeLog {
 		t.Errorf("раздел restart примера: %+v", c.Restart)
+	}
+	if c.Cpu.SpinnerAfter.D() != 10*time.Minute || c.Cpu.SpinnerCPU != 0.8 || c.Cpu.SpinnerIO != 1<<20 {
+		t.Errorf("пороги spinner из примера: after=%s cpu=%v io=%d", c.Cpu.SpinnerAfter.D(), c.Cpu.SpinnerCPU, c.Cpu.SpinnerIO)
+	}
+	defaults := cpuwatch.Default(home)
+	if c.Cpu.SpinnerAfter != defaults.SpinnerAfter || c.Cpu.SpinnerCPU != defaults.SpinnerCPU || c.Cpu.SpinnerIO != defaults.SpinnerIO {
+		t.Errorf("spinner значения примера не совпадают с Default: example=%+v default=%+v", c.Cpu, defaults)
 	}
 }
 

@@ -40,14 +40,192 @@ type Task struct {
 	SSH    string // SSH_CONNECTION из окружения: «адрес порт адрес порт» клиента и сервера
 }
 
+// Process — лёгкий снимок живого процесса для поиска долгих занятых процессов.
+type Process struct {
+	Task
+	Start        int64
+	StartedAt    time.Time
+	Age          time.Duration
+	CPU          float64
+	Rchar, Wchar int64
+	IOKnown      bool
+	Cmdline      string
+}
+
+var (
+	errProcessGone = errors.New("процесс завершился во время чтения")
+	errPIDReused   = errors.New("pid переиспользован")
+)
+
+// IsTransientProcessError определяет обычные гонки /proc и запрет доступа.
+func IsTransientProcessError(err error) bool {
+	return proc.Gone(err) || errors.Is(err, fs.ErrPermission) || errors.Is(err, errProcessGone) || errors.Is(err, errPIDReused)
+}
+
+func skipUnreadableStat(err error) bool { return proc.Gone(err) || errors.Is(err, fs.ErrPermission) }
+
+// ReadProcessStats читает только stat: по одному файлу на PID; время загрузки читает один раз.
+func ReadProcessStats(procRoot string, now time.Time) ([]Process, error) {
+	boot, err := proc.BootTime(procRoot)
+	if err != nil {
+		return nil, fmt.Errorf("время загрузки: %w", err)
+	}
+	ents, err := os.ReadDir(procRoot)
+	if err != nil {
+		return nil, fmt.Errorf("процессы: %w", err)
+	}
+	var out []Process
+	var errs []error
+	for _, e := range ents {
+		if !isPid(e.Name()) {
+			continue
+		}
+		q, ok, err := readProcessStat(filepath.Join(procRoot, e.Name()), boot, now)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("процесс %s: %w", e.Name(), err))
+			continue
+		}
+		if ok {
+			out = append(out, q)
+		}
+	}
+	return out, errors.Join(errs...)
+}
+
+func readProcessStat(dir string, boot, now time.Time) (Process, bool, error) {
+	stat, err := os.ReadFile(filepath.Join(dir, "stat"))
+	if err != nil {
+		if skipUnreadableStat(err) {
+			return Process{}, false, nil
+		}
+		return Process{}, false, fmt.Errorf("чтение stat: %w", err)
+	}
+	parsed, err := proc.ParseStat(string(stat))
+	if err != nil {
+		return Process{}, false, fmt.Errorf("разбор stat: %w", err)
+	}
+	i := strings.LastIndexByte(string(stat), ')')
+	f := strings.Fields(string(stat[i+1:]))
+	// akit уже разобрал общие поля; utime и stime он не отдаёт, поэтому читаем их из полей 14 и 15.
+	ut, e1 := strconv.ParseFloat(f[11], 64)
+	st, e2 := strconv.ParseFloat(f[12], 64)
+	start, e3 := strconv.ParseInt(parsed.Start, 10, 64)
+	pid, e4 := strconv.Atoi(filepath.Base(dir))
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil {
+		return Process{}, false, errors.New("неверные поля stat")
+	}
+	started := boot.Add(time.Duration(start) * time.Second / 100)
+	p := Process{Task: Task{Pid: pid, Comm: parsed.Comm}, Start: start, StartedAt: started, Age: now.Sub(started), CPU: (ut + st) / 100}
+	return p, true, nil
+}
+
+// ReadProcessIO сверяет время старта и читает IO до командной строки и владельца.
+func ReadProcessIO(procRoot string, p *Process) error {
+	dir := filepath.Join(procRoot, strconv.Itoa(p.Pid))
+	stat, err := os.ReadFile(filepath.Join(dir, "stat"))
+	if err != nil {
+		return fmt.Errorf("проверка времени старта: %w", err)
+	}
+	start, err := parseProcessStart(stat)
+	if err != nil {
+		return err
+	}
+	if start != p.Start {
+		return fmt.Errorf("%w: %d", errPIDReused, p.Pid)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "io"))
+	if err != nil {
+		return fmt.Errorf("чтение io: %w", err)
+	}
+	if p.Rchar, p.Wchar, err = parseProcIO(b); err != nil {
+		return err
+	}
+	p.IOKnown = true
+	return nil
+}
+
+// ReadProcessOwner читает команду и владельца только после прохождения порогов возраста, CPU и IO.
+func ReadProcessOwner(procRoot string, p *Process) error {
+	dir := filepath.Join(procRoot, strconv.Itoa(p.Pid))
+	if b, e := candidateProcFile(filepath.Join(dir, "cgroup")); e != nil {
+		return fmt.Errorf("cgroup: %w", e)
+	} else if b != nil {
+		p.Cgroup = proc.ParseCgroup(string(b))
+	}
+	if b, e := candidateProcFile(filepath.Join(dir, "environ")); e != nil {
+		return fmt.Errorf("environ: %w", e)
+	} else if b != nil {
+		claude, ssh, err := parseEnviron(b)
+		if err != nil {
+			return err
+		}
+		p.Claude, p.SSH = claude, ssh
+	}
+	if b, e := candidateProcFile(filepath.Join(dir, "cmdline")); e != nil {
+		return fmt.Errorf("cmdline: %w", e)
+	} else if b != nil {
+		p.Cmdline = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(string(b), "\x00", " "), "\n", " "))
+	}
+	return nil
+}
+
+func candidateProcFile(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if proc.Gone(err) {
+		return nil, fmt.Errorf("%w до чтения %s", errProcessGone, filepath.Base(path))
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return nil, nil
+	}
+	return b, err
+}
+
+func parseProcessStart(stat []byte) (int64, error) {
+	parsed, err := proc.ParseStat(string(stat))
+	if err != nil {
+		return 0, fmt.Errorf("разбор времени старта из stat: %w", err)
+	}
+	start, err := strconv.ParseInt(parsed.Start, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("starttime: %w", err)
+	}
+	return start, nil
+}
+
+func parseProcIO(b []byte) (int64, int64, error) {
+	var read, written int64
+	hasRead, hasWritten := false, false
+	for line := range strings.SplitSeq(string(b), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("счётчик %s: %w", key, err)
+		}
+		switch key {
+		case "rchar":
+			read, hasRead = n, true
+		case "wchar":
+			written, hasWritten = n, true
+		}
+	}
+	if !hasRead || !hasWritten {
+		return 0, 0, errors.New("нет rchar или wchar")
+	}
+	return read, written, nil
+}
+
 // Sample — замер машины: load average, готовые к работе задачи в момент замера (procs_running без себя), потоки машины
 // и, при высоком load average за минуту, готовые потоки по процессам.
 type Sample struct {
-	At       time.Time
-	Load     pressure.LoadAvg
-	Runnable int
-	Threads  int
-	Tasks    []Task
+	At        time.Time
+	Load      pressure.LoadAvg
+	Runnable  int
+	Threads   int
+	Tasks     []Task
+	Processes []Process
 }
 
 // Over — машина перегружена для наблюдения серии: load average за минуту не меньше числа потоков. Мгновенное число

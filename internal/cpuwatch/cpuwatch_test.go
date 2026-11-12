@@ -2,6 +2,8 @@ package cpuwatch
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -393,6 +395,10 @@ func TestConfig(t *testing.T) {
 		func(c *Config) { c.Notify = 0 },
 		func(c *Config) { c.After = -1 },
 		func(c *Config) { c.Notify = 2 },
+		func(c *Config) { c.SpinnerAfter = 0 },
+		func(c *Config) { c.SpinnerCPU = 0 },
+		func(c *Config) { c.SpinnerCPU = 1.1 },
+		func(c *Config) { c.SpinnerIO = 0 },
 	} {
 		c := Default("/home/u")
 		bad(&c)
@@ -472,5 +478,161 @@ func TestByUnitPrefix(t *testing.T) {
 		if j, err := jobs.ByUnitPrefix(unit); err != nil || j != nil {
 			t.Errorf("ByUnitPrefix(%q) = %+v, %v, want nil", unit, j, err)
 		}
+	}
+}
+
+func TestPartsShowsProcessRemainder(t *testing.T) {
+	three := Load{Owner: Owner{Kind: KindSession}, N: 3, Comms: []Comm{{Name: "rg", N: 1, Procs: 1}, {Name: "graft", N: 1, Procs: 1}, {Name: "claude", N: 1, Procs: 1}}}
+	four := Load{Owner: three.Owner, N: 5, Comms: append(append([]Comm{}, three.Comms...), Comm{Name: "grep", N: 2, Procs: 2})}
+	if got := parts([]Load{three}); strings.Contains(got, "ещё") {
+		t.Fatalf("exactly three commands have no remainder: %q", got)
+	}
+	got := parts([]Load{four})
+	if !strings.Contains(got, "rg 1, graft 1, claude 1, ещё 2 процесса") {
+		t.Fatalf("parts = %q", got)
+	}
+}
+
+func TestPartsRemainderCountsProcessesNotThreads(t *testing.T) {
+	owner := func(*Task) Owner { return Owner{Master: "alpha-master", Kind: KindSession} }
+	var tasks []Task
+	for _, n := range []int{20, 19, 18} {
+		tasks = append(tasks, Task{N: n, Comm: fmt.Sprintf("top-%d", n)})
+	}
+	tasks = append(tasks, Task{N: 3, Comm: "scan"}, Task{N: 3, Comm: "scan"})
+	loads := Owners(tasks, owner)
+	if len(loads) != 1 {
+		t.Fatalf("Owners = %+v", loads)
+	}
+	var scan Comm
+	for _, c := range loads[0].Comms {
+		if c.Name == "scan" {
+			scan = c
+		}
+	}
+	if scan.Procs != 2 || scan.N != 6 {
+		t.Fatalf("scan process/thread counts = %+v", scan)
+	}
+	got := parts(loads)
+	if !strings.Contains(got, "ещё 2 процесса") || strings.Contains(got, "ещё 6") {
+		t.Fatalf("parts counts threads instead of processes: %s", got)
+	}
+}
+
+func TestRussianCountForms(t *testing.T) {
+	for n, want := range map[int]string{1: "процесс", 2: "процесса", 4: "процесса", 5: "процессов", 11: "процессов", 21: "процесс", 22: "процесса"} {
+		if got := russianCount(n, "процесс", "процесса", "процессов"); got != want {
+			t.Errorf("russianCount(%d)=%q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestSpinnerRemainderUsesRussianPlural(t *testing.T) {
+	for n, want := range map[int]string{1: "ещё 1 долгий процесс", 2: "ещё 2 долгих процесса", 5: "ещё 5 долгих процессов"} {
+		spinners := make([]Spinner, 5+n)
+		for i := range spinners {
+			spinners[i] = Spinner{Pid: i + 1, Owner: Owner{Master: "alpha-master"}}
+		}
+		msg := MasterMessage(HostLocal, &Verdict{Spinners: spinners}, &Master{Name: "alpha-master"}, time.Now(), true)
+		if !strings.Contains(msg, want) {
+			t.Errorf("remainder %d missing %q: %s", n, want, msg)
+		}
+	}
+}
+
+func TestHumanBytesThresholds(t *testing.T) {
+	for n, want := range map[int64]string{1023: "1023 Б", 1024: "1 КБ", 1 << 20: "1.0 МБ"} {
+		if got := humanBytes(n); got != want {
+			t.Errorf("humanBytes(%d)=%q, want %q", n, got, want)
+		}
+	}
+}
+
+func TestReadProcessesUsesProcRoot(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "stat"), "btime 1000\n")
+	dir := filepath.Join(root, "321")
+	fields := make([]string, 20)
+	for i := range fields {
+		fields[i] = "0"
+	}
+	fields[0], fields[11], fields[12], fields[19] = "S", "10", "20", "9876"
+	write(t, filepath.Join(dir, "stat"), "321 (pipe-reader) "+strings.Join(fields, " ")+"\n")
+	write(t, filepath.Join(dir, "comm"), "pipe-reader\n")
+	write(t, filepath.Join(dir, "cmdline"), "pipe-reader\x00--input\x00")
+	write(t, filepath.Join(dir, "environ"), "CLAUDE_PID=0\x00")
+	write(t, filepath.Join(dir, "io"), "rchar: 12\nwchar: 34\nread_bytes: 0\nwrite_bytes: 0\n")
+	write(t, filepath.Join(dir, "cgroup"), "0::/user.slice/alpha-master\n")
+	ps, err := ReadProcessStats(root, time.Unix(1200, 0))
+	if err != nil || len(ps) != 1 {
+		t.Fatalf("ReadProcessStats = %+v, %v", ps, err)
+	}
+	if ps[0].Pid != 321 || ps[0].Start != 9876 || ps[0].CPU != 0.3 || ps[0].Age < 101*time.Second || ps[0].Age > 102*time.Second {
+		t.Fatalf("process = %+v", ps[0])
+	}
+	if err := ReadProcessIO(root, &ps[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReadProcessOwner(root, &ps[0]); err != nil {
+		t.Fatal(err)
+	}
+	if !ps[0].IOKnown || ps[0].Rchar != 12 || ps[0].Wchar != 34 || ps[0].Cmdline != "pipe-reader --input" {
+		t.Fatalf("details = %+v", ps[0])
+	}
+}
+
+func TestReadProcessStatsSkipsMalformedProcessAndKeepsOthers(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "stat"), "btime 1000\n")
+	write(t, filepath.Join(root, "111", "stat"), "111 (broken) S 1\n")
+	fields := make([]string, 20)
+	for i := range fields {
+		fields[i] = "0"
+	}
+	fields[0], fields[19] = "S", "123"
+	write(t, filepath.Join(root, "222", "stat"), "222 (reader) "+strings.Join(fields, " ")+"\n")
+	got, err := ReadProcessStats(root, time.Unix(1100, 0))
+	if err == nil || len(got) != 1 || got[0].Pid != 222 {
+		t.Fatalf("one bad proc entry stopped scan: processes=%+v err=%v", got, err)
+	}
+}
+
+func TestReadProcessIOStarttimeAndCounters(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "123")
+	fields := make([]string, 20)
+	for i := range fields {
+		fields[i] = "0"
+	}
+	fields[19] = "77"
+	write(t, filepath.Join(dir, "stat"), "123 (reader) "+strings.Join(fields, " ")+"\n")
+	write(t, filepath.Join(dir, "io"), "rchar: 15\nwchar: 0\n")
+	p := Process{Task: Task{Pid: 123}, Start: 76}
+	if err := ReadProcessIO(root, &p); !IsTransientProcessError(err) {
+		t.Fatalf("pid reuse error=%v", err)
+	}
+	p.Start = 77
+	if err := ReadProcessIO(root, &p); err != nil || !p.IOKnown || p.Rchar != 15 || p.Wchar != 0 {
+		t.Fatalf("valid IO=%+v err=%v", p, err)
+	}
+	for _, io := range [][]byte{[]byte("rchar: 15\n"), []byte("wchar: 0\n")} {
+		if _, _, err := parseProcIO(io); err == nil {
+			t.Errorf("accepted incomplete io %q", io)
+		}
+	}
+}
+
+func TestProcessStatExpectedReadErrorsAreSkipped(t *testing.T) {
+	now := time.Now()
+	boot := now.Add(-time.Hour)
+	root := t.TempDir()
+	if _, ok, err := readProcessStat(filepath.Join(root, "404"), boot, now); err != nil || ok {
+		t.Fatalf("gone stat: ok=%v err=%v", ok, err)
+	}
+	if !skipUnreadableStat(fs.ErrPermission) || !skipUnreadableStat(os.ErrNotExist) || skipUnreadableStat(errors.New("bad stat")) {
+		t.Fatal("stat read error classification changed")
+	}
+	if !IsTransientProcessError(fs.ErrPermission) || !IsTransientProcessError(os.ErrNotExist) || IsTransientProcessError(errors.New("malformed CLAUDE_PID")) {
+		t.Fatal("candidate error classification changed")
 	}
 }
