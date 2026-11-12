@@ -65,6 +65,7 @@ type Tracker struct {
 	containers map[string]bool
 	started    time.Time
 	lastFull   time.Time
+	fullLogged bool
 	lastSave   time.Time
 	measuring  bool
 	dirty      bool // таблица менялась после последнего снимка
@@ -74,6 +75,7 @@ type Tracker struct {
 type measureJob struct {
 	start time.Time
 	full  bool
+	list  bool
 	items []usage // путь и inode на входе
 	dirs  []string
 }
@@ -172,7 +174,7 @@ func (t *Tracker) loop(parent context.Context) error {
 	hourly := time.NewTicker(time.Hour)
 	defer hourly.Stop()
 	t.log.Info(fmt.Sprintf("aguard слежение: следим за %v, контейнеры %v, записей при старте %d", t.cfg.Roots, t.cfg.Containers, len(t.entries)))
-	t.startMeasure(ctx, doneCh, true)
+	t.startInitialMeasure(ctx, doneCh)
 	for {
 		select {
 		case evs := <-evCh:
@@ -445,6 +447,17 @@ func (t *Tracker) close(e *record.Entry, ev, to string, now time.Time) {
 
 // startMeasure запускает du в отдельной горутине, чтобы не задерживать разбор событий.
 func (t *Tracker) startMeasure(ctx context.Context, done chan<- measureDone, full bool) {
+	t.startMeasureMode(ctx, done, full, full)
+}
+
+// startInitialMeasure сверяет список папок после свежего полного замера, не обходя размеры старых записей.
+func (t *Tracker) startInitialMeasure(ctx context.Context, done chan<- measureDone) {
+	now := time.Now()
+	fresh := !t.lastFull.IsZero() && !t.lastFull.After(now) && now.Sub(t.lastFull) < t.cfg.Full
+	t.startMeasureMode(ctx, done, !fresh, true)
+}
+
+func (t *Tracker) startMeasureMode(ctx context.Context, done chan<- measureDone, full, list bool) {
 	if t.measuring {
 		return
 	}
@@ -456,7 +469,8 @@ func (t *Tracker) startMeasure(ctx context.Context, done chan<- measureDone, ful
 			job.items = append(job.items, usage{path: e.Path, ino: e.Ino})
 		}
 	}
-	if full {
+	if list {
+		job.list = true
 		for d := range t.watched {
 			job.dirs = append(job.dirs, d)
 		}
@@ -466,7 +480,7 @@ func (t *Tracker) startMeasure(ctx context.Context, done chan<- measureDone, ful
 			}
 		}
 	}
-	if len(job.items) == 0 && !full {
+	if len(job.items) == 0 && !full && !list {
 		if t.dirty { // замерять нечего, но удаления и создания должны дойти до снимка
 			t.save(false)
 		}
@@ -476,8 +490,8 @@ func (t *Tracker) startMeasure(ctx context.Context, done chan<- measureDone, ful
 	go func() { done <- runMeasure(ctx, job, t.cfg.Yield) }()
 }
 
-// runMeasure — замер записей и листинг папок с уступкой занятой машине (yield, nil — без неё): полный замер на старте
-// при холодном кэше метаданных читал сотни МБ за секунды и давал фризы диска (тикет io-freeze-aguard). Уступают и
+// runMeasure — замер записей и листинг папок с уступкой занятой машине (yield, nil — без неё): полный замер при холодном
+// кэше метаданных читал сотни МБ за секунды и давал фризы диска (тикет io-freeze-aguard). Уступают и
 // молодые замеры каждого тика: мелкий замер стоит одного сравнения времени на запись и не больше одного замера машины,
 // а в нём бывают и большие записи — свежая распаковка, найденная сверкой и ни разу не замеренная. Отмена ctx — итог
 // прерван.
@@ -510,15 +524,16 @@ func (t *Tracker) finishMeasure(d measureDone) {
 	now := time.Now()
 	t.st.measurePauses += d.pauses
 	t.st.measurePaused += d.paused
-	// Полный замер — строкой INFO: первый (старт демона, переполнение fanotify) всегда — видно, что уступка работала,
-	// следующие — если были паузы. Молодые — каждую минуту: их паузы только в часовой сводке.
-	if d.job.full && (t.lastFull.IsZero() || d.pauses > 0) {
+	// Полный замер — строкой INFO: первый в процессе всегда, следующие — если были паузы. Молодые — каждую минуту:
+	// их паузы только в часовой сводке.
+	if d.job.full && (!t.fullLogged || d.pauses > 0) {
 		var files int64
 		for _, u := range d.usages {
 			files += u.files
 		}
 		t.log.Info("aguard слежение: полный замер", "name", t.cfg.Name, "entries", len(d.job.items), "dirs", len(d.job.dirs),
 			"files", files, "took", now.Sub(d.job.start).Round(time.Second).String(), "paused", d.paused.String(), "pauses", d.pauses)
+		t.fullLogged = true
 	}
 	for _, u := range d.usages {
 		e := t.entries[u.path]
@@ -527,8 +542,10 @@ func (t *Tracker) finishMeasure(d measureDone) {
 		}
 		applyUsage(e, u.bytes, u.files, now)
 	}
-	if d.job.full {
+	if d.job.list || d.job.full {
 		t.reconcile(d.listing, d.job.start, now)
+	}
+	if d.job.full {
 		t.lastFull = now
 	}
 	t.save(now.Sub(t.lastSave) >= t.cfg.Persist)
@@ -614,6 +631,7 @@ func (t *Tracker) restore() {
 	if st == nil {
 		return
 	}
+	t.lastFull = st.LastFull
 	now := time.Now()
 	for i := range st.Entries {
 		e := st.Entries[i]
@@ -628,7 +646,7 @@ func (t *Tracker) restore() {
 
 func (t *Tracker) save(persist bool) {
 	now := time.Now()
-	s := record.State{Updated: now, Started: t.started, Roots: t.cfg.Roots, Containers: t.cfg.Containers}
+	s := record.State{Updated: now, Started: t.started, LastFull: t.lastFull, Roots: t.cfg.Roots, Containers: t.cfg.Containers}
 	es := make([]*record.Entry, 0, len(t.entries))
 	for _, e := range t.entries {
 		es = append(es, e)
@@ -675,7 +693,20 @@ func writeState(w io.Writer, s *record.State, es []*record.Entry) error {
 	for _, f := range []struct {
 		lit string
 		v   any
-	}{{`{"updated":`, s.Updated}, {`,"started":`, s.Started}, {`,"roots":`, s.Roots}, {`,"containers":`, s.Containers}} {
+	}{{`{"updated":`, s.Updated}, {`,"started":`, s.Started}} {
+		if err := put(f.lit, f.v); err != nil {
+			return err
+		}
+	}
+	if !s.LastFull.IsZero() {
+		if err := put(`,"last_full":`, s.LastFull); err != nil {
+			return err
+		}
+	}
+	for _, f := range []struct {
+		lit string
+		v   any
+	}{{`,"roots":`, s.Roots}, {`,"containers":`, s.Containers}} {
 		if err := put(f.lit, f.v); err != nil {
 			return err
 		}

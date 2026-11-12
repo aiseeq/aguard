@@ -105,8 +105,7 @@ func TestMeasureCancelInPause(t *testing.T) {
 	}
 }
 
-// Прерванный замер не трогает записи и снимок; полный — строкой INFO: первый (старт) всегда, следующие — если были
-// паузы; паузы молодых — в часовую сводку.
+// Прерванный замер не трогает записи и снимок; первый полный после старта процесса и полные с паузами — строкой INFO.
 func TestFinishMeasureLogsAndSkipsAborted(t *testing.T) {
 	dir := t.TempDir()
 	var logged bytes.Buffer
@@ -123,6 +122,7 @@ func TestFinishMeasureLogsAndSkipsAborted(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, record.StateFile)); err == nil {
 		t.Fatal("прерванный замер записал снимок")
 	}
+	tr.lastFull = time.Now().Add(-time.Hour) // восстановленный недавний полный не считается полным в этом процессе
 	full := func(pauses int) measureDone {
 		return measureDone{job: measureJob{start: time.Now().Add(-3 * time.Second), full: true, items: []usage{{path: "/tmp/e"}}},
 			usages: []usage{{path: "/tmp/e", ok: true, bytes: 5, files: 1}}, listing: map[string][]string{},

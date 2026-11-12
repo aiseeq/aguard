@@ -146,6 +146,117 @@ func TestWriteStateMatchesMarshal(t *testing.T) {
 	}
 }
 
+func TestStartInitialMeasure(t *testing.T) {
+	dir := t.TempDir()
+	watchedExtra := t.TempDir()
+	container := filepath.Join(dir, "container")
+	if err := os.Mkdir(container, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	cases := []struct {
+		name     string
+		lastFull time.Time
+		full     bool
+	}{
+		{name: "recent", lastFull: time.Now().Add(-time.Hour), full: false},
+		{name: "missing", full: true},
+		{name: "expired", lastFull: time.Now().Add(-7 * time.Hour), full: true},
+		{name: "future", lastFull: time.Now().Add(time.Hour), full: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &Tracker{
+				cfg:        Config{Full: 6 * time.Hour, Young: 2 * time.Hour},
+				lastFull:   tc.lastFull,
+				entries:    map[string]*record.Entry{},
+				watched:    map[string]string{dir: "root-key", watchedExtra: "extra-key"},
+				containers: map[string]bool{container: true},
+			}
+			tr.entries[filepath.Join(dir, "young")] = &record.Entry{Path: filepath.Join(dir, "young"), Born: time.Now().Add(-time.Hour), MeasuredAt: old}
+			tr.entries[filepath.Join(dir, "old-measured")] = &record.Entry{Path: filepath.Join(dir, "old-measured"), Born: time.Now().Add(-24 * time.Hour), MeasuredAt: old}
+			tr.entries[filepath.Join(dir, "old-unmeasured")] = &record.Entry{Path: filepath.Join(dir, "old-unmeasured"), Born: time.Now().Add(-24 * time.Hour)}
+			done := make(chan measureDone, 1)
+			tr.startInitialMeasure(t.Context(), done)
+			got := <-done
+			wantDirs := map[string]bool{dir: true, watchedExtra: true, container: true}
+			gotDirs := make(map[string]bool, len(got.job.dirs))
+			for _, d := range got.job.dirs {
+				gotDirs[d] = true
+			}
+			if got.job.full != tc.full || !got.job.list || !reflect.DeepEqual(gotDirs, wantDirs) {
+				t.Fatalf("стартовое задание: full=%v list=%v dirs=%v", got.job.full, got.job.list, got.job.dirs)
+			}
+			wantItems := map[string]bool{
+				filepath.Join(dir, "young"):          true,
+				filepath.Join(dir, "old-unmeasured"): true,
+			}
+			if tc.full {
+				wantItems[filepath.Join(dir, "old-measured")] = true
+			}
+			gotItems := make(map[string]bool, len(got.job.items))
+			for _, it := range got.job.items {
+				gotItems[it.path] = true
+			}
+			if !reflect.DeepEqual(gotItems, wantItems) {
+				t.Fatalf("записи в задании: got %v, want %v", gotItems, wantItems)
+			}
+		})
+	}
+}
+
+func TestFinishListingWithoutFullReconciles(t *testing.T) {
+	dir := t.TempDir()
+	newPath := filepath.Join(dir, "new")
+	if err := os.WriteFile(newPath, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := filepath.Join(dir, "gone")
+	lastFull := time.Now().Add(-time.Hour).Round(0)
+	owners, err := openEventLog(filepath.Join(dir, record.OwnersFile), 0, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owners.close()
+	tr := &Tracker{
+		cfg:      Config{Name: "track", RunDir: dir, StateDir: dir, Persist: time.Hour},
+		log:      slog.New(slog.DiscardHandler),
+		owners:   owners,
+		entries:  map[string]*record.Entry{oldPath: {Path: oldPath, Born: time.Now().Add(-24 * time.Hour)}},
+		lastFull: lastFull,
+	}
+	tr.finishMeasure(measureDone{
+		job:     measureJob{start: time.Now(), list: true},
+		listing: map[string][]string{dir: {"new"}},
+	})
+	if tr.entries[oldPath] != nil {
+		t.Fatalf("пропавшая запись осталась: %+v", tr.entries[oldPath])
+	}
+	added := tr.entries[newPath]
+	if added == nil || !added.MeasuredAt.IsZero() {
+		t.Fatalf("новая запись отсутствует или уже замерена: %+v", added)
+	}
+	if len(tr.entries) != 1 {
+		t.Fatalf("таблица содержит дубли или лишние записи: %+v", tr.entries)
+	}
+	if !tr.lastFull.Equal(lastFull) {
+		t.Fatalf("листинг без полного изменил lastFull: %v, хотели %v", tr.lastFull, lastFull)
+	}
+}
+
+func TestLastFullSaveRestore(t *testing.T) {
+	dir := t.TempDir()
+	lastFull := time.Now().Add(-time.Hour).Round(0)
+	tr := &Tracker{cfg: Config{RunDir: dir, StateDir: dir}, lastFull: lastFull,
+		entries: map[string]*record.Entry{}, log: slog.New(slog.DiscardHandler)}
+	tr.save(true)
+	restored := &Tracker{cfg: tr.cfg, entries: map[string]*record.Entry{}, log: slog.New(slog.DiscardHandler)}
+	restored.restore()
+	if !restored.lastFull.Equal(lastFull) {
+		t.Fatalf("lastFull после restore: %v, хотели %v", restored.lastFull, lastFull)
+	}
+}
+
 // Сохранение снимка не держит его целиком в памяти: на 3 000 записей —
 // не больше ~50 выделений на запись (было: копия всех записей и буфер во весь JSON).
 func BenchmarkSave(b *testing.B) {

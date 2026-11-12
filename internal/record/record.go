@@ -144,7 +144,8 @@ func (e *Entry) Event(t time.Time, ev string) Event {
 // State — снимок живых записей, пишется атомарно после каждого замера.
 type State struct {
 	Updated    time.Time `json:"updated"`
-	Started    time.Time `json:"started"` // запуск сторожа
+	Started    time.Time `json:"started"`            // запуск сторожа
+	LastFull   time.Time `json:"last_full,omitzero"` // последний завершённый полный замер
 	Roots      []string  `json:"roots"`
 	Containers []string  `json:"containers"`
 	Entries    []Entry   `json:"entries"`
