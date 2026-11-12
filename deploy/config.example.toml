@@ -295,7 +295,7 @@ fast = "2m"            # шаг, когда прогноз 100% ближе near 
 near = "30m"
 warn = "2h"
 min_idle = "24h"
-codex = "~/.npm/bin/codex"
+codex = "~/.local/bin/codex"
 # Учётки — в коде (codexwatch.Default), как hostAccounts в worker: work (~/.codex) и personal (~/.codex-personal); у каждой
 # свои лимит, состояние (codex/<имя>.json) и файл «да» (~/.claude/improve/state/codex-reset-approved.tsv и
 # …-approved-personal.tsv). Лимит кончился на всех — письмо лиду один раз на переход (codex/fleet.json).

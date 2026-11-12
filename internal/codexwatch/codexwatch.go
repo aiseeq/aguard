@@ -74,7 +74,7 @@ type Config struct {
 func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(10 * time.Minute), Fast: policy.Duration(2 * time.Minute),
 		Near: policy.Duration(30 * time.Minute), Warn: policy.Duration(2 * time.Hour), MinIdle: policy.Duration(24 * time.Hour),
-		Codex: home + "/.npm/bin/codex",
+		Codex: home + "/.local/bin/codex", // релизный бинарь, не npm-пакет (тикет codex-path-from-binary)
 		Accounts: []Account{
 			{Name: "work", Home: home + "/.codex", Approvals: home + "/.claude/improve/state/codex-reset-approved.tsv"},
 			{Name: "personal", Home: home + "/.codex-personal", Approvals: home + "/.claude/improve/state/codex-reset-approved-personal.tsv"},
