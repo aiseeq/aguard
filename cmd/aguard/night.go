@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cllog"
+	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/aguard/internal/night"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/akit/session"
@@ -38,7 +39,7 @@ type nightFailure struct {
 
 // dispatchNight шлёт каждый сигнал каждому адресату to и его собственным (Signal.To), которому он ещё не дошёл;
 // дошедшему не повторяется, неудачный — в следующий проход.
-func dispatchNight(state nightState, signals []night.Signal, to []string, now time.Time, send func(string, string) error) (nightState, []nightFailure) {
+func dispatchNight(state nightState, signals []night.Signal, to []string, now time.Time, send func(string, string, string) error) (nightState, []nightFailure) {
 	var failed []nightFailure
 	for _, s := range signals {
 		rec := state[s.Key]
@@ -49,7 +50,7 @@ func dispatchNight(state nightState, signals []night.Signal, to []string, now ti
 			if _, ok := rec.Channels[channel]; ok {
 				continue
 			}
-			if err := send(channel, s.Text); err != nil {
+			if err := send(channel, s.Text, s.Key); err != nil {
 				failed = append(failed, nightFailure{s.Key, channel, err})
 				continue
 			}
@@ -136,11 +137,15 @@ func (a *app) nightRound(cfg *night.Config, dry bool) error {
 		a.nightNote("registry_failed", "", "", 0, "")
 	}
 	// состояние в памяти демона: сбой записи state.json не повторяет дошедшее каждую минуту
-	state, failures := dispatchNight(state, signals, cfg.Recipients(), now, func(to, msg string) error {
+	state, failures := dispatchNight(state, signals, cfg.Recipients(), now, func(to, msg, key string) error {
 		if regErr != nil {
 			return fmt.Errorf("реестр сессий: %w", regErr)
 		}
-		err := a.nightEmail(cfg, alive, to, msg)
+		kind := nightGuideKind(key)
+		if kind == "night.other" {
+			a.log.Warn("aguard night: неизвестный ключ сигнала", "key", key, "kind", kind)
+		}
+		err := a.nightEmail(cfg, alive, to, kind, msg)
 		if a.act != nil && !errors.Is(err, errQuiet) {
 			a.note("night", map[bool]string{true: "email_sent", false: "email_failed"}[err == nil], "", to, 0, "")
 		}
@@ -367,8 +372,8 @@ func (a *app) nightNote(kind, what, target string, value int64, unit string) {
 }
 
 // nightEmail — письмо сессии to.
-func (a *app) nightEmail(cfg *night.Config, alive map[string]session.Info, to, msg string) error {
-	if err := a.sendAlive(alive, to, cfg.SendAuth, msg); err != nil {
+func (a *app) nightEmail(cfg *night.Config, alive map[string]session.Info, to string, kind guide.Kind, msg string) error {
+	if err := a.sendAlive(alive, to, cfg.SendAuth, kind, msg); err != nil {
 		return err
 	}
 	a.log.Info("aguard night: написал", "session", to, "msg", msg)

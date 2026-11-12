@@ -131,7 +131,7 @@ func TestQuietIOLetterDropped(t *testing.T) {
 	got := liveLead(t, a)
 	cfg := iowatch.Default()
 	cfg.Mode, cfg.Lead = iowatch.ModeAlert, "lead"
-	a.ioSend(cfg, "lead", "срочно", "aguard io: фриз", 2500)
+	a.ioSend(cfg, "lead", "io.urgent", "срочно", "aguard io: фриз", 2500)
 	noLetter(t, got, "io в тишине")
 }
 

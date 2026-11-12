@@ -118,7 +118,9 @@ func (a *app) bgtaskNotify(cfg *bgtask.Config, t *bgtask.Task, o *bgtask.Origin,
 		a.note("bgtask", prefix+"would_send", t.ID, in.Name, value, "min")
 		return
 	}
-	if err := a.sendSocket(in.Pid, in.Name, in.SocketPath, cfg.SendAuth, msg); err != nil {
+	kind := bgtaskGuideKind(o.Auto, wait)
+	a.warnOtherGuideInput(kind, fmt.Sprintf("auto=%t wait=%q", o.Auto, wait))
+	if err := a.sendSocket(in.Pid, in.Name, in.SocketPath, cfg.SendAuth, kind, msg); err != nil {
 		if a.quietFailure("bgtask", err) {
 			return
 		}

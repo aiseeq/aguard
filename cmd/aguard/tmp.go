@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
+	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/report"
@@ -242,7 +243,7 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 			a.note("tmp", "would_send", "", s.Target.Key(), int64(len(s.Lines)), "entries")
 			continue
 		}
-		if err := a.tmpSend(cfg, s.Target, msg); err != nil {
+		if err := a.tmpSend(cfg, s.Target, "tmp.summary", msg); err != nil {
 			quiet := a.quietFailure("tmp", err)
 			if !quiet {
 				a.log.Warn("aguard tmp: сводка не доставлена", "to", s.Target.Key(), "err", err)
@@ -459,7 +460,7 @@ func (a *app) tmpSendTest(cfg *policy.Config, to string, dry bool) error {
 	if dry {
 		return nil
 	}
-	if err := a.tmpSend(cfg, target, msg); err != nil {
+	if err := a.tmpSend(cfg, target, "tmp.test", msg); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.out, "\nотправлено в %s (%s)\n", target.Key(), target.Socket)
@@ -481,8 +482,8 @@ func testLine(it *policy.Item) policy.Line {
 }
 
 // tmpSend доставляет текст в сокет сессии; токен — только если включён send_auth.
-func (a *app) tmpSend(cfg *policy.Config, t policy.Target, msg string) error {
-	return a.sendSocket(t.Pid, t.Key(), t.Socket, cfg.SendAuth, msg)
+func (a *app) tmpSend(cfg *policy.Config, t policy.Target, kind guide.Kind, msg string) error {
+	return a.sendSocket(t.Pid, t.Key(), t.Socket, cfg.SendAuth, kind, msg)
 }
 
 // printDry печатает то, что ушло бы в этот проход, и отложенное: строки,

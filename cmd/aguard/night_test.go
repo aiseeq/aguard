@@ -198,7 +198,7 @@ func TestNightDeliveryRetriesFailed(t *testing.T) {
 	signals := []night.Signal{{Key: "dream:2026-10-28", Text: "Сон не стартовал"}}
 	now := time.Now()
 	tries := 0
-	send := func(channel, msg string) error {
+	send := func(channel, msg, key string) error {
 		tries++
 		if tries == 1 {
 			return errors.New("лид не в реестре")
@@ -224,7 +224,7 @@ func TestNightDeliveryRetriesFailed(t *testing.T) {
 func TestNightBackupRecipientWhenLeadDown(t *testing.T) {
 	signals := []night.Signal{{Key: "dream:2026-10-29", Text: "Сон не стартовал"}}
 	sent := map[string]int{}
-	send := func(to, msg string) error {
+	send := func(to, msg, key string) error {
 		if to == "lead" {
 			return errors.New("сессии lead нет")
 		}
@@ -326,7 +326,7 @@ func TestNightDreamOwnerGetsDreamSignal(t *testing.T) {
 		t.Errorf("текст Сна: %s", signals[0].Text)
 	}
 	got := map[string][]string{}
-	dispatchNight(nightState{}, signals, cfg.Recipients(), now, func(to, msg string) error {
+	dispatchNight(nightState{}, signals, cfg.Recipients(), now, func(to, msg, signalKey string) error {
 		key, _, _ := strings.Cut(msg, " ")
 		got[key] = append(got[key], to)
 		return nil

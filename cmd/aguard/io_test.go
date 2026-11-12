@@ -196,7 +196,7 @@ func TestAlertLogModeText(t *testing.T) {
 	base := time.Date(2026, 10, 29, 7, 9, 28, 0, time.Local)
 	full := []iowatch.Case{alertCase(base, 2100), alertCase(base.Add(time.Minute), 3400)}
 	act := ioroute.Action{Kind: ioroute.Letter, To: "sess7", Why: ioroute.WhyUrgent}
-	a.ioSend(cfg, act.To, string(act.Why), ioRouteLetter(act, full, cfg.AlertMin.D(), nil), 3400)
+	a.ioSend(cfg, act.To, ioGuideKind(act.Why), string(act.Why), ioRouteLetter(act, full, cfg.AlertMin.D(), nil), 3400)
 	text := logged.String()
 	for _, want := range []string{"написал бы", "to=sess7", "фриз 29.10 07:10:28, 3,4 с (простой 2,5 с, io", "главная cgroup sess7",
 		"запись процессов (данные и метаданные): dd(2) 300 МБ", "своп in/out 1200/0 стр", "Всего случаев от 2,0 с с 07:09: 2, вместе 5,5 с", "aguard io report -since"} {
@@ -286,7 +286,7 @@ func TestIOSendAlive(t *testing.T) {
 	cfg.Mode, cfg.Lead = iowatch.ModeAlert, "lead"
 	got := liveLead(t, a)
 	act := ioroute.Action{Kind: ioroute.Letter, To: "lead", Why: ioroute.WhyNoOwner}
-	a.ioSend(cfg, "lead", string(act.Why), ioRouteLetter(act, []iowatch.Case{alertCase(time.Now().Add(-time.Minute), 12500)}, cfg.AlertMin.D(), nil), 12500)
+	a.ioSend(cfg, "lead", ioGuideKind(act.Why), string(act.Why), ioRouteLetter(act, []iowatch.Case{alertCase(time.Now().Add(-time.Minute), 12500)}, cfg.AlertMin.D(), nil), 12500)
 	if msg := <-got; !strings.Contains(msg, "хозяина виновника нет") || !strings.Contains(msg, "dd(2)") || strings.Contains(logged.String(), "level=WARN") {
 		t.Fatalf("письмо лиду %.300q, журнал:\n%s", msg, logged.String())
 	}

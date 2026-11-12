@@ -107,7 +107,7 @@ func (a *app) namesAlert(c *config.Config, dry bool, now time.Time) {
 	if _, ok := alive[c.Lead]; !ok {
 		return
 	}
-	if err := a.sendAlive(alive, c.Lead, c.SendAuth, msg); err != nil {
+	if err := a.sendAlive(alive, c.Lead, c.SendAuth, "names.broken", msg); err != nil {
 		if !a.quietFailure("queue", err) {
 			a.warn("queue", "письмо не отправлено", "to", c.Lead, "err", err)
 		}

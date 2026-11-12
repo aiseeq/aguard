@@ -503,7 +503,9 @@ func (a *app) deliverQueueNotices(c *config.Config, alive map[string]session.Inf
 		for _, n := range ns {
 			lines = append(lines, n.Line)
 		}
-		if err := a.sendAlive(alive, to, c.SendAuth, strings.Join(lines, "\n")); err != nil {
+		kind := queueGuideKind(ns[0].Kind)
+		a.warnOtherGuideInput(kind, ns[0].Kind)
+		if err := a.sendAlive(alive, to, c.SendAuth, kind, strings.Join(lines, "\n")); err != nil {
 			if a.quietFailure("queue", err) {
 				continue
 			}
@@ -514,6 +516,9 @@ func (a *app) deliverQueueNotices(c *config.Config, alive map[string]session.Inf
 		for _, n := range ns {
 			state.Confirm(n, view)
 			a.queueJournal(n, now)
+			kind := queueGuideKind(n.Kind)
+			a.warnOtherGuideInput(kind, n.Kind)
+			a.log.Info("aguard queue: письмо доставлено", "kind", kind, "source", n.Kind, "to", to, "key", n.Key)
 			a.note("queue", "sent", n.Key, to, 1, "notice")
 		}
 	}

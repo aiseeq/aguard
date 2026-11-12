@@ -22,6 +22,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/disk"
+	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/names"
 	"github.com/aiseeq/aguard/internal/policy"
@@ -492,12 +493,12 @@ func (a *app) diskFree(cfg *disk.Config, st *disk.State, now time.Time, free int
 
 // diskLowFree — письмо «свободно меньше free_min» сессии to; в log — только журнал «написал бы». Ошибка — письмо не ушло.
 func (a *app) diskLowFree(cfg *disk.Config, to, msg string, free int64) error {
-	return a.diskSend(cfg, cfg.FreeMode == disk.FreeAlert, to, "free", msg, free)
+	return a.diskSend(cfg, cfg.FreeMode == disk.FreeAlert, to, "free", "disk.low_free", msg, free)
 }
 
 // diskSend — письмо disk сессии to (kind — free, fast, forecast: учёт <kind>_sent и т. п.); не alert — только журнал
 // «написал бы». Ошибка — письмо не ушло; тишина — errQuiet без учёта (его ведёт вызывающий).
-func (a *app) diskSend(cfg *disk.Config, alert bool, to, kind, msg string, free int64) error {
+func (a *app) diskSend(cfg *disk.Config, alert bool, to, kind string, guideKind guide.Kind, msg string, free int64) error {
 	gb := free >> 30
 	if !alert {
 		a.log.Info("aguard disk: написал бы", "session", to, "kind", kind, "msg", msg)
@@ -508,7 +509,7 @@ func (a *app) diskSend(cfg *disk.Config, alert bool, to, kind, msg string, free 
 	if err != nil {
 		a.warn("disk", "реестр сессий", "err", err)
 	}
-	if err := a.sendAlive(alive, to, cfg.SendAuth, msg); err != nil {
+	if err := a.sendAlive(alive, to, cfg.SendAuth, guideKind, msg); err != nil {
 		if errors.Is(err, errQuiet) {
 			return err
 		}

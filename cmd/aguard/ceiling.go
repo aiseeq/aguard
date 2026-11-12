@@ -931,7 +931,7 @@ func (a *app) ceilingOOMNotice(st ceiling.State, victims []oomVictim, count, cur
 		leadLine = fmt.Sprintf(" Сессия %s уже завершилась.", name)
 	}
 	msg := fmt.Sprintf("aguard: потолок памяти сессии %s (%s) снял процессов по memory.events: %s; крупнейшие: %s. MemoryMax %s, shmem %s. Поднять: aguard memory ceiling <N> или graft exec --heavy --memory-max <N>.%s", name, st.Unit, countText, strings.Join(top, "; "), formatBytes(current), formatBytes(shmem), leadLine)
-	if err := a.sendUrgent(alive, to, cfg.SendAuth, msg); err != nil {
+	if err := a.sendUrgent(alive, to, cfg.SendAuth, "ceiling.oom", msg); err != nil {
 		return fmt.Errorf("send OOM notice to %s: %w", to, err)
 	}
 	a.note("ceiling", "oom_notice", st.Unit, to, count, "processes")
