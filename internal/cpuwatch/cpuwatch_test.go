@@ -439,6 +439,7 @@ func TestUnescapeUnit(t *testing.T) {
 		`worker-1112-0123-\xd0\xbf\xd1\x80\xd1\x8`:                            "worker-1112-0123-пр",
 		`worker-1112-0123-\xd0\xbf\xd1`:                                       "worker-1112-0123-п",
 		`worker-1112-0123-\xd0\xbf\x2`:                                        "worker-1112-0123-п",
+		`worker-1112-0123-ab\`:                                                "worker-1112-0123-ab",
 		`a\zz`:                                                                `a\zz`,
 	} {
 		if got := UnescapeUnit(in); got != want {
@@ -452,25 +453,22 @@ func TestUnescapeUnit(t *testing.T) {
 
 func TestByUnitPrefix(t *testing.T) {
 	dir := t.TempDir()
-	for id, created := range map[string]string{
-		"1112-0123-проба-kill-пустышки":   "2026-11-12T01:23:00+01:00",
-		"1112-0123-проба-kill-пустышки-2": "2026-11-12T01:40:00+01:00",
-		"1112-0124-другое":                "2026-11-12T01:50:00+01:00",
-	} {
-		if err := os.MkdirAll(filepath.Join(dir, id), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		body := `{"id":"` + id + `","master":"alpha-master","created":"` + created + `"}`
-		if err := os.WriteFile(filepath.Join(dir, id, "job.json"), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	now := time.Now()
+	writeUnitJob(t, dir, "1112-0123-проба-kill-пустышки", now, "alpha-master")
+	writeUnitJob(t, dir, "1112-0124-другое", now, "beta-master")
+	ask := "1112-0123-проба-kill-пустышки-ask" // вопрос worker ask с тем же началом: без unit, не боец
+	if err := os.MkdirAll(filepath.Join(dir, ask), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ask, "job.json"), []byte(`{"id":"`+ask+`","master":"gamma-master"}`), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	jobs := &Jobs{Dir: dir}
 	j, err := jobs.ByUnitPrefix(`worker-1112-0123-\xd0\xbf\xd1\x80\xd0\xbe\xd0\xb1\xd0\xb0-kill-\xd0\xbf\xd1\x83\xd1\`)
-	if err != nil || j == nil || j.ID != "1112-0123-проба-kill-пустышки-2" {
+	if err != nil || j == nil || j.ID != "1112-0123-проба-kill-пустышки" {
 		t.Fatalf("ByUnitPrefix = %+v, %v", j, err)
 	}
-	for _, unit := range []string{"worker-1112-01", "worker-1112-0125-x", "agent-1112-0123-проба"} {
+	for _, unit := range []string{"worker-1112-01", "worker-1112-0125-x", "agent-1112-0123-проба", "worker-1112-0123-проба-kill-пустышки.scope"} {
 		if j, err := jobs.ByUnitPrefix(unit); err != nil || j != nil {
 			t.Errorf("ByUnitPrefix(%q) = %+v, %v, want nil", unit, j, err)
 		}

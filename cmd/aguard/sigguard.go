@@ -355,7 +355,7 @@ func (a *app) sigguardSend(cfg *sigguard.Config, g sigguard.Group) {
 	}
 	jobs := a.sigJobs
 	if jobs == nil {
-		jobs = &cpuwatch.Jobs{Dir: filepath.Join(a.home, ".local", "state", "worker")}
+		jobs = a.workerJobs()
 	}
 	what := "unparsed"
 	msg := sigguard.UnparsedMessage(g)
@@ -387,24 +387,38 @@ func (a *app) sigguardSend(cfg *sigguard.Config, g sigguard.Group) {
 	a.note("sigguard", "sent", what, target, int64(g.Count), "signals")
 }
 
+// ownerSession — живая сессия, запустившая задание: pid и время старта процесса совпадают с owner из job.json
+// (pid мог достаться другому процессу); у старого задания owner нет.
+func ownerSession(o *cpuwatch.JobOwner, alive map[string]session.Info) (string, bool) {
+	if o == nil || o.Pid <= 0 || o.Start == "" {
+		return "", false
+	}
+	for _, name := range slices.Sorted(maps.Keys(alive)) {
+		if in := alive[name]; in.Pid == o.Pid && in.ProcStart == o.Start {
+			return name, true
+		}
+	}
+	return "", false
+}
+
 // sigguardRoute находит живую сессию или мастера задания бойца; иначе возвращает лида.
 func sigguardRoute(d sigguard.Deny, lead string, alive map[string]session.Info, jobs *cpuwatch.Jobs) (string, string) {
 	// unit бойца — worker-<id>.service (защита пишет имя целиком: NAME_LEN 128 с 11.11 18:58, до того 47 символов
 	// резали его, и письмо уходило лиду); задания нет — ищем сессию по root, как у прочих unit
 	if len(cpuwatch.JobIDs(d.Unit)) > 0 && !strings.HasSuffix(d.Unit, ".scope") && jobs != nil {
-		j, err := jobs.ByUnit(d.Unit)
-		if err == nil && j == nil && !strings.HasSuffix(d.Unit, ".service") {
-			// имя без .service — обрезано сторожем (NAME_LEN 128, кириллица в id экранирована вчетверо): по префиксу
+		// имя без .service — обрезано сторожем (NAME_LEN 128, кириллица в id экранирована вчетверо): только по префиксу —
+		// точный ByUnit взял бы задание, чей id совпал с обрезком (<id> при живом повторе <id>-2)
+		var j *cpuwatch.Job
+		var err error
+		if strings.HasSuffix(d.Unit, ".service") {
+			j, err = jobs.ByUnit(d.Unit)
+		} else {
 			j, err = jobs.ByUnitPrefix(d.Unit)
 		}
 		if err == nil && j != nil {
-			// отказ — действие бойца: письмо запустившей его сессии (owner, жива по pid и start), затем мастеру
-			if o := j.Owner; o != nil && o.Pid > 0 && o.Start != "" {
-				for _, name := range slices.Sorted(maps.Keys(alive)) {
-					if in := alive[name]; in.Pid == o.Pid && in.ProcStart == o.Start {
-						return name, j.ID
-					}
-				}
+			// отказ — действие бойца: письмо запустившей его сессии (owner), затем мастеру
+			if name, ok := ownerSession(j.Owner, alive); ok {
+				return name, j.ID
 			}
 			if _, live := alive[j.Master]; live {
 				return j.Master, j.ID

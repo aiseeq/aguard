@@ -166,31 +166,76 @@ func UnescapeUnit(s string) string {
 }
 
 // ByUnitPrefix — задание по обрезанному имени unit (agent-signal-guard режет имя cgroup на 127 байтах, экранированная
-// кириллица вчетверо длиннее): папка задания, чьё имя начинается с id из unit; несколько — самое новое по created.
-// Короче «MMDD-HHMM-» (10 знаков) префикс не принимается: совпадёт с чужими заданиями.
+// кириллица вчетверо длиннее): обрезок — начало имени службы задания, <unit>.service или повтора <unit>-<n>.service
+// (unit из job.json). Совпало несколько (<id> и повтор worker <id>-2 с тем же началом) — то, чей unit жив; иначе nil:
+// хозяина письма не угадываем. Короче «MMDD-HHMM-» (10 знаков) обрезок не принимается. Ошибки чтения — только если
+// задание не найдено.
 func (j *Jobs) ByUnitPrefix(unit string) (*Job, error) {
-	id, ok := strings.CutPrefix(UnescapeUnit(unit), "worker-")
+	cut := UnescapeUnit(unit)
+	id, ok := strings.CutPrefix(cut, "worker-")
 	if !ok || len(id) < 10 {
-		return nil, nil //nolint:return-nil-error // не unit бойца или слишком короткий префикс — задания нет
+		return nil, nil
 	}
 	ents, err := os.ReadDir(j.Dir)
 	if err != nil {
 		return nil, fmt.Errorf("папка заданий worker: %w", err)
 	}
-	var best *Job
+	var found []*Job
+	var errs []error
 	for _, e := range ents {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), id) {
+		name := e.Name()
+		if !e.IsDir() || !(strings.HasPrefix(name, id) || strings.HasPrefix(id, name)) {
 			continue
 		}
-		v, err := j.get(e.Name())
+		v, err := j.get(name)
 		if err != nil {
-			return nil, err
+			errs = append(errs, err)
+			continue
 		}
-		if v != nil && (best == nil || v.Created.After(best.Created)) {
-			best = v
+		if v != nil && unitCut(v.Unit, cut) { // у вопроса worker ask unit пуст: unitCut ложно
+			found = append(found, v)
 		}
 	}
-	return best, nil
+	if len(found) > 1 && j.Units != "" {
+		live, err := liveUnits(j.Units)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			found = slices.DeleteFunc(found, func(v *Job) bool { return !unitLive(live, v.Unit) })
+		}
+	}
+	if len(found) == 1 {
+		return found[0], nil
+	}
+	return nil, errors.Join(errs...)
+}
+
+// unitCut — cut — начало имени службы задания: <unit>.service или повтора <unit>-<n>.service.
+func unitCut(unit, cut string) bool {
+	if strings.HasPrefix(unit+".service", cut) {
+		return true
+	}
+	rest, ok := strings.CutPrefix(cut, unit+"-")
+	if !ok {
+		return false
+	}
+	tail := strings.TrimLeft(rest, "0123456789")
+	return strings.HasPrefix(".service", tail)
+}
+
+// liveUnits — работающие unit бойцов: папки <имя>.service в cgroup, имя без экранирования systemd и без .service.
+func liveUnits(dir string) (map[string]bool, error) {
+	units, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("unit бойцов: %w", err)
+	}
+	live := map[string]bool{}
+	for _, u := range units {
+		if name, ok := strings.CutSuffix(u.Name(), ".service"); ok && u.IsDir() {
+			live[UnescapeUnit(name)] = true
+		}
+	}
+	return live, nil
 }
 
 // pcSpot — scope задания на PC: <префикс>-<имя дерева>.<16 hex>.scope (llmark tool/internal/pcguard.NewSpot).
@@ -255,15 +300,9 @@ func (j *Jobs) ByPath(path string) (*Job, error) {
 
 // readLive — задания папки, чей unit сейчас работает.
 func (j *Jobs) readLive() error {
-	units, err := os.ReadDir(j.Units)
+	live, err := liveUnits(j.Units)
 	if err != nil {
-		return fmt.Errorf("unit бойцов: %w", err)
-	}
-	live := map[string]bool{}
-	for _, u := range units {
-		if name, ok := strings.CutSuffix(u.Name(), ".service"); ok && u.IsDir() {
-			live[name] = true
-		}
+		return err
 	}
 	ents, err := os.ReadDir(j.Dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -287,15 +326,9 @@ func (j *Jobs) readLive() error {
 
 // UnitLive — работает ли unit задания или его повтор <unit>-<n>; unit — имя из job.json без .service.
 func (j *Jobs) UnitLive(unit string) (bool, error) {
-	units, err := os.ReadDir(j.Units)
+	live, err := liveUnits(j.Units)
 	if err != nil {
-		return false, fmt.Errorf("unit бойцов: %w", err)
-	}
-	live := map[string]bool{}
-	for _, u := range units {
-		if name, ok := strings.CutSuffix(u.Name(), ".service"); ok && u.IsDir() {
-			live[name] = true
-		}
+		return false, err
 	}
 	return unitLive(live, strings.TrimSuffix(unit, ".service")), nil
 }

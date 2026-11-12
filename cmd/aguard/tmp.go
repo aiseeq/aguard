@@ -132,6 +132,11 @@ func (a *app) live() (*liveSessions, error) {
 	if err != nil {
 		return nil, fmt.Errorf("живые сессии: %w", err)
 	}
+	return &liveSessions{reg: a.reg, log: a.log, byName: m, jobs: a.workerJobs()}, nil
+}
+
+// workerJobs — задания worker на ноуте: папка состояния и папка cgroup живых unit бойцов (подменяются в тестах).
+func (a *app) workerJobs() *cpuwatch.Jobs {
 	jobsDir := a.workerJobsDir
 	if jobsDir == "" {
 		jobsDir = filepath.Join(a.home, ".local", "state", "worker")
@@ -140,7 +145,7 @@ func (a *app) live() (*liveSessions, error) {
 	if unitsDir == "" {
 		unitsDir = fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/app.slice", a.uid, a.uid)
 	}
-	return &liveSessions{reg: a.reg, log: a.log, byName: m, jobs: &cpuwatch.Jobs{Dir: jobsDir, Units: unitsDir}}, nil
+	return &cpuwatch.Jobs{Dir: jobsDir, Units: unitsDir}
 }
 
 // tmpFactor — множитель порога по давлению памяти. Давление не прочиталось —

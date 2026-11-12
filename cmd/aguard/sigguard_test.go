@@ -114,7 +114,7 @@ func TestRouteSigguardTruncatedUnit(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, id), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"id":"` + id + `","master":"leader","owner":{"pid":456646,"start":"240969","name":"alpha-master"}}`
+	body := `{"id":"` + id + `","master":"leader","unit":"worker-` + id + `","owner":{"pid":456646,"start":"240969","name":"alpha-master"}}`
 	if err := os.WriteFile(filepath.Join(dir, id, "job.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
