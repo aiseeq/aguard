@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/queue"
+	"github.com/aiseeq/aguard/internal/rates"
 )
 
 // exitCode — код выхода команды, итог которой уже напечатан: не ошибка демона и не строка журнала.
@@ -43,6 +44,9 @@ func (a *app) limitResetCheck(args []string, now time.Time) error {
 		return resetBadArgs
 	}
 	fmt.Fprintln(a.out, check.Reason)
+	if check.RateError != "" {
+		fmt.Fprintf(os.Stderr, "aguard limit-reset-check: курс подписки: %s\n", check.RateError)
+	}
 	if !check.Confirmed {
 		return resetRefused
 	}
@@ -68,5 +72,22 @@ func (a *app) runResetCheck(account, since, history string, now time.Time) (queu
 	if err != nil {
 		return queue.ResetCheck{}, fmt.Errorf("история лимитов %s: %w", history, err)
 	}
-	return queue.CheckReset(rows, account, pausedAt, now)
+	loaded, rateErr := rates.Load(now)
+	plan := loaded["anthropic"].PlanUSD
+	if rateErr == nil && plan <= 0 {
+		rateErr = fmt.Errorf("для anthropic нет курса")
+	}
+	if plan <= 0 {
+		check, err := queue.CheckReset(rows, account, pausedAt, now)
+		check.RateError = errorString(rateErr)
+		return check, err
+	}
+	return queue.CheckResetWithPlan(rows, account, pausedAt, now, plan)
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

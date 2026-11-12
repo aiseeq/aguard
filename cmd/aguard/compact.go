@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/aiseeq/aguard/internal/cllog"
 	"github.com/aiseeq/aguard/internal/compact"
 	"github.com/aiseeq/aguard/internal/config"
+	"github.com/aiseeq/aguard/internal/rates"
 	"github.com/aiseeq/aguard/internal/restart"
 )
 
@@ -35,7 +37,7 @@ func (a *app) compactCmd(args []string) error {
 		return a.compactRound(restart.NewJudge(a.home), &cfg, *dry)
 	case "report":
 		fl := flag.NewFlagSet("compact report", flag.ContinueOnError)
-		since := fl.Duration("since", 7*24*time.Hour, "за какой срок (без -json)")
+		since := fl.Duration("since", 7*24*time.Hour, "за какой срок (без -json); цена в % недели $100 Claude")
 		asJSON := fl.Bool("json", false, "JSON для sleepstats (формат v1, compact.Summary): сутки, неделя, месяц")
 		atText := fl.String("at", "", "момент отчёта, RFC3339 (по умолчанию сейчас)")
 		parse(fl, rest)
@@ -52,7 +54,15 @@ func (a *app) compactCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		return r.Print(a.out)
+		loaded, rateErr := rates.Load(at)
+		rate := loaded["anthropic"]
+		if rateErr == nil && (rate.APIWeek <= 0 || rate.PlanUSD <= 0) {
+			rateErr = fmt.Errorf("для anthropic нет курса")
+		}
+		if rateErr != nil {
+			fmt.Fprintf(os.Stderr, "aguard compact report: курс подписки: %v\n", rateErr)
+		}
+		return r.PrintRates(a.out, rate, rateErr == nil)
 	}
 	usage()
 	return nil
