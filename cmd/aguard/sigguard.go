@@ -393,6 +393,14 @@ func sigguardRoute(d sigguard.Deny, lead string, alive map[string]session.Info, 
 	// резали его, и письмо уходило лиду); задания нет — ищем сессию по root, как у прочих unit
 	if len(cpuwatch.JobIDs(d.Unit)) > 0 && !strings.HasSuffix(d.Unit, ".scope") && jobs != nil {
 		if j, err := jobs.ByUnit(d.Unit); err == nil && j != nil {
+			// отказ — действие бойца: письмо запустившей его сессии (owner, жива по pid и start), затем мастеру
+			if o := j.Owner; o != nil && o.Pid > 0 && o.Start != "" {
+				for _, name := range slices.Sorted(maps.Keys(alive)) {
+					if in := alive[name]; in.Pid == o.Pid && in.ProcStart == o.Start {
+						return name, j.ID
+					}
+				}
+			}
 			if _, live := alive[j.Master]; live {
 				return j.Master, j.ID
 			}

@@ -45,6 +45,16 @@ type Job struct {
 	Master  string    `json:"master"`
 	Unit    string    `json:"unit"` // unit бойца на ноуте без .service; повтор — <unit>-<n>.service
 	Created time.Time `json:"created"`
+	// Owner — сессия, запустившая бойца (worker run); nil — задание старше поля.
+	Owner *JobOwner `json:"owner"`
+}
+
+// JobOwner — запустившая задание сессия: pid и время старта процесса (поле 22 /proc/<pid>/stat, как procStart
+// реестра сессий), имя — на момент запуска.
+type JobOwner struct {
+	Pid   int    `json:"pid"`
+	Start string `json:"start"`
+	Name  string `json:"name"`
 }
 
 // Jobs — задания worker по папке состояния; читаются по мере надобности.

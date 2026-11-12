@@ -50,6 +50,62 @@ func TestRouteSigguard(t *testing.T) {
 	}
 }
 
+// TestRouteSigguardOwner — отказ по бойцу идёт запустившей сессии (owner, жива по pid и start), затем мастеру, затем лиду.
+func TestRouteSigguardOwner(t *testing.T) {
+	dir := t.TempDir()
+	jobdir := filepath.Join(dir, "job-7")
+	if err := os.MkdirAll(jobdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"id":"job-7","master":"beta-master","owner":{"pid":50,"start":"777","name":"alpha-admin"},"unit":"worker-job-7"}`
+	if err := os.WriteFile(filepath.Join(jobdir, "job.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := &cpuwatch.Jobs{Dir: dir}
+	owner := session.Info{Pid: 50, ProcStart: "777", Name: "alpha-admin"}
+	reused := session.Info{Pid: 50, ProcStart: "778", Name: "gamma"}
+	master := session.Info{Pid: 60, ProcStart: "1", Name: "beta-master"}
+	for _, tc := range []struct {
+		name  string
+		alive map[string]session.Info
+		want  string
+	}{
+		{"owner и мастер живы", map[string]session.Info{"alpha-admin": owner, "beta-master": master}, "alpha-admin"},
+		{"owner жив, мастер нет", map[string]session.Info{"alpha-admin": owner}, "alpha-admin"},
+		{"owner под другим именем", map[string]session.Info{"renamed": owner, "beta-master": master}, "renamed"},
+		{"pid занят другим процессом, мастер жив", map[string]session.Info{"gamma": reused, "beta-master": master}, "beta-master"},
+		{"pid занят другим процессом, мастера нет", map[string]session.Info{"gamma": reused}, "leader"},
+		{"тот же start у другого pid", map[string]session.Info{"delta": {Pid: 51, ProcStart: "777", Name: "delta"}, "beta-master": master}, "beta-master"},
+		{"owner нет, мастер жив", map[string]session.Info{"beta-master": master}, "beta-master"},
+		{"никого", map[string]session.Info{}, "leader"},
+	} {
+		got, job := sigguardRoute(sigguard.Deny{Unit: "worker-job-7.service", Root: "50"}, "leader", tc.alive, jobs)
+		if got != tc.want || job != "job-7" {
+			t.Errorf("%s: got %s %s, want %s job-7", tc.name, got, job, tc.want)
+		}
+	}
+}
+
+// TestRouteSigguardOwnerEmpty — owner без pid или start ни с кем не совпадает, даже с сессией без procStart.
+func TestRouteSigguardOwnerEmpty(t *testing.T) {
+	for _, owner := range []string{`{"pid":50,"start":""}`, `{"pid":0,"start":""}`, `null`} {
+		dir := t.TempDir()
+		jobdir := filepath.Join(dir, "job-8")
+		if err := os.MkdirAll(jobdir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"id":"job-8","master":"beta-master","owner":` + owner + `}`
+		if err := os.WriteFile(filepath.Join(jobdir, "job.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		alive := map[string]session.Info{"blank": {Pid: 50, Name: "blank"}, "zero": {Name: "zero"}}
+		got, job := sigguardRoute(sigguard.Deny{Unit: "worker-job-8.service"}, "leader", alive, &cpuwatch.Jobs{Dir: dir})
+		if got != "leader" || job != "job-8" {
+			t.Errorf("owner %s: got %s %s, want leader job-8", owner, got, job)
+		}
+	}
+}
+
 func TestSigguardMessageKilledAndSignalName(t *testing.T) {
 	d := sigguard.Deny{Kind: "signal", Arg: "15", Count: 10, Comm: "python3", PID: 2267720, PPID: 1, Pcomm: "bash", Unit: "agent-a-1.scope", Target: 9, TargetComm: "sh", TargetUnit: "x.service", Targets: 10, HasTargets: true, Killed: true}
 	m := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}, Count: 10, Lines: 1}, "")
