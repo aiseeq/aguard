@@ -16,7 +16,7 @@ import (
 	"github.com/aiseeq/akit/session"
 )
 
-func reviewScope(t *testing.T, slice, unit, events string) {
+func scenarioScope(t *testing.T, slice, unit, events string) {
 	dir := filepath.Join(slice, unit)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -28,17 +28,17 @@ func reviewScope(t *testing.T, slice, unit, events string) {
 	}
 }
 
-func reviewApp(home string) *app {
+func scenarioApp(home string) *app {
 	return &app{home: home, log: slog.New(slog.DiscardHandler), act: activity.New(filepath.Join(home, "act"), time.Now()),
 		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour)}
 }
 
-// прежняя находка 1
-func TestReviewDuplicateNoticeOnSetFailure(t *testing.T) {
+// сбой set-property не даёт второго письма о том же снятии
+func TestCeilingSetFailureNoDuplicateNotice(t *testing.T) {
 	home := t.TempDir()
 	slice := filepath.Join(home, "cg")
 	unit := "agent-demo-1.scope"
-	reviewScope(t, slice, unit, "oom_kill 1\n")
+	scenarioScope(t, slice, unit, "oom_kill 1\n")
 	if err := ceiling.Write(ceiling.StatePath(home, unit), ceiling.State{Unit: unit, Base: 2 << 30, By: "cl", OOMSeen: true, OOM: 0}); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestReviewDuplicateNoticeOnSetFailure(t *testing.T) {
 	ceilingSetProperty = func(string, int64) error { return errors.New("unit not loaded") }
 	t.Cleanup(func() { ceilingSetProperty = old })
 	sent := 0
-	a := reviewApp(home)
+	a := scenarioApp(home)
 	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) {
 		return []oomVictim{{PID: 5, Name: "grow", RSS: 1 << 30}}, time.Now(), nil
 	}
@@ -65,8 +65,8 @@ func TestReviewDuplicateNoticeOnSetFailure(t *testing.T) {
 	}
 }
 
-// прежняя находка 4
-func TestReviewMissingAtNotReset(t *testing.T) {
+// scope вернулся — отметка его пропажи (MissingAt) снимается
+func TestCeilingMissingAtClearedOnReturn(t *testing.T) {
 	home := t.TempDir()
 	slice := filepath.Join(home, "cg")
 	unit := "agent-demo-2.scope"
@@ -77,12 +77,12 @@ func TestReviewMissingAtNotReset(t *testing.T) {
 	old := ceilingSetProperty
 	ceilingSetProperty = func(string, int64) error { return nil }
 	t.Cleanup(func() { ceilingSetProperty = old })
-	a := reviewApp(home)
+	a := scenarioApp(home)
 	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) { return nil, time.Time{}, nil }
 	if err := a.ceilingRound(context.Background(), slice); err != nil {
 		t.Fatal(err)
 	}
-	reviewScope(t, slice, unit, "oom_kill 0\n")
+	scenarioScope(t, slice, unit, "oom_kill 0\n")
 	if err := a.ceilingRound(context.Background(), slice); err != nil {
 		t.Fatal(err)
 	}
@@ -95,8 +95,8 @@ func TestReviewMissingAtNotReset(t *testing.T) {
 	}
 }
 
-// прежняя находка 2: попытки ограничены, файл удаляется
-func TestReviewGoneSendFailureBounded(t *testing.T) {
+// scope исчез, письмо не уходит: попытки ограничены, состояние удаляется
+func TestCeilingGoneSendFailureBounded(t *testing.T) {
 	home := t.TempDir()
 	unit := "agent-demo-3.scope"
 	path := ceiling.StatePath(home, unit)
@@ -104,7 +104,7 @@ func TestReviewGoneSendFailureBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	queries, sends := 0, 0
-	a := reviewApp(home)
+	a := scenarioApp(home)
 	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) {
 		queries++
 		return []oomVictim{{PID: 5, Name: "grow", RSS: 1 << 30}}, time.Now(), nil
@@ -126,8 +126,8 @@ func TestReviewGoneSendFailureBounded(t *testing.T) {
 	t.Errorf("state never removed: queries=%d", queries)
 }
 
-// новое: письмо в живом scope ушло без имён (журнал ещё не дописан), имена пришли позже — при исчезновении scope второе письмо о том же
-func TestReviewGoneResendsAlreadyCountedVictims(t *testing.T) {
+// письмо в живом scope ушло без имён (журнал ещё не дописан), имена пришли позже — при исчезновении scope второго письма о том же нет
+func TestCeilingGoneNoSecondLetterForCountedVictims(t *testing.T) {
 	home := t.TempDir()
 	unit := "agent-demo-4.scope"
 	path := ceiling.StatePath(home, unit)
@@ -136,7 +136,7 @@ func TestReviewGoneResendsAlreadyCountedVictims(t *testing.T) {
 		t.Fatal(err)
 	}
 	var counts []int64
-	a := reviewApp(home)
+	a := scenarioApp(home)
 	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) {
 		// строка ядра получена journald после fetchedAt первого письма
 		return []oomVictim{{PID: 5, Name: "grow", RSS: 1 << 30}}, notifiedAt.Add(50 * time.Millisecond), nil
@@ -153,8 +153,8 @@ func TestReviewGoneResendsAlreadyCountedVictims(t *testing.T) {
 	}
 }
 
-// новое: SaveObserved затирает ClaudePID, записанный cl между Read и записью наблюдателя
-func TestReviewClaudePIDLostUpdate(t *testing.T) {
+// SaveObserved не затирает ClaudePID, записанный cl между Read и записью наблюдателя
+func TestCeilingObserverKeepsClaudePID(t *testing.T) {
 	home := t.TempDir()
 	unit := "agent-demo-5.scope"
 	path := ceiling.StatePath(home, unit)
@@ -176,17 +176,17 @@ func TestReviewClaudePIDLostUpdate(t *testing.T) {
 	}
 }
 
-// новое: запись состояния на каждом проходе, когда memory.current меняется (так почти всегда)
-func TestReviewStateRewrittenWhenCurrentMoves(t *testing.T) {
+// memory.current меняется почти каждый проход — состояние от этого не переписывается
+func TestCeilingStateNotRewrittenWhenCurrentMoves(t *testing.T) {
 	home := t.TempDir()
 	slice := filepath.Join(home, "cg")
 	unit := "agent-demo-6.scope"
-	reviewScope(t, slice, unit, "oom_kill 0\n")
+	scenarioScope(t, slice, unit, "oom_kill 0\n")
 	path := ceiling.StatePath(home, unit)
 	if err := ceiling.Write(path, ceiling.State{Unit: unit, Base: 1 << 30, By: "cl"}); err != nil {
 		t.Fatal(err)
 	}
-	a := reviewApp(home)
+	a := scenarioApp(home)
 	writes := 0
 	var lastIno uint64
 	for i := range 5 {
@@ -206,11 +206,11 @@ func TestReviewStateRewrittenWhenCurrentMoves(t *testing.T) {
 	t.Logf("state rewrites over 5 passes with moving memory.current: %d", writes)
 }
 
-// прежняя находка 3 на реальном журнале: жертвы по pid без заголовка
-func TestReviewRealKernelLines(t *testing.T) {
-	path := os.Getenv("REVIEW_KERN_JSON")
+// диагностика на реальном журнале ядра (CEILING_KERN_JSON — выгрузка journalctl -k -o json): сколько жертв нашлось по pid без заголовка
+func TestCeilingRealKernelLinesVictimsByPID(t *testing.T) {
+	path := os.Getenv("CEILING_KERN_JSON")
 	if path == "" {
-		t.Skip("REVIEW_KERN_JSON не задан")
+		t.Skip("CEILING_KERN_JSON не задан")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -235,4 +235,69 @@ func TestReviewRealKernelLines(t *testing.T) {
 		total += len(v)
 	}
 	t.Logf("Killed process lines=%d, victims attributed by nearest header=%d (units %d)", killed, total, len(units))
+}
+
+// история pid scope ограничена, карты scope чистятся с его исчезновением
+func TestCeilingPIDHistoryBoundedAndCleared(t *testing.T) {
+	home := t.TempDir()
+	slice := filepath.Join(home, "cg")
+	unit := "agent-demo-7.scope"
+	scenarioScope(t, slice, unit, "oom_kill 0\n")
+	if err := os.WriteFile(filepath.Join(slice, unit, "cgroup.procs"), []byte("11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ceiling.Write(ceiling.StatePath(home, unit), ceiling.State{Unit: unit, Base: 1 << 30, By: "cl"}); err != nil {
+		t.Fatal(err)
+	}
+	a := scenarioApp(home)
+	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) { return nil, time.Time{}, nil }
+	for range 1000 {
+		if err := a.ceilingRound(context.Background(), slice); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Logf("after 1000 passes (200 s at 200 ms) with 10 pids: len(ceilingPIDs)=%d", len(a.ceilingPIDs[unit]))
+	if err := os.RemoveAll(filepath.Join(slice, unit)); err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		cur, err := ceiling.Read(ceiling.StatePath(home, unit))
+		if err != nil {
+			break
+		}
+		cur.MissingCheckAt = cur.MissingCheckAt.Add(-2 * time.Second)
+		a.ceilingGone(context.Background(), ceiling.StatePath(home, unit), cur)
+	}
+	_, gone := os.Stat(ceiling.StatePath(home, unit))
+	t.Logf("state removed=%v; maps after scope gone: pids=%d baseline=%v cursors=%v", gone != nil, len(a.ceilingPIDs[unit]), len(a.ceilingBaseline), len(a.ceilingCursors))
+	if len(a.ceilingPIDs[unit]) > 10 {
+		t.Errorf("pid history unbounded: %d", len(a.ceilingPIDs[unit]))
+	}
+	if gone == nil || len(a.ceilingPIDs) != 0 || len(a.ceilingBaseline) != 0 || len(a.ceilingCursors) != 0 || len(a.ceilingLimits) != 0 || len(a.ceilingShmem) != 0 || len(a.ceilingNotified) != 0 || len(a.ceilingUnpersisted) != 0 || len(a.ceilingSeedRetries) != 0 {
+		t.Errorf("scope maps survived removal: pids=%v baseline=%v cursors=%v limits=%v shmem=%v notified=%v unpersisted=%v retries=%v", a.ceilingPIDs, a.ceilingBaseline, a.ceilingCursors, a.ceilingLimits, a.ceilingShmem, a.ceilingNotified, a.ceilingUnpersisted, a.ceilingSeedRetries)
+	}
+}
+
+// повторные чтения журнала ядра для засева идут не чаще срока
+func TestCeilingSeedJournalRetriesAreRateLimited(t *testing.T) {
+	home := t.TempDir()
+	slice, unit := filepath.Join(home, "cg"), "agent-demo-8.scope"
+	scenarioScope(t, slice, unit, "oom_kill 0\n")
+	if err := ceiling.Write(ceiling.StatePath(home, unit), ceiling.State{Unit: unit, Base: 1 << 30, By: "cl"}); err != nil {
+		t.Fatal(err)
+	}
+	a := scenarioApp(home)
+	queries := 0
+	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) {
+		queries++
+		return nil, time.Time{}, errors.New("journal unavailable")
+	}
+	for range 100 {
+		if err := a.ceilingRound(context.Background(), slice); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if queries != 1 || a.ceilingSeedRetries[unit].Attempts != 1 {
+		t.Fatalf("seed journal retries were not delayed: queries=%d retries=%+v", queries, a.ceilingSeedRetries[unit])
+	}
 }
