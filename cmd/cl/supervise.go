@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -224,7 +225,9 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 				}
 			}
 		case <-timer.C:
-			if _, err := proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() }); err != nil {
+			// claude мог выйти сам в последний миг, и горутина Wait его уже прибрала: это не отказ остановки
+			_, err := proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() })
+			if err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, fs.ErrNotExist) {
 				journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: сжатие дольше %v, не убил: %v", out.name, compactTimeout, err))
 			}
 		}

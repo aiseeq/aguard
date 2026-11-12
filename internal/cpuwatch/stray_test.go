@@ -336,13 +336,13 @@ func TestStrayScriptLive(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "pid")
 	// внук крутит цикл и пишет pid; его родитель выходит сразу, внука усыновляет init или systemd --user. Внук
-	// останавливается сам: флаг убирает Cleanup, предел шагов — если тест упал до Cleanup
+	// останавливается сам: флаг убирает Cleanup, предел времени (bash) и шагов — если тест убит до Cleanup
 	flag := filepath.Join(dir, "spin")
 	if err := os.WriteFile(flag, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Remove(flag) })
-	spin := exec.Command("sh", "-c", `sh -c 'echo $$ >"$0"; i=0; while [ -e "$1" ] && [ $i -lt 20000000 ]; do i=$((i+1)); done' "$0" "$1" & exit 0`, pidFile, flag)
+	spin := exec.Command("sh", "-c", `sh -c 'echo $$ >"$0"; i=0; while [ -e "$1" ] && [ $i -lt 20000000 ] && [ ${SECONDS:-0} -lt 60 ]; do i=$((i+1)); done' "$0" "$1" & exit 0`, pidFile, flag)
 	if err := spin.Run(); err != nil {
 		t.Fatal(err)
 	}
