@@ -14,6 +14,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/trackfd"
+	"github.com/aiseeq/akit/proc"
 )
 
 // checkWait — сколько ждать события от настоящего ядра.
@@ -56,7 +57,7 @@ func Check(pair trackfd.Pair, dir string) (err error) {
 
 // stopChild снимает процесс пробы; его выход по сигналу и есть успех.
 func stopChild(child *exec.Cmd) error {
-	if err := child.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if _, err := proc.StopChild(child.Process.Pid, 0, func() error { return child.Process.Kill() }); err != nil {
 		return fmt.Errorf("процесс пробы: %w", err)
 	}
 	var exit *exec.ExitError

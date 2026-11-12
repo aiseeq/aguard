@@ -18,6 +18,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/cllog"
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -223,7 +224,7 @@ func (l launcher) compactSession(sigs <-chan os.Signal, unit string, keep []stri
 				}
 			}
 		case <-timer.C:
-			if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			if _, err := proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() }); err != nil {
 				journal(cfg.Restart.Journal, time.Now(), fmt.Sprintf("%s: сжатие дольше %v, не убил: %v", out.name, compactTimeout, err))
 			}
 		}
@@ -479,7 +480,9 @@ func wait(proc *os.Process) error {
 
 // signalChild шлёт сигнал claude; вышедший процесс — не ошибка (его выход и так придёт в done).
 func signalChild(proc *os.Process, sig os.Signal) error {
-	if err := proc.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	// StopChild добил бы SIGKILL потомков claude — фоновые задачи сессии при плановом перезапуске;
+	// способа «только сам процесс» в akit пока нет: akit docs/tasks/20261112-0422-MED-DO-signal-child-leader-only
+	if err := proc.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) { //nolint:raw-process-kill // akit signal-child-leader-only
 		return fmt.Errorf("сигнал %v claude: %w", sig, err)
 	}
 	return nil

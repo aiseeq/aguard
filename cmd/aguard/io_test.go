@@ -926,7 +926,7 @@ func TestIOSignalViaSystemd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = child.Process.Kill()
+		_, _ = proc.StopChild(child.Process.Pid, 0, func() error { return child.Process.Kill() })
 		_ = child.Wait()
 	})
 	bin := t.TempDir()

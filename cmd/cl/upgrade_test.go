@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -79,7 +80,10 @@ func claudeUnderPty(t *testing.T, c *console) (*exec.Cmd, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	t.Cleanup(func() {
+		_, _ = proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() })
+		_ = cmd.Wait()
+	})
 	return cmd, finish
 }
 
@@ -175,7 +179,10 @@ func TestAdopt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	t.Cleanup(func() {
+		_, _ = proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() })
+		_ = cmd.Wait()
+	})
 	var fd int
 	conn, err := master.SyscallConn()
 	if err == nil {

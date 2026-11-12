@@ -28,7 +28,7 @@ func startChild(t *testing.T, want string, ready bool, name string, args ...stri
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
+		_, _ = proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() })
 		_ = cmd.Wait()
 	})
 	if ready {

@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/akit/proc"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
@@ -228,7 +229,7 @@ func (c *console) handOver() (fd int, typed int64, back func(), err error) {
 
 // stopChild — убить запущенный claude и дождаться его: без Wait он остался бы зомби.
 func stopChild(cmd *exec.Cmd) error {
-	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if _, err := proc.StopChild(cmd.Process.Pid, 0, func() error { return cmd.Process.Kill() }); err != nil {
 		return fmt.Errorf("остановить claude: %w", err)
 	}
 	if err := cmd.Wait(); err != nil {
