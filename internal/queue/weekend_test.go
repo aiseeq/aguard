@@ -83,7 +83,7 @@ func TestWeekendCritGoes(t *testing.T) {
 	w.free["m-master"] = false
 	s := seeded(w)
 	ns := step(s, []Ticket{inDir(tick("CRIT", "открыт"), restRoot+"/p")}, w)
-	if !has(ns, KindCrit, "m-master") || !has(ns, KindCritCopy, "lead") {
+	if !has(ns, KindCrit, "m-master") || has(ns, KindCritCopy, "lead") {
 		t.Fatalf("CRIT в выходной: %+v", ns)
 	}
 }

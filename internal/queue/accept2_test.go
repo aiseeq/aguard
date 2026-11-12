@@ -37,8 +37,13 @@ func TestCritCopyRetriedAlone(t *testing.T) {
 		}
 	}
 	ns := s.Step(ts, w.view())
-	if len(ns) != 1 || ns[0].Kind != KindCritCopy {
+	if len(ns) != 0 {
 		t.Fatalf("%+v", ns)
+	}
+	w.now = w.now.Add(15 * time.Minute)
+	ns = s.Step(ts, w.view())
+	if len(ns) != 1 || ns[0].Kind != KindCritCopy {
+		t.Fatalf("копия после срока: %+v", ns)
 	}
 }
 

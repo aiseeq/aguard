@@ -12,14 +12,15 @@ import (
 const LiveAll = "*"
 
 type Config struct {
-	Mode      string          `toml:"mode"`
-	Live      []string        `toml:"live"`
-	Interval  policy.Duration `toml:"interval"`
-	FreeAfter policy.Duration `toml:"free_after"`
-	BootGrace policy.Duration `toml:"boot_grace"`
-	GitRoots  []string        `toml:"git_roots"`
-	Dirs      []string        `toml:"dirs"`
-	Skip      []string        `toml:"skip"`
+	Mode          string          `toml:"mode"`
+	Live          []string        `toml:"live"`
+	Interval      policy.Duration `toml:"interval"`
+	FreeAfter     policy.Duration `toml:"free_after"`
+	BootGrace     policy.Duration `toml:"boot_grace"`
+	CritCopyAfter policy.Duration `toml:"crit_copy_after"`
+	GitRoots      []string        `toml:"git_roots"`
+	Dirs          []string        `toml:"dirs"`
+	Skip          []string        `toml:"skip"`
 	// RestCrit — папки, где в дни отдыха (суббота, воскресенье, праздники RestHolidays; дата — в поясе RestZone) из
 	// новой работы идёт только CRIT: ворота, будильник и «HIGH не взят». Список — в конфиге машины.
 	RestCrit     []string `toml:"rest_crit"`
@@ -46,7 +47,7 @@ func Default(home string) Config {
 		return out
 	}
 	paths := expand("~/git", "~/work", "~/docs", "~/.local/state/queue/gate.json", "~/.local/state/chooks/limits-history.jsonl", "~/bin/tk")
-	return Config{Mode: ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second), FreeAfter: policy.Duration(2 * time.Minute), BootGrace: policy.Duration(time.Hour),
+	return Config{Mode: ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second), FreeAfter: policy.Duration(2 * time.Minute), BootGrace: policy.Duration(time.Hour), CritCopyAfter: policy.Duration(15 * time.Minute),
 		GitRoots: paths[:2], Dirs: paths[2:3], Gate: paths[3], History: paths[4], Tk: paths[5], Level: LevelHigh, Frozen: policy.ExpandHome("~/.config/queue/frozen", home)}
 }
 
@@ -56,6 +57,9 @@ func (c *Config) Validate(home string) error {
 	}
 	if c.Interval.D() <= 0 || c.FreeAfter.D() < 0 || c.BootGrace.D() < 0 {
 		return fmt.Errorf("queue.interval > 0, queue.free_after и queue.boot_grace >= 0")
+	}
+	if c.CritCopyAfter.D() <= 0 {
+		return fmt.Errorf("queue.crit_copy_after > 0")
 	}
 	for _, ps := range [][]string{c.GitRoots, c.Dirs, c.Skip, c.RestCrit} {
 		for i := range ps {

@@ -58,7 +58,7 @@ func newQueueBench(t *testing.T, gitJSON, docsJSON string) *queueBench {
 	}
 	c := &config.Config{Lead: "lead", Admins: map[string]string{filepath.Join(dir, "git"): "git-admin"},
 		Queue: queue.Config{Mode: queue.ModeOn, Live: []string{"glint", "graft"}, Interval: policy.Duration(30 * time.Second),
-			FreeAfter: policy.Duration(2 * time.Minute), GitRoots: []string{filepath.Join(dir, "git")},
+			FreeAfter: policy.Duration(2 * time.Minute), CritCopyAfter: policy.Duration(15 * time.Minute), GitRoots: []string{filepath.Join(dir, "git")},
 			Dirs: []string{filepath.Join(dir, "docs")}, Level: queue.LevelHigh,
 			Gate: filepath.Join(dir, "gate.json"), History: hist, Tk: tk}}
 	return &queueBench{a, c, dir}
@@ -203,6 +203,43 @@ func TestQueueStateSurvivesRestart(t *testing.T) {
 	if !strings.Contains(string(data), "p/20261103-1200-c") {
 		t.Fatalf("ключ по имени файла: %s", data)
 	}
+}
+
+func TestQueueViewCritCopyAfter(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	start := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	alive := map[string]session.Info{"glint-master": {}, "lead": {}}
+	v := queueView(b.c, alive, fakeJudge{}, start, b.a, nil, nil)
+	s := &queue.State{}
+	ticket := queue.Ticket{Key: "glint/crit", Project: "glint", Slug: "crit", Prio: "CRIT", Status: "открыт", Master: "glint-master", Admin: "git-admin"}
+	confirm := func(ns []queue.Notice) {
+		for _, n := range ns {
+			s.Confirm(n, v)
+		}
+	}
+	if ns := s.Step([]queue.Ticket{ticket}, v); !queueHas(ns, queue.KindCrit, "glint-master") || queueHas(ns, queue.KindCritCopy, "lead") {
+		t.Fatalf("первый проход через queueView: %+v", ns)
+	} else {
+		confirm(ns)
+	}
+	v.Now = start.Add(14 * time.Minute)
+	if ns := s.Step([]queue.Ticket{ticket}, v); queueHas(ns, queue.KindCritCopy, "lead") {
+		t.Fatalf("до срока из queueView: %+v", ns)
+	}
+	v.Now = start.Add(15 * time.Minute)
+	ns := s.Step([]queue.Ticket{ticket}, v)
+	if !queueHas(ns, queue.KindCritCopy, "lead") {
+		t.Fatalf("срок из queueView: %+v", ns)
+	}
+}
+
+func queueHas(ns []queue.Notice, kind, to string) bool {
+	for _, n := range ns {
+		if n.Kind == kind && n.To == to {
+			return true
+		}
+	}
+	return false
 }
 
 // Ключ — из имени файла, без PRIO и DIFF: смена приоритета не заводит новый тикет.

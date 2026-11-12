@@ -234,6 +234,7 @@ type View struct {
 	Now                  time.Time
 	BootAt               time.Time
 	BootGrace            time.Duration
+	CritCopyAfter        time.Duration
 	Lead                 string
 	Serious, Alive, Free func(string) bool
 	Next                 func(string, string) (Ticket, bool, error)
@@ -279,6 +280,9 @@ type ticketState struct {
 	BackSent    bool      `json:"back_sent,omitempty"`
 	BackLost    bool      `json:"back_lost,omitempty"`
 	Crit        mark      `json:"crit,omitzero"`
+	CritTo      string    `json:"crit_to,omitempty"`
+	CritTried   time.Time `json:"crit_tried,omitzero"`
+	CritTriedTo string    `json:"crit_tried_to,omitempty"`
 	CritCopy    mark      `json:"crit_copy,omitzero"`
 	High        mark      `json:"high,omitzero"`
 	Admin       mark      `json:"admin,omitzero"`
@@ -355,6 +359,7 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 			return nil
 		}
 	}
+	resetCritAttempt(t, st)
 	if closedTicket {
 		return s.backNotices(t, st, v)
 	}
@@ -441,13 +446,90 @@ func (s *State) critNotices(t Ticket, st *ticketState, v View) []Notice {
 		}
 		return out
 	}
+	critSentToLead := false
 	if !marked(st.Crit, serious, true) {
 		out = append(out, notice(t, v, KindCrit, to, line))
+		critSentToLead = to == v.Lead
+		if st.CritTried.IsZero() || st.CritTriedTo != to || serious && st.Crit.Mode == ModeLog && !st.Crit.At.IsZero() && !st.CritTried.After(st.Crit.At) {
+			st.CritTried, st.CritTriedTo = v.Now, to
+		}
 	}
-	if v.Lead != t.Master && to != v.Lead && alive(v, v.Lead) && !marked(st.CritCopy, serious, true) {
-		out = append(out, notice(t, v, KindCritCopy, v.Lead, line))
+	copyNotice, sendCopy := critCopyNotice(t, st, v, to, serious, critSentToLead, line)
+	if sendCopy {
+		out = append(out, copyNotice)
 	}
 	return out
+}
+
+func critCopyNotice(t Ticket, st *ticketState, v View, to string, serious, critToLead bool, line string) (Notice, bool) {
+	if v.Lead == t.Master || !alive(v, v.Lead) || marked(st.CritCopy, serious, true) {
+		return Notice{}, false
+	}
+	if critToLead {
+		return Notice{}, false
+	}
+	copyLine, send := critCopyLine(t, st, v, to, serious, line)
+	if !send {
+		return Notice{}, false
+	}
+	return notice(t, v, KindCritCopy, v.Lead, copyLine), true
+}
+
+func critCopyLine(t Ticket, st *ticketState, v View, to string, serious bool, line string) (string, bool) {
+	if (st.CritTriedTo != "" && st.CritTriedTo != t.Master) || (st.CritTo != "" && st.CritTo != t.Master) {
+		return line, true
+	}
+	if st.CritTo == t.Master {
+		if st.Crit.At.IsZero() || serious && st.Crit.Mode == ModeLog {
+			return failedCritCopyLine(t, st, v, line)
+		}
+		return deliveredCritCopyLine(t, st, v, line)
+	}
+	if st.Crit.At.IsZero() && to == t.Master {
+		return failedCritCopyLine(t, st, v, line)
+	}
+	return line, true
+}
+
+func failedCritCopyLine(t Ticket, st *ticketState, v View, line string) (string, bool) {
+	if st.CritTried.IsZero() || st.CritTriedTo != t.Master || critTaken(t) {
+		return "", false
+	}
+	age := v.Now.Sub(st.CritTried)
+	if age < v.CritCopyAfter {
+		return "", false
+	}
+	return line + fmt.Sprintf(". письмо мастеру %s не дошло за %d мин", t.Master, int(age/time.Minute)), true
+}
+
+func deliveredCritCopyLine(t Ticket, st *ticketState, v View, line string) (string, bool) {
+	if critTaken(t) {
+		return "", false
+	}
+	if !alive(v, t.Master) {
+		return line + fmt.Sprintf(". мастер %s недоступен", t.Master), true
+	}
+	age := v.Now.Sub(st.Crit.At)
+	if age < v.CritCopyAfter {
+		return "", false
+	}
+	return line + fmt.Sprintf(". мастер %s не взял за %d мин", t.Master, int(age/time.Minute)), true
+}
+
+func resetCritAttempt(t Ticket, st *ticketState) {
+	if st.Prio != t.Prio {
+		st.Prio = t.Prio
+		st.Crit, st.CritTo = mark{}, ""
+		st.CritTried, st.CritTriedTo = time.Time{}, ""
+	}
+	if t.Prio == "CRIT" && t.Status != "открыт" {
+		st.Crit, st.CritTo = mark{}, ""
+		st.CritTried, st.CritTriedTo = time.Time{}, ""
+	}
+}
+
+func critTaken(t Ticket) bool {
+	return t.Started
 }
 
 func (s *State) highNotices(t Ticket, st *ticketState, v View) []Notice {
@@ -573,6 +655,7 @@ func (s *State) Confirm(n Notice, v View) {
 		switch n.Kind {
 		case KindCrit:
 			st.Crit = m
+			st.CritTo = n.To
 			if n.To == v.Lead {
 				st.CritCopy = m
 			}

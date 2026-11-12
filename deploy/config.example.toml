@@ -312,6 +312,7 @@ mode = "on"
 live = ["glint", "graft"]
 interval = "30s"
 free_after = "2m"
+crit_copy_after = "15m" # копия CRIT лиду, если мастер не взял тикет за этот срок
 boot_grace = "1h" # не слать HIGH «нет живой сессии» столько после загрузки системы
 git_roots = ["~/git", "~/work"]
 dirs = ["~/docs"]

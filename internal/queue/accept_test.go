@@ -57,7 +57,7 @@ func newWorld(mode string) *world {
 
 func (w *world) view() View {
 	return View{
-		Now: w.now, BootAt: w.BootAt, BootGrace: w.BootGrace, Lead: "lead", Rest: w.rest,
+		Now: w.now, BootAt: w.BootAt, BootGrace: w.BootGrace, CritCopyAfter: 15 * time.Minute, Lead: "lead", Rest: w.rest,
 		Serious: func(project string) bool { return w.mode == ModeOn },
 		Alive:   func(n string) bool { return w.live[n] },
 		Free:    func(n string) bool { w.asked[n]++; return w.free[n] },
@@ -97,14 +97,14 @@ func TestSeedKeepsCrit(t *testing.T) {
 	crit.Key = "m/20261104-0900-c"
 	w.free["m-master"] = true
 	ns := step(s, []Ticket{old, crit}, w)
-	if !has(ns, KindCrit, "m-master") || !has(ns, KindCritCopy, "lead") {
+	if !has(ns, KindCrit, "m-master") || has(ns, KindCritCopy, "lead") {
 		t.Fatalf("CRIT на первом проходе: %+v", ns)
 	}
 	if has(ns, KindHigh, "m-master") {
 		t.Fatalf("старый HIGH засеян, письма нет: %+v", ns)
 	}
 	w.now = w.now.Add(5 * time.Hour)
-	if ns := step(s, []Ticket{old, crit}, w); has(ns, KindHighAdmin, "git-admin") || has(ns, KindCrit, "m-master") {
+	if ns := step(s, []Ticket{old, crit}, w); has(ns, KindHighAdmin, "git-admin") || has(ns, KindCrit, "m-master") || !has(ns, KindCritCopy, "lead") {
 		t.Fatalf("засеянный HIGH и отправленный CRIT молчат: %+v", ns)
 	}
 }
@@ -120,11 +120,15 @@ func TestCritOnce(t *testing.T) {
 	s := seeded(w)
 	ts := []Ticket{tick("CRIT", "открыт")}
 	ns := step(s, ts, w) // занятому тоже: CRIT не ждёт
-	if !has(ns, KindCrit, "m-master") || !has(ns, KindCritCopy, "lead") {
+	if !has(ns, KindCrit, "m-master") || has(ns, KindCritCopy, "lead") {
 		t.Fatalf("%+v", ns)
 	}
 	if ns := step(s, ts, w); len(ns) != 0 {
 		t.Fatalf("второй раз: %+v", ns)
+	}
+	w.now = w.now.Add(15 * time.Minute)
+	if ns := step(s, ts, w); !has(ns, KindCritCopy, "lead") {
+		t.Fatalf("копия после срока: %+v", ns)
 	}
 }
 
