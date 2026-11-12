@@ -106,6 +106,34 @@ func TestRouteSigguardOwnerEmpty(t *testing.T) {
 	}
 }
 
+// TestRouteSigguardTruncatedUnit — строка сторожа пробы 12.11 01:25 (кириллица в id, имя обрезано) находит задание
+// и его owner; до правки письмо уходило лиду без id.
+func TestRouteSigguardTruncatedUnit(t *testing.T) {
+	dir := t.TempDir()
+	id := "1112-0123-проба-signal-alert-owner-kill-пустышки"
+	if err := os.MkdirAll(filepath.Join(dir, id), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"id":"` + id + `","master":"leader","owner":{"pid":456646,"start":"240969","name":"alpha-master"}}`
+	if err := os.WriteFile(filepath.Join(dir, id, "job.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msg := `deny kind=signal arg=15 count=1 first=01:25:52.993 last=01:25:52.993 span_ms=0 unit="worker-1112-0123-\\xd0\\xbf\\xd1\\x80\\xd0\\xbe\\xd0\\xb1\\xd0\\xb0-signal-alert-owner-kill-\\xd0\\xbf\\xd1\\x83\\xd1\\x81\\xd1\\x82\\xd1\\x8b\\xd1\\" root=3293294 pid=3340008 comm="bash" ppid=3340007 pcomm="bash" euid=1000 target=3092058 target_comm="sleep" target_unit="agent-alpha-master-456633.scope" targets=1 killed=0 mode=enforce`
+	d, ok := sigguard.Parse(msg)
+	if !ok {
+		t.Fatal("строка пробы не разобрана")
+	}
+	alive := map[string]session.Info{"alpha-master": {Pid: 456646, ProcStart: "240969", Name: "alpha-master"}, "leader": {Pid: 1, ProcStart: "1", Name: "leader"}}
+	got, job := sigguardRoute(d, "leader", alive, &cpuwatch.Jobs{Dir: dir})
+	if got != "alpha-master" || job != id {
+		t.Fatalf("route = %s %s, want alpha-master %s", got, job, id)
+	}
+	escaped := `worker-1112-0123-\xd0\xbf\xd1\x80\xd0\xbe\xd0\xb1\xd0\xb0-signal-alert-owner-kill-\xd0\xbf\xd1\x83\xd1\x81\xd1\x82\xd1\x8b\xd1\x88\xd0\xba\xd0\xb8.service`
+	if got, job := sigguardRoute(sigguard.Deny{Unit: escaped}, "leader", alive, &cpuwatch.Jobs{Dir: dir}); got != "alpha-master" || job != id {
+		t.Fatalf("route full escaped = %s %s", got, job)
+	}
+}
+
 func TestSigguardMessageKilledAndSignalName(t *testing.T) {
 	d := sigguard.Deny{Kind: "signal", Arg: "15", Count: 10, Comm: "python3", PID: 2267720, PPID: 1, Pcomm: "bash", Unit: "agent-a-1.scope", Target: 9, TargetComm: "sh", TargetUnit: "x.service", Targets: 10, HasTargets: true, Killed: true}
 	m := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}, Count: 10, Lines: 1}, "")

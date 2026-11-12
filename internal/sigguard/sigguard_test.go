@@ -76,3 +76,23 @@ func TestBatcher(t *testing.T) {
 		t.Fatalf("next window %#v", got)
 	}
 }
+
+// TestParseEscapedUnit — строка сторожа с кириллицей в id бойца (проба 12.11 01:25): systemd экранирует байты \xHH,
+// сторож печатает имя через jq tojson (\ → \\) и режет на 127 байтах; Parse раскрывает JSON, но не экранирование systemd.
+func TestParseEscapedUnit(t *testing.T) {
+	msg := `deny kind=signal arg=15 count=1 first=01:25:52.993 last=01:25:52.993 span_ms=0 unit="worker-1112-0123-\\xd0\\xbf\\xd1\\x80\\xd0\\xbe\\xd0\\xb1\\xd0\\xb0-signal-alert-owner-kill-\\xd0\\xbf\\xd1\\x83\\xd1\\x81\\xd1\\x82\\xd1\\x8b\\xd1\\" root=3293294 pid=3340008 comm="bash" ppid=3340007 pcomm="bash" euid=1000 target=3092058 target_comm="sleep" target_unit="agent-alpha-master-456633.scope" targets=1 killed=0 mode=enforce`
+	d, ok := Parse(msg)
+	want := `worker-1112-0123-\xd0\xbf\xd1\x80\xd0\xbe\xd0\xb1\xd0\xb0-signal-alert-owner-kill-\xd0\xbf\xd1\x83\xd1\x81\xd1\x82\xd1\x8b\xd1\`
+	if !ok || d.Unit != want || d.Root != "3293294" || d.Comm != "bash" || d.Target != 3092058 || d.TargetUnit != "agent-alpha-master-456633.scope" {
+		t.Fatalf("Parse = %#v, %v", d, ok)
+	}
+}
+
+// TestParseQuoteInsideValue — кавычка внутри значения (tojson пишет \") не обрывает поле и не сдвигает следующие.
+func TestParseQuoteInsideValue(t *testing.T) {
+	msg := `deny kind=signal arg=15 count=2 first=a last=b span_ms=0 unit="agent-a-1.scope" root=7 pid=9 comm="x\" y" ppid=8 pcomm="bash" euid=1000 target=5 target_comm="sleep" target_unit="b.scope" mode=enforce`
+	d, ok := Parse(msg)
+	if !ok || d.Comm != `x" y` || d.PPID != 8 || d.Pcomm != "bash" || d.Target != 5 {
+		t.Fatalf("Parse = %#v, %v", d, ok)
+	}
+}

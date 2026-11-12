@@ -392,7 +392,12 @@ func sigguardRoute(d sigguard.Deny, lead string, alive map[string]session.Info, 
 	// unit бойца — worker-<id>.service (защита пишет имя целиком: NAME_LEN 128 с 11.11 18:58, до того 47 символов
 	// резали его, и письмо уходило лиду); задания нет — ищем сессию по root, как у прочих unit
 	if len(cpuwatch.JobIDs(d.Unit)) > 0 && !strings.HasSuffix(d.Unit, ".scope") && jobs != nil {
-		if j, err := jobs.ByUnit(d.Unit); err == nil && j != nil {
+		j, err := jobs.ByUnit(d.Unit)
+		if err == nil && j == nil && !strings.HasSuffix(d.Unit, ".service") {
+			// имя без .service — обрезано сторожем (NAME_LEN 128, кириллица в id экранирована вчетверо): по префиксу
+			j, err = jobs.ByUnitPrefix(d.Unit)
+		}
+		if err == nil && j != nil {
 			// отказ — действие бойца: письмо запустившей его сессии (owner, жива по pid и start), затем мастеру
 			if o := j.Owner; o != nil && o.Pid > 0 && o.Start != "" {
 				for _, name := range slices.Sorted(maps.Keys(alive)) {

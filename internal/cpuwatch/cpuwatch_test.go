@@ -429,3 +429,50 @@ func TestJobIDs(t *testing.T) {
 		}
 	}
 }
+
+func TestUnescapeUnit(t *testing.T) {
+	for in, want := range map[string]string{
+		"worker-1111-2248-symlink-guard-tails.service":                        "worker-1111-2248-symlink-guard-tails.service",
+		`worker-1112-0123-\xd0\xbf\xd1\x80\xd0\xbe\xd0\xb1\xd0\xb0-x.service`: "worker-1112-0123-проба-x.service",
+		`worker-1112-0123-\xd0\xbf\xd1\x80\xd1\`:                              "worker-1112-0123-пр",
+		`worker-1112-0123-\xd0\xbf\xd1\x80\xd1\x`:                             "worker-1112-0123-пр",
+		`worker-1112-0123-\xd0\xbf\xd1\x80\xd1\x8`:                            "worker-1112-0123-пр",
+		`worker-1112-0123-\xd0\xbf\xd1`:                                       "worker-1112-0123-п",
+		`worker-1112-0123-\xd0\xbf\x2`:                                        "worker-1112-0123-п",
+		`a\zz`:                                                                `a\zz`,
+	} {
+		if got := UnescapeUnit(in); got != want {
+			t.Errorf("UnescapeUnit(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if ids := JobIDs(`worker-1112-0123-\xd0\xbf\xd1\x80\xd0\xbe\xd0\xb1\xd0\xb0-3.service`); !slices.Equal(ids, []string{"1112-0123-проба-3", "1112-0123-проба"}) {
+		t.Errorf("JobIDs escaped = %q", ids)
+	}
+}
+
+func TestByUnitPrefix(t *testing.T) {
+	dir := t.TempDir()
+	for id, created := range map[string]string{
+		"1112-0123-проба-kill-пустышки":   "2026-11-12T01:23:00+01:00",
+		"1112-0123-проба-kill-пустышки-2": "2026-11-12T01:40:00+01:00",
+		"1112-0124-другое":                "2026-11-12T01:50:00+01:00",
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, id), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"id":"` + id + `","master":"alpha-master","created":"` + created + `"}`
+		if err := os.WriteFile(filepath.Join(dir, id, "job.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jobs := &Jobs{Dir: dir}
+	j, err := jobs.ByUnitPrefix(`worker-1112-0123-\xd0\xbf\xd1\x80\xd0\xbe\xd0\xb1\xd0\xb0-kill-\xd0\xbf\xd1\x83\xd1\`)
+	if err != nil || j == nil || j.ID != "1112-0123-проба-kill-пустышки-2" {
+		t.Fatalf("ByUnitPrefix = %+v, %v", j, err)
+	}
+	for _, unit := range []string{"worker-1112-01", "worker-1112-0125-x", "agent-1112-0123-проба"} {
+		if j, err := jobs.ByUnitPrefix(unit); err != nil || j != nil {
+			t.Errorf("ByUnitPrefix(%q) = %+v, %v, want nil", unit, j, err)
+		}
+	}
+}

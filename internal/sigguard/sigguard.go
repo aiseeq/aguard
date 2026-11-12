@@ -2,6 +2,7 @@
 package sigguard
 
 import (
+	"encoding/json"
 	"maps"
 	"slices"
 	"strconv"
@@ -35,7 +36,7 @@ func Parse(msg string) (Deny, bool) {
 		if !ok {
 			continue
 		}
-		values[k] = strings.Trim(v, "\"")
+		values[k] = fieldValue(v)
 	}
 	get := func(k string) string { return values[k] }
 	d.Kind, d.Arg, d.First, d.Last, d.Unit, d.Root = get("kind"), get("arg"), get("first"), get("last"), get("unit"), get("root")
@@ -49,11 +50,28 @@ func Parse(msg string) (Deny, bool) {
 	return d, true
 }
 
+// fieldValue — значение поля: строки agent-signal-guard печатает через jq tojson (unit="worker-…\\xd0…"),
+// их раскрываем как JSON; не JSON — без кавычек как есть.
+func fieldValue(v string) string {
+	if strings.HasPrefix(v, `"`) {
+		var s string
+		if json.Unmarshal([]byte(v), &s) == nil {
+			return s
+		}
+	}
+	return strings.Trim(v, `"`)
+}
+
 func splitFields(s string) []string {
 	var fields []string
-	start, quoted := -1, false
+	start, quoted, escaped := -1, false, false
 	for i, r := range s {
-		if r == '"' {
+		switch {
+		case escaped:
+			escaped = false
+		case quoted && r == '\\':
+			escaped = true
+		case r == '"':
 			quoted = !quoted
 		}
 		if unicode.IsSpace(r) && !quoted {

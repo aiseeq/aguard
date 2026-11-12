@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aiseeq/akit/proc"
 )
@@ -120,7 +121,7 @@ const settleUnit = "worker-settle"
 // повтор worker-<id>-<n>.service — сначала имя целиком (у задания бывает число на конце: 1110-1118-2026-11-10), потом
 // без хвоста -<n>. Не unit бойца (нет префикса worker-, служба worker-settle) — nil.
 func JobIDs(unit string) []string {
-	unit = strings.TrimSuffix(unit, ".service")
+	unit = strings.TrimSuffix(UnescapeUnit(unit), ".service")
 	id, ok := strings.CutPrefix(unit, "worker-")
 	if !ok || unit == settleUnit {
 		return nil
@@ -130,6 +131,66 @@ func JobIDs(unit string) []string {
 		return []string{id}
 	}
 	return []string{id, id[:i]}
+}
+
+// UnescapeUnit — имя unit без экранирования systemd: байты вне [A-Za-z0-9:_.-] systemd пишет как \xHH (кириллица
+// в id задания: worker-1112-0123-\xd0\xbf…), так его видят /proc/<pid>/cgroup и agent-signal-guard. Неполное
+// экранирование в конце (имя обрезано) и оборванный хвост UTF-8 отбрасываются.
+func UnescapeUnit(s string) string {
+	if !strings.Contains(s, `\x`) && !strings.HasSuffix(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if i+3 >= len(s) { // \, \x, \xH в конце — имя обрезано посреди экранирования
+			break
+		}
+		if s[i+1] == 'x' {
+			if v, err := strconv.ParseUint(s[i+2:i+4], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	out := b.String()
+	for out != "" && !utf8.ValidString(out) {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+// ByUnitPrefix — задание по обрезанному имени unit (agent-signal-guard режет имя cgroup на 127 байтах, экранированная
+// кириллица вчетверо длиннее): папка задания, чьё имя начинается с id из unit; несколько — самое новое по created.
+// Короче «MMDD-HHMM-» (10 знаков) префикс не принимается: совпадёт с чужими заданиями.
+func (j *Jobs) ByUnitPrefix(unit string) (*Job, error) {
+	id, ok := strings.CutPrefix(UnescapeUnit(unit), "worker-")
+	if !ok || len(id) < 10 {
+		return nil, nil //nolint:return-nil-error // не unit бойца или слишком короткий префикс — задания нет
+	}
+	ents, err := os.ReadDir(j.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("папка заданий worker: %w", err)
+	}
+	var best *Job
+	for _, e := range ents {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), id) {
+			continue
+		}
+		v, err := j.get(e.Name())
+		if err != nil {
+			return nil, err
+		}
+		if v != nil && (best == nil || v.Created.After(best.Created)) {
+			best = v
+		}
+	}
+	return best, nil
 }
 
 // pcSpot — scope задания на PC: <префикс>-<имя дерева>.<16 hex>.scope (llmark tool/internal/pcguard.NewSpot).
