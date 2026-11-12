@@ -12,6 +12,21 @@ import (
 	"github.com/aiseeq/aguard/internal/record"
 )
 
+// quietHelp — справка aguard quiet: группы писем совпадают с разделом «Тихий режим» docs/spec.md.
+const quietHelp = `aguard quiet — тишина писем сторожа сессиям на срок.
+
+  aguard quiet                                         состояние
+  aguard quiet on --until ВРЕМЯ --why ТЕКСТ --by ИМЯ   включить до ВРЕМЯ (RFC3339 или ГГГГ-ММ-ДД ЧЧ:ММ местного), не дальше 7 суток
+  aguard quiet off                                     снять
+
+В тишине:
+  идут сквозь неё (аварии): sigguard — отказ сигнала и неразобранные строки; ceiling — снятие процессов потолком памяти
+  ждут её конца и уходят обычным повтором: queue, night, cpu, tmp, codex, disk, said
+  пропадают: io, bgtask, remote, orphans
+
+busy --quiet — другое: придерживает тяжёлую работу, писем не глушит.
+`
+
 func (a *app) quietCmd(args []string) error {
 	if len(args) == 0 {
 		return a.quietStatus()
@@ -21,6 +36,9 @@ func (a *app) quietCmd(args []string) error {
 		return a.quietOn(args[1:])
 	case "off":
 		return a.quietOff(args[1:])
+	case "-h", "--help", "help":
+		_, err := fmt.Fprint(a.out, quietHelp)
+		return err
 	default:
 		return errors.New("aguard quiet: ожидается on или off")
 	}

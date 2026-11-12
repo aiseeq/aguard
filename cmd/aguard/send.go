@@ -63,6 +63,27 @@ func (a *app) sendSocket(pid int, name, socket string, auth bool, msg string) er
 		a.log.Info("aguard тихо: не отправил", "to", name, "msg", line, "until", state.Until, "why", state.Why)
 		return fmt.Errorf("%w: %s", errQuiet, state.Until.Format(time.RFC3339))
 	}
+	return a.deliverSocket(pid, name, socket, auth, msg)
+}
+
+// sendUrgent — аварийное письмо живой сессии to (sigguard, снятие потолком памяти): идёт сквозь тишину, иначе
+// повод теряется насовсем; файл тишины читается только ради строки журнала, его поломка письма не держит.
+func (a *app) sendUrgent(alive map[string]session.Info, to string, auth bool, msg string) error {
+	in, err := aliveSocket(alive, to)
+	if err != nil {
+		return err
+	}
+	if state, active, err := a.readQuiet(); err != nil {
+		a.log.Warn("aguard тихо: состояние не прочитано, аварийное письмо отправляю", "to", to, "err", err)
+	} else if active {
+		line, _, _ := strings.Cut(msg, "\n")
+		a.log.Info("aguard тихо: аварийное письмо сквозь тишину", "to", to, "msg", line, "until", state.Until, "why", state.Why)
+	}
+	return a.deliverSocket(in.Pid, to, in.SocketPath, auth, msg)
+}
+
+// deliverSocket — отправка без проверки тишины: её решают sendSocket и sendUrgent.
+func (a *app) deliverSocket(pid int, name, socket string, auth bool, msg string) error {
 	token := ""
 	if auth {
 		var err error
@@ -78,9 +99,18 @@ func (a *app) sendSocket(pid int, name, socket string, auth bool, msg string) er
 
 // sendAlive — письмо живой сессии to через её сокет; auth — с токеном peer первой строкой.
 func (a *app) sendAlive(alive map[string]session.Info, to string, auth bool, msg string) error {
-	in, ok := alive[to]
-	if !ok || in.SocketPath == "" {
-		return fmt.Errorf("сессии %s нет", to)
+	in, err := aliveSocket(alive, to)
+	if err != nil {
+		return err
 	}
 	return a.sendSocket(in.Pid, to, in.SocketPath, auth, msg)
+}
+
+// aliveSocket — живая сессия to с сокетом.
+func aliveSocket(alive map[string]session.Info, to string) (session.Info, error) {
+	in, ok := alive[to]
+	if !ok || in.SocketPath == "" {
+		return session.Info{}, fmt.Errorf("сессии %s нет", to)
+	}
+	return in, nil
 }
