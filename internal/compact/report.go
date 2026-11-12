@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cllog"
+	"github.com/aiseeq/aguard/internal/rates"
 )
 
 // Version — версия формата Summary для sleepstats.
@@ -117,10 +118,21 @@ func Collect(read func(fn func(*Record)) (int, error)) (*Report, error) {
 
 // Print — сводка для человека.
 func (r *Report) Print(w io.Writer) error {
+	return r.PrintRates(w, rates.Rate{}, false)
+}
+
+// PrintRates — человекочитаемая сводка с курсом anthropic.
+func (r *Report) PrintRates(w io.Writer, rate rates.Rate, rateAvailable bool) error {
 	var b strings.Builder
+	price := func(micro int64) string {
+		if !rateAvailable || rate.APIWeek <= 0 || rate.PlanUSD <= 0 {
+			return "цена ?"
+		}
+		return rates.FormatPct(rate.WeekPct(dollars(micro))) + " % недели $100 Claude"
+	}
 	fmt.Fprintf(&b, "сжал бы: %d, не стал бы: %d\n", r.Decisions[KindWould], r.Decisions[KindWouldNot])
-	fmt.Fprintf(&b, "сбросил бы: %d (контекст %d тыс., запись заново $%.2f), не стал бы: %d\n", r.Decisions[KindWouldReset],
-		r.Held[KindWouldReset].Tokens/1000, dollars(r.Held[KindWouldReset].MicroUSD), r.Decisions[KindWouldNotReset])
+	fmt.Fprintf(&b, "сбросил бы: %d (контекст %d тыс., запись заново %s), не стал бы: %d\n", r.Decisions[KindWouldReset],
+		r.Held[KindWouldReset].Tokens/1000, price(r.Held[KindWouldReset].MicroUSD), r.Decisions[KindWouldNotReset])
 	for _, code := range slices.Sorted(maps.Keys(r.Against)) {
 		fmt.Fprintf(&b, "  против сжатия %s: %d\n", code, r.Against[code])
 	}
@@ -129,7 +141,7 @@ func (r *Report) Print(w io.Writer) error {
 	}
 	for _, key := range slices.Sorted(maps.Keys(r.Outcomes)) {
 		t := r.Outcomes[key]
-		fmt.Fprintf(&b, "исход %s: %d, контекст %d тыс. токенов, $%.2f\n", key, t.Count, t.Tokens/1000, dollars(t.MicroUSD))
+		fmt.Fprintf(&b, "исход %s: %d, контекст %d тыс. токенов, %s\n", key, t.Count, t.Tokens/1000, price(t.MicroUSD))
 	}
 	if r.Bad > 0 {
 		fmt.Fprintf(&b, "нечитаемых строк: %d\n", r.Bad)

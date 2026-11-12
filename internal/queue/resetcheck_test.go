@@ -200,3 +200,31 @@ func TestCheckResetSinceInFuture(t *testing.T) {
 		t.Fatal("момент постановки паузы в будущем: нужна ошибка")
 	}
 }
+
+func TestCheckResetSubscriptionUnit(t *testing.T) {
+	rows := []Row{{At: clock(t, "2026-11-01T00:00:00Z"), ResetsAt: clock(t, "2026-11-08T00:00:00Z"), Used: 70, Account: "claude"}}
+	got, err := CheckResetWithPlan(rows, "claude", clock(t, "2026-11-02T00:00:00Z"), clock(t, "2026-11-03T00:00:00Z"), 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Reason, "расход 140 % недели $100 из 200") {
+		t.Fatalf("reason: %s", got.Reason)
+	}
+	fallback, err := CheckResetWithPlan(rows, "claude", clock(t, "2026-11-02T00:00:00Z"), clock(t, "2026-11-03T00:00:00Z"), 0)
+	if err != nil || !strings.Contains(fallback.Reason, "70 % своей учётки") {
+		t.Fatalf("fallback: %+v err=%v", fallback, err)
+	}
+}
+
+func TestOtherAccountUsesSubscriptionUnit(t *testing.T) {
+	now := clock(t, "2026-11-04T00:03:09+01:00")
+	rows := history(t, nightHistory, now)
+	got, err := CheckResetWithPlan(rows, active, clock(t, pausedAt), now, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "другая учётка " + waited + ": сброс 2026-11-04T01:00:00+01:00, расход 200 % недели $100 из 200"
+	if !strings.Contains(got.Reason, want) {
+		t.Fatalf("нет другой учётки в новой единице %q:\n%s", want, got.Reason)
+	}
+}

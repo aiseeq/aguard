@@ -241,9 +241,9 @@ func usage() {
   aguard memory ceiling [размер]
   aguard restart ask -pid N [-name имя]
   aguard waits tick [-dry-run] | report [-since 24h]
-  aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время RFC3339]
+  aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время RFC3339]   цена — % недели $100 Claude
   aguard disk tick [-dry-run] | retro [-days 7] | traces [-all] | report [-since 168h]
-  aguard said tick [-dry-run] | report [-since 168h]
+  aguard said tick [-dry-run] | report [-since 168h]   цена — % недели $100 по каждому поставщику
   aguard bgtask tick [-dry-run]
   aguard agentwaits tick [-dry-run] | report [-json] [-window week]
   aguard cpu tick [-dry-run]
@@ -258,7 +258,7 @@ func usage() {
   aguard quiet [on --until время --why текст --by имя | off]
   aguard queue tick [-dry-run] | report [-since 168h] [-json]
   aguard report [-json] [-at время RFC3339]
-  aguard limit-reset-check --account почта --since время RFC3339 [--history путь]   сброс лимита учётки после постановки паузы: код 0 есть, 1 нет (причина в выводе), 2 ошибка входа`)
+  aguard limit-reset-check --account почта --since время RFC3339 [--history путь]   сброс лимита: расход в % недели $100 учётки Claude; код 0 есть, 1 нет, 2 ошибка входа`)
 	os.Exit(2)
 }
 

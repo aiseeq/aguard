@@ -18,6 +18,7 @@ const resetHistory = `{"at":"2026-10-31T07:28:26+01:00","sevenDayUsedPercentage"
 `
 
 func TestLimitResetCheckExitCodes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // не читать курсы из живого ~/.claude/improve/rates.tsv
 	file := func(body string) string {
 		p := filepath.Join(t.TempDir(), "limits-history.jsonl")
 		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {

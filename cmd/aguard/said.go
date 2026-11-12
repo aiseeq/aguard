@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -66,12 +67,17 @@ func (a *app) saidCmd(ctx context.Context, args []string) error {
 		return a.saidRound(ctx, &cfg, *dry)
 	case "report":
 		fl := flag.NewFlagSet("said report", flag.ContinueOnError)
-		since := fl.Duration("since", 7*24*time.Hour, "за какой срок")
+		since := fl.Duration("since", 7*24*time.Hour, "за какой срок; цена в % недели $100 каждого поставщика отдельно")
 		parse(fl, rest)
 		st := said.NewStore(a.dir("said"))
-		days, bad, err := said.Summary(func(fn func(*said.Record)) (int, error) {
+		at := time.Now()
+		read := func(fn func(*said.Record)) (int, error) {
 			return st.Read(time.Now().Add(-*since), fn)
-		})
+		}
+		days, bad, rateErr, err := said.SummaryAt(read, at)
+		if rateErr != nil {
+			fmt.Fprintf(os.Stderr, "aguard said report: курсы подписки: %v\n", rateErr)
+		}
 		if err != nil {
 			return err
 		}
