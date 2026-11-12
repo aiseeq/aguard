@@ -124,7 +124,9 @@ func (a *app) remoteSend(cfg *remotebroken.Config, alive map[string]session.Info
 		a.note("remote", "would_send", n.Key, n.To, int64(n.Count), "events")
 		return
 	}
-	if err := a.sendAlive(alive, n.To, cfg.SendAuth, n.Message); err != nil {
+	kind := remoteGuideKind(n)
+	a.warnOtherGuideInput(kind, n.Key)
+	if err := a.sendAlive(alive, n.To, cfg.SendAuth, kind, n.Message); err != nil {
 		if a.quietFailure("remote", err) {
 			return
 		}

@@ -35,13 +35,13 @@ func (a *app) diskFastLetters(cfg *disk.Config, st *disk.State, recs []disk.Reco
 	}
 	for _, l := range st.FastLetters(cfg, now, recs, isAlive) {
 		alert := cfg.Mode == disk.ModeAlert
-		err := a.diskSend(cfg, alert, l.To, "fast", l.Text(cfg, a.home), l.Free)
+		err := a.diskSend(cfg, alert, l.To, "fast", "disk.fast", l.Text(cfg, a.home), l.Free)
 		if err == nil || a.quietFailure("disk", err) {
 			continue
 		}
 		if l.To != cfg.Lead { // хозяин кончился после проверки — лиду: срочное не должно потеряться
 			l.To, l.Offline = cfg.Lead, true
-			if err = a.diskSend(cfg, alert, l.To, "fast", l.Text(cfg, a.home), l.Free); err == nil || a.quietFailure("disk", err) {
+			if err = a.diskSend(cfg, alert, l.To, "fast", "disk.fast", l.Text(cfg, a.home), l.Free); err == nil || a.quietFailure("disk", err) {
 				continue
 			}
 		}
@@ -104,7 +104,7 @@ func (a *app) diskForecast(cfg *disk.Config, now time.Time, free int64) error {
 			}
 			msg := cfg.ForecastMessage(fc, grew, a.home)
 			for _, to := range due {
-				err := a.diskSend(cfg, cfg.Mode == disk.ModeAlert, to, "forecast", msg, free)
+				err := a.diskSend(cfg, cfg.Mode == disk.ModeAlert, to, "forecast", "disk.forecast", msg, free)
 				if err != nil && !a.quietFailure("disk", err) {
 					a.warn("disk", "письмо прогноза", "session", to, "err", err)
 				}

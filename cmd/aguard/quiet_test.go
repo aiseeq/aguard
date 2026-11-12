@@ -135,7 +135,7 @@ func TestQuietSendSocketAndExpiryWithoutReload(t *testing.T) {
 	a := quietTestApp(t)
 	sock, got := quietListener(t)
 	writeQuietState(t, a, time.Now().Add(time.Minute))
-	if err := a.sendSocket(0, "lead", sock, false, "строка письма\nтело"); !errors.Is(err, errQuiet) {
+	if err := a.sendSocket(0, "lead", sock, false, "tmp.summary", "строка письма\nтело"); !errors.Is(err, errQuiet) {
 		t.Fatalf("ошибка тихого режима: %v", err)
 	}
 	select {
@@ -146,11 +146,11 @@ func TestQuietSendSocketAndExpiryWithoutReload(t *testing.T) {
 	// срок истекает сам: файл тот же, его не переписываем и не перечитываем конфиг
 	until := time.Now().Add(300 * time.Millisecond)
 	writeQuietState(t, a, until)
-	if err := a.sendSocket(0, "lead", sock, false, "ещё тихо"); !errors.Is(err, errQuiet) {
+	if err := a.sendSocket(0, "lead", sock, false, "tmp.summary", "ещё тихо"); !errors.Is(err, errQuiet) {
 		t.Fatalf("до срока ожидался errQuiet: %v", err)
 	}
 	time.Sleep(time.Until(until) + 50*time.Millisecond)
-	if err := a.sendSocket(0, "lead", sock, false, "проверка доставки"); err != nil {
+	if err := a.sendSocket(0, "lead", sock, false, "tmp.summary", "проверка доставки"); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -167,7 +167,7 @@ func TestQuietSendMissingBrokenAndUnreadableState(t *testing.T) {
 	t.Run("нет файла", func(t *testing.T) {
 		a := quietTestApp(t)
 		sock, got := quietListener(t)
-		if err := a.sendSocket(0, "lead", sock, false, "без режима"); err != nil {
+		if err := a.sendSocket(0, "lead", sock, false, "tmp.summary", "без режима"); err != nil {
 			t.Fatal(err)
 		}
 		if msg := <-got; !strings.Contains(msg, "без режима") {
@@ -193,7 +193,7 @@ func TestQuietSendMissingBrokenAndUnreadableState(t *testing.T) {
 				}
 			}
 			sock, _ := quietListener(t)
-			err := a.sendSocket(0, "lead", sock, false, "не отправлять")
+			err := a.sendSocket(0, "lead", sock, false, "tmp.summary", "не отправлять")
 			if err == nil || errors.Is(err, errQuiet) || !strings.Contains(err.Error(), a.quietPath()) {
 				t.Fatalf("ожидалась ошибка чтения с путём, errQuiet=false: %v", err)
 			}
@@ -212,7 +212,7 @@ func TestQuietSendMissingBrokenAndUnreadableState(t *testing.T) {
 		if readErr == nil {
 			t.Skip("текущий пользователь может читать файл с mode 000")
 		}
-		err := a.sendSocket(0, "lead", "unused", false, "не отправлять")
+		err := a.sendSocket(0, "lead", "unused", false, "tmp.summary", "не отправлять")
 		if err == nil || errors.Is(err, errQuiet) || !errors.Is(err, fs.ErrPermission) || !strings.Contains(err.Error(), a.quietPath()) {
 			t.Fatalf("ожидалась ошибка прав чтения с путём, errQuiet=false: %v", err)
 		}
@@ -374,7 +374,7 @@ func TestQuietIOAlertDoneDoesNotWarnOrRecordFailure(t *testing.T) {
 	_ = liveLead(t, a)
 	cfg := iowatch.Default()
 	cfg.Mode, cfg.Lead = iowatch.ModeAlert, "lead"
-	a.ioSend(cfg, "lead", "срочно", "aguard io: фриз", 2500)
+	a.ioSend(cfg, "lead", "io.urgent", "срочно", "aguard io: фриз", 2500)
 	assertQuietAccounting(t, a, log, "io")
 }
 
@@ -420,7 +420,7 @@ func TestQuietUnixListenerReadsWholeFrame(t *testing.T) {
 	// Сохраняем покрытие простого пути записи полного кадра в настоящую папку сокета.
 	a := quietTestApp(t)
 	sock, got := quietListener(t)
-	if err := a.sendSocket(0, "lead", sock, false, "кадр"); err != nil {
+	if err := a.sendSocket(0, "lead", sock, false, "tmp.summary", "кадр"); err != nil {
 		t.Fatal(err)
 	}
 	frame := <-got
@@ -464,7 +464,7 @@ func TestQuietLogLineHasWholeFirstLine(t *testing.T) {
 	sock, _ := quietListener(t)
 	writeQuietState(t, a, time.Now().Add(time.Minute))
 	first := "aguard: " + strings.Repeat("длинная первая строка ", 20)
-	if err := a.sendSocket(0, "lead", sock, false, first+"\nтело письма"); !errors.Is(err, errQuiet) {
+	if err := a.sendSocket(0, "lead", sock, false, "tmp.summary", first+"\nтело письма"); !errors.Is(err, errQuiet) {
 		t.Fatalf("ошибка тихого режима: %v", err)
 	}
 	out := log.String()

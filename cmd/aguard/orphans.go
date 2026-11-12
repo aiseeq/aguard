@@ -142,7 +142,7 @@ func (a *app) orphansAct(ctx context.Context, cfg *orphans.Config, trees []orpha
 	}
 	a.appendJournal(lines)
 	for _, to := range slices.Sorted(maps.Keys(byTo)) {
-		if err := a.sendSocket(alive[to].Pid, alive[to].Name, alive[to].SocketPath, cfg.SendAuth, a.orphansMessage(cfg, byTo[to])); err != nil {
+		if err := a.sendSocket(alive[to].Pid, alive[to].Name, alive[to].SocketPath, cfg.SendAuth, "orphans.summary", a.orphansMessage(cfg, byTo[to])); err != nil {
 			if a.quietFailure("orphans", err) {
 				continue
 			}

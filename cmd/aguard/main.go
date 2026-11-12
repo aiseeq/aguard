@@ -210,6 +210,8 @@ func (a *app) dispatch(ctx context.Context, cmd string, args []string) error {
 		return a.codexCmd(ctx, args)
 	case "quiet":
 		return a.quietCmd(args)
+	case "guide":
+		return a.guideCmd(args)
 	default:
 		return a.dispatchLate(ctx, cmd, args)
 	}
@@ -234,6 +236,7 @@ func (a *app) dispatchLate(ctx context.Context, cmd string, args []string) error
 func usage() {
 	fmt.Fprintln(os.Stderr, `использование:
   aguard run
+  aguard guide [вид|наблюдатель]
   aguard orphans tick [-dry-run] [-min-dead 0s]
   aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
   aguard track check

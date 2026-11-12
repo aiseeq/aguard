@@ -286,7 +286,7 @@ func (a *app) saidStall(c *config.Config, st *said.State, now time.Time) {
 	}
 	alive, err := a.reg.Alive()
 	if err == nil {
-		err = a.sendAlive(alive, c.Lead, c.SendAuth, msg)
+		err = a.sendAlive(alive, c.Lead, c.SendAuth, "said.stalled", msg)
 	}
 	if err != nil {
 		if a.quietFailure("said", err) {

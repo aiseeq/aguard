@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
+	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/akit/session"
 )
@@ -300,7 +301,7 @@ func (a *app) cpuAct(cfg *cpuwatch.Config, h *cpuwatch.Host, v *cpuwatch.Verdict
 		if !h.Due(m.Name, now, cfg.Repeat.D()) {
 			continue
 		}
-		if err := a.cpuSend(cfg, alive, m.Name, cpuwatch.MasterMessage(h.Name, v, &m, now, h.First(m.Name)), int64(m.N)); err != nil {
+		if err := a.cpuSend(cfg, alive, m.Name, "cpu.owner", cpuwatch.MasterMessage(h.Name, v, &m, now, h.First(m.Name)), int64(m.N)); err != nil {
 			a.cpuFailed(m.Name, int64(m.N), err)
 			continue
 		}
@@ -313,7 +314,7 @@ func (a *app) cpuAct(cfg *cpuwatch.Config, h *cpuwatch.Host, v *cpuwatch.Verdict
 	}
 	if h.Due(leadKey+cfg.Lead, now, cfg.Repeat.D()) {
 		lead := cpuwatch.LeadMessage(h.Name, v, h.Told(), now)
-		if err := a.cpuSend(cfg, alive, cfg.Lead, lead, int64(v.Runnable)); err != nil {
+		if err := a.cpuSend(cfg, alive, cfg.Lead, "cpu.summary", lead, int64(v.Runnable)); err != nil {
 			a.cpuFailed(cfg.Lead, int64(v.Runnable), err)
 			return
 		}
@@ -369,13 +370,13 @@ func (a *app) cpuFailed(to string, value int64, err error) {
 }
 
 // cpuSend — письмо сессии to; в режиме log — только журнал «написал бы».
-func (a *app) cpuSend(cfg *cpuwatch.Config, alive map[string]session.Info, to, msg string, value int64) error {
+func (a *app) cpuSend(cfg *cpuwatch.Config, alive map[string]session.Info, to string, kind guide.Kind, msg string, value int64) error {
 	if cfg.Mode != cpuwatch.ModeAlert {
 		a.log.Info("aguard cpu: написал бы", "session", to, "msg", msg)
 		a.note("cpu", "would_send", "", to, value, "runnable")
 		return nil
 	}
-	if err := a.sendAlive(alive, to, cfg.SendAuth, msg); err != nil {
+	if err := a.sendAlive(alive, to, cfg.SendAuth, kind, msg); err != nil {
 		return err
 	}
 	a.log.Info("aguard cpu: написал", "session", to, "msg", msg)

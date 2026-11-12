@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
+	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/names"
@@ -387,13 +388,15 @@ func (s *ioService) act(acts []ioroute.Action) {
 		for _, c := range act.Cases {
 			dur = max(dur, c.DurMS)
 		}
+		kind := ioGuideKind(act.Why)
+		s.a.warnOtherGuideInput(kind, string(act.Why))
 		s.letters.Go(func() {
 			defer func() {
 				if v := recover(); v != nil {
 					s.a.warn("io", "паника письма", "err", fmt.Sprint(v), "stack", string(debug.Stack()))
 				}
 			}()
-			if s.a.ioSend(cfg, act.To, string(act.Why), msg, dur) || act.To == cfg.Lead {
+			if s.a.ioSend(cfg, act.To, kind, string(act.Why), msg, dur) || act.To == cfg.Lead {
 				return
 			}
 			// Письмо хозяину не ушло (сессия кончилась после проверки, тишина) — случаи в его тикет: иначе не дойдут никуда.
@@ -423,7 +426,7 @@ func (s *ioService) fullCases(cases []ioroute.Case) []iowatch.Case {
 
 // ioSend — письмо о фризе сессии to; mode = log — строка журнала «написал бы». Сбой и тишина — в журнал и учёт,
 // false: письмо не дошло.
-func (a *app) ioSend(cfg iowatch.Config, to, why, msg string, dur int64) bool {
+func (a *app) ioSend(cfg iowatch.Config, to string, guideKind guide.Kind, why, msg string, dur int64) bool {
 	if cfg.Mode == iowatch.ModeLog {
 		a.log.Info("aguard io: написал бы", "to", to, "why", why, "message", msg)
 		a.note("io", "написал бы", why, to, dur, "ms")
@@ -431,7 +434,7 @@ func (a *app) ioSend(cfg iowatch.Config, to, why, msg string, dur int64) bool {
 	}
 	alive, err := a.reg.Alive()
 	if err == nil {
-		err = a.sendAlive(alive, to, cfg.SendAuth, msg)
+		err = a.sendAlive(alive, to, cfg.SendAuth, guideKind, msg)
 	}
 	if err != nil {
 		if a.quietFailure("io", err) {

@@ -124,13 +124,13 @@ func (a *app) strayLetters(cfg *cpuwatch.Config, r *cpuwatch.Resolver, h *cpuHos
 	}
 	changed := false
 	for to, g := range byTo {
-		if err := a.cpuSend(cfg, alive, to, cpuwatch.StrayMessage(h.win.Name, g.list, repeat[to], g.absent), int64(len(g.list))); err != nil {
+		if err := a.cpuSend(cfg, alive, to, "cpu.stray", cpuwatch.StrayMessage(h.win.Name, g.list, repeat[to], g.absent), int64(len(g.list))); err != nil {
 			a.cpuFailed(to, int64(len(g.list)), err)
 			continue // отметки нет: следующий проход пробует снова
 		}
 		if repeat[to] && to != cfg.Lead {
 			msg := "копия, " + to + " не снял: " + cpuwatch.StrayMessage(h.win.Name, g.list, true, "")
-			if err := a.cpuSend(cfg, alive, cfg.Lead, msg, int64(len(g.list))); err != nil {
+			if err := a.cpuSend(cfg, alive, cfg.Lead, "cpu.stray_copy", msg, int64(len(g.list))); err != nil {
 				a.cpuFailed(cfg.Lead, int64(len(g.list)), err)
 			}
 		}

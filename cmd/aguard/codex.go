@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/codexwatch"
+	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/akit/codexlimit"
 )
 
@@ -195,7 +196,7 @@ func (a *app) codexFleet(cfg *codexwatch.Config, readings []codexwatch.Reading, 
 		return nil
 	}
 	if msg != "" {
-		if err := a.codexSend(cfg, msg); err != nil {
+		if err := a.codexSend(cfg, "codex.all_out", msg); err != nil {
 			if !a.quietFailure("codex", err) {
 				a.warn("codex", "письмо не отправлено", "session", cfg.Lead, "kind", "all_out", "err", err)
 				a.note("codex", "send_failed", "all_out", cfg.Lead, 1, "")
@@ -241,7 +242,9 @@ func (a *app) codexAccount(ctx context.Context, cfg *codexwatch.Config, r codexw
 			a.note("codex", string(n.Kind), "", r.Account.Name, 0, "")
 			continue
 		}
-		if err := a.codexSend(cfg, n.Message); err != nil {
+		kind := codexGuideKind(n.Kind)
+		a.warnOtherGuideInput(kind, string(n.Kind))
+		if err := a.codexSend(cfg, kind, n.Message); err != nil {
 			if a.quietFailure("codex", err) {
 				st.Unsent(n.Kind)
 				continue
@@ -291,7 +294,7 @@ func (a *app) codexDeliver(ctx context.Context, cfg *codexwatch.Config, st *code
 	for i := range st.Pending {
 		d := &st.Pending[i]
 		if !d.Lead {
-			if err := a.codexSend(cfg, d.Message); err != nil {
+			if err := a.codexSend(cfg, "codex.outcome", d.Message); err != nil {
 				if !a.quietFailure("codex", err) {
 					a.warn("codex", "исход не отправлен лиду", "err", err)
 				}
@@ -335,7 +338,7 @@ func (a *app) codexDry(r codexwatch.Reading, f codexwatch.Forecast, st *codexwat
 }
 
 // codexSend — письмо лиду; mode=log — строка «написал бы». Ошибка — письмо не ушло.
-func (a *app) codexSend(cfg *codexwatch.Config, msg string) error {
+func (a *app) codexSend(cfg *codexwatch.Config, kind guide.Kind, msg string) error {
 	if cfg.Mode == codexwatch.ModeLog {
 		a.log.Info("aguard codex: написал бы", "session", cfg.Lead, "msg", msg)
 		return nil
@@ -344,7 +347,7 @@ func (a *app) codexSend(cfg *codexwatch.Config, msg string) error {
 	if err != nil {
 		return fmt.Errorf("реестр сессий: %w", err)
 	}
-	if err := a.sendAlive(alive, cfg.Lead, cfg.SendAuth, msg); err != nil {
+	if err := a.sendAlive(alive, cfg.Lead, cfg.SendAuth, kind, msg); err != nil {
 		return err
 	}
 	a.log.Info("aguard codex: написал", "session", cfg.Lead, "msg", msg)

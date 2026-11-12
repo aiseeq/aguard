@@ -374,7 +374,7 @@ func (a *app) sigguardSend(cfg *sigguard.Config, g sigguard.Group) {
 	if a.sigSend != nil {
 		err = a.sigSend(target, msg)
 	} else {
-		err = a.sendUrgent(alive, target, cfg.SendAuth, msg)
+		err = a.sendUrgent(alive, target, cfg.SendAuth, sigguardGuideKind(g.Unparsed), msg)
 	}
 	if err != nil {
 		a.warn("sigguard", "письмо", "to", target, "err", err)
