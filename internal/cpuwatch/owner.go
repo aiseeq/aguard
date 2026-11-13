@@ -117,14 +117,24 @@ func (j *Jobs) ByUnit(unit string) (*Job, error) {
 // settleUnit — служба worker, что подводит итоги заданий (llmark tool/cmd/worker/settle.go): unit worker-*, но не боец.
 const settleUnit = "worker-settle"
 
-// JobIDs — id задания (папка в состоянии worker) по unit бойца на ноуте, по порядку проб: worker-<id>.service — id;
-// повтор worker-<id>-<n>.service — сначала имя целиком (у задания бывает число на конце: 1110-1118-2026-11-10), потом
-// без хвоста -<n>. Не unit бойца (нет префикса worker-, служба worker-settle) — nil.
+// JobIDs — id задания (папка в состоянии worker) по unit бойца на ноуте, по порядку проб. Имена unit — llmark
+// tool/cmd/worker/job.go jobUnit и roundUnit (с 12.11 3ab3552): worker-job-<id>.service — id; заход
+// worker-round-<id>-<n>.service — id без хвоста -<n>. Прежний вид worker-<id>.service и повтор worker-<id>-<n>.service —
+// сначала имя целиком (у задания бывает число на конце: 1110-1118-2026-11-10), потом без хвоста -<n>. Не unit бойца
+// (нет префикса worker-, служба worker-settle) — nil.
 func JobIDs(unit string) []string {
 	unit = strings.TrimSuffix(UnescapeUnit(unit), ".service")
 	id, ok := strings.CutPrefix(unit, "worker-")
-	if !ok || unit == settleUnit {
+	if !ok || unit == settleUnit || id == "" {
 		return nil
+	}
+	if job, ok := strings.CutPrefix(id, "job-"); ok && job != "" {
+		return []string{job}
+	}
+	if round, ok := strings.CutPrefix(id, "round-"); ok {
+		if i := strings.LastIndexByte(round, '-'); i > 0 && isPid(round[i+1:]) {
+			return []string{round[:i]}
+		}
 	}
 	i := strings.LastIndexByte(id, '-')
 	if i <= 0 || !isPid(id[i+1:]) { // хвоста повтора нет
@@ -173,6 +183,11 @@ func UnescapeUnit(s string) string {
 func (j *Jobs) ByUnitPrefix(unit string) (*Job, error) {
 	cut := UnescapeUnit(unit)
 	id, ok := strings.CutPrefix(cut, "worker-")
+	if rest, kind := strings.CutPrefix(id, "job-"); kind { // имена unit с 12.11: worker-job-<id>, worker-round-<id>-<n>
+		id = rest
+	} else if rest, kind := strings.CutPrefix(id, "round-"); kind {
+		id = rest
+	}
 	if !ok || len(id) < 10 {
 		return nil, nil
 	}

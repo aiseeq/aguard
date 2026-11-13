@@ -25,27 +25,27 @@ import (
 
 func TestRouteSigguard(t *testing.T) {
 	dir := t.TempDir()
-	jobdir := filepath.Join(dir, "job-123")
+	jobdir := filepath.Join(dir, "1113-0001-sig")
 	if err := os.MkdirAll(jobdir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(jobdir, "job.json"), []byte(`{"id":"job-123","master":"worker-master"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(jobdir, "job.json"), []byte(`{"id":"1113-0001-sig","master":"worker-master"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	jobs := &cpuwatch.Jobs{Dir: dir}
 	alive := map[string]session.Info{"session-a": {Pid: 42, Name: "session-a"}, "worker-master": {Pid: 43, Name: "worker-master"}}
-	for _, tc := range []struct{ unit, root, want, job string }{{"agent-session-42.scope", "42", "session-a", ""}, {"graft-heavy-1.scope", "42", "session-a", ""}, {"run-u123.scope", "42", "session-a", ""}, {"worker-io-abc.scope", "42", "session-a", ""}, {"worker-settle.service", "42", "session-a", ""}, {"app-foo.scope", "42", "session-a", ""}, {"worker-job-123.service", "42", "worker-master", "job-123"}, {"worker-io-3428722.service", "42", "session-a", ""}, {"run-any.scope", "999", "leader", ""}, {"run-u123.scope", "999", "leader", ""}, {"agent-old-9.scope", "999", "leader", ""}} {
+	for _, tc := range []struct{ unit, root, want, job string }{{"agent-session-42.scope", "42", "session-a", ""}, {"graft-heavy-1.scope", "42", "session-a", ""}, {"run-u123.scope", "42", "session-a", ""}, {"worker-io-abc.scope", "42", "session-a", ""}, {"worker-settle.service", "42", "session-a", ""}, {"app-foo.scope", "42", "session-a", ""}, {"worker-job-1113-0001-sig.service", "42", "worker-master", "1113-0001-sig"}, {"worker-io-3428722.service", "42", "session-a", ""}, {"run-any.scope", "999", "leader", ""}, {"run-u123.scope", "999", "leader", ""}, {"agent-old-9.scope", "999", "leader", ""}} {
 		got, job := sigguardRoute(sigguard.Deny{Unit: tc.unit, Root: tc.root}, "leader", alive, jobs)
 		if got != tc.want || job != tc.job {
 			t.Errorf("%s: got %s %s, want %s %s", tc.unit, got, job, tc.want, tc.job)
 		}
 	}
-	got, job := sigguardRoute(sigguard.Deny{Unit: "worker-job-123.service"}, "leader", map[string]session.Info{}, jobs)
-	if got != "leader" || job != "job-123" {
+	got, job := sigguardRoute(sigguard.Deny{Unit: "worker-job-1113-0001-sig.service"}, "leader", map[string]session.Info{}, jobs)
+	if got != "leader" || job != "1113-0001-sig" {
 		t.Fatalf("dead master route = %s %s", got, job)
 	}
 	message := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{{Comm: "worker", PID: 7}}, Count: 1, Lines: 1}, job)
-	if !strings.Contains(message, "Задание worker job-123") {
+	if !strings.Contains(message, "Задание worker 1113-0001-sig") {
 		t.Fatalf("worker id missing from message: %s", message)
 	}
 }
@@ -53,11 +53,11 @@ func TestRouteSigguard(t *testing.T) {
 // TestRouteSigguardOwner — отказ по бойцу идёт запустившей сессии (owner, жива по pid и start), затем мастеру, затем лиду.
 func TestRouteSigguardOwner(t *testing.T) {
 	dir := t.TempDir()
-	jobdir := filepath.Join(dir, "job-7")
+	jobdir := filepath.Join(dir, "1113-0007-sig")
 	if err := os.MkdirAll(jobdir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"id":"job-7","master":"beta-master","owner":{"pid":50,"start":"777","name":"alpha-admin"},"unit":"worker-job-7"}`
+	body := `{"id":"1113-0007-sig","master":"beta-master","owner":{"pid":50,"start":"777","name":"alpha-admin"},"unit":"worker-job-1113-0007-sig"}`
 	if err := os.WriteFile(filepath.Join(jobdir, "job.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -79,9 +79,9 @@ func TestRouteSigguardOwner(t *testing.T) {
 		{"owner нет, мастер жив", map[string]session.Info{"beta-master": master}, "beta-master"},
 		{"никого", map[string]session.Info{}, "leader"},
 	} {
-		got, job := sigguardRoute(sigguard.Deny{Unit: "worker-job-7.service", Root: "50"}, "leader", tc.alive, jobs)
-		if got != tc.want || job != "job-7" {
-			t.Errorf("%s: got %s %s, want %s job-7", tc.name, got, job, tc.want)
+		got, job := sigguardRoute(sigguard.Deny{Unit: "worker-job-1113-0007-sig.service", Root: "50"}, "leader", tc.alive, jobs)
+		if got != tc.want || job != "1113-0007-sig" {
+			t.Errorf("%s: got %s %s, want %s 1113-0007-sig", tc.name, got, job, tc.want)
 		}
 	}
 }
@@ -90,18 +90,18 @@ func TestRouteSigguardOwner(t *testing.T) {
 func TestRouteSigguardOwnerEmpty(t *testing.T) {
 	for _, owner := range []string{`{"pid":50,"start":""}`, `{"pid":0,"start":""}`, `null`} {
 		dir := t.TempDir()
-		jobdir := filepath.Join(dir, "job-8")
+		jobdir := filepath.Join(dir, "1113-0008-sig")
 		if err := os.MkdirAll(jobdir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		body := `{"id":"job-8","master":"beta-master","owner":` + owner + `}`
+		body := `{"id":"1113-0008-sig","master":"beta-master","owner":` + owner + `}`
 		if err := os.WriteFile(filepath.Join(jobdir, "job.json"), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		alive := map[string]session.Info{"blank": {Pid: 50, Name: "blank"}, "zero": {Name: "zero"}}
-		got, job := sigguardRoute(sigguard.Deny{Unit: "worker-job-8.service"}, "leader", alive, &cpuwatch.Jobs{Dir: dir})
-		if got != "leader" || job != "job-8" {
-			t.Errorf("owner %s: got %s %s, want leader job-8", owner, got, job)
+		got, job := sigguardRoute(sigguard.Deny{Unit: "worker-job-1113-0008-sig.service"}, "leader", alive, &cpuwatch.Jobs{Dir: dir})
+		if got != "leader" || job != "1113-0008-sig" {
+			t.Errorf("owner %s: got %s %s, want leader 1113-0008-sig", owner, got, job)
 		}
 	}
 }

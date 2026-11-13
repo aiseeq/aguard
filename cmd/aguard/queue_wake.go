@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/queue"
 )
 
@@ -120,28 +121,14 @@ func (a *app) workerOwners() (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
+	jobs := &cpuwatch.Jobs{Dir: filepath.Join(a.home, ".local/state/worker")}
 	owners := map[string]bool{}
 	for _, unit := range units {
-		id, ok := strings.CutPrefix(strings.TrimSuffix(unit, ".service"), "worker-")
-		if !ok || id == "" || strings.ContainsAny(id, "/\\") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(a.home, ".local/state/worker", id, "job.json"))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
+		job, err := jobs.ByUnit(unit)
 		if err != nil {
-			return nil, fmt.Errorf("задание бойца %s: %w", id, err)
+			return nil, fmt.Errorf("задание бойца %s: %w", unit, err)
 		}
-		var job struct {
-			Owner struct {
-				Name string `json:"name"`
-			} `json:"owner"`
-		}
-		if err = json.Unmarshal(data, &job); err != nil {
-			return nil, fmt.Errorf("задание бойца %s: %w", id, err)
-		}
-		if job.Owner.Name != "" {
+		if job != nil && job.Owner != nil && job.Owner.Name != "" {
 			owners[job.Owner.Name] = true
 		}
 	}

@@ -34,16 +34,16 @@ func wakeSocketWorld(t *testing.T, worker bool) (*app, queue.View, []queue.Ticke
 	}
 	a.queueWorkers = func() ([]string, error) {
 		if worker {
-			return []string{"worker-job.service"}, nil
+			return []string{"worker-job-1113-0946-confirm-sudo-cached.service"}, nil
 		}
 		return nil, nil
 	}
 	if worker {
-		path := filepath.Join(a.home, ".local/state/worker/job/job.json")
+		path := filepath.Join(a.home, ".local/state/worker/1113-0946-confirm-sudo-cached/job.json")
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte(`{"owner":{"name":"lead"}}`), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(`{"master":"lead","unit":"worker-job-1113-0946-confirm-sudo-cached","owner":{"name":"lead"}}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -270,15 +270,15 @@ func TestQueueViewWakeWiring(t *testing.T) {
 	busy := map[string]bool{}
 	b.a.queueWorkers = func() ([]string, error) {
 		if busy["m"] {
-			return []string{"worker-job.service"}, nil
+			return []string{"worker-job-1113-0946-confirm-sudo-cached.service"}, nil
 		}
 		return nil, nil
 	}
-	jobPath := filepath.Join(b.dir, ".local/state/worker/job/job.json")
+	jobPath := filepath.Join(b.dir, ".local/state/worker/1113-0946-confirm-sudo-cached/job.json")
 	if err = os.MkdirAll(filepath.Dir(jobPath), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(jobPath, []byte(`{"owner":{"name":"m"}}`), 0600); err != nil {
+	if err = os.WriteFile(jobPath, []byte(`{"master":"m","unit":"worker-job-1113-0946-confirm-sudo-cached","owner":{"name":"m"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	alive := map[string]session.Info{"m": {Pid: 7, SessionID: "s1", Name: "m"}}

@@ -428,7 +428,11 @@ func TestJobIDs(t *testing.T) {
 		"worker-1107-1220-dups-0.service":            {"1107-1220-dups-0"},
 		"worker-12":                                  {"12"},
 		"worker-settle.service":                      nil,
-		"foo.service":                                nil,
+		// имена llmark worker с 12.11 (3ab3552): jobUnit и roundUnit
+		"worker-job-1113-0946-confirm-sudo-cached.service": {"1113-0946-confirm-sudo-cached"},
+		"worker-round-1111-2150-runsh-g4-7.service":        {"1111-2150-runsh-g4"},
+		"worker-round-1110-1118-2026-11-10-3.service":      {"1110-1118-2026-11-10"},
+		"foo.service": nil,
 	} {
 		if got := JobIDs(unit); !slices.Equal(got, want) {
 			t.Errorf("%s: %q, ждали %q", unit, got, want)
@@ -634,5 +638,41 @@ func TestProcessStatExpectedReadErrorsAreSkipped(t *testing.T) {
 	}
 	if !IsTransientProcessError(fs.ErrPermission) || !IsTransientProcessError(os.ErrNotExist) || IsTransientProcessError(errors.New("malformed CLAUDE_PID")) {
 		t.Fatal("candidate error classification changed")
+	}
+}
+
+// TestByUnitNewNames — задание по unit настоящего вида llmark worker (worker-job-<id>, worker-round-<id>-<n>), целым
+// именем и обрезком agent-signal-guard.
+func TestByUnitNewNames(t *testing.T) {
+	dir := t.TempDir()
+	write := func(id, unit, master string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, id), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"id":"` + id + `","master":"` + master + `","unit":"` + unit + `"}`
+		if err := os.WriteFile(filepath.Join(dir, id, "job.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("1113-0946-confirm-sudo-cached", "worker-job-1113-0946-confirm-sudo-cached", "graft-master")
+	write("1111-2150-runsh-g4", "worker-round-1111-2150-runsh-g4-7", "dream-master")
+	for unit, want := range map[string]string{
+		"worker-job-1113-0946-confirm-sudo-cached.service": "graft-master",
+		"worker-round-1111-2150-runsh-g4-7.service":        "dream-master",
+	} {
+		j, err := (&Jobs{Dir: dir}).ByUnit(unit)
+		if err != nil || j == nil || j.Master != want {
+			t.Errorf("ByUnit(%q) = %+v, %v, ждали %s", unit, j, err, want)
+		}
+	}
+	for unit, want := range map[string]string{
+		"worker-job-1113-0946-confirm-sud":   "graft-master",
+		"worker-round-1111-2150-runsh-g4-7.": "dream-master",
+	} {
+		j, err := (&Jobs{Dir: dir}).ByUnitPrefix(unit)
+		if err != nil || j == nil || j.Master != want {
+			t.Errorf("ByUnitPrefix(%q) = %+v, %v, ждали %s", unit, j, err, want)
+		}
 	}
 }
