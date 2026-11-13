@@ -259,20 +259,28 @@ func overlapShare(from, at, start, end int64) float64 {
 // случая не его), простой вне потолка — целиком: фриз и есть этот простой, равномерным внутри записи он не бывает
 // (проверка 08.11 14:27: plasmashell 330 мс в записи с долей 0,6 иначе дал бы 198 мс — ниже порога, без письма).
 // Запись — дельта с прошлого прохода: медленный проход (тикер пропустил такты) покрывает несколько секунд, и
-// скорость упора — байты за весь этот промежуток. Первая запись — за номинальный detail.
+// скорость упора — байты за весь этот промежуток. Интервал первой записи передаётся отдельно:
+// он может начинаться до окна, если предыдущая запись была раньше.
 //
 // Не видит (известные пределы): потолок на самом интерфейсе (его ожидание — тоже «под потолком»; на 08.11 число в
 // io.max есть только у agents-evals.slice) и ожидание блокировки ФС, которую держит придержанный писатель, — оно не
 // в PSI io full ждущего. Срезы интерфейса (guiwatch) детектор не сверяет.
 func cappedWait(details []Step, start, end time.Time, detail time.Duration, durMS, busyMS int64) capVerdict {
+	return cappedWaitFirstInterval(details, start, end, detail, durMS, busyMS)
+}
+
+func cappedWaitFirstInterval(details []Step, start, end time.Time, firstInterval time.Duration, durMS, busyMS int64) capVerdict {
 	acc := newCapAcc()
 	var parts []capPart
 	var owners []capOwner
 	for i := range details {
 		d := &details[i]
-		interval := detail
+		interval := firstInterval
 		if i > 0 {
-			interval = max(detail, d.At.Sub(details[i-1].At))
+			interval = d.At.Sub(details[i-1].At)
+			if interval <= 0 {
+				interval = firstInterval
+			}
 		}
 		share := overlapShare(d.At.Add(-interval).UnixNano(), d.At.UnixNano(), start.UnixNano(), end.UnixNano())
 		if share == 0 {

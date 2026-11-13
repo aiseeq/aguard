@@ -242,6 +242,7 @@ exclude = "tmux.*|screen|SCREEN|catatonit"   # regexp по comm целиком: 
 mode = "alert"       # off | log (только журнал «написал бы») | alert
 step = "100ms"
 detail = "1s"        # проход по cgroup и процессам
+detail_idle = "5s"   # подробный проход в покое; при фризе используется detail
 ring = "5m"
 trigger = 0.5        # шаг с простоем: PSI full io или mem не меньше этой доли шага
 gap = "300ms"        # спокойный промежуток до gap случай не делит

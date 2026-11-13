@@ -198,9 +198,10 @@ type Recorder struct {
 	hasStep bool
 	waiting []Case // закрыты, ждут детальной записи за свой конец
 	// Ряд, профили и живое состояние службы (Attach); у `aguard io record` и import их нет.
-	series   *Series
-	profiles *Profiles
-	live     *Live
+	series     *Series
+	profiles   *Profiles
+	live       *Live
+	lastDetail time.Time
 }
 
 func NewRecorder(cfg Config) *Recorder {
@@ -215,6 +216,9 @@ func (r *Recorder) SetConfig(cfg Config) { r.cfg = cfg }
 func (r *Recorder) Attach(series *Series, profiles *Profiles, live *Live) {
 	r.series, r.profiles, r.live = series, profiles, live
 }
+
+// Pressure reports whether a fast step currently belongs to an open case.
+func (r *Recorder) Pressure() bool { return r.open != nil }
 
 // Step кладёт быстрый шаг; готовые случаи (с виновниками) возвращаются.
 func (r *Recorder) Step(s Step) []Case {
@@ -269,24 +273,38 @@ func (r *Recorder) Step(s Step) []Case {
 		}
 		r.live.step(&s, stallUS, interval, open, closed)
 	}
-	return r.ready(s.At.Add(-r.cfg.Detail.D() - step))
+	covered := s.At.Add(-r.cfg.DetailIdle.D() - r.cfg.Detail.D() - step)
+	if r.lastDetail.After(covered) {
+		covered = r.lastDetail
+	}
+	return r.ready(covered)
 }
 
 // Detail кладёт детальную запись в буфер, в ряд (Dirty, Writeback, память), профили и живое состояние.
 func (r *Recorder) Detail(s Step) {
-	r.ring.Add(Record{Kind: KindDetail, Step: s})
+	interval := r.cfg.Detail.D()
+	if !r.lastDetail.IsZero() {
+		interval = s.At.Sub(r.lastDetail)
+	}
+	r.lastDetail = s.At
+	r.ring.Add(Record{Kind: KindDetail, detailInterval: interval, Step: s})
 	if r.series != nil {
 		r.series.detail(&s)
 	}
 	if r.profiles != nil {
-		r.profiles.detail(&s, r.cfg.Detail.D())
+		r.profiles.detail(&s, interval)
 	}
 	if r.live != nil {
-		r.live.detail(&s, r.cfg.Detail.D())
+		r.live.detail(&s, interval)
 		if o := r.open; o != nil {
-			// идущий случай — по своим детальным записям, как закрытый в finish; запись до начала — для интервала первой
-			detail := r.cfg.Detail.D()
-			v := cappedWait(r.ring.Details(o.start.Add(-2*detail), s.At), o.start, o.last, detail, o.last.Sub(o.start).Milliseconds(), o.sum.ticks)
+			// Берём предыдущую запись даже при покое длиннее detail: её интервал может пересечь начало случая.
+			lookback := max(interval, r.cfg.DetailIdle.D())
+			details := r.ring.Details(o.start.Add(-2*lookback), s.At)
+			firstInterval := interval
+			if len(details) > 0 {
+				firstInterval = r.ring.DetailInterval(details[0].At, firstInterval)
+			}
+			v := cappedWaitFirstInterval(details, o.start, o.last, firstInterval, o.last.Sub(o.start).Milliseconds(), o.sum.ticks)
 			r.live.setOpenCapped(o.start, v.Capped)
 		}
 	}
@@ -313,7 +331,9 @@ func (r *Recorder) ready(covered time.Time) []Case {
 func (r *Recorder) finish(c *Case) {
 	c.Quiet = quietCase(c, r.cfg.QuietBytes)
 	from := c.Start.Add(-r.cfg.Context.D())
-	details := r.ring.Details(from, c.End.Add(r.cfg.Detail.D()))
+	// Closing is detected on a fast step after the gap threshold; the step boundary can add
+	// one more step. The next idle detail can then land detail_idle after closure.
+	details := r.ring.Details(from, c.End.Add(r.cfg.DetailIdle.D()+r.cfg.Gap.D()+2*r.cfg.Step.D()))
 	for i := range details {
 		c.Dirty = max(c.Dirty, details[i].Dirty)
 		c.Writeback = max(c.Writeback, details[i].Writeback)
@@ -340,7 +360,11 @@ func (r *Recorder) finish(c *Case) {
 		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
 		CgroupDirty: Rank(sum.CgroupDirty, caseTop), CgroupOwn: map[string]int64{}}
 	c.Culprits.Foreign, _ = sum.ForeignOver(c.Culprits.Main)
-	v := cappedWait(details, c.Start, c.End, r.cfg.Detail.D(), c.DurMS, c.BusyMS)
+	firstInterval := r.cfg.Detail.D()
+	if len(details) > 0 {
+		firstInterval = r.ring.DetailInterval(details[0].At, firstInterval)
+	}
+	v := cappedWaitFirstInterval(details, c.Start, c.End, firstInterval, c.DurMS, c.BusyMS)
 	c.Capped, c.OutsideIdleMS, c.Culprits.CappedIdle = v.Capped, v.OutsideMS, v.Who
 	for i := range details {
 		c.Culprits.CleanerMS += details[i].CleanerMS
@@ -350,8 +374,8 @@ func (r *Recorder) finish(c *Case) {
 			c.Culprits.CgroupOwn[g.Name] = sum.CgroupDirty[g.Name]
 		}
 	}
-	if len(details) > 0 { // детальная запись — дельта за (At − Detail, At]
-		c.Culprits.DeviceWrite = r.ring.DeviceWrite(details[0].At.Add(-r.cfg.Detail.D()), details[len(details)-1].At)
+	if len(details) > 0 { // детальная запись — дельта за интервал предыдущей записи
+		c.Culprits.DeviceWrite = r.ring.DeviceWrite(details[0].At.Add(-firstInterval), details[len(details)-1].At)
 		var cgroups int64
 		for _, v := range sum.CgroupWrite {
 			cgroups += v

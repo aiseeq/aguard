@@ -62,6 +62,7 @@ const (
 // (Profiles.swap) у начала первого прохода и у последнего прохода, где cgroup была видна.
 type cgroupAcc struct {
 	first, last                          time.Time
+	firstInterval                        time.Duration
 	rd, wr, peakRd, peakWr, ioFull, swap int64
 	cpuUS, peakCPU, peakAnon, majflt     int64
 	swapFrom, swapTo                     int64
@@ -90,7 +91,7 @@ func (p *Profiles) detail(s *Step, interval time.Duration) {
 		g := &s.Cgroups[i]
 		acc := p.open[g.Path]
 		if acc == nil {
-			acc = &cgroupAcc{first: s.At, swapFrom: p.passSwap}
+			acc = &cgroupAcc{first: s.At, firstInterval: interval, swapFrom: p.passSwap}
 			p.open[g.Path] = acc
 		}
 		acc.last, acc.swapTo = s.At, p.swap
@@ -144,7 +145,11 @@ func (p *Profiles) End(gone map[string]string, interval time.Duration) []Profile
 			continue
 		}
 		delete(p.open, path)
-		start := acc.first.Add(-interval)
+		firstInterval := acc.firstInterval
+		if firstInterval <= 0 {
+			firstInterval = interval
+		}
+		start := acc.first.Add(-firstInterval)
 		pr := Profile{Name: CgroupName(path), Path: path, Kind: gone[path], Start: start, End: acc.last,
 			DurMS: acc.last.Sub(start).Milliseconds(), ReadB: acc.rd, WriteB: acc.wr, PeakReadBps: acc.peakRd,
 			PeakWriteBps: acc.peakWr, IOFullMS: acc.ioFull / 1000, SwapIn: acc.swap, CPUMS: acc.cpuUS / 1000,

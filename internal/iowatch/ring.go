@@ -54,6 +54,28 @@ func (r *Ring) Details(from, to time.Time) []Step {
 	return out
 }
 
+// DetailInterval — длительность детальной записи at по соседней предыдущей записи в кольце.
+// Для первой записи наблюдения используется fallback.
+func (r *Ring) DetailInterval(at time.Time, fallback time.Duration) time.Duration {
+	var previous time.Time
+	for i := range r.count {
+		rec := &r.records[(r.head+i)%len(r.records)]
+		if rec.Kind != KindDetail {
+			continue
+		}
+		if rec.At.Equal(at) && rec.detailInterval > 0 {
+			return rec.detailInterval
+		}
+		if rec.At.Before(at) && rec.At.After(previous) {
+			previous = rec.At
+		}
+	}
+	if !previous.IsZero() && at.After(previous) {
+		return at.Sub(previous)
+	}
+	return fallback
+}
+
 // DeviceWrite — запись устройства по быстрым шагам с временем в (from, to].
 func (r *Ring) DeviceWrite(from, to time.Time) int64 {
 	var sum int64

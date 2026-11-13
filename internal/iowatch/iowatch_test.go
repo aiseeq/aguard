@@ -918,15 +918,20 @@ func TestCulpritsMainByProcessWrite(t *testing.T) {
 // Простои через промежуток больше gap — два случая; короче case_min — без виновников; случай
 // отдаётся, только когда детальная запись за его конец уже пришла.
 func TestCaseSplitByGapShortWithoutCulpritsWaitsDetail(t *testing.T) {
-	r := NewRecorder(Default())
+	cfg := Default()
+	cfg.DetailIdle = cfg.Detail // этот сценарий проверяет ожидание при секундном сборе
+	r := NewRecorder(cfg)
 	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
 	idle := make([]int64, 40)
 	idle[5], idle[10] = 80_000, 80_000 // 10 − 5 = 500 мс > gap 300 + шаг
 	var got []Case
 	for i, v := range idle {
 		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
+		if i%10 == 0 {
+			r.Detail(Step{At: at})
+		}
 		cases := r.Step(Step{At: at, IOFullUS: v})
-		if len(cases) > 0 && i < 16 {
+		if len(cases) > 0 && i < 10 {
 			t.Fatalf("случай отдан на шаге %d, до детальной записи за его конец", i)
 		}
 		got = append(got, cases...)
