@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -61,6 +62,19 @@ type Config struct {
 	Night    night.Config          `toml:"night"` // Сон, Дайджест и окна доверия
 	Sigguard sigguard.Config       `toml:"sigguard"`
 	Ceiling  ceilingwatch.Config   `toml:"ceiling"`
+	Quiet    QuietConfig           `toml:"quiet"`
+}
+
+// QuietConfig — окно тишины после загрузки машины.
+type QuietConfig struct {
+	AfterBoot policy.Duration `toml:"after_boot"`
+}
+
+func (c QuietConfig) Validate() error {
+	if c.AfterBoot.D() < 0 {
+		return fmt.Errorf("quiet.after_boot должен быть не меньше нуля")
+	}
+	return nil
 }
 
 // Path — путь конфига в домашней папке.
@@ -93,6 +107,7 @@ func Default(home string) Config {
 		Night:      night.Default(home),
 		Sigguard:   sigguard.Default(),
 		Ceiling:    ceilingwatch.Default(),
+		Quiet:      QuietConfig{AfterBoot: policy.Duration(45 * time.Minute)},
 	}
 }
 
@@ -128,6 +143,9 @@ func Load(path, home string, uid int) (Config, error) {
 			}
 			return c, fmt.Errorf("%s: неизвестные ключи: %s", path, strings.Join(keys, ", "))
 		}
+	}
+	if err := c.Quiet.Validate(); err != nil {
+		return c, err
 	}
 	return c, c.finish(home, uid)
 }

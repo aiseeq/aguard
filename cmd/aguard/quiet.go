@@ -24,6 +24,8 @@ const quietHelp = `aguard quiet — тишина писем сторожа се�
   ждут её конца и уходят обычным повтором: queue, night, cpu, tmp, codex, disk, said
   пропадают: io, bgtask, remote, orphans
 
+После загрузки действует автоматическое окно [quiet] after_boot (по умолчанию 45m). quiet off снимает его до следующей загрузки.
+
 busy --quiet — другое: придерживает тяжёлую работу, писем не глушит.
 `
 
@@ -45,7 +47,10 @@ func (a *app) quietCmd(args []string) error {
 }
 
 func (a *app) quietStatus() error {
-	state, active, err := a.readQuiet()
+	if err := a.loadQuietConfig(); err != nil {
+		a.quietBootWarning("config", fmt.Errorf("конфиг: %w", err))
+	}
+	state, active, err := a.readQuietAt(a.currentTime())
 	if err != nil {
 		return err
 	}
@@ -53,8 +58,12 @@ func (a *app) quietStatus() error {
 		fmt.Fprintln(a.out, "громко")
 		return nil
 	}
-	left := time.Until(state.Until).Round(time.Second)
-	fmt.Fprintf(a.out, "тихо до %s (осталось %s): %s\n", state.Until.Local().Format("2006-01-02 15:04:05 MST"), left, state.Why)
+	left := state.Until.Sub(a.currentTime()).Round(time.Second)
+	if state.BootWindow {
+		fmt.Fprintf(a.out, "тихо до %s (осталось %s): %s\n", state.Until.Local().Format("15:04:05 MST"), left, state.Why)
+	} else {
+		fmt.Fprintf(a.out, "тихо до %s (осталось %s): %s\n", state.Until.Local().Format("2006-01-02 15:04:05 MST"), left, state.Why)
+	}
 	return nil
 }
 
@@ -112,11 +121,37 @@ func (a *app) quietOff(args []string) error {
 	if len(args) != 0 {
 		return errors.New("aguard quiet off: лишние аргументы")
 	}
-	if err := os.Remove(a.quietPath()); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(a.out, "не был включён")
-			return nil
+	if err := a.loadQuietConfig(); err != nil {
+		a.quietBootWarning("config", fmt.Errorf("конфиг: %w", err))
+	}
+	now := a.currentTime()
+	_, bootID, bootActive, bootErr := a.quietBootWindowAt(now)
+	if bootErr != nil {
+		a.quietBootWarning(quietBootErrorReason(bootErr), bootErr)
+	}
+	stateExists := false
+	if _, err := os.Stat(a.quietPath()); err == nil {
+		stateExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("чтение %s: %w", a.quietPath(), err)
+	}
+	if !stateExists && !bootActive {
+		fmt.Fprintln(a.out, "не был включён")
+		return nil
+	}
+	if bootActive {
+		if err := os.MkdirAll(a.dir("quiet"), 0o700); err != nil {
+			return fmt.Errorf("создание папки тихого режима: %w", err)
 		}
+		b, marshalErr := json.Marshal(quietBootOff{BootID: bootID})
+		if marshalErr != nil {
+			return fmt.Errorf("кодирование отметки тихого режима: %w", marshalErr)
+		}
+		if err := record.WriteFileAtomic(a.quietBootOffPath(), append(b, '\n'), 0o600); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(a.quietPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("удаление %s: %w", a.quietPath(), err)
 	}
 	fmt.Fprintln(a.out, "громко")

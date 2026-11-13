@@ -14,8 +14,8 @@ type Kind string
 type Quiet string
 
 const (
-	QuietWait Quiet = "ждёт конца aguard quiet; повторная попытка — при следующем проходе, пока событие актуально"
-	QuietPass Quiet = "идёт сквозь aguard quiet"
+	QuietWait Quiet = "ждёт конца тихого режима; повторная попытка — при следующем проходе, пока событие актуально"
+	QuietPass Quiet = "идёт сквозь тихий режим"
 	QuietLose Quiet = "теряется в тишине; автоматического повтора нет, новое письмо возможно при новом событии"
 )
 

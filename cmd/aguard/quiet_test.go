@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,13 +24,20 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
 )
 
 func quietTestApp(t *testing.T) *app {
 	t.Helper()
 	home := t.TempDir()
-	return &app{home: home, stateDir: filepath.Join(home, "state"), log: slog.New(slog.NewTextHandler(io.Discard, nil)), out: io.Discard}
+	return &app{
+		home: home, stateDir: filepath.Join(home, "state"), log: slog.New(slog.NewTextHandler(io.Discard, nil)), out: io.Discard,
+		quietRuntime: &quietRuntime{afterBoot: 45 * time.Minute},
+		bootTime:     func() (time.Time, error) { return time.Now().Add(-48 * time.Hour), nil },
+		bootID:       func() (string, error) { return "test-boot", nil },
+	}
 }
 
 func quietObservedApp(t *testing.T) (*app, *bytes.Buffer) {
@@ -262,6 +270,9 @@ func TestQuietCommandValidationAndAtomicState(t *testing.T) {
 	if err := json.Unmarshal(b, &state); err != nil || state.Why != "проверка" || state.By != "alice" || state.At.IsZero() {
 		t.Fatalf("состояние: %+v, ошибка %v", state, err)
 	}
+	if strings.Contains(string(b), "boot_id") || strings.Contains(string(b), "boot_off") {
+		t.Fatalf("state.json перестал быть совместимым со старым форматом: %s", b)
+	}
 	if mode, err := os.Stat(a.quietPath()); err != nil || mode.Mode().Perm() != 0o600 {
 		t.Fatalf("права файла: %v, ошибка %v", mode, err)
 	}
@@ -329,6 +340,586 @@ func TestQuietQueueNoticeRemainsPendingUntilSent(t *testing.T) {
 	}
 	if string(before) == string(after) {
 		t.Fatal("queue не подтвердила доставленное письмо")
+	}
+}
+
+func TestQuietAfterBootQueueWaitsUrgentPassesAndRetries(t *testing.T) {
+	a := quietTestApp(t)
+	boot := time.Date(2026, 11, 13, 8, 0, 0, 0, time.Local)
+	now := boot.Add(10 * time.Minute)
+	a.now = func() time.Time { return now }
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	a.bootID = func() (string, error) { return "boot-one", nil }
+	a.cfgPath = filepath.Join(a.home, "config.toml")
+	if err := os.WriteFile(a.cfgPath, []byte("[quiet]\nafter_boot = \"45m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.setQuietWindow(45 * time.Minute)
+
+	urgentSock, urgentGot := quietListener(t)
+	if err := a.sendUrgent(map[string]session.Info{"lead": {Name: "lead", SocketPath: urgentSock}}, "lead", false, "sigguard.denied", "авария"); err != nil {
+		t.Fatalf("аварийное письмо через окно: %v", err)
+	}
+	select {
+	case msg := <-urgentGot:
+		if !strings.Contains(msg, "авария") {
+			t.Fatalf("аварийное письмо: %s", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("аварийное письмо не прошло через окно")
+	}
+
+	now = boot.Add(10 * time.Minute)
+	queueSock, queueGot := quietListener(t)
+	alive := map[string]session.Info{"lead": {Name: "lead", SocketPath: queueSock}}
+	view := queue.View{Now: now, Lead: "lead", Serious: func(string) bool { return true }, Alive: func(string) bool { return true }}
+	state := queue.State{}
+	ticket := queue.Ticket{Key: "p/c", Project: "p", Slug: "c", Title: "critical", Prio: "CRIT", Status: "открыт"}
+	_ = state.Step([]queue.Ticket{ticket}, view)
+	notices := state.Step([]queue.Ticket{ticket}, view)
+	if len(notices) == 0 {
+		notices = state.Step([]queue.Ticket{ticket}, view)
+	}
+	if len(notices) == 0 {
+		t.Fatal("queue не создала уведомление")
+	}
+	a.deliverQueueNotices(&config.Config{Queue: queue.Config{Mode: queue.ModeOn}}, alive, &state, view, notices, now)
+	if !state.Tickets[ticket.Key].Crit.At.IsZero() {
+		t.Fatal("queue подтвердила уведомление в окне загрузки")
+	}
+
+	now = boot.Add(46 * time.Minute)
+	view.Now = now
+	notices = state.Step([]queue.Ticket{ticket}, view)
+	if len(notices) == 0 {
+		t.Fatal("после окна не осталось повтора queue")
+	}
+	a.deliverQueueNotices(&config.Config{Queue: queue.Config{Mode: queue.ModeOn}}, alive, &state, view, notices, now)
+	select {
+	case msg := <-queueGot:
+		if !strings.Contains(msg, "critical") {
+			t.Fatalf("неожиданное письмо queue: %s", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queue не повторила письмо после окна")
+	}
+}
+
+func TestQuietAfterBootOffAndExplicitQuietPrecedence(t *testing.T) {
+	a := quietTestApp(t)
+	now := time.Now().Truncate(time.Second)
+	boot := now.Add(-10 * time.Minute)
+	a.now = func() time.Time { return now }
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	a.bootID = func() (string, error) { return "boot-one", nil }
+	a.cfgPath = filepath.Join(a.home, "config.toml")
+	if err := os.WriteFile(a.cfgPath, []byte("[quiet]\nafter_boot = \"45m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	a.out = &output
+	if err := a.quietCmd(nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "после загрузки машины в ") || !strings.Contains(output.String(), "after_boot = 45m") {
+		t.Fatalf("статус окна: %s", output.String())
+	}
+	want := fmt.Sprintf("тихо до %s (осталось 35m0s): после загрузки машины в %s, [quiet] after_boot = 45m\n", boot.Add(45*time.Minute).Local().Format("15:04:05 MST"), boot.Local().Format("15:04"))
+	if output.String() != want {
+		t.Fatalf("статус окна = %q, хотим %q", output.String(), want)
+	}
+	if err := a.quietCmd([]string{"off"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := a.readQuietAt(now); err != nil || active {
+		t.Fatalf("off не снял окно: active=%v err=%v", active, err)
+	}
+	boot = boot.Add(time.Hour)
+	a.bootID = func() (string, error) { return "boot-two", nil }
+	now = boot.Add(time.Minute)
+	if _, active, err := a.readQuietAt(now); err != nil || !active {
+		t.Fatalf("новая загрузка не включила окно: active=%v err=%v", active, err)
+	}
+
+	// Явный срок длиннее окна загрузки должен определять статус и причину.
+	writeQuietState(t, a, now.Add(2*time.Hour))
+	state, active, err := a.readQuietAt(now)
+	if err != nil || !active || state.Why != "тест" || !state.Until.Equal(now.Add(2*time.Hour)) {
+		t.Fatalf("явная тишина не победила короткое окно: %+v active=%v err=%v", state, active, err)
+	}
+}
+
+func TestQuietAfterBootOffSurvivesQuietOnAndExpiry(t *testing.T) {
+	a := quietTestApp(t)
+	boot := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
+	now := boot.Add(10 * time.Minute)
+	a.now = func() time.Time { return now }
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	bootID := "same-boot"
+	a.bootID = func() (string, error) { return bootID, nil }
+	a.cfgPath = filepath.Join(a.home, "config.toml")
+	if err := os.WriteFile(a.cfgPath, []byte("[quiet]\nafter_boot = \"45m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.quietCmd([]string{"off"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.quietCmd([]string{"on", "--until", now.Add(5 * time.Minute).Format(time.RFC3339), "--why", "коротко", "--by", "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := a.readQuietAt(now.Add(6 * time.Minute)); err != nil || active {
+		t.Fatalf("окно вернулось после конца explicit: active=%v err=%v", active, err)
+	}
+	if _, err := os.Stat(a.quietBootOffPath()); err != nil {
+		t.Fatalf("off отметка не пережила quiet on: %v", err)
+	}
+	if err := a.quietCmd([]string{"off"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(a.quietBootOffPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repeatOutput bytes.Buffer
+	a.out = &repeatOutput
+	if err := a.quietCmd([]string{"off"}); err != nil {
+		t.Fatal(err)
+	}
+	if repeatOutput.String() != "не был включён\n" {
+		t.Fatalf("повторный off: %q", repeatOutput.String())
+	}
+	after, err := os.Stat(a.quietBootOffPath())
+	if err != nil || !os.SameFile(info, after) {
+		t.Fatalf("повторный off изменил отметку: before=%v after=%v err=%v", info.ModTime(), after, err)
+	}
+}
+
+func TestQuietOffRemovesBrokenAndExpiredExplicitState(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{name: "broken", content: "{broken"},
+		{name: "expired", content: "expired"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := quietTestApp(t)
+			if tc.name == "expired" {
+				writeQuietState(t, a, time.Now().Add(-time.Minute))
+			} else {
+				if err := os.MkdirAll(a.dir("quiet"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(a.quietPath(), []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out bytes.Buffer
+			a.out = &out
+			if err := a.quietCmd([]string{"off"}); err != nil {
+				t.Fatal(err)
+			}
+			if out.String() != "громко\n" {
+				t.Fatalf("off output %q", out.String())
+			}
+			if _, err := os.Stat(a.quietPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("state не удалён: %v", err)
+			}
+		})
+	}
+}
+
+func TestQuietBootReadErrorDoesNotBlockStatusOrSend(t *testing.T) {
+	a, logs := quietObservedApp(t)
+	bootErr := errors.New("нет proc stat")
+	a.bootTime = func() (time.Time, error) { return time.Time{}, bootErr }
+	var out bytes.Buffer
+	a.out = &out
+	if err := a.quietCmd(nil); err != nil {
+		t.Fatalf("quiet status: %v", err)
+	}
+	if out.String() != "громко\n" {
+		t.Fatalf("status при boot ошибке: %q", out.String())
+	}
+	sock, got := quietListener(t)
+	if err := a.sendSocket(0, "lead", sock, false, "queue.crit", "письмо"); err != nil {
+		t.Fatalf("boot ошибка остановила отправку: %v", err)
+	}
+	select {
+	case msg := <-got:
+		if !strings.Contains(msg, "письмо") {
+			t.Fatalf("сообщение: %s", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("письмо не отправлено")
+	}
+	if strings.Count(logs.String(), "окно после загрузки недоступно") != 1 {
+		t.Fatalf("предупреждения не ограничены/отсутствуют: %s", logs.String())
+	}
+	if err := a.quietCmd([]string{"off"}); err != nil {
+		t.Fatalf("quiet off при boot ошибке: %v", err)
+	}
+}
+
+func TestQuietConfigControlsCLIAndReloadedDaemonWindow(t *testing.T) {
+	a := quietTestApp(t)
+	now := time.Date(2026, 11, 13, 8, 50, 0, 0, time.Local)
+	boot := now.Add(-50 * time.Minute)
+	a.now = func() time.Time { return now }
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	a.bootID = func() (string, error) { return "config-boot", nil }
+	a.cfgPath = filepath.Join(a.home, "config.toml")
+	writeConfig := func(value string) {
+		t.Helper()
+		if err := os.WriteFile(a.cfgPath, []byte("[quiet]\nafter_boot = \""+value+"\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sock, got := quietListener(t)
+	writeConfig("0")
+	if _, err := a.config(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.sendSocket(0, "lead", sock, false, "queue.crit", "отправить при after_boot=0"); err != nil {
+		t.Fatalf("CLI после загрузки с after_boot=0: %v", err)
+	}
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("CLI не отправил письмо при after_boot=0")
+	}
+	writeConfig("2h")
+	if _, err := a.config(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.sendSocket(0, "lead", sock, false, "queue.crit", "подавить при after_boot=2h"); !errors.Is(err, errQuiet) {
+		t.Fatalf("CLI не применил after_boot=2h после 50 минут: %v", err)
+	}
+	writeConfig("10m")
+	if _, err := a.config(); err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := a.readQuietAt(now); err != nil || active {
+		t.Fatalf("after_boot=10m не применился: active=%v err=%v", active, err)
+	}
+	boot = now.Add(-5 * time.Minute)
+	state, active, err := a.readQuietAt(now)
+	if err != nil || !active || !state.Until.Equal(boot.Add(10*time.Minute)) {
+		t.Fatalf("короткое окно не сохраняет срок 10m: state=%+v active=%v err=%v", state, active, err)
+	}
+	writeConfig("45m")
+	boot = now.Add(-5 * time.Minute)
+	if _, err := a.config(); err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := a.readQuietAt(now); err != nil || !active {
+		t.Fatalf("после reload 45m окно не включилось: active=%v err=%v", active, err)
+	}
+	writeConfig("[broken")
+	if _, err := a.config(); err == nil {
+		t.Fatal("битый конфиг принят")
+	}
+	if _, active, err := a.readQuietAt(now); err != nil || active {
+		t.Fatalf("битый конфиг не выключил окно: active=%v err=%v", active, err)
+	}
+}
+
+func TestQuietBrokenBootOffFailsSafeAndQuietOffRepairs(t *testing.T) {
+	a := quietTestApp(t)
+	var logs bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logs, nil))
+	boot := time.Now().Add(-5 * time.Minute)
+	a.now = func() time.Time { return boot.Add(5 * time.Minute) }
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	a.bootID = func() (string, error) { return "broken-marker-boot", nil }
+	a.cfgPath = filepath.Join(a.home, "config.toml")
+	if err := os.WriteFile(a.cfgPath, []byte("[quiet]\nafter_boot = \"45m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.loadQuietConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(a.dir("quiet"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"{broken", `{"boot_id":""}`} {
+		logs.Reset()
+		a.quietRuntime.mu.Lock()
+		a.quietRuntime.warnedAt = nil
+		a.quietRuntime.mu.Unlock()
+		if err := os.WriteFile(a.quietBootOffPath(), []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, active, err := a.readQuiet(); err != nil || !active {
+			t.Fatalf("битая отметка %q должна считать окно активным: active=%v err=%v", bad, active, err)
+		}
+		if !strings.Contains(logs.String(), "окно после загрузки недоступно") {
+			t.Fatalf("битая отметка %q не вызвала предупреждение: %s", bad, logs.String())
+		}
+		if err := a.quietCmd([]string{"off"}); err != nil {
+			t.Fatal(err)
+		}
+		off, err := a.readQuietBootOff()
+		if err != nil || off != "broken-marker-boot" {
+			t.Fatalf("quiet off не починил отметку %q: id=%q err=%v", bad, off, err)
+		}
+	}
+}
+
+func TestQuietWarningsRepeatPerReasonAfterTenMinutes(t *testing.T) {
+	a, logs := quietObservedApp(t)
+	now := time.Date(2026, 11, 13, 8, 0, 0, 0, time.Local)
+	a.now = func() time.Time { return now }
+	errConfig, errBoot := errors.New("bad config"), errors.New("bad boot time")
+	a.quietBootWarning("config", errConfig)
+	a.quietBootWarning("boot_time", errBoot)
+	now = now.Add(9 * time.Minute)
+	a.quietBootWarning("config", errConfig)
+	now = now.Add(time.Minute)
+	a.quietBootWarning("config", errConfig)
+	if got := strings.Count(logs.String(), "окно после загрузки недоступно"); got != 3 {
+		t.Fatalf("число предупреждений до/после 10 минут и для второй причины: %d, журнал %s", got, logs.String())
+	}
+}
+
+func TestQueueNoticesPassesBootTimeIntoView(t *testing.T) {
+	a := quietTestApp(t)
+	a.reg = session.ForHome(a.home)
+	a.namesMem.loaded = true
+	a.namesMem.table = map[string]string{}
+	boot := time.Date(2026, 11, 13, 8, 0, 0, 0, time.Local)
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	queueCfg := queue.Config{}
+	dirs, err := queueFingerprintDirs(&queueCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := queue.Fingerprint(dirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := boot.Add(10 * time.Minute)
+	ticket := queue.Ticket{Key: "p/task", Project: "p", Slug: "task", Dir: filepath.Join(a.home, "p"), Title: "missing master", Prio: "HIGH", Status: "открыт", Master: "gone"}
+	a.queueCache = queueTicketCache{Loaded: true, Fingerprint: fingerprint, ScannedAt: now, Tickets: []queue.Ticket{ticket}}
+	cfg := &config.Config{}
+	cfg.Queue.Mode = queue.ModeOn
+	cfg.Queue.BootGrace = policy.Duration(time.Hour)
+	if err := os.MkdirAll(a.dir("queue"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seeded, err := json.Marshal(queue.State{Seeded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.dir("queue"), "state.json"), seeded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	a.out = &output
+	if err := a.queueNotices(context.Background(), cfg, restart.NewJudge(a.home), true, now); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("queue сообщила об отсутствующей сессии в boot grace; вызов queueBootGrace мог отсутствовать: %s", output.String())
+	}
+}
+
+func TestQueueBootTimeErrorUsesQueueWarningAccounting(t *testing.T) {
+	a, logs := quietObservedApp(t)
+	a.bootTime = func() (time.Time, error) { return time.Time{}, errors.New("stat unavailable") }
+	view := queue.View{}
+	a.queueBootGrace(&view, time.Hour)
+	if !strings.Contains(logs.String(), "aguard queue: время загрузки") {
+		t.Fatalf("нет предупреждения очереди об ошибке btime: %s", logs.String())
+	}
+	if err := a.act.Flush(time.Now(), activityKeep); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	_, err := activity.NewStore(a.dir("activity")).Read(time.Time{}, func(r *activity.Record) {
+		if r.Watcher == "queue" && r.Kind == activity.KindWarn && r.What == "время загрузки" {
+			count += r.Count
+		}
+	})
+	if err != nil || count != 1 {
+		t.Fatalf("учёт WARN queue: count=%d err=%v", count, err)
+	}
+}
+
+func TestRunLogsQuietStartupWindow(t *testing.T) {
+	a := quietTestApp(t)
+	now := time.Date(2026, 11, 13, 8, 10, 0, 0, time.Local)
+	boot := now.Add(-10 * time.Minute)
+	a.now = func() time.Time { return now }
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	a.bootID = func() (string, error) { return "run-boot", nil }
+	a.cfgPath = filepath.Join(a.home, "config.toml")
+	if err := os.WriteFile(a.cfgPath, []byte("[quiet]\nafter_boot = \"45m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logs, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := a.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "тихо после загрузки до ") {
+		t.Fatalf("run не журналирует окно: %s", logs.String())
+	}
+}
+
+func TestQuietBadConfigDisablesWindowButKeepsQuietCommandsWorking(t *testing.T) {
+	a, logs := quietObservedApp(t)
+	a.cfgPath = filepath.Join(a.home, "broken.toml")
+	if err := os.WriteFile(a.cfgPath, []byte("[quiet\nafter_boot = \"45m\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	a.out = &out
+	if err := a.quietCmd(nil); err != nil {
+		t.Fatalf("status with bad config: %v", err)
+	}
+	if out.String() != "громко\n" {
+		t.Fatalf("bad config still enabled window: %q", out.String())
+	}
+	if !strings.Contains(logs.String(), "конфиг:") {
+		t.Fatalf("нет предупреждения о конфиге: %s", logs.String())
+	}
+	sock, got := quietListener(t)
+	if err := a.sendSocket(0, "lead", sock, false, "queue.crit", "deliver"); err != nil {
+		t.Fatalf("bad config blocked send: %v", err)
+	}
+	select {
+	case <-got:
+	case <-time.After(time.Second):
+		t.Fatal("письмо не отправилось")
+	}
+	if err := a.quietCmd([]string{"off"}); err != nil {
+		t.Fatalf("off with bad config: %v", err)
+	}
+}
+
+func TestQuietBootBoundaryAndLongerThanExplicit(t *testing.T) {
+	a := quietTestApp(t)
+	boot := time.Date(2026, 11, 13, 8, 0, 0, 0, time.Local)
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	a.bootID = func() (string, error) { return "boundary-boot", nil }
+	for _, tc := range []struct {
+		at   time.Time
+		want bool
+	}{
+		{at: boot.Add(45*time.Minute - time.Nanosecond), want: true},
+		{at: boot.Add(45 * time.Minute), want: false},
+	} {
+		_, active, err := a.readQuietAt(tc.at)
+		if err != nil || active != tc.want {
+			t.Errorf("на границе %s: active=%v err=%v хотим %v", tc.at, active, err, tc.want)
+		}
+	}
+	short := boot.Add(20 * time.Minute)
+	writeQuietState(t, a, short)
+	state, active, err := a.readQuietAt(boot.Add(10 * time.Minute))
+	if err != nil || !active || !state.BootWindow || !state.Until.Equal(boot.Add(45*time.Minute)) {
+		t.Fatalf("длинное окно не победило явное: %+v active=%v err=%v", state, active, err)
+	}
+}
+
+func TestQuietStartupLineWhenBootWindowActive(t *testing.T) {
+	a := quietTestApp(t)
+	boot := time.Now().Add(-10 * time.Minute)
+	a.now = time.Now
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	var logs bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logs, nil))
+	a.logQuietStartup()
+	if !strings.Contains(logs.String(), "тихо после загрузки до ") {
+		t.Fatalf("нет стартовой строки окна: %s", logs.String())
+	}
+	writeQuietState(t, a, time.Now().Add(2*time.Hour))
+	logs.Reset()
+	a.logQuietStartup()
+	if !strings.Contains(logs.String(), "тихо после загрузки: действует явная тишина до ") {
+		t.Fatalf("для более длинной явной тишины нет стартовой строки: %s", logs.String())
+	}
+}
+
+func TestQueueViewReceivesBootTimeAndGrace(t *testing.T) {
+	a := quietTestApp(t)
+	boot := time.Date(2026, 11, 13, 8, 0, 0, 0, time.Local)
+	a.bootTime = func() (time.Time, error) { return boot, nil }
+	view := queue.View{}
+	a.queueBootGrace(&view, time.Hour)
+	if !view.BootAt.Equal(boot) || view.BootGrace != time.Hour {
+		t.Fatalf("queue view boot info: BootAt=%s BootGrace=%s", view.BootAt, view.BootGrace)
+	}
+}
+
+func TestSystemBootTimeUsesAkitSnapshot(t *testing.T) {
+	want, err := proc.BootTime(procRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := (&app{}).systemBootTime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(want) {
+		t.Fatalf("system boot time = %s, akit says %s", got, want)
+	}
+}
+
+func TestQuietAfterBootDisabledOrExpired(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		after  string
+		upTime time.Duration
+	}{
+		{name: "disabled", after: "0", upTime: time.Minute},
+		{name: "shorter-than-uptime", after: "5m", upTime: 10 * time.Minute},
+		{name: "expired", after: "45m", upTime: time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := quietTestApp(t)
+			now := time.Date(2026, 11, 13, 8, 0, 0, 0, time.Local)
+			boot := now.Add(-tc.upTime)
+			a.now = func() time.Time { return now }
+			a.bootTime = func() (time.Time, error) { return boot, nil }
+			a.bootID = func() (string, error) { return "test-boot", nil }
+			a.cfgPath = filepath.Join(a.home, "config.toml")
+			cfg := fmt.Sprintf("[quiet]\nafter_boot = %q\n", tc.after)
+			if err := os.WriteFile(a.cfgPath, []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.after == "0" {
+				a.setQuietWindow(0)
+			} else {
+				d, err := time.ParseDuration(tc.after)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a.setQuietWindow(d)
+			}
+			if state, active, err := a.readQuietAt(now); err != nil || active {
+				t.Fatalf("окно действует: %+v active=%v err=%v", state, active, err)
+			}
+		})
+	}
+}
+
+func TestQuietOffWithAfterBootZeroDoesNotCreateBootMarker(t *testing.T) {
+	a := quietTestApp(t)
+	a.cfgPath = filepath.Join(a.home, "config.toml")
+	if err := os.WriteFile(a.cfgPath, []byte("[quiet]\nafter_boot = \"0\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	a.out = &out
+	if err := a.quietCmd([]string{"off"}); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "не был включён\n" {
+		t.Fatalf("quiet off с нулевым окном: %q", out.String())
+	}
+	if _, err := os.Stat(a.quietBootOffPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("создана отметка выключения при after_boot=0: %v", err)
 	}
 }
 
