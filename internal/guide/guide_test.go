@@ -400,7 +400,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 		"internal/orphans/stop.go:podmanStop": "CommandContext", "cmd/aguard/sigguard.go:sigguardSend": "sendUrgent",
 		"cmd/aguard/ceiling.go:ceilingGoneNotice": "sendCeilingOOMNotice", "cmd/aguard/night_fallback.go:clean": "Command",
 		"cmd/aguard/io.go:ioSignal":       "Command",
-		"cmd/cl/supervise.go:signalChild": "Signal", "cmd/cl/supervise.go:watch": "signalChild",
+		"cmd/cl/supervise.go:signalChild": "SignalChild", "cmd/cl/supervise.go:watch": "signalChild",
 		"cmd/cl/supervise.go:compactSession": "StopChild", "cmd/cl/console.go:start": "stopChild",
 		"cmd/cl/console.go:stopChild": "StopChild", "internal/track/check.go:Check": "stopChild",
 		"internal/track/check.go:stopChild": "StopChild",
@@ -462,7 +462,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 					}
 					name := sel.Sel.Name
 					isSignalType := name == "Signal" && selectorRoot(sel.X) == "syscall"
-					if (name == "Signal" && len(call.Args) > 0 && !isSignalType && !literalSignal(call.Args[0], "SIGWINCH")) || name == "Kill" || name == "Tgkill" || name == "PidfdSendSignal" {
+					if (name == "Signal" && len(call.Args) > 0 && !isSignalType && !literalSignal(call.Args[0], "SIGWINCH")) || name == "Kill" || name == "Tgkill" || name == "PidfdSendSignal" || akitSignal[name] {
 						if name == "PidfdSendSignal" && len(call.Args) > 1 && isZero(call.Args[1]) {
 							return true
 						}
@@ -534,7 +534,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 			loc := filepath.ToSlash(rel) + ":" + fnName
 			if s, ok := n.(*ast.SelectorExpr); ok {
 				name := s.Sel.Name
-				if name == "Kill" || name == "Tgkill" || name == "PidfdSendSignal" || name == "StopChild" || name == "Signal" {
+				if name == "Kill" || name == "Tgkill" || name == "PidfdSendSignal" || name == "StopChild" || name == "Signal" || akitSignal[name] {
 					if name == "Signal" {
 						call, ok := parentCall(file, s)
 						if !ok || len(call.Args) == 0 || selectorRoot(s.X) == "syscall" || literalSignal(call.Args[0], "SIGWINCH") {
@@ -660,3 +660,6 @@ func parentCall(file *ast.File, node ast.Node) (*ast.CallExpr, bool) {
 	})
 	return found, found != nil
 }
+
+// akitSignal — функции akit/proc, которые шлют сигнал (go doc github.com/aiseeq/akit/proc): место прерывания, как Kill.
+var akitSignal = map[string]bool{"SignalChild": true, "SignalDescendant": true, "CancelByStop": true}

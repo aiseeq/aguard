@@ -481,11 +481,15 @@ func wait(proc *os.Process) error {
 	return nil
 }
 
-// signalChild шлёт сигнал claude; вышедший процесс — не ошибка (его выход и так придёт в done).
-func signalChild(proc *os.Process, sig os.Signal) error {
-	// StopChild добил бы SIGKILL потомков claude — фоновые задачи сессии при плановом перезапуске;
-	// способа «только сам процесс» в akit пока нет: akit docs/tasks/20261112-0422-MED-DO-signal-child-leader-only
-	if err := proc.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) { //nolint:raw-process-kill // akit signal-child-leader-only
+// signalChild шлёт сигнал claude — прямому потомку cl (и после подхвата нового cl: exec сохраняет pid) — только ему:
+// StopChild добил бы SIGKILL потомков claude, фоновые задачи сессии при плановом перезапуске. Вышедший процесс —
+// не ошибка (его выход и так придёт в done).
+func signalChild(child *os.Process, sig os.Signal) error {
+	s, ok := sig.(syscall.Signal)
+	if !ok {
+		return fmt.Errorf("сигнал %v claude: не syscall.Signal", sig)
+	}
+	if err := proc.SignalChild(child.Pid, s); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("сигнал %v claude: %w", sig, err)
 	}
 	return nil
