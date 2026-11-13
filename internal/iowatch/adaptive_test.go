@@ -69,6 +69,24 @@ func TestConfigDetailIdleMustBeMultipleOfDetail(t *testing.T) {
 	}
 }
 
+func TestRecorderPressureTracksOpenCase(t *testing.T) {
+	r := NewRecorder(Default())
+	base := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	if r.Pressure() {
+		t.Fatal("new Recorder reports pressure")
+	}
+	r.Step(Step{At: base, IOFullUS: 80_000})
+	if !r.Pressure() {
+		t.Fatal("Recorder did not report pressure after opening a stalled case")
+	}
+	for i := 1; i <= 30; i++ {
+		r.Step(Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond)})
+	}
+	if r.Pressure() {
+		t.Fatal("Recorder still reports pressure after the case closed")
+	}
+}
+
 func TestClosedIdleCaseWaitsForDetailsAndReturnsCulprits(t *testing.T) {
 	cfg := Default()
 	cfg.CaseMin = policy.Duration(200 * time.Millisecond)
@@ -98,6 +116,87 @@ func TestClosedIdleCaseWaitsForDetailsAndReturnsCulprits(t *testing.T) {
 	if gotAt := detailAt.Add(cfg.Step.D()); gotAt.After(closeAt.Add(cfg.DetailIdle.D() + cfg.Step.D())) {
 		t.Fatalf("выдача случая задержана до %s, предел %s", gotAt, closeAt.Add(cfg.DetailIdle.D()+cfg.Step.D()))
 	}
+}
+
+func TestClosedCaseWaitsForLateCoveringDetail(t *testing.T) {
+	for _, delay := range []time.Duration{time.Second, 3 * time.Second, 5 * time.Second} {
+		t.Run(delay.String(), func(t *testing.T) {
+			c, deliveredAt, sent := lateCoveringCase(t, delay)
+			if !sent {
+				t.Fatalf("case delivered at %s before detail covering its end arrived", deliveredAt)
+			}
+			if c.Culprits == nil || c.Culprits.Main != fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/agents.slice/agent-late.scope", os.Getuid(), os.Getuid()) {
+				t.Fatalf("late covering detail was not used for culprit: %+v", c.Culprits)
+			}
+			if len(c.Culprits.ProcWrite) != 1 || c.Culprits.ProcWrite[0].Name != "late(9)" {
+				t.Fatalf("late covering process missing: %+v", c.Culprits.ProcWrite)
+			}
+			if deliveredAt.Before(c.End.Add(delay)) {
+				t.Fatalf("case delivered at %s before covering detail at %s", deliveredAt, c.End.Add(delay))
+			}
+		})
+	}
+	t.Run("no-covering-detail", func(t *testing.T) {
+		_, deliveredAt, boundary := closedCaseWithoutCoveringDetail(t)
+		if !deliveredAt.Equal(boundary) {
+			t.Fatalf("case without a covering detail delivered at %s, want exact time boundary %s", deliveredAt, boundary)
+		}
+	})
+}
+
+func lateCoveringCase(t *testing.T, delay time.Duration) (Case, time.Time, bool) {
+	t.Helper()
+	cfg := Default()
+	cfg.CaseMin = policy.Duration(200 * time.Millisecond)
+	r := NewRecorder(cfg)
+	base := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	path := fmt.Sprintf("/user.slice/user-%d.slice/user@%d.service/agents.slice/agent-late.scope", os.Getuid(), os.Getuid())
+	r.Detail(Step{At: base.Add(-4 * time.Second)})
+	r.Detail(Step{At: base.Add(150 * time.Millisecond)})
+	end := base.Add(600 * time.Millisecond)
+	coverAt := end.Add(delay).Truncate(100 * time.Millisecond).Add(50 * time.Millisecond)
+	sent := false
+	for i := 0; i <= 200; i++ {
+		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
+		if !sent && at.After(coverAt) {
+			p := Process{PID: 9, Start: 1, Comm: "late", Cgroup: path, WriteBytes: 1 << 20}
+			r.Detail(Step{At: coverAt, Processes: []Process{p}, Cgroups: []Cgroup{{Path: path, WriteBytes: 1 << 20}}})
+			sent = true
+		}
+		var idle int64
+		if i >= 1 && i <= 6 {
+			idle = 80_000
+		}
+		if got := r.Step(Step{At: at, IOFullUS: idle}); len(got) > 0 {
+			return got[0], at, sent
+		}
+	}
+	t.Fatal("case was not delivered")
+	return Case{}, time.Time{}, false
+}
+
+func closedCaseWithoutCoveringDetail(t *testing.T) (Case, time.Time, time.Time) {
+	t.Helper()
+	cfg := Default()
+	cfg.CaseMin = policy.Duration(200 * time.Millisecond)
+	r := NewRecorder(cfg)
+	base := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	r.Detail(Step{At: base.Add(-4 * time.Second)})
+	r.Detail(Step{At: base.Add(150 * time.Millisecond)})
+	end := base.Add(600 * time.Millisecond)
+	boundary := end.Add(cfg.DetailIdle.D() + cfg.Detail.D() + cfg.Step.D())
+	for i := 0; i <= 100; i++ {
+		at := base.Add(time.Duration(i) * cfg.Step.D())
+		var idle int64
+		if i >= 1 && i <= 6 {
+			idle = 80_000
+		}
+		if got := r.Step(Step{At: at, IOFullUS: idle}); len(got) > 0 {
+			return got[0], at, boundary
+		}
+	}
+	t.Fatal("case without a covering detail was not delivered")
+	return Case{}, time.Time{}, boundary
 }
 
 func TestClosedCaseWithoutDetailsHasBoundedWait(t *testing.T) {
@@ -164,13 +263,20 @@ func TestDetailIntervalIsStoredWhenPreviousRecordFallsOutOfRing(t *testing.T) {
 }
 
 func TestCaseFirstDetailKeepsItsIntervalAfterPriorDetailEviction(t *testing.T) {
-	r := NewRecorder(Default())
+	cfg := Default()
+	cfg.Ring = policy.Duration(3 * time.Minute)
+	r := NewRecorder(cfg)
 	base := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 	end := base.Add(6 * time.Minute)
-	r.ring.Add(Record{Kind: KindDetail, detailInterval: time.Second, Step: Step{At: base}})
-	r.ring.Add(Record{Kind: KindStep, Step: Step{At: end.Add(-2 * time.Minute), WriteBytes: 10}})
-	r.ring.Add(Record{Kind: KindStep, Step: Step{At: end.Add(-time.Second), WriteBytes: 20}})
-	r.ring.Add(Record{Kind: KindDetail, detailInterval: 6 * time.Minute, Step: Step{At: end}})
+	r.Detail(Step{At: base})
+	r.Step(Step{At: end.Add(-2 * time.Minute), WriteBytes: 10})
+	r.Step(Step{At: end.Add(-time.Second), WriteBytes: 20})
+	r.Detail(Step{At: end})
+	for _, rec := range r.ring.Records() {
+		if rec.Kind == KindDetail && rec.At.Equal(base) {
+			t.Fatal("previous detail should have been evicted by Recorder.Detail")
+		}
+	}
 	c := Case{Start: end.Add(-100 * time.Millisecond), End: end, DurMS: 1000}
 	r.finish(&c)
 	if got := c.Culprits.DeviceWrite; got != 30 {
@@ -200,5 +306,68 @@ func TestOpenCaseUsesStoredLongDetailIntervalForCapRate(t *testing.T) {
 	now, ok := live.Now()
 	if !ok || !now.Open.Open || now.Open.Capped {
 		t.Fatalf("ongoing case at 5 MB/s must stay below the 10 MB/s cap over its stored 6-minute interval: %+v (ok=%v)", now.Open, ok)
+	}
+}
+
+func TestOpenCaseUsesNonemptyIdleDetailAcrossFiveSecondGap(t *testing.T) {
+	cfg := Default()
+	base := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	path := "/agents.slice/job.scope"
+	verdict := func(includeCgroups bool) bool {
+		r := NewRecorder(cfg)
+		live := NewLive()
+		r.Attach(nil, nil, live)
+		r.Detail(Step{At: base.Add(-4 * time.Second)})
+		r.Step(Step{At: base})
+		r.Step(Step{At: base.Add(100 * time.Millisecond), IOFullUS: 80_000}) // case starts at base
+		var firstCgroups []Cgroup
+		if includeCgroups {
+			cap := Cap{Path: "/agents.slice", RBps: 10_000_000}
+			firstCgroups = []Cgroup{{Path: path, ReadBytes: 50_000_000, IOFullUS: 1_000_000, Cap: cap}}
+		}
+		// First detail contributing to the open window: its 5s interval is (-4s, +1s]
+		// and therefore crosses the case start at 0s.
+		r.Detail(Step{At: base.Add(time.Second), Cgroups: firstCgroups})
+		for i := 2; i <= 50; i++ {
+			r.Step(Step{At: base.Add(time.Duration(i) * 100 * time.Millisecond), IOFullUS: 80_000})
+		}
+		// A short uncapped idle contribution makes the first record decisive for the verdict.
+		r.Detail(Step{At: base.Add(5 * time.Second), Cgroups: []Cgroup{{Path: path, IOFullUS: 100_000}}})
+		return live.openCapped
+	}
+	if got := verdict(true); !got {
+		t.Fatal("open case with the nonempty capped idle detail should be capped")
+	}
+	if got := verdict(false); got {
+		t.Fatal("removing Cgroups from the first idle detail should change the open-case verdict to uncapped")
+	}
+}
+
+func TestOpenCaseUsesStoredIntervalAfterPriorDetailEviction(t *testing.T) {
+	cfg := Default()
+	cfg.Ring = policy.Duration(time.Minute)
+	r := NewRecorder(cfg)
+	live := NewLive()
+	r.Attach(nil, nil, live)
+	base := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	r.Detail(Step{At: base.Add(-6 * time.Minute)})
+	for i := 0; i <= 60; i++ {
+		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
+		r.Step(Step{At: at, IOFullUS: 80_000})
+		if i == 10 {
+			cap := Cap{Path: "/agents.slice", RBps: 1}
+			r.Detail(Step{At: base.Add(time.Second), Cgroups: []Cgroup{{Path: "/agents.slice/job.scope",
+				ReadBytes: 361, IOFullUS: 5_000_000, Cap: cap}}})
+		}
+	}
+	r.Detail(Step{At: base.Add(6 * time.Second), Cgroups: []Cgroup{{Path: "/agents.slice/job.scope", IOFullUS: 40_000}}})
+	for _, rec := range r.ring.Records() {
+		if rec.Kind == KindDetail && rec.At.Equal(base.Add(-6*time.Minute)) {
+			t.Fatal("previous detail should have been evicted from the ring")
+		}
+	}
+	now, ok := live.Now()
+	if !ok || !now.Open.Open || now.Open.Capped {
+		t.Fatalf("open capped verdict must use the evicted predecessor's stored interval: %+v (ok=%v)", now.Open, ok)
 	}
 }

@@ -149,3 +149,47 @@ func TestRecorderPressureDrivesDetailIntervalAndCooldown(t *testing.T) {
 		t.Fatalf("после второго закрытия + context нет возврата к покою: %+v %v", change, changed)
 	}
 }
+
+func TestRunIODetailReadChangeImmediateAndRecorded(t *testing.T) {
+	ctx := t.Context()
+	control := make(chan ioDetailChange, 1)
+	out := make(chan ioDetailResult, 4)
+	reads := make(chan time.Time, 4)
+	go runIODetailRead(ctx, time.Hour, func(at time.Time) ioDetailResult {
+		reads <- at
+		return ioDetailResult{step: iowatch.Step{At: at}}
+	}, out, control)
+
+	// A one hour initial timer makes Change(immediate=true) the only possible first trigger.
+	setIODetailInterval(control, time.Hour, time.Hour, true, true)
+	var first time.Time
+	select {
+	case first = <-reads:
+	case <-time.After(time.Second):
+		t.Fatal("immediate Change did not trigger a detail read")
+	}
+	select {
+	case got := <-out:
+		if !got.step.At.Equal(first) {
+			t.Fatalf("result At = %s, read time = %s", got.step.At, first)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("detail read result was not sent")
+	}
+
+	// After the read, Recorded schedules from its completion. Change to a regular short interval.
+	setIODetailInterval(control, 30*time.Millisecond, 30*time.Millisecond, true, false)
+	select {
+	case at := <-reads:
+		t.Fatalf("regular Change read immediately at %s", at)
+	case <-time.After(10 * time.Millisecond):
+	}
+	select {
+	case second := <-reads:
+		if !second.After(first) {
+			t.Fatalf("second read time %s is not after first read %s", second, first)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Recorded/regular timer did not trigger the next read")
+	}
+}
