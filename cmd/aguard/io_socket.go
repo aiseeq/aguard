@@ -49,7 +49,7 @@ func (s *ioService) answer(line []byte) any {
 	}
 	switch req.Q {
 	case iowatch.QueryNow:
-		now, ok := s.live.Now(req.Kind)
+		now, ok := s.live.Now()
 		if !ok {
 			return fail(errors.New("замер ещё не дал ни одного шага (mode = off или служба только стартовала)"))
 		}

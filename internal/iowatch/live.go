@@ -26,7 +26,6 @@ type Live struct {
 	nWriters         int
 	swappers         [nowTop]Swapper
 	nSwappers        int
-	profiles         map[string]ProfileStats
 }
 
 const (
@@ -167,13 +166,6 @@ func (l *Live) capWindow(last int64, d time.Duration, busyMS, tailBusyMS int64) 
 	return NowCapped{Capped: v.Capped && 2*tailBusyMS < time.Second.Milliseconds(), OutsideMS: v.OutsideMS, CappedMS: v.CappedMS}
 }
 
-// SetProfiles — свод профилей по видам (служба пересчитывает, когда профили меняются).
-func (l *Live) SetProfiles(stats map[string]ProfileStats) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.profiles = stats
-}
-
 // Writer — cgroup из последнего детального прохода по записи.
 type Writer struct {
 	Name     string `json:"name"` // CgroupName
@@ -237,24 +229,23 @@ type NowCases struct {
 
 // Now — моментальное состояние на последний быстрый шаг. At давний — замер не идёт: клиент сверяет сам.
 type Now struct {
-	At           time.Time     `json:"at"`
-	W1s          NowWindow     `json:"1s"`
-	W5s          NowWindow     `json:"5s"`
-	W30s         NowWindow     `json:"30s"`
-	NProc        int           `json:"nproc"`         // потоков процессора (runtime.NumCPU)
-	Dirty        int64         `json:"dirty"`         // байт, последний детальный проход
-	Writeback    int64         `json:"writeback"`     // байт
-	MemAvailable int64         `json:"mem_available"` // MemAvailable, байт, последний детальный проход
-	SwapUsed     int64         `json:"swap_used"`     // байт
-	Open         NowOpen       `json:"open"`
-	Cases        NowCases      `json:"cases"`
-	Writers      []Writer      `json:"writers"`
-	Swappers     []Swapper     `json:"swappers"`
-	Profile      *ProfileStats `json:"profile,omitempty"` // свод профилей вида из запроса; нет таких — пусто
+	At           time.Time `json:"at"`
+	W1s          NowWindow `json:"1s"`
+	W5s          NowWindow `json:"5s"`
+	W30s         NowWindow `json:"30s"`
+	NProc        int       `json:"nproc"`         // потоков процессора (runtime.NumCPU)
+	Dirty        int64     `json:"dirty"`         // байт, последний детальный проход
+	Writeback    int64     `json:"writeback"`     // байт
+	MemAvailable int64     `json:"mem_available"` // MemAvailable, байт, последний детальный проход
+	SwapUsed     int64     `json:"swap_used"`     // байт
+	Open         NowOpen   `json:"open"`
+	Cases        NowCases  `json:"cases"`
+	Writers      []Writer  `json:"writers"`
+	Swappers     []Swapper `json:"swappers"`
 }
 
-// Now — снимок состояния; kind — вид для свода профилей (пусто — без него). ok = false — шагов ещё не было.
-func (l *Live) Now(kind string) (Now, bool) {
+// Now — снимок состояния. ok = false — шагов ещё не было.
+func (l *Live) Now() (Now, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.count == 0 {
@@ -296,9 +287,6 @@ func (l *Live) Now(kind string) (Now, bool) {
 			end := c.end
 			n.Cases.LastEnd = &end
 		}
-	}
-	if st, ok := l.profiles[kind]; kind != "" && ok {
-		n.Profile = &st
 	}
 	return n, true
 }

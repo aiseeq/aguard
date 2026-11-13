@@ -265,7 +265,7 @@ func usage() {
   aguard cpu tick [-dry-run]
   aguard io report [-since 24h] [-until время] [-who подстрока] [-min 0] [-json] [-file сводки]   прошлые фризы: случаи, виновники
   aguard io route [-since 168h] [-v] [-file сводки]   маршрут случаев: письма хозяевам и лиду, тикеты; рядом — прежняя рассылка
-  aguard io now [-kind вид] [-json] | series [-since 1h] [-json] | profiles [-kind вид] [-since 7d] [-json]   из службы: сейчас, посекундный ряд, профили задач
+  aguard io now [-json] | series [-since 1h] [-json] | profiles [-kind вид] [-since 7d] [-json]   из службы: сейчас, посекундный ряд, профили задач
   aguard io record [-for 30s] [-dir папка] | dump | at время [-window 2m] [-dir папка]   ручные снимки: at читает только их — прошлый фриз смотреть через io report и io series
   aguard gui watch -for 10s [-dir папка] [-pid имя=PID]… | report [-since 24h] [-json] [-dir папка]
   aguard io import [-dir папка] [-remove] [-out файл]   снимки событий прежнего наблюдателя — в сводки, при остановленной службе

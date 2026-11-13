@@ -75,7 +75,7 @@ func askIO(socket string, req iowatch.Request) (iowatch.Answer, error) {
 }
 
 // writeIONow — две строки: окна 1/5/30 с; CPU и память за 1 с, dirty, случай, свежие случаи, кто
-// пишет, свод вида.
+// пишет.
 func writeIONow(w io.Writer, n *iowatch.Now) {
 	win := func(label string, x iowatch.NowWindow) string {
 		line := fmt.Sprintf("%s: full %d мс, простой %d мс, W/R %.0f/%.0f МБ/с, ожид W %d мс, очередь %d", label, x.IOFullMS, x.StallMS,
@@ -106,17 +106,6 @@ func writeIONow(w io.Writer, n *iowatch.Now) {
 		megabytes(n.Writeback), open, n.Cases.From100ms60s, n.Cases.From200ms60s)
 	if len(writers) > 0 {
 		line += "; пишут: " + strings.Join(writers, ", ")
-	}
-	if p := n.Profile; p != nil {
-		line += fmt.Sprintf("; %s: %d проф., ", p.Kind, p.Count)
-		if p.IOCount == 0 {
-			line += "пик W не мерен"
-		} else {
-			line += fmt.Sprintf("пик W p50/p90 %.0f/%.0f МБ/с", megabytes(p.PeakWriteBps.P50), megabytes(p.PeakWriteBps.P90))
-			if p.IOCount < p.Count {
-				line += fmt.Sprintf(" (по %d)", p.IOCount)
-			}
-		}
 	}
 	fmt.Fprintln(w, line)
 }

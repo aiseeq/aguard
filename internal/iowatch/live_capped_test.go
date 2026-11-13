@@ -24,7 +24,7 @@ func liveRun(t *testing.T, step func(s *Step), cgroups func(sec int) []Cgroup) N
 		step(&s)
 		r.Step(s)
 	}
-	now, ok := live.Now("")
+	now, ok := live.Now()
 	if !ok {
 		t.Fatal("нет шагов")
 	}
@@ -92,7 +92,7 @@ func TestLiveCappedFieldsPresentWithoutDetails(t *testing.T) {
 	r := NewRecorder(Default())
 	r.Attach(nil, nil, live)
 	r.Step(Step{At: time.Now()})
-	now, ok := live.Now("")
+	now, ok := live.Now()
 	if !ok {
 		t.Fatal("нет шагов")
 	}
@@ -144,12 +144,12 @@ func TestLiveOpenCappedResetOnNewCase(t *testing.T) {
 		}
 		r.Step(s)
 		if i == 30 {
-			if now, _ := live.Now(""); !now.Open.Open || !now.Open.Capped {
+			if now, _ := live.Now(); !now.Open.Open || !now.Open.Capped {
 				t.Fatalf("первый случай под потолком: %+v", now.Open)
 			}
 		}
 	}
-	if now, _ := live.Now(""); !now.Open.Open || now.Open.Capped {
+	if now, _ := live.Now(); !now.Open.Open || now.Open.Capped {
 		t.Fatalf("новый случай без своих записей — не под потолком: %+v", now.Open)
 	}
 }
@@ -172,7 +172,7 @@ func TestLiveCappedLateRecordInterval(t *testing.T) {
 		}
 		r.Step(Step{At: at, IOFullUS: 70_000, ReadBytes: 3_000_000})
 	}
-	now, _ := live.Now("")
+	now, _ := live.Now()
 	if c := now.W5s.Capped; c.Capped || c.CappedMS != 0 || c.OutsideMS != 2500 {
 		t.Fatalf("скорость — за весь промежуток записи: %+v", c)
 	}

@@ -779,7 +779,7 @@ func TestRecorderUsesWallClockStepIntervals(t *testing.T) {
 		series, live := NewSeries(time.Hour), NewLive()
 		r.Attach(series, nil, live)
 		r.Step(Step{At: base.Add(3200 * time.Millisecond), IOFullUS: 2_900_000, ReadBytes: 600, WriteBytes: 300, WMS: 3000, WIOS: 30, FIOS: 3, SwapIn: 9, Majflt: 6})
-		if now, ok := live.Now(""); !ok || now.W1s.StallMS != 1000 || now.W1s.IOFullMS != 966 || now.W1s.ReadBps != 200 || now.W1s.WriteBps != 100 || now.W1s.Flushes != 1 || now.W1s.SwapIn != 3 || now.W1s.Majflt != 2 || now.W5s.StallMS != 3000 || now.W5s.ReadBps != 120 || !now.Open.Open || now.Open.MS != 3000 {
+		if now, ok := live.Now(); !ok || now.W1s.StallMS != 1000 || now.W1s.IOFullMS != 966 || now.W1s.ReadBps != 200 || now.W1s.WriteBps != 100 || now.W1s.Flushes != 1 || now.W1s.SwapIn != 3 || now.W1s.Majflt != 2 || now.W5s.StallMS != 3000 || now.W5s.ReadBps != 120 || !now.Open.Open || now.Open.MS != 3000 {
 			t.Fatalf("live после опоздавшего шага: %+v, есть=%t", now, ok)
 		}
 		r.Step(Step{At: base.Add(3300 * time.Millisecond)})

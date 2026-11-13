@@ -294,7 +294,6 @@ func (s *ioService) load() {
 	s.ended = loadIOFile(s, s.profilesPath, "профили cgroup", func(path string) ([]iowatch.Profile, error) {
 		return iowatch.LoadProfiles(path, now.Add(-cfg.ProfilesKeep.D()))
 	})
-	s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
 	s.seedRoute(cfg, now)
 }
 
@@ -351,12 +350,11 @@ func (s *ioService) keptCover(now time.Time) iowatch.CoverRecord {
 	return s.cover.Record(now)
 }
 
-// keptProfiles — профили в сроке profiles_keep; свод по видам для now — по ним же.
+// keptProfiles — профили в сроке profiles_keep.
 func (s *ioService) keptProfiles(now time.Time) []iowatch.Profile {
 	since := now.Add(-s.keepCfg().ProfilesKeep.D())
 	if len(s.ended) > 0 && s.ended[0].End.Before(since) {
 		s.ended = iowatch.FilterProfiles(s.ended, "", since)
-		s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
 	}
 	return s.ended
 }
@@ -572,7 +570,6 @@ func (s *ioService) endProfiles(gone map[string]string, now time.Time) {
 	s.ended = append(s.ended, ended...)
 	iowatch.SortProfiles(s.ended)
 	s.keptProfiles(now)
-	s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
 }
 
 // closed — случай в сводки; от case_min — строка журнала, от alert_min — в маршрут (письмо или тикет).

@@ -333,35 +333,14 @@ func TestProfileKindGraftHeavy(t *testing.T) {
 	}
 }
 
-// Свод профилей вида: медиана и p90 по ближайшему рангу, последний конец.
-func TestSummarizeProfilesQuantiles(t *testing.T) {
-	base := time.Date(2026, 10, 29, 21, 0, 0, 0, time.Local)
-	var list []Profile
-	for i := range 10 {
-		list = append(list, Profile{Kind: "worker:x", PeakWriteBps: int64(i+1) << 20, WriteB: int64(10-i) << 20, DurMS: int64(i) * 1000, End: base.Add(time.Duration(i) * time.Minute)})
-	}
-	for i := range list {
-		list[i].CPUMS, list[i].PeakCPUMilli, list[i].PeakAnonB, list[i].Majflt, list[i].MachineSwapIn = int64(i)*60_000, int64(i)*1000, int64(i)<<20, int64(i), int64(i)*100
-	}
-	list = append(list, Profile{Kind: KindAgent, WriteB: 7})
-	st := SummarizeProfiles(list)
-	w := st["worker:x"]
-	if w.Count != 10 || w.PeakWriteBps != (Quantiles{5 << 20, 9 << 20}) || w.WriteB != (Quantiles{5 << 20, 9 << 20}) || w.DurMS != (Quantiles{4000, 8000}) ||
-		w.CPUMS != (Quantiles{240_000, 480_000}) || w.PeakCPUMilli != (Quantiles{4000, 8000}) || w.PeakAnonB != (Quantiles{4 << 20, 8 << 20}) ||
-		w.Majflt != (Quantiles{4, 8}) || w.MachineSwapIn != (Quantiles{400, 800}) ||
-		!w.Last.Equal(base.Add(9*time.Minute)) || st[KindAgent].WriteB != (Quantiles{7, 7}) {
-		t.Fatalf("свод: %+v", st)
-	}
-}
-
 // Живое состояние: окна по быстрым шагам, идущий случай, закрытые случаи за 30 и 60 с, писатели
-// последнего прохода, свод профилей запрошенного вида.
+// последнего прохода.
 func TestLiveNowWindowsCasesWriters(t *testing.T) {
 	cfg := Default()
 	r := NewRecorder(cfg)
 	live := NewLive()
 	r.Attach(nil, nil, live)
-	if _, ok := live.Now(""); ok {
+	if _, ok := live.Now(); ok {
 		t.Fatal("состояние до первого шага")
 	}
 	base := time.Date(2026, 10, 29, 21, 0, 0, 0, time.Local)
@@ -381,12 +360,11 @@ func TestLiveNowWindowsCasesWriters(t *testing.T) {
 		}
 		step(i, idle)
 	}
-	live.SetProfiles(map[string]ProfileStats{"worker:x": {Kind: "worker:x", Count: 3}})
 	chrome := "/user.slice/user-1000.slice/user@1000.service/app.slice/app-google\\x2dchrome-1234.scope"
 	r.Detail(Step{At: base.Add(59 * time.Second), Dirty: 70 << 20, Writeback: 3 << 20, MemAvail: 1100 << 20, SwapUsed: 15 << 30,
 		Cgroups: []Cgroup{{Path: "/a.slice/dd.scope", WriteBytes: 50 << 20}, {Path: "/a.slice/b.service", WriteBytes: 2 << 20, SwapIn: 40, Majflt: 30},
 			{Path: "/a.slice/r.scope", ReadBytes: 1}, {Path: chrome, SwapIn: 5000, Majflt: 687}}})
-	n, ok := live.Now("worker:x")
+	n, ok := live.Now()
 	if !ok || !n.At.Equal(base.Add(59900*time.Millisecond)) {
 		t.Fatalf("at: %v %v", n.At, ok)
 	}
@@ -416,12 +394,6 @@ func TestLiveNowWindowsCasesWriters(t *testing.T) {
 	if n.Dirty != 70<<20 || len(n.Writers) != 2 || n.Writers[0].Name != "dd.scope" || n.Writers[0].WriteBps != 50<<20 || n.Writers[1].Name != "b.service" {
 		t.Fatalf("писатели: %+v", n.Writers)
 	}
-	if n.Profile == nil || n.Profile.Count != 3 {
-		t.Fatalf("свод вида: %+v", n.Profile)
-	}
-	if other, _ := live.Now("worker:нет"); other.Profile != nil {
-		t.Fatalf("свод чужого вида: %+v", other.Profile)
-	}
 }
 
 func TestCheckRequestVersionQueryAndSince(t *testing.T) {
@@ -441,9 +413,8 @@ func TestCheckRequestVersionQueryAndSince(t *testing.T) {
 }
 
 // Лист без io.stat (контроллер io у слайса не включён: scope graft-heavy в agents-graft.slice) —
-// чтение и запись не мерены: профиль помечен no_io, свод считает квантили записи только по
-// замеренным, а IOCount говорит, по скольким.
-func TestProfileNoIOAndSummaryOverMeasured(t *testing.T) {
+// чтение и запись не мерены: профиль помечен no_io.
+func TestProfileNoIO(t *testing.T) {
 	p := NewProfiles()
 	base := time.Date(2026, 11, 11, 7, 0, 0, 0, time.Local)
 	const blind, seen = "/agents.slice/agents-graft.slice/graft-heavy-1.scope", "/app.slice/go-test.scope"
@@ -458,15 +429,5 @@ func TestProfileNoIOAndSummaryOverMeasured(t *testing.T) {
 	byPath := map[string]Profile{got[0].Path: got[0], got[1].Path: got[1]}
 	if !byPath[blind].NoIO || byPath[seen].NoIO {
 		t.Fatalf("no_io: %+v", got)
-	}
-	list := append(got, Profile{Kind: "graft:gate", NoIO: true}, Profile{Kind: "graft:gate", NoIO: true})
-	st := SummarizeProfiles(list)["graft:gate"]
-	if st.Count != 4 || st.IOCount != 1 || st.PeakWriteBps != (Quantiles{4 << 20, 4 << 20}) || st.WriteB != (Quantiles{120 << 20, 120 << 20}) ||
-		st.CPUMS != (Quantiles{0, 90_000}) || st.DurMS != (Quantiles{0, 30_000}) {
-		t.Fatalf("свод по замеренным: %+v", st)
-	}
-	none := SummarizeProfiles([]Profile{{Kind: "x", NoIO: true, CPUMS: 5}})["x"]
-	if none.Count != 1 || none.IOCount != 0 || none.PeakWriteBps != (Quantiles{}) || none.CPUMS != (Quantiles{5, 5}) {
-		t.Fatalf("свод без замеренных: %+v", none)
 	}
 }

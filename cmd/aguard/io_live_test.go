@@ -33,8 +33,9 @@ func ioLiveService(t *testing.T, ctx context.Context) (*ioService, *bytes.Buffer
 	return s, out, socket
 }
 
-// Живые запросы через настоящий unix-сокет: службы нет — «не запущена»; now (с писателями и сводом
-// вида), series и profiles; неизвестный запрос и другая версия — ошибка в ответе.
+// Живые запросы через настоящий unix-сокет: службы нет — «не запущена»; now (с писателями; kind
+// старого клиента — без ошибки и без свода вида), series и profiles; неизвестный запрос и другая
+// версия — ошибка в ответе.
 func TestIOSocketNowSeriesProfiles(t *testing.T) {
 	ctx := t.Context()
 	s, out, socket := ioLiveService(t, ctx)
@@ -54,7 +55,6 @@ func TestIOSocketNowSeriesProfiles(t *testing.T) {
 	s.ended = []iowatch.Profile{{Kind: "worker:glint-правило", Name: "worker-a.service", End: time.Now().Add(-time.Hour), WriteB: 20 << 20, PeakWriteBps: 8 << 20, DurMS: 90_000,
 		CPUMS: 330_000, PeakCPUMilli: 3650},
 		{Kind: iowatch.KindAgent, Name: "x-master", End: time.Now().Add(-time.Hour)}}
-	s.live.SetProfiles(iowatch.SummarizeProfiles(s.ended))
 	go s.serve()
 	go s.wait(time.Minute) // горутина цикла: исполняет extra
 	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
@@ -69,7 +69,13 @@ func TestIOSocketNowSeriesProfiles(t *testing.T) {
 		t.Fatalf("права сокета %v", info.Mode().Perm())
 	}
 
-	if err := a.ioLive(iowatch.Request{Q: iowatch.QueryNow, Kind: "worker:glint-правило"}, true); err != nil {
+	// kind в now от старого клиента: без ошибки и без свода профилей вида — по сырому ответу службы
+	var rawNow json.RawMessage
+	if err := linesock.Ask(socket, time.Second, json.RawMessage(`{"v":1,"q":"now","kind":"worker:glint-правило"}`), &rawNow); err != nil ||
+		!bytes.Contains(rawNow, []byte(`"at"`)) || bytes.Contains(rawNow, []byte(`"profile`)) || bytes.Contains(rawNow, []byte(`"error"`)) {
+		t.Fatalf("now с kind (%v): %s", err, rawNow)
+	}
+	if err := a.ioLive(iowatch.Request{Q: iowatch.QueryNow}, true); err != nil {
 		t.Fatal(err)
 	}
 	var now iowatch.Answer
@@ -77,8 +83,7 @@ func TestIOSocketNowSeriesProfiles(t *testing.T) {
 		t.Fatalf("now JSON %v: %s", err, out)
 	}
 	if !now.At.Equal(base.Add(2400*time.Millisecond)) || now.W1s.WriteBps != 10<<20 || now.W1s.WAwaitMS != 3 || now.Dirty != 40<<20 ||
-		len(now.Writers) != 1 || now.Writers[0].Name != "run-dd.scope" || now.Writers[0].WriteBps != 30<<20 ||
-		now.Profile == nil || now.Profile.Count != 1 || now.Profile.PeakWriteBps.P50 != 8<<20 || now.Profile.CPUMS.P50 != 330_000 {
+		len(now.Writers) != 1 || now.Writers[0].Name != "run-dd.scope" || now.Writers[0].WriteBps != 30<<20 {
 		t.Fatalf("now: %+v", now.Now)
 	}
 	if now.W1s.CPUSomeMS != 120 || now.W1s.RunnableMax != 18 || now.MemAvailable != 1126<<20 || now.SwapUsed != 15<<30 ||
@@ -140,9 +145,6 @@ func TestSeriesProfilesSurviveRestartKeepAndBrokenFile(t *testing.T) {
 	if len(seconds) != 2 || seconds[0].WriteB != 5<<20 || seconds[0].Dirty != 3<<20 || len(next.ended) != 1 || next.ended[0].WriteB != 70<<20 {
 		t.Fatalf("после перезапуска: ряд %+v, профили %+v", seconds, next.ended)
 	}
-	if n, _ := next.live.Now("worker:x"); n.Profile != nil {
-		t.Fatal("now без шагов отдал свод")
-	}
 	for _, path := range []string{s.seriesPath, s.profilesPath} {
 		if err := os.WriteFile(path, []byte("{битая\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -195,10 +197,6 @@ func TestCheckCgroupsEndsProfile(t *testing.T) {
 	if len(s.ended) != 1 || s.ended[0].Kind != "worker:правка" || s.ended[0].WriteB != 24<<20 || len(s.profiles.Open()) != 0 {
 		t.Fatalf("профиль: %+v", s.ended)
 	}
-	s.rec.Step(iowatch.Step{At: time.Now()})
-	if n, ok := s.live.Now("worker:правка"); !ok || n.Profile == nil || n.Profile.Count != 1 {
-		t.Fatalf("свод вида в now: %+v", n.Profile)
-	}
 }
 
 func writeIOFile(t *testing.T, path, content string) {
@@ -211,27 +209,11 @@ func writeIOFile(t *testing.T, path, content string) {
 	}
 }
 
-// Профиль без меры IO (лист без io.stat) — «IO не мерено», а не W 0; свод в now — пик W по
-// замеренным с их числом, нет замеренных — «пик W не мерен».
+// Профиль без меры IO (лист без io.stat) — «IO не мерено», а не W 0.
 func TestIOProfilesNoIOText(t *testing.T) {
 	var b strings.Builder
 	writeIOProfiles(&b, []iowatch.Profile{{Kind: "graft:gate", Name: "graft-heavy-1.scope", NoIO: true, DurMS: 78_000, CPUMS: 60_000}})
 	if line := b.String(); !strings.Contains(line, "IO не мерено") || strings.Contains(line, "W 0 МБ") {
 		t.Fatalf("профиль без IO: %q", line)
-	}
-	for _, c := range []struct {
-		st   iowatch.ProfileStats
-		want string
-	}{
-		{iowatch.ProfileStats{Kind: "graft:gate", Count: 6}, "graft:gate: 6 проф., пик W не мерен"},
-		{iowatch.ProfileStats{Kind: "graft:gate", Count: 6, IOCount: 2, PeakWriteBps: iowatch.Quantiles{P50: 3 << 20, P90: 9 << 20}}, "graft:gate: 6 проф., пик W p50/p90 3/9 МБ/с (по 2)"},
-		{iowatch.ProfileStats{Kind: "agent", Count: 4, IOCount: 4, PeakWriteBps: iowatch.Quantiles{P50: 1 << 20, P90: 2 << 20}}, "agent: 4 проф., пик W p50/p90 1/2 МБ/с\n"},
-	} {
-		b.Reset()
-		st := c.st
-		writeIONow(&b, &iowatch.Now{Profile: &st})
-		if !strings.Contains(b.String(), c.want) {
-			t.Fatalf("свод %+v: %q, ждали %q", c.st, b.String(), c.want)
-		}
 	}
 }

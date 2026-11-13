@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
-	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -285,90 +284,6 @@ func workerClass(path string) (string, error) {
 		return "", fmt.Errorf("класс бойца %s: поля class нет", path)
 	}
 	return job.Class, nil
-}
-
-// ProfileStats — свод профилей одного вида: для допуска одним запросом now.
-type ProfileStats struct {
-	Kind          string    `json:"kind"`
-	Count         int       `json:"count"`
-	IOCount       int       `json:"io_count"` // профилей с мерой IO (без NoIO): по ним PeakWriteBps и WriteB; 0 — запись не мерена
-	PeakWriteBps  Quantiles `json:"peak_wr_bps"`
-	WriteB        Quantiles `json:"wr_b"`
-	DurMS         Quantiles `json:"dur_ms"`
-	CPUMS         Quantiles `json:"cpu_ms"`
-	PeakCPUMilli  Quantiles `json:"peak_cpu_milli"`
-	PeakAnonB     Quantiles `json:"peak_anon_b"`
-	Majflt        Quantiles `json:"majflt"`
-	MachineSwapIn Quantiles `json:"machine_swapin"`
-	Last          time.Time `json:"last"` // конец последнего профиля
-}
-
-// profileStatFields — поля профиля, которые сводятся квантилями, и их место в ProfileStats.
-// io — поле меры IO: его квантили только по профилям без NoIO.
-var profileStatFields = [...]struct {
-	value func(*Profile) int64
-	stat  func(*ProfileStats) *Quantiles
-	io    bool
-}{
-	{func(p *Profile) int64 { return p.PeakWriteBps }, func(s *ProfileStats) *Quantiles { return &s.PeakWriteBps }, true},
-	{func(p *Profile) int64 { return p.WriteB }, func(s *ProfileStats) *Quantiles { return &s.WriteB }, true},
-	{func(p *Profile) int64 { return p.DurMS }, func(s *ProfileStats) *Quantiles { return &s.DurMS }, false},
-	{func(p *Profile) int64 { return p.CPUMS }, func(s *ProfileStats) *Quantiles { return &s.CPUMS }, false},
-	{func(p *Profile) int64 { return p.PeakCPUMilli }, func(s *ProfileStats) *Quantiles { return &s.PeakCPUMilli }, false},
-	{func(p *Profile) int64 { return p.PeakAnonB }, func(s *ProfileStats) *Quantiles { return &s.PeakAnonB }, false},
-	{func(p *Profile) int64 { return p.Majflt }, func(s *ProfileStats) *Quantiles { return &s.Majflt }, false},
-	{func(p *Profile) int64 { return p.MachineSwapIn }, func(s *ProfileStats) *Quantiles { return &s.MachineSwapIn }, false},
-}
-
-// Quantiles — медиана и 90-й перцентиль (ближайший ранг).
-type Quantiles struct {
-	P50 int64 `json:"p50"`
-	P90 int64 `json:"p90"`
-}
-
-// SummarizeProfiles — свод по видам.
-func SummarizeProfiles(profiles []Profile) map[string]ProfileStats {
-	byKind := map[string][]*Profile{}
-	for i := range profiles {
-		byKind[profiles[i].Kind] = append(byKind[profiles[i].Kind], &profiles[i])
-	}
-	out := make(map[string]ProfileStats, len(byKind))
-	for kind, list := range byKind {
-		st := ProfileStats{Kind: kind, Count: len(list)}
-		for _, p := range list {
-			if p.End.After(st.Last) {
-				st.Last = p.End
-			}
-		}
-		measured := slices.DeleteFunc(slices.Clone(list), func(p *Profile) bool { return p.NoIO })
-		st.IOCount = len(measured)
-		values := make([]int64, 0, len(list))
-		for _, f := range profileStatFields {
-			of := list
-			if f.io {
-				if of = measured; len(of) == 0 {
-					continue // запись не мерена ни в одном: нули квантилей, IOCount 0
-				}
-			}
-			values = values[:0]
-			for _, p := range of {
-				values = append(values, f.value(p))
-			}
-			*f.stat(&st) = quantiles(values)
-		}
-		out[kind] = st
-	}
-	return out
-}
-
-// quantiles — p50 и p90 по ближайшему рангу; values сортируются на месте.
-func quantiles(values []int64) Quantiles {
-	slices.Sort(values)
-	rank := func(p float64) int64 {
-		i := int(math.Ceil(p*float64(len(values)))) - 1
-		return values[max(0, min(len(values)-1, i))]
-	}
-	return Quantiles{P50: rank(.5), P90: rank(.9)}
 }
 
 // FilterProfiles — профили вида kind (пусто — все) с концом не раньше since.

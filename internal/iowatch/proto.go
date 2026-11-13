@@ -13,7 +13,7 @@ const ProtoVersion = 1
 
 // Запросы.
 const (
-	QueryNow      = "now"      // моментальное состояние (Now); kind — ещё свод профилей вида
+	QueryNow      = "now"      // моментальное состояние (Now); kind от старых клиентов не читается
 	QuerySeries   = "series"   // посекундный ряд с since
 	QueryProfiles = "profiles" // профили вида kind (пусто — все) с концом не раньше since
 	QueryCases    = "cases"    // сводки случаев с концом не раньше since и учёт покрытия замера
