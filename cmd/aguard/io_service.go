@@ -28,6 +28,57 @@ type ioSink interface {
 	sampleErr(key string, err error) // замер не удался: цикл идёт дальше
 }
 
+type ioPressureSink interface{ pressure() bool }
+
+type ioDetailChange struct {
+	interval  time.Duration
+	immediate bool
+}
+
+type ioDetailSchedule struct {
+	interval time.Duration
+	next     time.Time
+}
+
+func newIODetailSchedule(at time.Time, interval time.Duration) ioDetailSchedule {
+	return ioDetailSchedule{interval: interval, next: at.Add(interval)}
+}
+
+func (s *ioDetailSchedule) Change(at time.Time, change ioDetailChange) {
+	s.interval = change.interval
+	s.next = at.Add(s.interval)
+	if change.immediate {
+		s.next = at
+	}
+}
+
+func (s *ioDetailSchedule) Recorded(at time.Time) { s.next = at.Add(s.interval) }
+func (s ioDetailSchedule) Due(at time.Time) bool  { return !at.Before(s.next) }
+
+func (s ioDetailSchedule) Wait(at time.Time) time.Duration {
+	if !at.Before(s.next) {
+		return 0
+	}
+	return s.next.Sub(at)
+}
+
+type ioPressureState struct {
+	pressured bool
+	quietTill time.Time
+}
+
+func (p *ioPressureState) update(at time.Time, open bool, context time.Duration) (pressured, entered bool) {
+	if open {
+		p.quietTill = time.Time{}
+	} else if p.pressured && p.quietTill.IsZero() {
+		p.quietTill = at.Add(context)
+	}
+	pressured = open || at.Before(p.quietTill)
+	entered = pressured && !p.pressured
+	p.pressured = pressured
+	return pressured, entered
+}
+
 // runIOSampling — быстрые шаги по тикеру здесь, детальные записи из своей горутины, extra —
 // действия других горутин (сигнал, итог разбора), исполняются здесь же. Возвращается по ctx.
 func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots, sink ioSink, extra <-chan func()) error {
@@ -41,12 +92,13 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 		return err
 	}
 	details := make(chan ioDetailResult, 4)
+	control := make(chan ioDetailChange, 1)
 	detailCtx, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer detail.Close()
-		runIODetail(detailCtx, cfg.Detail.D(), detail, details)
+		runIODetail(detailCtx, cfg.DetailIdle.D(), detail, details, control)
 	}()
 	defer func() {
 		stop()
@@ -54,6 +106,7 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 	}()
 	ticker := time.NewTicker(cfg.Step.D())
 	defer ticker.Stop()
+	var pressure ioPressureState
 	for {
 		select {
 		case <-ctx.Done():
@@ -65,7 +118,7 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 				sink.sampleErr("fast", err)
 				continue
 			}
-			sink.step(s)
+			advanceIOFastStep(sink, s, cfg, &pressure, control)
 		case r := <-details:
 			if r.err != nil {
 				sink.sampleErr("detail", r.err)
@@ -81,6 +134,36 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 	}
 }
 
+func advanceIOFastStep(sink ioSink, sample iowatch.Step, cfg iowatch.Config, pressure *ioPressureState, control chan ioDetailChange) {
+	sink.step(sample)
+	active := false
+	if state, ok := sink.(ioPressureSink); ok {
+		active = state.pressure()
+	}
+	wasPressured := pressure.pressured
+	pressured, entered := pressure.update(sample.At, active, cfg.Context.D())
+	if pressured != wasPressured {
+		setIODetailInterval(control, cfg.DetailIdle.D(), cfg.Detail.D(), pressured, entered)
+	}
+}
+
+func setIODetailInterval(control chan ioDetailChange, idle, active time.Duration, pressured, immediate bool) {
+	interval := idle
+	if pressured {
+		interval = active
+	}
+	change := ioDetailChange{interval: interval, immediate: immediate}
+	select {
+	case control <- change:
+	default:
+		select {
+		case <-control:
+		default:
+		}
+		control <- change
+	}
+}
+
 type ioDetailResult struct {
 	step    iowatch.Step
 	skipped error // пропущенные процессы: запись годна без них
@@ -88,21 +171,43 @@ type ioDetailResult struct {
 }
 
 // runIODetail — детальный проход раз в interval; паника прохода — ошибкой, цикл идёт дальше.
-func runIODetail(ctx context.Context, interval time.Duration, r *iowatch.DetailReader, out chan<- ioDetailResult) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+func runIODetail(ctx context.Context, interval time.Duration, r *iowatch.DetailReader, out chan<- ioDetailResult, control <-chan ioDetailChange) {
+	runIODetailRead(ctx, interval, func(now time.Time) ioDetailResult {
+		return readIODetail(r, now)
+	}, out, control)
+}
+
+func runIODetailRead(ctx context.Context, interval time.Duration, read func(time.Time) ioDetailResult, out chan<- ioDetailResult, control <-chan ioDetailChange) {
+	schedule := newIODetailSchedule(time.Now(), interval)
+	timer := time.NewTimer(schedule.Wait(time.Now()))
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case change, ok := <-control:
+			if !ok {
+				return
+			}
+			now := time.Now()
+			schedule.Change(now, change)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(schedule.Wait(time.Now()))
+		case <-timer.C:
 			// Детальный проход тоже снимает дельты, поэтому At должен быть временем чтения.
-			res := readIODetail(r, time.Now())
+			res := read(time.Now())
 			select {
 			case out <- res:
 			case <-ctx.Done():
 				return
 			}
+			schedule.Recorded(time.Now())
+			timer.Reset(schedule.Wait(time.Now()))
 		}
 	}
 }
@@ -435,6 +540,8 @@ func (s *ioService) step(st iowatch.Step) {
 	}
 }
 
+func (s *ioService) pressure() bool { return s.rec.Pressure() }
+
 func (s *ioService) detail(st iowatch.Step) { s.rec.Detail(st) }
 
 func (s *ioService) sampleErr(key string, err error) {
@@ -512,7 +619,7 @@ func (s *ioService) reconfigure(gen int, next iowatch.Config, err error) {
 		s.warn(time.Now(), "config", "конфиг не прочитан, работаю по прежнему", err)
 		return
 	}
-	if next.Mode == iowatch.ModeOff || next.Step != s.cfg.Step || next.Detail != s.cfg.Detail || next.Ring != s.cfg.Ring || next.Device != s.cfg.Device {
+	if next.Mode == iowatch.ModeOff || next.Step != s.cfg.Step || next.Detail != s.cfg.Detail || next.DetailIdle != s.cfg.DetailIdle || next.Ring != s.cfg.Ring || next.Device != s.cfg.Device {
 		s.restarted = true
 		s.restart()
 		return

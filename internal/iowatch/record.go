@@ -95,7 +95,8 @@ type Cgroup struct {
 
 // Record — строка снимка: {"k":"s"|"d", поля Step}.
 type Record struct {
-	Kind string `json:"k"`
+	Kind           string `json:"k"`
+	detailInterval time.Duration
 	Step
 }
 

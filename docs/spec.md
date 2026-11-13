@@ -82,7 +82,7 @@ User-наблюдатель раз в 5 минут читает снимок, и
 
 ## IO и фризы: что меряет
 
-Быстрый шаг по умолчанию 100 мс: PSI io и memory, CPU some, готовые задачи, статистика устройства, дискового ввода-вывода и свопа. Детальный проход каждую секунду читает процессы и листья cgroup, в том числе объём IO, память, CPU, swap и major faults; исходники — `/proc` и `/sys/fs/cgroup`. Быстрые данные держатся в кольце 5 минут (deploy/config.example.toml:199, internal/iowatch/fast.go:24, internal/iowatch/detail.go:26, internal/iowatch/cgroup.go:67, internal/iowatch/process.go:94, internal/iowatch/ring.go:14).
+Быстрый шаг по умолчанию 100 мс: PSI io и memory, CPU some, готовые задачи, статистика устройства, дискового ввода-вывода и свопа. Детальный проход в покое идёт раз в 5 секунд (`detail_idle`), а при случае фриза — раз в секунду (`detail`), сразу при переходе в давление; после закрытия случая сохраняется подробный сбор ещё 5 секунд (`context`). Проход читает процессы и листья cgroup, в том числе объём IO, память, CPU, swap и major faults; исходники — `/proc` и `/sys/fs/cgroup`. Быстрые данные держатся в кольце 5 минут (deploy/config.example.toml:199, internal/iowatch/fast.go:24, internal/iowatch/detail.go:26, internal/iowatch/cgroup.go:67, internal/iowatch/process.go:94, internal/iowatch/ring.go:14).
 
 ### Что решает, пороги и кому пишет
 

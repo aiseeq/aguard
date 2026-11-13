@@ -149,6 +149,7 @@ type ioRecordSink struct {
 }
 
 func (s *ioRecordSink) step(st iowatch.Step) { s.print(s.rec.Step(st)) }
+func (s *ioRecordSink) pressure() bool       { return s.rec.Pressure() }
 
 func (s *ioRecordSink) print(cases []iowatch.Case) {
 	for i := range cases {

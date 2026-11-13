@@ -894,6 +894,20 @@ func TestIOReconfigureRefreshesRoute(t *testing.T) {
 	}
 }
 
+func TestIOReconfigureRestartsForDetailIdle(t *testing.T) {
+	a, _ := testIOApp(t)
+	s := newIOService(context.Background(), a)
+	s.cfg = iowatch.Default()
+	s.rec = iowatch.NewRecorder(s.cfg)
+	s.restart = func() {}
+	next := s.cfg
+	next.DetailIdle = policy.Duration(10 * time.Second)
+	s.reconfigure(s.gen, next, nil)
+	if !s.restarted {
+		t.Fatal("смена detail_idle должна перестраивать цикл замера")
+	}
+}
+
 // Хозяин не в сети при маршруте сохраняется в случае (owner_offline) и переживает перезапуск: засев не решает по
 // сессиям в сети сейчас.
 func TestIOOwnerOfflineSavedForSeed(t *testing.T) {

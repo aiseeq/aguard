@@ -25,6 +25,7 @@ type Config struct {
 	Mode       string          `toml:"mode"`        // off | log (случаи копятся, письма — в журнал) | alert
 	Step       policy.Duration `toml:"step"`        // быстрый шаг: PSI, vmstat, diskstats
 	Detail     policy.Duration `toml:"detail"`      // детальная запись: cgroup и процессы
+	DetailIdle policy.Duration `toml:"detail_idle"` // детальная запись в покое
 	Ring       policy.Duration `toml:"ring"`        // сколько сырых записей держать в памяти
 	Trigger    float64         `toml:"trigger"`     // доля шага простоя PSI full: шаг с простоем
 	Gap        policy.Duration `toml:"gap"`         // спокойный промежуток до стольких не делит случай
@@ -67,6 +68,7 @@ func Default() Config {
 		Mode:          ModeAlert,
 		Step:          policy.Duration(100 * time.Millisecond),
 		Detail:        policy.Duration(time.Second),
+		DetailIdle:    policy.Duration(5 * time.Second),
 		Ring:          policy.Duration(5 * time.Minute),
 		Trigger:       .5,
 		Gap:           policy.Duration(300 * time.Millisecond),
@@ -98,15 +100,17 @@ func (c *Config) Validate() error {
 	if c.Mode != ModeOff && c.Mode != ModeLog && c.Mode != ModeAlert {
 		return fmt.Errorf("mode: off, log или alert")
 	}
-	step, detail := c.Step.D(), c.Detail.D()
-	if step < 50*time.Millisecond || detail < step || detail%step != 0 || c.Ring.D() < time.Minute || c.Trigger <= 0 || c.Trigger > 1 {
-		return errors.New("step >= 50ms, detail >= step и кратен ему, ring >= 1m, trigger в (0, 1]")
+	if err := c.validateIntervals(); err != nil {
+		return err
+	}
+	if c.Ring.D() < time.Minute || c.Trigger <= 0 || c.Trigger > 1 {
+		return errors.New("ring >= 1m, trigger в (0, 1]")
 	}
 	if c.Gap.D() < 0 || c.CaseMin.D() < 0 || c.Context.D() < 0 {
 		return errors.New("gap, case_min и context не отрицательны")
 	}
-	if c.Context.D()+c.Detail.D() >= c.Ring.D() {
-		return errors.New("context + detail должны быть меньше ring: виновники берутся из буфера")
+	if c.Context.D()+c.DetailIdle.D() >= c.Ring.D() {
+		return errors.New("context + detail_idle должны быть меньше ring: виновники берутся из буфера")
 	}
 	if c.CasesKeep.D() <= 0 || c.Keep.D() <= 0 || c.QuietBytes < 0 {
 		return errors.New("cases_keep и keep должны быть положительными, quiet_bytes — не отрицательным")
@@ -118,6 +122,14 @@ func (c *Config) Validate() error {
 		return err
 	}
 	return c.validateLive()
+}
+
+func (c *Config) validateIntervals() error {
+	step, detail, idle := c.Step.D(), c.Detail.D(), c.DetailIdle.D()
+	if step < 50*time.Millisecond || detail < step || detail%step != 0 || idle < detail || idle%detail != 0 {
+		return errors.New("step >= 50ms, detail >= step и кратен ему, detail_idle >= detail и кратен ему")
+	}
+	return nil
 }
 
 // validateRoute — пороги маршрута случаев и таблица хозяев служб.
