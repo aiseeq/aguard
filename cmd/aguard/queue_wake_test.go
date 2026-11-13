@@ -559,6 +559,7 @@ func TestJobUnitMatches(t *testing.T) {
 		{"worker-job-1113-0946-other", "worker-job-1113-0946-a.service", false},
 		{"worker-1107-1220-x", "worker-1107-1220-x-y.service", false},
 		{"worker-1107-1220-x", "worker-1107-1220-x-.service", false},
+		{"worker-job-1113-0001-п", `worker-job-1113-0001-\xd0\xbf.service`, true}, // systemctl экранирует кириллицу
 	} {
 		if got := jobUnitMatches(tc.job, tc.unit); got != tc.want {
 			t.Errorf("jobUnitMatches(%q, %q) = %v", tc.job, tc.unit, got)
