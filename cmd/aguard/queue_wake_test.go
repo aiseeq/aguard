@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -503,6 +504,64 @@ func TestQueueWakeProjectsMatchTasksProject(t *testing.T) {
 	for dir, seen := range want {
 		if !seen {
 			t.Fatalf("нет %s", dir)
+		}
+	}
+}
+
+// TestWorkerOwnersUnits — хозяева живых бойцов по настоящим unit worker: owner, не master; worker-settle — не боец,
+// без строки журнала; unit бойца без своего задания или с чужим unit в job.json — предупреждение, не молча.
+func TestWorkerOwnersUnits(t *testing.T) {
+	var logs strings.Builder
+	a := cpuApp(t, &logs)
+	job := func(id, body string) {
+		t.Helper()
+		path := filepath.Join(a.home, ".local/state/worker", id, "job.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	job("1113-0946-a", `{"master":"beta-master","unit":"worker-job-1113-0946-a","owner":{"name":"alpha-admin"}}`)
+	job("1111-2150-b", `{"master":"gamma-master","unit":"worker-round-1111-2150-b-7","owner":{"name":"gamma-master"}}`)
+	job("1113-0950-c", `{"master":"delta-master","unit":"worker-job-1113-0950-other","owner":{"name":"delta-master"}}`)
+	a.queueWorkers = func() ([]string, error) {
+		return []string{"worker-settle.service", "worker-job-1113-0946-a.service", "worker-round-1111-2150-b-7.service",
+			"worker-job-1113-0950-c.service", "worker-job-1113-0999-missing.service"}, nil
+	}
+	owners, err := a.workerOwners()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]bool{"alpha-admin": true, "gamma-master": true}; !maps.Equal(owners, want) {
+		t.Errorf("owners = %v, ждали %v", owners, want)
+	}
+	out := logs.String()
+	for _, unit := range []string{"worker-job-1113-0950-c.service", "worker-job-1113-0999-missing.service"} {
+		if !strings.Contains(out, unit) {
+			t.Errorf("нет предупреждения о %s:\n%s", unit, out)
+		}
+	}
+	if strings.Contains(out, "worker-settle") || strings.Contains(out, "1113-0946-a") || strings.Contains(out, "1111-2150-b") {
+		t.Errorf("лишнее предупреждение:\n%s", out)
+	}
+}
+
+func TestJobUnitMatches(t *testing.T) {
+	for _, tc := range []struct {
+		job, unit string
+		want      bool
+	}{
+		{"worker-job-1113-0946-a", "worker-job-1113-0946-a.service", true},
+		{"worker-1107-1220-x", "worker-1107-1220-x-2.service", true},
+		{"", "worker-job-1113-0946-a.service", true},
+		{"worker-job-1113-0946-other", "worker-job-1113-0946-a.service", false},
+		{"worker-1107-1220-x", "worker-1107-1220-x-y.service", false},
+		{"worker-1107-1220-x", "worker-1107-1220-x-.service", false},
+	} {
+		if got := jobUnitMatches(tc.job, tc.unit); got != tc.want {
+			t.Errorf("jobUnitMatches(%q, %q) = %v", tc.job, tc.unit, got)
 		}
 	}
 }

@@ -124,13 +124,35 @@ func (a *app) workerOwners() (map[string]bool, error) {
 	jobs := &cpuwatch.Jobs{Dir: filepath.Join(a.home, ".local/state/worker")}
 	owners := map[string]bool{}
 	for _, unit := range units {
+		if cpuwatch.JobIDs(unit) == nil { // не боец: worker-settle и т. п.
+			continue
+		}
 		job, err := jobs.ByUnit(unit)
 		if err != nil {
 			return nil, fmt.Errorf("задание бойца %s: %w", unit, err)
 		}
-		if job != nil && job.Owner != nil && job.Owner.Name != "" {
+		if job == nil || !jobUnitMatches(job.Unit, unit) { // молча мимо — и будильник будит мастеров с живыми бойцами
+			found := ""
+			if job != nil {
+				found = job.Unit
+			}
+			a.warn("queue", "unit бойца без своего задания", "unit", unit, "job_unit", found)
+			continue
+		}
+		if job.Owner != nil && job.Owner.Name != "" {
 			owners[job.Owner.Name] = true
 		}
 	}
 	return owners, nil
+}
+
+// jobUnitMatches — unit из job.json тот же, что живой: целиком или прежний повтор <unit>-<n>; пустое поле
+// (задание старше поля) не опровергает.
+func jobUnitMatches(jobUnit, unit string) bool {
+	name := strings.TrimSuffix(cpuwatch.UnescapeUnit(unit), ".service")
+	if jobUnit == "" || jobUnit == name {
+		return true
+	}
+	rest, ok := strings.CutPrefix(name, jobUnit+"-")
+	return ok && rest != "" && strings.Trim(rest, "0123456789") == ""
 }
