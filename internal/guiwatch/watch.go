@@ -306,11 +306,9 @@ func (w *Watcher) step(at time.Time) error {
 		w.lastDiscover = at
 	}
 	for pid, s := range w.states {
-		interval := w.Config.Interval.D()
-		if !s.Main {
-			interval = w.Config.RendererEvery.D()
-		}
-		if at.Sub(s.sampled) >= interval {
+		interval := w.sampleEvery(s)
+		// допуск — четверть шага тика: тик приходит чуть раньше, а рендерер с шагом длиннее тика не опрашивается чаще своего
+		if at.Sub(s.sampled) >= interval-w.Config.Interval.D()/4 {
 			if err := w.sample(s, at); err != nil {
 				if !procGone(err) {
 					return fmt.Errorf("опрос %s pid=%d: %w", s.Name, pid, err)
@@ -381,12 +379,27 @@ func (w *Watcher) checkClock(at time.Time) error {
 			return err
 		}
 	}
-	if gap >= 300*time.Millisecond && sleepDelta <= time.Second {
+	if gap >= gapLimit(w.Config.Interval.D()) && sleepDelta <= time.Second {
 		if err := w.recordSamplerGap(at, gap); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// gapLimit — пауза между опросами с шагом interval, после которой это уже
+// разрыв (пропуск опроса, конец серии сна), а не опоздание тика. Допуск 20% покрывает
+// небольшое опоздание после двух ожидаемых тиков.
+func gapLimit(interval time.Duration) time.Duration {
+	return max(300*time.Millisecond, 2*interval+interval/5)
+}
+
+// sampleEvery — шаг опроса цели: главные процессы GUI — Interval, рендереры — RendererEvery.
+func (w *Watcher) sampleEvery(s *targetState) time.Duration {
+	if s.Main {
+		return w.Config.Interval.D()
+	}
+	return w.Config.RendererEvery.D()
 }
 
 func (w *Watcher) readSelfWait() (uint64, error) {
@@ -798,7 +811,7 @@ func (w *Watcher) sample(s *targetState, at time.Time) error {
 	}
 	elapsed := at.Sub(s.sampled)
 	if elapsed <= 0 {
-		elapsed = w.Config.Interval.D()
+		elapsed = w.sampleEvery(s)
 	}
 	runDelta, waitDelta := run-s.run, wait-s.wait
 	cur.RunMS = int64(runDelta) / 1e6
@@ -819,13 +832,13 @@ func (w *Watcher) sample(s *targetState, at time.Time) error {
 	}
 	w.trackSleep(s, cur, at)
 	w.appendSample(s, cur, at)
-	return w.judge(s, sampleKind(state, runDelta, waitDelta, elapsed), at)
+	return w.judgeFromSample(s, sampleKind(state, runDelta, waitDelta, elapsed), at, at.Add(-elapsed))
 }
 
 func sleepKey(date, target, wchan string) string { return date + "\x00" + target + "\x00" + wchan }
 func (w *Watcher) trackSleep(s *targetState, x Sample, at time.Time) {
 	r, ok := w.sleepCurrent[s.PID]
-	if x.State != "S" || (ok && (r.wchan != x.Wchan || at.Sub(r.last) > 300*time.Millisecond)) {
+	if x.State != "S" || (ok && (r.wchan != x.Wchan || at.Sub(r.last) > gapLimit(w.sampleEvery(s)))) {
 		if ok {
 			w.finishSleep(r, at)
 		}
@@ -1035,6 +1048,10 @@ func sampleKind(state string, runDelta, waitDelta uint64, elapsed time.Duration)
 }
 
 func (w *Watcher) judge(s *targetState, kind string, at time.Time) error {
+	return w.judgeFromSample(s, kind, at, at)
+}
+
+func (w *Watcher) judgeFromSample(s *targetState, kind string, at, sampleStart time.Time) error {
 	e := s.episode
 	for i := 0; i < len(s.closing); {
 		pending := s.closing[i]
@@ -1049,7 +1066,7 @@ func (w *Watcher) judge(s *targetState, kind string, at time.Time) error {
 	}
 	if kind != "" {
 		if e == nil {
-			e = &episode{start: at, end: at, kind: kind}
+			e = &episode{start: sampleStart, end: at, kind: kind}
 			s.episode = e
 			if !w.topTracking {
 				w.top = map[int]uint64{}
@@ -2581,7 +2598,11 @@ func LongestSleep(d Document) time.Duration {
 			x := &s.Samples[j]
 			at := s.Start.Add(time.Duration(x.AtMS) * time.Millisecond)
 			if x.State == "S" {
-				if start.IsZero() || x.Wchan != chanName || at.Sub(last) > 250*time.Millisecond {
+				interval := Default().Interval.D()
+				if s.Target == "chrome-renderer" {
+					interval = Default().RendererEvery.D()
+				}
+				if start.IsZero() || x.Wchan != chanName || at.Sub(last) > gapLimit(interval) {
 					start = at
 					chanName = x.Wchan
 				}

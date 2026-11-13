@@ -28,7 +28,7 @@ type Config struct {
 }
 
 func Default() Config {
-	return Config{Mode: ModeLog, Interval: policy.Duration(50 * time.Millisecond), RendererEvery: policy.Duration(250 * time.Millisecond), Rediscover: policy.Duration(5 * time.Second), MinStall: policy.Duration(time.Second), Gap: policy.Duration(300 * time.Millisecond), Context: policy.Duration(5 * time.Second), Ring: policy.Duration(30 * time.Second), Keep: policy.Duration(14 * 24 * time.Hour), MaxPerHour: 60, MaxBytes: 200 << 20}
+	return Config{Mode: ModeLog, Interval: policy.Duration(250 * time.Millisecond), RendererEvery: policy.Duration(250 * time.Millisecond), Rediscover: policy.Duration(5 * time.Second), MinStall: policy.Duration(time.Second), Gap: policy.Duration(300 * time.Millisecond), Context: policy.Duration(5 * time.Second), Ring: policy.Duration(30 * time.Second), Keep: policy.Duration(14 * 24 * time.Hour), MaxPerHour: 60, MaxBytes: 200 << 20}
 }
 
 func (c *Config) Validate() error {

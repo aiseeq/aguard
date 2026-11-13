@@ -119,6 +119,170 @@ func setupState(t *testing.T, root, dir string, pid int) (*Watcher, *targetState
 	return watcher, state
 }
 
+func TestInterval250msDStallProducesSingleSlice(t *testing.T) {
+	root, dir, pid, at := fixture(t)
+	w, s := setupState(t, root, dir, pid)
+	defer w.closeAll()
+	w.Config.Interval = policy.Duration(250 * time.Millisecond)
+	statPath := filepath.Join(root, fmt.Sprint(pid), "task", fmt.Sprint(pid), "stat")
+	if err := w.sample(s, at.Add(-250*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	rewrite(t, statPath, statLine("D", 100))
+	if err := w.sample(s, at); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 4; i++ {
+		if err := w.sample(s, at.Add(time.Duration(i)*250*time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.finishAll(at.Add(1200*time.Millisecond), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 1 || w.document.Slices[0].Kind != "D" || w.document.Slices[0].DurationMS < 1200 || w.document.Slices[0].DurationMS > 1450 {
+		t.Fatalf("expected one D slice between 1.2s and 1.45s, got %#v", w.document.Slices)
+	}
+}
+
+func TestInterval250msSamplerGapThreshold(t *testing.T) {
+	root, _, _, at := fixture(t)
+	w := New(root, filepath.Join(root, "out"), Default(), nil)
+	w.Config.Interval = policy.Duration(250 * time.Millisecond)
+	defer w.closeAll()
+	var elapsed time.Duration
+	w.clock = func() (time.Duration, time.Duration, error) { return elapsed, elapsed, nil }
+	if err := w.checkClock(at); err != nil {
+		t.Fatal(err)
+	}
+	elapsed = 350 * time.Millisecond
+	if err := w.checkClock(at.Add(elapsed)); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 0 {
+		t.Fatalf("350ms interval recorded sampler gap: %#v", w.document.Slices)
+	}
+	elapsed = 950 * time.Millisecond
+	if err := w.checkClock(at.Add(elapsed)); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 1 || w.document.Slices[0].Kind != "sampler_gap" || w.document.Slices[0].DurationMS != 600 {
+		t.Fatalf("600ms pause did not record sampler gap: %#v", w.document.Slices)
+	}
+}
+
+func TestInterval250msSleepSeriesDoesNotSplit(t *testing.T) {
+	root, dir, pid, at := fixture(t)
+	w, s := setupState(t, root, dir, pid)
+	defer w.closeAll()
+	for i, offset := range []time.Duration{0, 250, 600, 850, 1200} {
+		w.trackSleep(s, Sample{State: "S", Wchan: "hrtimer_nanosleep"}, at.Add(offset*time.Millisecond))
+		if i > 0 && len(w.sleepStats) != 1 {
+			t.Fatalf("sleep series split at step %d: %#v", i, w.sleepStats)
+		}
+	}
+	if len(w.sleepCurrent) != 1 || w.sleepCurrent[pid].since != at {
+		t.Fatalf("sleep was not kept as one series: %#v", w.sleepCurrent)
+	}
+}
+
+func TestInterval250msStallsRespectActualDuration(t *testing.T) {
+	for _, duration := range []time.Duration{800 * time.Millisecond, 1100 * time.Millisecond, 1200 * time.Millisecond} {
+		t.Run(duration.String(), func(t *testing.T) {
+			root, dir, pid, at := fixture(t)
+			w, s := setupState(t, root, dir, pid)
+			defer w.closeAll()
+			w.Config.Interval = policy.Duration(250 * time.Millisecond)
+			statPath := filepath.Join(root, fmt.Sprint(pid), "task", fmt.Sprint(pid), "stat")
+			if err := w.sample(s, at); err != nil {
+				t.Fatal(err)
+			}
+			end := at.Add(10 * time.Millisecond).Add(duration)
+			for sampleAt := at.Add(250 * time.Millisecond); sampleAt.Before(end); sampleAt = sampleAt.Add(250 * time.Millisecond) {
+				rewrite(t, statPath, statLine("D", 100))
+				if err := w.sample(s, sampleAt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := w.finishAll(end, false); err != nil {
+				t.Fatal(err)
+			}
+			want := duration >= time.Second
+			if got := len(w.document.Slices) == 1; got != want {
+				t.Fatalf("D duration %s: got %d slices, want detected=%v", duration, len(w.document.Slices), want)
+			}
+			if want && w.document.Slices[0].DurationMS > duration.Milliseconds()+250 {
+				t.Fatalf("reported duration %dms exceeds actual duration %dms by more than one interval", w.document.Slices[0].DurationMS, duration.Milliseconds())
+			}
+		})
+	}
+}
+
+func TestInterval250msEarlyTickerSamplesEveryTick(t *testing.T) {
+	root, dir, pid, at := fixture(t)
+	w, s := setupState(t, root, dir, pid)
+	defer w.closeAll()
+	w.lastDiscover = at
+	if err := w.sample(s, at); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 40; i++ {
+		tickAt := at.Add(time.Duration(i) * 2499 * time.Millisecond / 10)
+		if err := w.step(tickAt); err != nil {
+			t.Fatal(err)
+		}
+		if !s.sampled.Equal(tickAt) {
+			t.Fatalf("tick %d at %s skipped sample; last sample %s", i, tickAt.Sub(at), s.sampled.Sub(at))
+		}
+	}
+}
+
+func TestLongestSleepUsesSamplingGapLimit(t *testing.T) {
+	at := time.Now()
+	d := Document{Slices: []Slice{{Target: "victim", Start: at, Samples: []Sample{
+		{AtMS: 0, State: "S", Wchan: "wait_event"},
+		{AtMS: 520, State: "S", Wchan: "wait_event"},
+		{AtMS: 1120, State: "S", Wchan: "wait_event"},
+	}}}}
+	if got := LongestSleep(d); got != 520*time.Millisecond {
+		t.Fatalf("LongestSleep=%s, want 520ms across tolerated gap and split after 600ms", got)
+	}
+}
+
+func TestInterval250msSleepGapTolerance(t *testing.T) {
+	for _, tc := range []struct {
+		gap       time.Duration
+		continues bool
+	}{{520 * time.Millisecond, true}, {600 * time.Millisecond, false}} {
+		t.Run(tc.gap.String(), func(t *testing.T) {
+			root, dir, pid, at := fixture(t)
+			w, s := setupState(t, root, dir, pid)
+			defer w.closeAll()
+			w.trackSleep(s, Sample{State: "S", Wchan: "wait_event"}, at)
+			w.trackSleep(s, Sample{State: "S", Wchan: "wait_event"}, at.Add(tc.gap))
+			got := w.sleepCurrent[pid].since.Equal(at)
+			if got != tc.continues {
+				t.Fatalf("gap %s: continues=%v, want %v", tc.gap, got, tc.continues)
+			}
+		})
+	}
+}
+
+func TestRendererSleepUsesRendererInterval(t *testing.T) {
+	root, dir, pid, at := fixture(t)
+	w, s := setupState(t, root, dir, pid)
+	defer w.closeAll()
+	w.Config.Interval = policy.Duration(250 * time.Millisecond)
+	w.Config.RendererEvery = policy.Duration(time.Second)
+	s.Main = false
+	for i := range 3 {
+		w.trackSleep(s, Sample{State: "S", Wchan: "wait_event"}, at.Add(time.Duration(i)*time.Second))
+	}
+	if len(w.sleepCurrent) != 1 || !w.sleepCurrent[pid].since.Equal(at) {
+		t.Fatalf("renderer sleep split with 1s sampling interval: %#v", w.sleepCurrent)
+	}
+}
+
 func TestDStallProducesSlice(t *testing.T) {
 	root, dir, pid, at := fixture(t)
 	w, s := setupState(t, root, dir, pid)
@@ -825,7 +989,7 @@ func TestSamplerGapUsesThreadSelfWaitDelta(t *testing.T) {
 	}
 	rewrite(t, path, "0 3000000 0\n")
 	w.clock = func() (time.Duration, time.Duration, error) { return 2 * time.Second, 2 * time.Second, nil }
-	if err := w.checkClock(at.Add(400 * time.Millisecond)); err != nil {
+	if err := w.checkClock(at.Add(600 * time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 	if len(w.document.Slices) != 1 || w.document.Slices[0].SelfWaitMS != 2 {

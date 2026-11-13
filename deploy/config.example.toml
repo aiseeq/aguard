@@ -269,7 +269,7 @@ profiles_keep = "720h" # профили завершившихся cgroup (от 
 # Наблюдение за потоками интерфейса и рендерерами Chrome. Снимки — в ~/.local/state/aguard/gui.
 [gui]
 mode = "log"          # off | log; только наблюдение и запись
-interval = "50ms"     # kwin, plasmashell, Chrome и GPU-процесс
+interval = "250ms"    # шаг опроса главных процессов GUI
 renderer_every = "250ms"
 rediscover = "5s"
 min_stall = "1s"

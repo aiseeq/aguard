@@ -22,7 +22,7 @@ type journalRun struct {
 }
 
 // runJournalEpisode — эпизод D на 10 с с поддельным journalctl, затем finish заканчивает его (sample — дальнейшие
-// опросы с шагом 50 мс); ждёт сборы.
+// опросы с шагом 250 мс); ждёт сборы.
 func runJournalEpisode(t *testing.T, finish func(w *Watcher, pid int, at time.Time, sample func(string, int)) error) journalRun {
 	t.Helper()
 	root, dir, pid, at := fixture(t)
@@ -45,7 +45,7 @@ func runJournalEpisode(t *testing.T, finish func(w *Watcher, pid int, at time.Ti
 	}
 	w.JournalDir = journalDir
 	statPath := filepath.Join(root, fmt.Sprint(pid), "task", fmt.Sprint(pid), "stat")
-	step := 50 * time.Millisecond
+	step := 250 * time.Millisecond
 	i := 0
 	sample := func(state string, n int) {
 		for range n {
