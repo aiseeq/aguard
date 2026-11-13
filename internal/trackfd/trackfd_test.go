@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,9 +17,9 @@ import (
 )
 
 // pipes — вместо fanotify и netlink: передача одна и та же, а открыть настоящие можно только под root.
-func pipes(t *testing.T, opened *int) func() (Pair, error) {
+func pipes(t *testing.T, opened *atomic.Int32) func() (Pair, error) {
 	return func() (Pair, error) {
-		*opened++
+		opened.Add(1)
 		var a, b [2]int
 		if err := unix.Pipe(a[:]); err != nil {
 			t.Error(err)
@@ -56,7 +57,7 @@ func serve(t *testing.T, uid int, open func() (Pair, error)) string {
 
 // Свой uid получает новую пару на каждое подключение: у двух читателей не общая очередь.
 func TestFetchFreshPairEachConnect(t *testing.T) {
-	opened := 0
+	var opened atomic.Int32
 	path := serve(t, os.Getuid(), pipes(t, &opened))
 	a, err := Fetch(path, os.Getuid())
 	if err != nil {
@@ -68,8 +69,8 @@ func TestFetchFreshPairEachConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	if opened != 2 || a.Fan == b.Fan || a.Fan == a.Conn {
-		t.Fatalf("открыто %d, пары %+v %+v", opened, a, b)
+	if opened.Load() != 2 || a.Fan == b.Fan || a.Fan == a.Conn {
+		t.Fatalf("открыто %d, пары %+v %+v", opened.Load(), a, b)
 	}
 	for _, fd := range []int{a.Fan, a.Conn, b.Fan, b.Conn} {
 		flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
@@ -81,7 +82,7 @@ func TestFetchFreshPairEachConnect(t *testing.T) {
 
 // Чужой uid дескрипторов не получает, и они для него даже не открываются.
 func TestServeRefusesOtherUID(t *testing.T) {
-	opened := 0
+	var opened atomic.Int32
 	path := serve(t, os.Getuid()+1, pipes(t, &opened))
 	if p, err := Fetch(path, os.Getuid()); err == nil {
 		p.Close()
@@ -89,14 +90,14 @@ func TestServeRefusesOtherUID(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "отказал") {
 		t.Fatalf("ошибка: %v", err)
 	}
-	if opened != 0 {
-		t.Fatalf("для чужого открыто %d", opened)
+	if opened.Load() != 0 {
+		t.Fatalf("для чужого открыто %d", opened.Load())
 	}
 }
 
 // Клиент не верит сокету, который держит не тот uid: подмена дала бы поддельные события.
 func TestFetchRefusesWrongServer(t *testing.T) {
-	opened := 0
+	var opened atomic.Int32
 	path := serve(t, os.Getuid(), pipes(t, &opened))
 	if p, err := Fetch(path, os.Getuid()+1); err == nil {
 		p.Close()

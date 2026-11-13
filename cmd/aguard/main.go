@@ -314,9 +314,12 @@ func (a *app) config() (config.Config, error) {
 	return c, err
 }
 
+// setQuietWindow запоминает окно тишины после загрузки. quietRuntime создаёт
+// конструктор app: ленивое создание здесь гонялось бы с config() из других
+// горутин (сокет io report), поэтому без него окно не запоминается.
 func (a *app) setQuietWindow(d time.Duration) {
 	if a.quietRuntime == nil {
-		a.quietRuntime = &quietRuntime{}
+		return
 	}
 	a.quietRuntime.mu.Lock()
 	a.quietRuntime.afterBoot = d
