@@ -148,6 +148,21 @@ func TestExample(t *testing.T) {
 	}
 }
 
+func TestQuietAfterBootConfig(t *testing.T) {
+	c, err := Load(write(t, ""), home, 1000)
+	if err != nil || c.Quiet.AfterBoot.D() != 45*time.Minute {
+		t.Fatalf("after_boot default = %s, err=%v", c.Quiet.AfterBoot.D(), err)
+	}
+	for _, body := range []string{"[quiet]\nafter_boot = \"0\"\n", "[quiet]\nafter_boot = \"12m\"\n"} {
+		if _, err := Load(write(t, body), home, 1000); err != nil {
+			t.Errorf("valid quiet config %q: %v", body, err)
+		}
+	}
+	if _, err := Load(write(t, "[quiet]\nafter_boot = \"-1s\"\n"), home, 1000); err == nil {
+		t.Fatal("negative quiet.after_boot accepted")
+	}
+}
+
 // Ступени ворот — слово пользователя: строка HIGH, MED или LOW; прежний сдвиг числом — ошибка с понятным текстом,
 // старые ключи таблицы и поправок — неизвестные ключи (пользователь 10.11: «Только этот механизм должен действовать сейчас»).
 func TestLoadQueueLevels(t *testing.T) {

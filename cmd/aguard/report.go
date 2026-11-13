@@ -29,7 +29,9 @@ const (
 
 // note — срабатывание в учёт (у команд вне демона учёта нет); value в единицах unit — для наибольшего за период.
 func (a *app) note(watcher, kind, what, target string, value int64, unit string) {
-	a.act.Add(watcher, kind, what, target, value, unit, time.Now())
+	if a.act != nil {
+		a.act.Add(watcher, kind, what, target, value, unit, time.Now())
+	}
 }
 
 // warn — предупреждение наблюдателя: в журнал и в учёт. Проход продолжается.

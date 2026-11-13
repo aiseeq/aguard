@@ -57,6 +57,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -71,6 +72,7 @@ import (
 	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/aguard/internal/trackfd"
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -129,6 +131,16 @@ type app struct {
 	sigJobs       *cpuwatch.Jobs
 	sigPause      func(context.Context, time.Duration) bool
 	sigAlive      func() (map[string]session.Info, error)
+	now           func() time.Time
+	bootTime      func() (time.Time, error)
+	bootID        func() (string, error)
+	quietRuntime  *quietRuntime
+}
+
+type quietRuntime struct {
+	mu        sync.RWMutex
+	afterBoot time.Duration
+	warnedAt  map[string]time.Time
 }
 
 func main() {
@@ -146,6 +158,7 @@ func main() {
 		reg:           session.ForHome(home),
 		uid:           os.Getuid(),
 		log:           lg,
+		quietRuntime:  &quietRuntime{afterBoot: 45 * time.Minute},
 		out:           os.Stdout,
 		units:         systemdUnits{},
 		codexRead:     readCodex,
@@ -290,7 +303,101 @@ func (a *app) closeWatcher(mw *memwatch.Watcher) {
 	}
 }
 
-func (a *app) config() (config.Config, error) { return config.Load(a.cfgPath, a.home, a.uid) }
+func (a *app) config() (config.Config, error) {
+	c, err := config.Load(a.cfgPath, a.home, a.uid)
+	if err != nil {
+		a.setQuietWindow(0)
+		a.quietBootWarning("config", fmt.Errorf("конфиг: %w", err))
+	} else {
+		a.setQuietWindow(c.Quiet.AfterBoot.D())
+	}
+	return c, err
+}
+
+func (a *app) setQuietWindow(d time.Duration) {
+	if a.quietRuntime == nil {
+		a.quietRuntime = &quietRuntime{}
+	}
+	a.quietRuntime.mu.Lock()
+	a.quietRuntime.afterBoot = d
+	a.quietRuntime.mu.Unlock()
+}
+
+func (a *app) loadQuietConfig() error {
+	_, err := a.config()
+	return err
+}
+
+func (a *app) currentTime() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
+}
+
+func (a *app) systemBootTime() (time.Time, error) {
+	if a.bootTime != nil {
+		return a.bootTime()
+	}
+	return proc.BootTime(procRoot)
+}
+
+func (a *app) systemBootID() (string, error) {
+	if a.bootID != nil {
+		return a.bootID()
+	}
+	b, err := os.ReadFile(filepath.Join(procRoot, "sys", "kernel", "random", "boot_id"))
+	if err != nil {
+		return "", fmt.Errorf("чтение /proc/sys/kernel/random/boot_id: %w", err)
+	}
+	id := strings.TrimSpace(string(b))
+	if id == "" {
+		return "", fmt.Errorf("пустой /proc/sys/kernel/random/boot_id")
+	}
+	return id, nil
+}
+
+func (a *app) quietWindow() time.Duration {
+	if a.quietRuntime == nil {
+		return 0
+	}
+	a.quietRuntime.mu.RLock()
+	defer a.quietRuntime.mu.RUnlock()
+	return a.quietRuntime.afterBoot
+}
+
+func (a *app) quietBootWarning(reason string, err error) {
+	now := a.currentTime()
+	rt := a.quietRuntime
+	if rt == nil {
+		a.log.Warn("aguard тихо: окно после загрузки недоступно", "err", err)
+		return
+	}
+	rt.mu.Lock()
+	if rt.warnedAt == nil {
+		rt.warnedAt = map[string]time.Time{}
+	}
+	last := rt.warnedAt[reason]
+	if !last.IsZero() && now.Sub(last) >= 0 && now.Sub(last) < 10*time.Minute {
+		rt.mu.Unlock()
+		return
+	}
+	rt.warnedAt[reason] = now
+	rt.mu.Unlock()
+	a.log.Warn("aguard тихо: окно после загрузки недоступно", "err", err)
+}
+
+func (a *app) logQuietStartup() {
+	quiet, active, err := a.readQuiet()
+	if err != nil || !active || !quiet.BootActive {
+		return
+	}
+	if quiet.BootWindow {
+		a.log.Info("тихо после загрузки до " + quiet.Until.Local().Format("2006-01-02 15:04:05 MST"))
+		return
+	}
+	a.log.Info("тихо после загрузки: действует явная тишина до " + quiet.Until.Local().Format("2006-01-02 15:04:05 MST"))
+}
 
 func (a *app) dir(name string) string { return filepath.Join(a.stateDir, name) }
 
@@ -324,6 +431,13 @@ func (a *app) run(ctx context.Context) error {
 	ws := a.watchers(mw, judge)
 	a.act = activity.New(a.dir("activity"), time.Now())
 	a.note("aguard", activity.KindStart, "", "", 0, "")
+	if _, err := a.config(); err != nil {
+		a.log.Debug("aguard: конфиг недоступен; окно после загрузки отключено", "err", err)
+	}
+	a.logQuietStartup()
+	if ctx.Err() != nil {
+		return nil
+	}
 	var wg sync.WaitGroup
 	wg.Go(func() { a.restartServe(ctx, judge) })
 	wg.Go(func() { a.ioLoop(ctx, usr2) })
