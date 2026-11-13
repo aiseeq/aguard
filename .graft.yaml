@@ -12,6 +12,14 @@ tasks:
     remote: true # тесты не читают вне дерева того, чего нет на PC: reflink без кэша пользователя — пропуск, живая проба night — только по AGUARD_NIGHT_PROBE
     run:
       - go test -p {threads} -json {args} ./...
+  # Гонки ловит только -race; в гейте он вчетверо дороже (~95 с против 24 с, 13.11), поэтому — перед установкой.
+  # Однопоточные бюджетные тесты под -race пропускают себя сами (testutil.SkipBudgetUnderRace).
+  race:
+    desc: все тесты под -race
+    tests: go
+    remote: true
+    run:
+      - go test -race -p {threads} -json {args} ./...
   build:
     desc: aguard, cl и aguard-track-helper в bin/
     run:
@@ -19,7 +27,7 @@ tasks:
   # Запущенные консоли держат старый cl, новые получат новый. Конфиги кладутся, только если их ещё нет.
   install:
     desc: aguard в ~/.local/bin с user-службой, cl в ~/bin
-    deps: [build]
+    deps: [race, build]
     run:
       - {install: bin/aguard, to: ~/.local/bin}
       - {install: bin/cl}

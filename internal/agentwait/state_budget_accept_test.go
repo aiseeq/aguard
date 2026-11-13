@@ -20,6 +20,7 @@ const (
 )
 
 func TestStateBudgetAccept(t *testing.T) {
+	testutil.SkipBudgetUnderRace(t)
 	path := filepath.Join(t.TempDir(), "offsets.json")
 	want := make(map[string]*File, acceptFiles)
 	raw := make(map[string]any, acceptFiles)

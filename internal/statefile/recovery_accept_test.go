@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/aiseeq/aguard/internal/testutil"
 )
 
 // Мера ревью тикета small-writers: восстановление после сбоя, точность чисел, цена прохода.
@@ -119,6 +121,7 @@ func TestBigIntegersExactAccept(t *testing.T) {
 // Цена прохода: чтение и сохранение большого состояния с журналом не разбирают все записи целиком. Счёт — выделенные
 // байты, а не время: от нагрузки машины не зависят.
 func TestCycleAllocationAccept(t *testing.T) {
+	testutil.SkipBudgetUnderRace(t)
 	path := filepath.Join(t.TempDir(), "state.json")
 	type file struct {
 		Offset int64  `json:"offset"`

@@ -40,6 +40,7 @@ func acceptOldFile(t *testing.T, path string) map[string]*File {
 }
 
 func TestStateBudgetAccept(t *testing.T) {
+	testutil.SkipBudgetUnderRace(t)
 	path := filepath.Join(t.TempDir(), "offsets.json")
 	want := acceptOldFile(t, path)
 	keys := make([]string, 0, len(want))

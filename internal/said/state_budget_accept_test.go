@@ -46,6 +46,7 @@ func acceptOldFile(t *testing.T, path string) {
 
 // Обычный проход: хвост и последний текст агента двигаются, очередь не меняется.
 func TestStateBudgetAccept(t *testing.T) {
+	testutil.SkipBudgetUnderRace(t)
 	path := filepath.Join(t.TempDir(), "state.json")
 	acceptOldFile(t, path)
 	st, err := LoadState(path)
