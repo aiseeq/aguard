@@ -142,6 +142,81 @@ func TestTmpRoundResolvesWorkerJobForRouting(t *testing.T) {
 	}
 }
 
+func TestTmpfilesDirectoryQuotedFields(t *testing.T) {
+	cases := []struct {
+		line, want, reason, wantErr string
+	}{
+		{`d "/tmp/double" 0700 - - -`, "/tmp/double", "", ""},
+		{`d '/tmp/single' 0700 - - -`, "/tmp/single", "", ""},
+		{`d "/tmp/with space" 0700 - - -`, "/tmp/with space", "", ""},
+		{`d /tmp/"a b" 0700 - - -`, "/tmp/a b", "", ""},
+		{`d "/tmp/a"x 0700 - - -`, "/tmp/ax", "", ""},
+		{`d /tmp/with\x20escape 0700 - - -`, "/tmp/with escape", "", ""},
+		{`d /tmp/a\040b 0700 - - -`, "/tmp/a b", "", ""},
+		{`d /tmp/\xc3\xa9 0700 - - -`, "/tmp/é", "", ""},
+		{`d /tmp/\303\251 0700 - - -`, "/tmp/é", "", ""},
+		{`d /tmp/a\sX 0700 - - -`, "/tmp/a X", "", ""},
+		{"d\t/tmp/tab\t0700\t-\t-\t-", "/tmp/tab", "", ""},
+		{`d /tmp/arg-quote 0700 - - - "arg`, "/tmp/arg-quote", "", ""},
+		{`d /tmp/arg-escape 0700 - - - \q`, "/tmp/arg-escape", "", ""},
+		{`'' /tmp/empty-type 0700 - - -`, "", "пустой тип правила", ""},
+		{`d '' 0700 - - -`, "", "пустой путь", ""},
+		{`d /tmp/nul\x00path 0700 - - -`, "", "", "escape даёт NUL"},
+		{`d /tmp/nul\u0000path 0700 - - -`, "", "", "escape даёт NUL"},
+		{`d /tmp/nul\000path 0700 - - -`, "", "", "escape даёт NUL"},
+		{`d /tmp/nul-mode 07\x0000 - - -`, "", "", "escape даёт NUL"},
+		{`d "/tmp/in\x20quotes" 0700 - - -`, "/tmp/in quotes", "", ""},
+		{`d$ /tmp/purge 0700 - - -`, "/tmp/purge", "", ""},
+		{`d /tmp/a\4x 0700 - - -`, "", "", `неверная C escape-последовательность \4`},
+		{`d /tmp/a\777 0700 - - -`, "", "", `неверная C escape-последовательность \7`},
+		{`d /tmp/a\08 0700 - - -`, "", "", `неверная C escape-последовательность \0`},
+		{`d /tmp/a\ud800 0700 - - -`, "", "", "недопустимый Unicode escape"},
+		{`d /tmp/a\q 0700 - - -`, "", "", `неизвестная C escape-последовательность \q`},
+		{`d /tmp/a\x4 0700 - - -`, "", "", `неверная C escape-последовательность \x`},
+		{`d /tmp/a'b 0700 - - -`, "", "", "незакрытая кавычка"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.line, func(t *testing.T) {
+			got, reason, err := tmpfilesDirectory(tc.line)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("ошибка разбора = %v, ожидалась %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || reason != tc.reason || got != tc.want {
+				t.Fatalf("tmpfilesDirectory(%q) = %q, %q, %v; ожидалось %q, %q", tc.line, got, reason, err, tc.want, tc.reason)
+			}
+		})
+	}
+}
+
+func TestTmpfilesEscapeTruncatedHex(t *testing.T) {
+	if _, _, err := tmpfilesEscape(`\x4`, 0); err == nil || err.Error() != `неполная C escape-последовательность \x` {
+		t.Fatalf("обрезанный \\x4: ожидалась ошибка неполного escape, получили %v", err)
+	}
+}
+
+func TestTmpConfigLogsEscapeParseReason(t *testing.T) {
+	a, logs := quietObservedApp(t)
+	a.log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "bad.conf")
+	if err := os.WriteFile(conf, []byte(`d /tmp/bad\q 0700 - - - \q`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := policy.Default(a.home)
+	cfg.TmpfilesDir = dir
+	got := a.tmpConfig(&cfg)
+	if got.Ignored("/tmp/bad") {
+		t.Fatal("путь с неизвестным escape не должен попадать в ignore")
+	}
+	if out := logs.String(); !strings.Contains(out, "reason=\"неизвестная C escape-последовательность") ||
+		strings.Contains(out, "не удалось проверить путь") {
+		t.Fatalf("журнал не содержит причину разбора: %s", out)
+	}
+}
+
 func TestTmpRoundAndReportHonorUserTmpfiles(t *testing.T) {
 	a, logs := quietObservedApp(t)
 	a.log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -167,14 +242,14 @@ func TestTmpRoundAndReportHonorUserTmpfiles(t *testing.T) {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	content := "# rules\n\nd! /tmp/from-d 0700 - - - -\nD /tmp/from-D 0700 - - - -\nv /tmp/from-v 0700 - - - -\nq /tmp/from-q 0700 - - - -\nQ /tmp/from-Q 0700 - - - -\nL+ /tmp/from-link - - - - /tmp/from-d\nd /tmp/%h/from-spec 0700 - - - -\nd relative-path 0700 - - - -\nd \"/tmp/from-quoted\" 0700 - - - -\n"
+	content := "# rules\n\nd! /tmp/from-d 0700 - - - -\nD /tmp/from-D 0700 - - - -\nv /tmp/from-v 0700 - - - -\nq /tmp/from-q 0700 - - - -\nQ /tmp/from-Q 0700 - - - -\nL+ /tmp/from-link - - - - /tmp/from-d\nd /tmp/%h/from-spec 0700 - - - -\nd relative-path 0700 - - - -\nd \"/tmp/from-quoted\" 0700 - - - -\n\nd /tmp/from-arg-quote 0700 - - - \"arg\n\nd /tmp/from-arg-escape 0700 - - - \\q\n"
 	confPath := filepath.Join(configDir, "custom.conf")
 	if err := os.WriteFile(confPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
 	paths := []string{"/tmp/from-d", "/tmp/from-D", "/tmp/from-v", "/tmp/from-q", "/tmp/from-Q",
-		"/tmp/from-link", "/tmp/%h/from-spec", "relative-path", "/var/tmp/outside", "/tmp/from-quoted", "/tmp/neighbor", "/tmp/from-d2"}
+		"/tmp/from-link", "/tmp/%h/from-spec", "relative-path", "/var/tmp/outside", "/tmp/from-quoted", "/tmp/from-arg-quote", "/tmp/from-arg-escape", "/tmp/neighbor", "/tmp/from-d2"}
 	entries := make([]record.Entry, 0, len(paths))
 	for _, path := range paths {
 		entries = append(entries, record.Entry{Path: path, Born: now.Add(-time.Hour), Bytes: 20 << 20})
@@ -201,12 +276,12 @@ func TestTmpRoundAndReportHonorUserTmpfiles(t *testing.T) {
 	}
 	hasPath := func(output, path string) bool { return strings.Contains(output, path+" —") }
 	summary := a.out.(*bytes.Buffer).String()
-	for _, path := range []string{"/tmp/from-d", "/tmp/from-D", "/tmp/from-v", "/tmp/from-q", "/tmp/from-Q"} {
+	for _, path := range []string{"/tmp/from-d", "/tmp/from-D", "/tmp/from-v", "/tmp/from-q", "/tmp/from-Q", "/tmp/from-quoted", "/tmp/from-arg-quote", "/tmp/from-arg-escape"} {
 		if hasPath(summary, path) {
 			t.Errorf("путь из правила каталога попал в сводку: %s\n%s", path, summary)
 		}
 	}
-	for _, path := range []string{"/tmp/from-link", "/tmp/%h/from-spec", "relative-path", "/var/tmp/outside", "/tmp/from-quoted", "/tmp/neighbor", "/tmp/from-d2"} {
+	for _, path := range []string{"/tmp/from-link", "/tmp/%h/from-spec", "relative-path", "/var/tmp/outside", "/tmp/neighbor", "/tmp/from-d2"} {
 		if !hasPath(summary, path) {
 			t.Errorf("путь не из применимого правила отсутствует в сводке: %s", path)
 		}
@@ -217,9 +292,18 @@ func TestTmpRoundAndReportHonorUserTmpfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	reportText := a.out.(*bytes.Buffer).String()
-	if !strings.Contains(reportText, "живых 7 ") {
-		t.Fatalf("tmp report должен учитывать семь путей без правила каталога: %s", reportText)
+	if !strings.Contains(reportText, "живых 6 ") {
+		t.Fatalf("tmp report должен учитывать шесть путей без правила каталога: %s", reportText)
 	}
+	a.out = &bytes.Buffer{}
+	if err := a.tmpSendTest(&cfg, "lead", true); err != nil {
+		t.Fatal(err)
+	}
+	sendTestText := a.out.(*bytes.Buffer).String()
+	if strings.Contains(sendTestText, "/tmp/from-d —") || !strings.Contains(sendTestText, "/tmp/from-d2 —") {
+		t.Fatalf("tmp send-test не применил user-tmpfiles.d: %s", sendTestText)
+	}
+
 	if !strings.Contains(logs.String(), `reason="спецификатор %"`) || !strings.Contains(logs.String(), `text="d /tmp/%h/from-spec 0700 - - - -"`) ||
 		!strings.Contains(logs.String(), `reason="путь не абсолютный"`) || !strings.Contains(logs.String(), `text="d relative-path 0700 - - - -"`) {
 		t.Fatalf("пропуск спецификатора не записан с причиной и строкой: %s", logs.String())

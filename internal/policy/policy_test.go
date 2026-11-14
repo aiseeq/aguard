@@ -86,6 +86,15 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestMatchAnyDoubleStarIncludesDotDotName(t *testing.T) {
+	if !matchAny([]string{"/tmp/root/**"}, "/tmp/root/..x") {
+		t.Fatal("шаблон /tmp/root/** должен включать потомка /tmp/root/..x")
+	}
+	if !matchAny([]string{"/tmp/root/**"}, "/tmp/root/..x/child") {
+		t.Fatal("шаблон /tmp/root/** должен включать вложенного потомка /tmp/root/..x/child")
+	}
+}
+
 func TestOverThresholds(t *testing.T) {
 	c := cfg()
 	lead := sess(10, sLead, home)

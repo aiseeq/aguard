@@ -332,6 +332,25 @@ func TestRestoreBtimeDirectionOwnerGoneAndNoBtime(t *testing.T) {
 	})
 }
 
+func TestRestoreMatchesBtimeBoundary(t *testing.T) {
+	born := time.Unix(1_000, 0)
+	e := record.Entry{Ino: 42, Born: born}
+	for _, tc := range []struct {
+		name  string
+		btime time.Time
+		want  bool
+	}{
+		{"ровно секунда", born.Add(time.Second), true},
+		{"секунда и наносекунда", born.Add(time.Second + time.Nanosecond), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := restoreMatches(e, meta{ino: 42, born: tc.btime, hasBorn: true}); got != tc.want {
+				t.Fatalf("restoreMatches при btime %v = %v, ожидалось %v", tc.btime, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLastFullSaveRestore(t *testing.T) {
 	dir := t.TempDir()
 	lastFull := time.Now().Add(-time.Hour).Round(0)

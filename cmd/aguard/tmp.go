@@ -14,9 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/guide"
@@ -200,29 +202,152 @@ func copyAlerts(m map[string]*policy.AlertState) map[string]*policy.AlertState {
 
 const tmpSummaryRoot = "/tmp"
 
+// tmpfilesOctalDigits — длина восьмеричного escape в systemd (\NNN).
+const tmpfilesOctalDigits = 3
+
+// errTmpfilesNUL — escape даёт NUL: systemd отвергает такую строку целиком, в любом поле.
+var errTmpfilesNUL = errors.New("escape даёт NUL")
+
+func tmpfilesSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+func tmpfilesFields(line string) ([]string, error) {
+	var fields []string
+	for i := 0; i < len(line) && len(fields) < 6; {
+		for i < len(line) && tmpfilesSpace(line[i]) {
+			i++
+		}
+		if i == len(line) {
+			break
+		}
+		field, next, err := tmpfilesField(line, i)
+		if err != nil {
+			return nil, err
+		}
+		fields = append(fields, field)
+		i = next
+	}
+	return fields, nil
+}
+
+func tmpfilesField(line string, i int) (string, int, error) {
+	var field strings.Builder
+	var quote byte
+	for i < len(line) {
+		c := line[i]
+		if quote != 0 && c == quote {
+			quote = 0
+			i++
+			continue
+		}
+		if quote == 0 && (c == '\'' || c == '"') {
+			quote = c
+			i++
+			continue
+		}
+		if quote == 0 && tmpfilesSpace(c) {
+			return field.String(), i, nil
+		}
+		if c == '\\' {
+			decoded, next, err := tmpfilesEscape(line, i)
+			if err != nil {
+				return "", i, err
+			}
+			field.WriteString(decoded)
+			i = next
+			continue
+		}
+		field.WriteByte(c)
+		i++
+	}
+	if quote != 0 {
+		return "", i, fmt.Errorf("незакрытая кавычка")
+	}
+	return field.String(), i, nil
+}
+
+func tmpfilesEscape(line string, i int) (string, int, error) {
+	if i+1 >= len(line) {
+		return "", i, fmt.Errorf("неполная C escape-последовательность")
+	}
+	c := line[i+1]
+	plain := map[byte]byte{'a': '\a', 'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t', 'v': '\v', '\\': '\\', '\'': '\'', '"': '"', 's': ' '}
+	if value, ok := plain[c]; ok {
+		return string(value), i + 2, nil
+	}
+	width, bits := 0, 0
+	switch c {
+	case 'x':
+		width, bits = 2, 8
+	case 'u':
+		width, bits = 4, 16
+	case 'U':
+		width, bits = 8, 32
+	case '0', '1', '2', '3', '4', '5', '6', '7':
+		// systemd cunescape: ровно три восьмеричные цифры, не больше \377.
+		if i+tmpfilesOctalDigits+1 > len(line) {
+			return "", i, fmt.Errorf("неполная C escape-последовательность \\%c", c)
+		}
+		value, err := strconv.ParseUint(line[i+1:i+tmpfilesOctalDigits+1], 8, 8)
+		if err != nil {
+			return "", i, fmt.Errorf("неверная C escape-последовательность \\%c", c)
+		}
+		if value == 0 {
+			return "", i, errTmpfilesNUL
+		}
+		return string([]byte{byte(value)}), i + tmpfilesOctalDigits + 1, nil
+	default:
+		return "", i, fmt.Errorf("неизвестная C escape-последовательность \\%c", c)
+	}
+	if i+2+width > len(line) {
+		return "", i, fmt.Errorf("неполная C escape-последовательность \\%c", c)
+	}
+	value, err := strconv.ParseUint(line[i+2:i+2+width], 16, bits)
+	if err != nil {
+		return "", i, fmt.Errorf("неверная C escape-последовательность \\%c", c)
+	}
+	if value == 0 {
+		return "", i, errTmpfilesNUL
+	}
+	if bits == 8 {
+		return string([]byte{byte(value)}), i + 2 + width, nil
+	}
+	if !utf8.ValidRune(rune(value)) {
+		return "", i, fmt.Errorf("недопустимый Unicode escape")
+	}
+	return string(rune(value)), i + 2 + width, nil
+}
+
 // tmpfilesDirectory разбирает тип и путь правила, возвращая причину пропуска.
 func tmpfilesDirectory(line string) (path, reason string, err error) {
-	fields := strings.Fields(line)
+	fields, err := tmpfilesFields(line)
+	if err != nil {
+		return "", "", err
+	}
 	if len(fields) < 2 {
 		return "", "не хватает полей", nil
 	}
 	typeAndMods := fields[0]
+	if typeAndMods == "" {
+		return "", "пустой тип правила", nil
+	}
 	switch typeAndMods[0] {
 	case 'd', 'D', 'v', 'q', 'Q':
 	default:
 		return "", "тип строки не создаёт каталог", nil
 	}
 	for _, mod := range typeAndMods[1:] {
-		if !strings.ContainsRune("!-=~^+", mod) {
+		if !strings.ContainsRune("!-=~^+$", mod) {
 			return "", "неизвестный модификатор", nil
 		}
 	}
 	path = fields[1]
+	if path == "" {
+		return "", "пустой путь", nil
+	}
 	if strings.Contains(path, "%") {
 		return "", "спецификатор %", nil
-	}
-	if strings.ContainsAny(path, "\\\"'") {
-		return "", "кавычки в пути", nil
 	}
 	if !filepath.IsAbs(path) {
 		return "", "путь не абсолютный", nil
@@ -243,16 +368,16 @@ func tmpfilesDirectory(line string) (path, reason string, err error) {
 
 // tmpConfig добавляет user-tmpfiles.d к обычным правилам ignore для всех потребителей [tmp].
 func (a *app) tmpConfig(cfg *policy.Config) *policy.Config {
-	copy := *cfg
-	copy.Ignore = append([]string(nil), cfg.Ignore...)
+	updated := *cfg
+	updated.Ignore = append([]string(nil), cfg.Ignore...)
 	dir := cfg.TmpfilesDir
 	if dir == "" {
-		dir = filepath.Join(a.home, ".config", "user-tmpfiles.d")
+		return &updated
 	}
 	patterns, err := filepath.Glob(filepath.Join(dir, "*.conf"))
 	if err != nil {
 		a.log.Warn("aguard tmp: список user-tmpfiles.d", "err", err)
-		return &copy
+		return &updated
 	}
 	for _, name := range patterns {
 		f, err := os.Open(name)
@@ -270,14 +395,14 @@ func (a *app) tmpConfig(cfg *policy.Config) *policy.Config {
 			}
 			path, reason, parseErr := tmpfilesDirectory(line)
 			if parseErr != nil {
-				a.log.Debug("aguard tmp: строка user-tmpfiles.d пропущена", "path", name, "line", lineNo, "reason", "не удалось проверить путь", "err", parseErr, "text", line)
+				a.log.Debug("aguard tmp: строка user-tmpfiles.d пропущена", "path", name, "line", lineNo, "reason", parseErr.Error(), "text", line)
 				continue
 			}
 			if reason != "" {
 				a.log.Debug("aguard tmp: строка user-tmpfiles.d пропущена", "path", name, "line", lineNo, "reason", reason, "text", line)
 				continue
 			}
-			copy.Ignore = append(copy.Ignore, path, filepath.Join(path, "**"))
+			updated.Ignore = append(updated.Ignore, path, filepath.Join(path, "**"))
 		}
 		if err := scanner.Err(); err != nil {
 			a.log.Warn("aguard tmp: файл user-tmpfiles.d прочитан не полностью", "path", name, "err", err)
@@ -286,7 +411,7 @@ func (a *app) tmpConfig(cfg *policy.Config) *policy.Config {
 			a.log.Warn("aguard tmp: файл user-tmpfiles.d не закрыт", "path", name, "err", err)
 		}
 	}
-	return &copy
+	return &updated
 }
 
 // tmpRound — один проход: учёт, план, доставка (или запись в observe), кеши.
