@@ -42,19 +42,6 @@ func scopeArgvBytes(systemdRun, claude, name, id string, args []string, base, sw
 	return append(argv, args...)
 }
 
-func memoryLimits(mem memoryConfig) (int64, int64, error) {
-	base, err := ceiling.ParseConfiguredSize(mem.Max)
-	if err != nil {
-		return 0, 0, err
-	}
-	swapText := mem.SwapMax
-	if swapText == "" {
-		swapText = ceiling.DefaultSwap
-	}
-	swap, err := ceiling.ParseSize(swapText, 0)
-	return base, swap, err
-}
-
 var writeCeilingState = ceiling.Write
 
 func scopeEnv(env []string, enabled bool, prefixPath string) []string {
@@ -70,14 +57,14 @@ func scopeEnv(env []string, enabled bool, prefixPath string) []string {
 	return append(out, "CLAUDE_CODE_SHELL_PREFIX="+prefixPath)
 }
 
-func prepareScope(home, systemdRun, claude, name, id string, args []string, mem memoryConfig, env []string, logErr func(error)) ([]string, []string) {
+func prepareScope(home, systemdRun, claude, name, id string, args []string, mem ceiling.ClMemory, env []string, logErr func(error)) ([]string, []string) {
 	if mem.Max == "" {
 		return scopeArgv(systemdRun, claude, name, id, args), env
 	}
 	if name == "" {
 		name = "claude"
 	}
-	base, swap, err := memoryLimits(mem)
+	base, swap, err := ceiling.MemoryLimits(mem)
 	unit := scopeUnit(name, id)
 	prefix := filepath.Join(home, "bin", "cl-oom-prefix")
 	if err == nil {

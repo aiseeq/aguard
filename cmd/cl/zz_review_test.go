@@ -76,7 +76,7 @@ func TestReviewEmptyNameUnitMismatch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "bin", "cl-oom-prefix"), []byte("x"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = prepareScope(home, "sr", "c", "", "123", nil, memoryConfig{Max: "1G"}, nil, func(e error) { t.Fatal(e) })
+	_, _ = prepareScope(home, "sr", "c", "", "123", nil, ceiling.ClMemory{Max: "1G"}, nil, func(e error) { t.Fatal(e) })
 	if _, err := os.Stat(ceiling.StatePath(home, "agent-claude-123.scope")); err != nil {
 		t.Fatalf("state for prepareScope: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestReviewCompactionScopeSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 	var logged error
-	argv, _ := prepareScope(home, "sr", "c", "x-master", "123-c1", nil, memoryConfig{Max: "1G"}, nil, func(e error) { logged = e })
+	argv, _ := prepareScope(home, "sr", "c", "x-master", "123-c1", nil, ceiling.ClMemory{Max: "1G"}, nil, func(e error) { logged = e })
 	t.Logf("compaction: logged=%v argv=%q", logged, argv)
 	if logged != nil || !strings.Contains(strings.Join(argv, " "), "MemoryMax=") {
 		t.Fatal("compaction still skipped")

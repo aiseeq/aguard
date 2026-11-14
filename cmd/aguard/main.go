@@ -33,7 +33,7 @@
 //     aguard orphans tick [-dry-run] [-min-dead 0s]      один проход сирот
 //     aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
 //     aguard memory tick [-dry-run] | report [-since 168h]
-//     aguard memory ceiling [размер]
+//     aguard memory ceiling [размер] | --default
 //     aguard restart ask -pid N [-name имя]              вопрос, как его задаёт cl
 //     aguard waits tick [-dry-run] | report [-since 24h]
 //     aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время]
@@ -257,7 +257,7 @@ func usage() {
   aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
   aguard track check
   aguard memory tick [-dry-run] | report [-since 168h]
-  aguard memory ceiling [размер]
+  aguard memory ceiling [размер] | --default
   aguard restart ask -pid N [-name имя]
   aguard waits tick [-dry-run] | report [-since 24h]
   aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время RFC3339]   цена — % недели $100 Claude

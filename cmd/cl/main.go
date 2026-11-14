@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/ceiling"
 	"github.com/aiseeq/aguard/internal/names"
 	"github.com/aiseeq/akit/session"
 )
@@ -41,10 +42,7 @@ func main() {
 		fail(err)
 	}
 	// CL_CONFIG — другой конфиг: проверка перезапуска на тестовой сессии, не трогая общий.
-	configFile := os.Getenv("CL_CONFIG")
-	if configFile == "" {
-		configFile = filepath.Join(home, ".config", "cl", "config.json")
-	}
+	configFile := ceiling.ClConfigPath(home)
 	l := launcher{claude: claude, home: home, configFile: configFile, registry: session.ForHome(home), aguard: aguardSocket(),
 		selfExe: "/proc/self/exe", exec: syscall.Exec}
 	if l.upgraded, _, err = takeUpgrade(); err != nil { // не разобралось — старт как обычно: новая беседа, но консоль жива

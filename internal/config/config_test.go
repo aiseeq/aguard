@@ -78,10 +78,11 @@ interval = "30s"
 
 func TestLoadErrors(t *testing.T) {
 	cases := map[string]string{
-		"неизвестный режим": "[tmp]\nmode = \"loud\"\n",
-		"опечатка в ключе":  "[orphans]\nmin_ded = \"2h\"\n",
-		"ключ старого вида": "mode = \"act\"\n",
-		"частый memory":     "[memory]\ninterval = \"1s\"\n",
+		"неизвестный режим":  "[tmp]\nmode = \"loud\"\n",
+		"опечатка в ключе":   "[orphans]\nmin_ded = \"2h\"\n",
+		"ключ старого вида":  "mode = \"act\"\n",
+		"частый memory":      "[memory]\ninterval = \"1s\"\n",
+		"лишний ceiling max": "[ceiling]\nmax = \"12G\"\n",
 	}
 	for name, body := range cases {
 		if _, err := Load(write(t, body), home, 1000); err == nil {

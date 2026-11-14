@@ -119,6 +119,31 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMemoryIgnoresUnknownKeysAndNormalizesBlankMax(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(file, []byte(`{"memory":{"max":"12G","interval":"zz"},"restart":{"mode":"act"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(file, "/home/u")
+	if err != nil || cfg.Memory.Max != "12G" || cfg.Restart.Mode != modeAct {
+		t.Fatalf("unknown memory key should be ignored: memory=%+v restart=%+v err=%v", cfg.Memory, cfg.Restart, err)
+	}
+	if err := os.WriteFile(file, []byte(`{"memory":{"max":"  ","swap_max":"abc"},"restart":{"mode":"act"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfig(file, "/home/u")
+	if err != nil || cfg.Memory != (ceiling.ClMemory{}) || cfg.Restart.Mode != modeAct {
+		t.Fatalf("blank max should disable ceiling: memory=%+v restart=%+v err=%v", cfg.Memory, cfg.Restart, err)
+	}
+	if err := os.WriteFile(file, []byte(`{"memory":{"max":"12G","swap_max":"abc"},"restart":{"mode":"act"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfig(file, "/home/u")
+	if !errors.Is(err, errMemoryConfig) || cfg.Memory != (ceiling.ClMemory{}) || cfg.Restart.Mode != modeAct {
+		t.Fatalf("invalid swap should disable entire ceiling: memory=%+v restart=%+v err=%v", cfg.Memory, cfg.Restart, err)
+	}
+}
+
 func TestJournalConfigErrorOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cl.log")
 	at := time.Now()

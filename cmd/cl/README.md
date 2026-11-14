@@ -182,6 +182,7 @@ Artifact только у админов, скиллы `~/work` вне `~/work` �
 В `~/.config/cl/config.json` задаются `memory.max` (например, `"12G"` или `"34%"`) и `memory.swap_max` (по умолчанию `"256M"`). Пустой или отсутствующий `max` оставляет потолок выключенным. Для таких scope cl задаёт `OOMPolicy=continue` и `CLAUDE_CODE_SHELL_PREFIX` равным пути `~/bin/cl-oom-prefix`. Ссылка устанавливается вместе с `cl`; она запускает ту же программу в режиме обёртки, выставляет `oom_score_adj=1000` и исполняет полученную команду через Bash.
 
 Сессия может поднять базу командой `aguard memory ceiling 20G`; без числа команда показывает текущие base, swap, `MemoryMax` и shmem. Поднятый base действует до завершения scope и записывается в `~/.local/state/aguard/ceiling/`. Наблюдатель aguard добавляет к base shmem и откладывает снижение, пока память занята. После OOM письмо сессии содержит снятые процессы и команду подъёма.
+`aguard memory ceiling --default` печатает базу из `memory.max` конфига cl в байтах; worker llmark использует её, чтобы брать тот же потолок, что и сессии.
 Без файла слайса или без systemd-run cl отказывается с ошибкой. В новой вкладке Konsole scope живёт около 1–2 с:
 Konsole переносит процесс в scope вкладки `tab(<pid оболочки>).scope` (журнал systemd 23.10 17:09: «agent-…scope:
 Consumed … over 1.5s wall clock»; 24.10 у всех пяти консолей cgroup — `app-org.kde.konsole-….scope/tab(…).scope`).

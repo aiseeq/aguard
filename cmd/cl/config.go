@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/ceiling"
 	"github.com/aiseeq/aguard/internal/cllog"
 	"github.com/aiseeq/aguard/internal/names"
 )
@@ -33,8 +34,8 @@ const (
 // config — ~/.config/cl/config.json: тексты ролей и настройки перезапуска. Тексты ролей живут только здесь, в коде
 // их нет. Файл перечитывается на каждой проверке: режим и тексты меняются без перезапуска консолей.
 type config struct {
-	Memory  memoryConfig  `json:"memory"`
-	Restart restartConfig `json:"restart"`
+	Memory  ceiling.ClMemory `json:"memory"`
+	Restart restartConfig    `json:"restart"`
 	// Roles — роли по имени сессии, первая подходящая; сессия без роли строки не получает.
 	Roles []role `json:"roles"`
 	// ResumeText — добавка к строке роли, когда есть свежий файл возобновления; {path} — путь к нему.
@@ -43,11 +44,6 @@ type config struct {
 	// следующей беседе; {name} — имя сессии, {dir} — restart.resume_dir. Путь знал только скилл work-supervisor, и
 	// мастер, которого пользователь просил напрямую, клал файл в scratchpad (shop-master 27.10 14:21 CET, задание лида).
 	ResumePrompt string `json:"resume_prompt"`
-}
-
-type memoryConfig struct {
-	Max     string `json:"max"`
-	SwapMax string `json:"swap_max"`
 }
 
 // restartConfig — как cl перезапускает сессию на новую версию Claude Code; когда можно — решает aguard (его
@@ -132,11 +128,11 @@ func loadConfig(file, home string) (config, error) {
 		return defaultConfig(home), fmt.Errorf("конфиг cl %s: %w", file, err)
 	}
 	var memoryErr error
-	if cfg.Memory.Max != "" {
-		if _, _, err := memoryLimits(cfg.Memory); err != nil {
-			cfg.Memory = memoryConfig{}
-			memoryErr = fmt.Errorf("%w: конфиг cl %s: memory.max: %w", errMemoryConfig, file, err)
-		}
+	if _, enabled, err := ceiling.ConfiguredBase(cfg.Memory); err != nil {
+		cfg.Memory = ceiling.ClMemory{}
+		memoryErr = fmt.Errorf("%w: конфиг cl %s: %w", errMemoryConfig, file, err)
+	} else if !enabled {
+		cfg.Memory = ceiling.ClMemory{}
 	}
 	if cfg.Restart.Mode != modeLog && cfg.Restart.Mode != modeAct {
 		return defaultConfig(home), fmt.Errorf("конфиг cl %s: restart.mode %q, нужно %q или %q", file, cfg.Restart.Mode, modeLog, modeAct)

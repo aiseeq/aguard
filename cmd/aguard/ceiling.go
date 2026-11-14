@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"maps"
@@ -108,6 +109,26 @@ func parseCeilingOOMJSONForPIDs(raw, unit string, after time.Time, pids map[int]
 }
 
 func (a *app) ceilingCmd(args []string) error {
+	fl := flag.NewFlagSet("aguard memory ceiling", flag.ContinueOnError)
+	fl.SetOutput(a.out)
+	fl.Usage = func() {
+		fmt.Fprintln(a.out, "Использование: aguard memory ceiling [размер] | --default")
+		fl.PrintDefaults()
+	}
+	defaultBase := fl.Bool("default", false, "показать базу потолка из конфига cl (~/.config/cl/config.json или $CL_CONFIG) в байтах")
+	if err := fl.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return fmt.Errorf("разбор флагов memory ceiling: %w", err)
+	}
+	args = fl.Args()
+	if *defaultBase {
+		if len(args) != 0 {
+			return fmt.Errorf("aguard memory ceiling --default не принимает размер")
+		}
+		return a.ceilingDefault()
+	}
 	if len(args) > 1 {
 		return fmt.Errorf("aguard memory ceiling [размер]")
 	}
@@ -123,6 +144,24 @@ func (a *app) ceilingCmd(args []string) error {
 		return a.ceilingShow(unit, root, st)
 	}
 	return a.ceilingSet(name, unit, root, statePath, st, args[0])
+}
+
+func (a *app) ceilingDefault() error {
+	path := ceiling.ClConfigPath(a.home)
+	mem, err := ceiling.ReadMemoryConfig(path)
+	if err != nil {
+		return err
+	}
+	base, enabled, err := ceiling.ConfiguredBase(mem)
+	if err != nil {
+		return fmt.Errorf("конфиг cl %s: %w", path, err)
+	}
+	if !enabled {
+		fmt.Fprintln(a.out, "потолка нет")
+		return nil
+	}
+	fmt.Fprintln(a.out, base)
+	return nil
 }
 
 func (a *app) ceilingCommandState() (string, string, string, string, ceiling.State, error) {

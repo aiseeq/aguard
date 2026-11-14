@@ -42,7 +42,7 @@ func TestMemoryScopeArgvAndEnv(t *testing.T) {
 	if err := os.WriteFile(prefix, []byte("stub"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	argv, env := prepareScope(home, "systemd-run", "claude", "sess", "123", nil, memoryConfig{Max: "12G", SwapMax: "256M"}, []string{"PATH=/bin"}, nil)
+	argv, env := prepareScope(home, "systemd-run", "claude", "sess", "123", nil, ceiling.ClMemory{Max: "12G", SwapMax: "256M"}, []string{"PATH=/bin"}, nil)
 	for _, want := range []string{"--property=OOMPolicy=continue", fmt.Sprintf("--property=MemoryMax=%d", base), fmt.Sprintf("--property=MemorySwapMax=%d", swap)} {
 		if !slices.Contains(argv, want) {
 			t.Errorf("argv missing %q: %q", want, argv)
@@ -69,7 +69,7 @@ func TestPrepareScopeDisablesLimitWhenStateWriteFails(t *testing.T) {
 	writeCeilingState = func(string, ceiling.State) error { return os.ErrPermission }
 	t.Cleanup(func() { writeCeilingState = old })
 	var logged error
-	argv, env := prepareScope(home, "systemd-run", "claude", "sess", "123", nil, memoryConfig{Max: "12G"}, []string{"PATH=/bin"}, func(err error) { logged = err })
+	argv, env := prepareScope(home, "systemd-run", "claude", "sess", "123", nil, ceiling.ClMemory{Max: "12G"}, []string{"PATH=/bin"}, func(err error) { logged = err })
 	for _, arg := range argv {
 		if strings.Contains(arg, "MemoryMax=") || strings.Contains(arg, "OOMPolicy=") {
 			t.Fatalf("limit remained after failed state write: %q", argv)

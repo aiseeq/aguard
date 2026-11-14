@@ -24,6 +24,11 @@ type Config struct {
 	Interval policy.Duration `toml:"interval"`
 }
 
+type ClMemory struct {
+	Max     string `json:"max"`
+	SwapMax string `json:"swap_max"`
+}
+
 func Default() Config { return Config{Interval: policy.Duration(200 * time.Millisecond)} }
 func (c Config) Validate() error {
 	if c.Interval.D() <= 0 {
@@ -38,6 +43,33 @@ const (
 	decimalKilo = 1000
 	binaryTera  = 1 << 40
 )
+
+func ClConfigPath(home string) string {
+	if path := os.Getenv("CL_CONFIG"); path != "" {
+		return path
+	}
+	return filepath.Join(home, ".config", "cl", "config.json")
+}
+
+// ReadMemoryConfig reads the memory section from cl's config file. A missing
+// file means memory limits are disabled, matching cl's default behavior.
+func ReadMemoryConfig(path string) (ClMemory, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return ClMemory{}, nil
+	}
+	if err != nil {
+		return ClMemory{}, fmt.Errorf("read cl config %s: %w", path, err)
+	}
+	var cfg struct {
+		Memory ClMemory `json:"memory"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return ClMemory{}, fmt.Errorf("decode cl config %s: %w", path, err)
+	}
+	return cfg.Memory, nil
+}
+
 const quantum int64 = 64 << 20
 const Unlimited int64 = -1
 
@@ -206,13 +238,44 @@ func ParseConfiguredSize(raw string) (int64, error) {
 	total := int64(0)
 	if strings.HasSuffix(strings.TrimSpace(raw), "%") {
 		var err error
-		total, err = HostMemoryTotal()
+		total, err = configuredHostMemoryTotal()
 		if err != nil {
 			return 0, err
 		}
 	}
 	return ParseSize(raw, total)
 }
+
+func MemoryLimits(mem ClMemory) (int64, int64, error) {
+	base, err := ParseConfiguredSize(mem.Max)
+	if err != nil {
+		return 0, 0, fmt.Errorf("memory.max: %w", err)
+	}
+	swapText := mem.SwapMax
+	if swapText == "" {
+		swapText = DefaultSwap
+	}
+	swap, err := ParseSize(swapText, 0)
+	if err != nil {
+		return 0, 0, fmt.Errorf("memory.swap_max: %w", err)
+	}
+	return base, swap, nil
+}
+
+// ConfiguredBase returns the session base in bytes, whether a base is enabled,
+// or an error. It validates swap exactly as cl does before enabling a limit.
+func ConfiguredBase(mem ClMemory) (int64, bool, error) {
+	if strings.TrimSpace(mem.Max) == "" {
+		return 0, false, nil
+	}
+	base, _, err := MemoryLimits(mem)
+	if err != nil {
+		return 0, false, err
+	}
+	return base, true, nil
+}
+
+var configuredHostMemoryTotal = HostMemoryTotal
 
 func HostMemoryTotal() (int64, error) {
 	values, err := meminfo.Read("MemTotal:")

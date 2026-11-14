@@ -1,6 +1,7 @@
 package ceiling
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,77 @@ func TestTargetAndLowering(t *testing.T) {
 	}
 	if !MayLower(500, 400, 10, 120) || MayLower(500, 300, 10, 120) {
 		t.Fatal("lowering safety predicate")
+	}
+}
+
+func TestParseConfiguredSizePercentUsesHostMemTotal(t *testing.T) {
+	old := configuredHostMemoryTotal
+	configuredHostMemoryTotal = func() (int64, error) { return 10_002, nil }
+	t.Cleanup(func() { configuredHostMemoryTotal = old })
+	got, err := ParseConfiguredSize("34%")
+	want := int64(math.Round(10_002 * 0.34))
+	if err != nil || got != want || got != 3_401 {
+		t.Fatalf("34%% of substituted MemTotal: got %d, want rounded %d, err %v", got, want, err)
+	}
+}
+
+func TestConfiguredBase(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mem     ClMemory
+		base    int64
+		enabled bool
+		wantErr bool
+	}{
+		{name: "blank", mem: ClMemory{Max: "  "}},
+		{name: "invalid swap disables entire ceiling", mem: ClMemory{Max: "12G", SwapMax: "abc"}, wantErr: true},
+		{name: "size", mem: ClMemory{Max: "12G"}, base: 12 << 30, enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, enabled, err := ConfiguredBase(tc.mem)
+			if (err != nil) != tc.wantErr || base != tc.base || enabled != tc.enabled {
+				t.Fatalf("ConfiguredBase(%+v) = %d, %t, %v", tc.mem, base, enabled, err)
+			}
+		})
+	}
+}
+
+func TestReadMemoryConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if got, err := ReadMemoryConfig(path); err != nil || got != (ClMemory{}) {
+		t.Fatalf("missing config: got %+v, err %v", got, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"memory":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadMemoryConfig(path); err != nil || got != (ClMemory{}) {
+		t.Fatalf("empty memory section: got %+v, err %v", got, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"memory":{"max":"12G","swap_max":"256M"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadMemoryConfig(path); err != nil || got.Max != "12G" || got.SwapMax != "256M" {
+		t.Fatalf("memory values: got %+v, err %v", got, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"memory":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadMemoryConfig(path); err == nil || got != (ClMemory{}) {
+		t.Fatalf("malformed config: got %+v, err %v", got, err)
+	}
+}
+
+func TestClConfigPathUsesOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CL_CONFIG", "")
+	want := filepath.Join(home, ".config", "cl", "config.json")
+	if got := ClConfigPath(home); got != want {
+		t.Fatalf("default cl config path = %q, want %q", got, want)
+	}
+	t.Setenv("CL_CONFIG", filepath.Join(t.TempDir(), "override.json"))
+	if got := ClConfigPath(home); got != os.Getenv("CL_CONFIG") {
+		t.Fatalf("override cl config path = %q, want %q", got, os.Getenv("CL_CONFIG"))
 	}
 }
 
