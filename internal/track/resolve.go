@@ -52,45 +52,151 @@ type procData struct {
 	uid             int
 }
 
-// readProc читает comm, argv (обрезанный), cwd и uid процесса. Ошибка —
-// процесс ушёл (или это поток ядра без cwd).
+// readProc читает comm, argv (обрезанный), cwd и uid процесса. Все операции
+// идут относительно одного открытого /proc/<pid>, чтобы путь разбирался один
+// раз и uid брался у того же процесса.
 func readProc(pid int) (procData, error) {
 	ps := "/proc/" + strconv.Itoa(pid)
 	d := procData{uid: -1}
-	comm, err := os.ReadFile(ps + "/comm")
+	dir, err := unix.Open(ps, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return d, fmt.Errorf("процесс %d: открыть proc: %w", pid, err)
+	}
+	defer unix.Close(dir)
+
+	var st unix.Stat_t
+	if err := unix.Fstat(dir, &st); err != nil {
+		return d, fmt.Errorf("процесс %d: stat: %w", pid, err)
+	}
+	d.uid = int(st.Uid)
+
+	var commBuf [128]byte
+	comm, err := readProcFile(dir, "comm", commBuf[:])
 	if err != nil {
 		return d, fmt.Errorf("процесс %d: comm: %w", pid, err)
 	}
 	d.comm = strings.TrimSpace(string(comm))
-	cmdline, err := os.ReadFile(ps + "/cmdline")
+
+	var cmdlineBuf [argsMax + utf8.UTFMax]byte
+	cmdline, err := readProcCmdline(dir, cmdlineBuf[:])
 	if err != nil {
 		return d, fmt.Errorf("процесс %d: cmdline: %w", pid, err)
 	}
-	// Clone: срез truncate держал бы всю командную строку (до сотен КБ) на всё время жизни надгробия
-	d.args = strings.Clone(truncate(strings.ReplaceAll(strings.TrimRight(string(cmdline), "\x00"), "\x00", " "), argsMax))
+	// Убираем только завершающие NUL, заменяем разделители аргументов на пробел
+	// и оставляем собственную короткую строку, не удерживая весь argv процесса.
+	for i := range cmdline {
+		if cmdline[i] == 0 {
+			cmdline[i] = ' '
+		}
+	}
+	if len(cmdline) > argsMax {
+		limit := argsMax
+		for limit > 0 && !utf8.RuneStart(cmdline[limit]) {
+			limit--
+		}
+		cmdline = cmdline[:limit]
+	}
+	var args strings.Builder
+	args.Grow(len(cmdline))
+	_, _ = args.Write(cmdline)
+	d.args = args.String()
+
 	// Чужой процесс (root) пользовательскому демону cwd не показывает: остальное о нём известно, cwd пуст.
-	if d.cwd, err = os.Readlink(ps + "/cwd"); err != nil && !errors.Is(err, fs.ErrPermission) {
+	var cwd [4096]byte
+	n, err := unix.Readlinkat(dir, "cwd", cwd[:])
+	if err != nil && !errors.Is(err, fs.ErrPermission) {
 		return d, fmt.Errorf("процесс %d: cwd: %w", pid, err)
 	}
-	fi, err := os.Stat(ps)
-	if err != nil {
-		return d, fmt.Errorf("процесс %d: %w", pid, err)
-	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		d.uid = int(st.Uid)
+	if err == nil {
+		d.cwd = string(cwd[:n])
 	}
 	return d, nil
 }
 
-// truncate режет строку до n байт, не разрывая символ UTF-8.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+// readProcFile читает небольшой proc-файл в заранее выделенный буфер.
+func readProcFile(dir int, name string, buf []byte) ([]byte, error) {
+	fd, err := unix.Openat(dir, name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("openat %s: %w", name, err)
 	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
+	defer unix.Close(fd)
+	n := 0
+	for n < len(buf) {
+		remaining := len(buf) - n
+		read, err := unix.Read(fd, buf[n:])
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", name, err)
+		}
+		if read == 0 {
+			break
+		}
+		n += read
+		if read < remaining {
+			break // procfs возвращает EOF данных коротким чтением
+		}
 	}
-	return s[:n]
+	return buf[:n], nil
+}
+
+// readProcCmdline читает начало cmdline в буфер и, если оно заканчивается
+// NUL, дочитывает до ненулевого байта или EOF. Это отличает внутренние пустые
+// аргументы от терминальных NUL, которые прежний os.ReadFile срезал целиком.
+func readProcCmdline(dir int, buf []byte) ([]byte, error) {
+	fd, err := unix.Openat(dir, "cmdline", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("openat cmdline: %w", err)
+	}
+	defer unix.Close(fd)
+
+	n := 0
+	for n < len(buf) {
+		remaining := len(buf) - n
+		read, err := unix.Read(fd, buf[n:])
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read cmdline: %w", err)
+		}
+		if read == 0 {
+			return trimProcNUL(buf[:n]), nil
+		}
+		n += read
+		if read < remaining {
+			return trimProcNUL(buf[:n]), nil
+		}
+	}
+	if buf[n-1] != 0 {
+		return buf[:n], nil
+	}
+	var tail [4096]byte
+	for {
+		read, err := unix.Read(fd, tail[:])
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read cmdline tail: %w", err)
+		}
+		if read == 0 {
+			return trimProcNUL(buf[:n]), nil
+		}
+		for _, b := range tail[:read] {
+			if b != 0 {
+				return buf[:n], nil
+			}
+		}
+	}
+}
+
+func trimProcNUL(b []byte) []byte {
+	for len(b) > 0 && b[len(b)-1] == 0 {
+		b = b[:len(b)-1]
+	}
+	return b
 }
 
 func readCgroup(pid int) (string, error) {
