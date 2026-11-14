@@ -272,6 +272,7 @@ func TestOnlyApprovedDeliveryChannelsAndCommands(t *testing.T) {
 		"cmd/aguard/codex.go:appServer":                  "configured codex executable",
 		"cmd/aguard/codex.go:noteTicket":                 "configured tk executable",
 		"cmd/aguard/night.go:nightPauseHolds":            "configured night command",
+		"cmd/aguard/io_bench.go:startBenchChild":         "fixed sh -c command from io bench variant",
 	}
 	deliverCalls := 0
 	knownVariableCalls := map[string]bool{}
@@ -353,6 +354,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 		"orphans.stop": {"internal/orphans/stop.go:Stop"}, "orphans.term": {"internal/orphans/stop.go:term"},
 		"orphans.kill": {"internal/orphans/stop.go:Stop"}, "orphans.container": {"internal/orphans/stop.go:podmanStop"},
 		"sigguard.deny": {"cmd/aguard/sigguard.go:sigguardSend"}, "ceiling.oom": {"cmd/aguard/ceiling.go:ceilingGoneNotice"},
+		"io.bench.scope": {"cmd/aguard/io_bench.go:Stop", "cmd/aguard/io_bench.go:Signal", "cmd/aguard/io_bench.go:benchHold", "cmd/aguard/io_bench.go:runBenchHold", "cmd/aguard/io.go:ioCmd"},
 		"night.fallback": {"cmd/aguard/night_fallback.go:clean"}, "io.service": {"cmd/aguard/io_report.go:ioImport"},
 		"io.dump_signal": {"cmd/aguard/io.go:ioSignal", "cmd/aguard/io.go:ioDump"}, "cl.supervise": {"cmd/cl/supervise.go:watch", "cmd/cl/supervise.go:compactSession", "cmd/cl/supervise.go:start"},
 		"cl.signal":  {"cmd/cl/supervise.go:watch", "cmd/cl/supervise.go:signalChild"},
@@ -400,6 +402,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 		"internal/orphans/stop.go:podmanStop": "CommandContext", "cmd/aguard/sigguard.go:sigguardSend": "sendUrgent",
 		"cmd/aguard/ceiling.go:ceilingGoneNotice": "sendCeilingOOMNotice", "cmd/aguard/night_fallback.go:clean": "Command",
 		"cmd/aguard/io.go:ioSignal":       "Command",
+		"cmd/aguard/io_bench.go:Stop":     "CommandContext",
 		"cmd/cl/supervise.go:signalChild": "SignalChild", "cmd/cl/supervise.go:watch": "signalChild",
 		"cmd/cl/supervise.go:compactSession": "StopChild", "cmd/cl/console.go:start": "stopChild",
 		"cmd/cl/console.go:stopChild": "StopChild", "internal/track/check.go:Check": "stopChild",
@@ -521,6 +524,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 	allowedStop := map[string]map[string]bool{
 		"cmd/aguard/night_fallback.go:clean":  {"dynamic": true},
 		"cmd/aguard/io.go:ioSignal":           {"kill": true},
+		"cmd/aguard/io_bench.go:Stop":         {"stop": true},
 		"internal/orphans/stop.go:podmanStop": {"dynamic": true},
 	}
 	for _, path := range goFiles(t, root, false) {

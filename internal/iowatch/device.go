@@ -80,6 +80,11 @@ func blockDevices(blockRoot, device string) ([]string, error) {
 	return ids, nil
 }
 
+// BenchBlockDevices возвращает диск из настройки и его stacked holders для учёта io.stat в bench.
+func BenchBlockDevices(blockRoot, device string) ([]string, error) {
+	return blockDevices(blockRoot, device)
+}
+
 func readDevID(dir string) (string, error) {
 	b, err := os.ReadFile(filepath.Join(dir, "dev"))
 	if err != nil {

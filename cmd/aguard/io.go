@@ -28,6 +28,11 @@ func (a *app) ioCmd(ctx context.Context, args []string) error {
 	events := filepath.Join(a.dir("io"), "events")
 	cases := filepath.Join(a.dir("io"), ioCasesFile)
 	switch cmd {
+	case "bench-hold":
+		if code := benchHold(ctx, rest); code != 0 {
+			return exitCode(code)
+		}
+		return nil
 	case "report":
 		fl := flag.NewFlagSet("io report", flag.ContinueOnError)
 		since := fl.String("since", "24h", "с какого времени: 30m, 2h, 3d, ЧЧ:ММ, RFC3339")
@@ -102,8 +107,10 @@ func (a *app) ioCmd(ctx context.Context, args []string) error {
 		asJSON := fl.Bool("json", false, "ответ службы JSON как есть")
 		parse(fl, rest)
 		return a.ioLiveSince(iowatch.Request{Q: iowatch.QueryProfiles, Kind: *kind}, *since, *asJSON)
+	case "bench":
+		return a.ioBench(ctx, rest)
 	}
-	return fmt.Errorf("aguard io: неизвестная команда %s (report, now, series, profiles, record, dump, at, import; справка — aguard -h)", cmd)
+	return fmt.Errorf("aguard io: неизвестная команда %s (report, now, series, profiles, bench, record, dump, at, import; справка — aguard -h)", cmd)
 }
 
 // ioConfig — раздел [io] конфига; конфиг не прочитался — ошибка, по неизвестным правилам не пишем.

@@ -108,6 +108,11 @@ func parsePressureTotals(data []byte) (some, full int64, err error) {
 	return some, full, nil
 }
 
+// BenchPressureTotals разбирает PSI тем же парсером, что использует iowatch.
+func BenchPressureTotals(data []byte) (some, full int64, err error) {
+	return parsePressureTotals(data)
+}
+
 // parseLoadavgRunnable — готовые к работе сущности планировщика из /proc/loadavg: четвёртое поле
 // «выполняются/всего» до косой черты без читающего потока, которого ядро считает тоже (`8/5201` → 7):
 // тот же смысл, что у Runnable в akit/pressure (procs_running − 1).
@@ -214,6 +219,12 @@ func parseDiskstats(data []byte, dev string) (diskCounters, error) {
 	return diskCounters{}, fmt.Errorf("%w: %s нет в diskstats", ErrNoDevice, dev)
 }
 
+// BenchDiskBytes возвращает сумму чтения и записи устройства из diskstats.
+func BenchDiskBytes(data []byte, dev string) (int64, error) {
+	c, err := parseDiskstats(data, dev)
+	return c.readBytes + c.writeBytes, err
+}
+
 // Поля io.stat, которые берём: байты и операции чтения и записи.
 const (
 	ioReadBytes = iota
@@ -271,6 +282,22 @@ func parseIOStat(data []byte, devices []string, dst [][ioFields]int64) error {
 	return nil
 }
 
+// BenchIOStatBytes возвращает максимальные счётчики чтения и записи stacked devices.
+func BenchIOStatBytes(data []byte, devices []string) (read, write int64, err error) {
+	if len(devices) == 0 {
+		return 0, 0, errors.New("пустой список устройств io.stat")
+	}
+	counters := make([][ioFields]int64, len(devices))
+	if err := parseIOStat(data, devices, counters); err != nil {
+		return 0, 0, err
+	}
+	for _, c := range counters {
+		read = max(read, c[ioReadBytes])
+		write = max(write, c[ioWriteBytes])
+	}
+	return read, write, nil
+}
+
 // ParseIOStatMax — rbytes и wbytes io.stat как максимум по устройствам: dm и диск под ним видят одну и ту же
 // запись, сумма посчитала бы её дважды (как maxDelta).
 func ParseIOStatMax(data []byte) (read, write int64, err error) {
@@ -283,15 +310,10 @@ func ParseIOStatMax(data []byte) (read, write int64, err error) {
 			devices = append(devices, string(id))
 		}
 	}
-	counters := make([][ioFields]int64, len(devices))
-	if err := parseIOStat(data, devices, counters); err != nil {
-		return 0, 0, err
+	if len(devices) == 0 {
+		return 0, 0, nil
 	}
-	for _, counter := range counters {
-		read = max(read, counter[ioReadBytes])
-		write = max(write, counter[ioWriteBytes])
-	}
-	return read, write, nil
+	return BenchIOStatBytes(data, devices)
 }
 
 // parseProcIO — read_bytes и write_bytes из /proc/<pid>/io.
