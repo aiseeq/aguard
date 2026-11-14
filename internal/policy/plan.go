@@ -43,7 +43,14 @@ type AlertState struct {
 	Sent       int       `json:"sent"`
 	LastTarget string    `json:"last_target"`
 	LastSent   time.Time `json:"last_sent"`
+	LastBytes  int64     `json:"last_bytes,omitempty"`
 }
+
+// LiveWorkerGrowth — размер должен вырасти в разы, чтобы повтор был полезен.
+const LiveWorkerGrowth int64 = 4
+
+// liveWorkerRepeatMin — не будим заказчика чаще раза в час (приёмка тикета).
+const liveWorkerRepeatMin = time.Hour
 
 // UserState — состояние эскалации, хранится в ~/.local/state/aguard/tmp/state.json.
 type UserState struct {
@@ -71,13 +78,24 @@ const (
 	RelWorkerLive                 // папку живого задания уберёт worker
 )
 
+// DeferredReason — почему строка живого задания не попала в отправляемое письмо.
+type DeferredReason int
+
+const (
+	DeferredWorkerNoAction DeferredReason = iota + 1
+	DeferredWorkerNoRoom
+	DeferredWorkerRepeat
+)
+
 // Line — строка сводки.
 type Line struct {
-	Item        Item
-	Rel         Relation
-	CreatorName string // имя сессии-создателя (для эскалации)
-	WorkerJobID string // задание worker, пока unit жив
-	Sent        int    // сколько сводок о записи уже было
+	Item           Item
+	Rel            Relation
+	CreatorName    string // имя сессии-создателя (для эскалации)
+	WorkerJobID    string // задание worker, пока unit жив
+	Sent           int    // сколько сводок о записи уже было
+	PreviousBytes  int64  // размер живой папки на прошлом письме
+	DeferredReason DeferredReason
 }
 
 // Summary — одна сводка одному адресату.
@@ -157,10 +175,12 @@ func (c *Config) adminFor(cwd string) string {
 // успешной доставки (в observe — сразу: имитация). Убранные записи забывает
 // Forget, не Plan: запись ниже порога (давление памяти спало) не убрана.
 //
-// send — сводки этого прохода. deferred — строки, которые верхняя ступень
-// уже получала и получит повтором не раньше top_repeat; счётчики их не
-// меняются, они нужны, чтобы dry-run и журнал показывали, что записи сверх
-// порога есть, но сводка о них отложена.
+// send — сводки этого прохода. deferred — строки, уже полученные или пока
+// не требующие отдельной отправки; счётчики отложенных строк не меняются.
+// Строка живой папки, ещё не названная, откладывается с пустым NextAt: без
+// действия она отдельным письмом не шлётся. Названная — с NextAt = прошлое
+// письмо + час: раньше повтора не будет, а позже — только при росте в 4 раза
+// или давлении.
 func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, factor float64) (send, deferred []Summary) {
 	if st.Alerts == nil {
 		st.Alerts = map[string]*AlertState{}
@@ -169,26 +189,10 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 	for _, g := range groups {
 		for i := range g.Items {
 			it := &g.Items[i]
-			key := EntryKey(it)
 			if it.WorkerLive {
-				as := st.Alerts[key]
-				if as == nil {
-					as = &AlertState{}
-					st.Alerts[key] = as
-				}
-				line := Line{Item: *it, Rel: RelWorkerLive, CreatorName: it.WorkerMaster,
-					WorkerJobID: it.WorkerJobID, Sent: as.Sent}
-				if !as.LastSent.IsZero() && as.LastTarget == it.WorkerMaster &&
-					now.Sub(as.LastSent) < c.Escalation.TopRepeat.D() {
-					deferB.add(Target{Name: it.WorkerMaster}, line, as.LastSent.Add(c.Escalation.TopRepeat.D()))
-					continue
-				}
-				if t, ok := live.ByName(it.WorkerMaster); ok {
-					sendB.add(t, line, time.Time{})
-					as.LastTarget, as.LastSent = t.Key(), now
-				}
 				continue
 			}
+			key := EntryKey(it)
 			steps, cname, calive := c.ladder(it, live)
 			if len(steps) == 0 {
 				continue // некому писать: ни создателя, ни лида
@@ -212,7 +216,87 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 			as.LastSent = now
 		}
 	}
+	c.planWorkerLive(now, groups, live, st, factor, sendB, deferB)
 	return sendB.list(now), deferB.list(now)
+}
+
+// planWorkerLive — второй цикл видит уже собранные сводки со строками-действиями.
+func (c *Config) planWorkerLive(now time.Time, groups []Group, live Live, st *UserState, factor float64,
+	sendB, deferB *summaries) {
+	for _, g := range groups {
+		for i := range g.Items {
+			it := &g.Items[i]
+			if !it.WorkerLive {
+				continue
+			}
+			key := EntryKey(it)
+			as := st.Alerts[key]
+			if as == nil {
+				as = &AlertState{}
+				st.Alerts[key] = as
+			}
+			reason := DeferredWorkerRepeat
+			if as.LastSent.IsZero() {
+				reason = DeferredWorkerNoAction
+			}
+			line := Line{Item: *it, Rel: RelWorkerLive, CreatorName: it.WorkerMaster,
+				WorkerJobID: it.WorkerJobID, Sent: as.Sent, DeferredReason: reason}
+			if !as.LastSent.IsZero() {
+				line.PreviousBytes = as.LastBytes
+			}
+			t, ok := live.ByName(it.WorkerMaster)
+			if !ok {
+				continue
+			}
+			dst := sendB.by[t.Key()]
+			if dst != nil && len(dst.Lines) >= c.Policy.MaxListed {
+				line.DeferredReason = DeferredWorkerNoRoom
+				deferB.add(t, line, liveWorkerNextAt(as))
+				continue
+			}
+			if !as.LastSent.IsZero() && as.LastBytes == 0 {
+				as.LastBytes = it.Entry.Bytes
+				deferB.add(t, line, liveWorkerNextAt(as))
+				continue
+			}
+			if as.LastSent.IsZero() {
+				if factor < 1 || hasActionLine(dst) {
+					sendB.add(t, line, time.Time{})
+					as.LastTarget, as.LastSent, as.LastBytes = t.Key(), now, it.Entry.Bytes
+				} else {
+					deferB.add(t, line, time.Time{})
+				}
+				continue
+			}
+			if now.Sub(as.LastSent) < liveWorkerRepeatMin ||
+				(factor >= 1 && it.Entry.Bytes < as.LastBytes*LiveWorkerGrowth) {
+				deferB.add(t, line, liveWorkerNextAt(as)) // срок — нижняя граница, не расписание
+				continue
+			}
+			line.PreviousBytes = as.LastBytes
+			sendB.add(t, line, time.Time{})
+			as.LastTarget, as.LastSent, as.LastBytes = t.Key(), now, it.Entry.Bytes
+		}
+	}
+}
+
+func liveWorkerNextAt(as *AlertState) time.Time {
+	if as.LastSent.IsZero() {
+		return time.Time{}
+	}
+	return as.LastSent.Add(liveWorkerRepeatMin)
+}
+
+func hasActionLine(s *Summary) bool {
+	if s == nil {
+		return false
+	}
+	for i := range s.Lines {
+		if s.Lines[i].Rel != RelWorkerLive {
+			return true
+		}
+	}
+	return false
 }
 
 // Forget забывает эскалацию записей, которых больше нет в /tmp (items — все

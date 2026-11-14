@@ -121,12 +121,53 @@ func TestTmpRoundResolvesWorkerJobForRouting(t *testing.T) {
 	if err := a.tmpRound(&cfg, true); err != nil {
 		t.Fatal(err)
 	}
-	if out := a.out.(*bytes.Buffer).String(); !strings.Contains(out, "=== сводка alpha-master") ||
-		!strings.Contains(out, "задание J идёт, папку уберёт worker") || strings.Contains(out, "сводка lead") {
-		t.Fatalf("tmpRound не направил живое задание заказчику: %s", out)
+	if out := a.out.(*bytes.Buffer).String(); !strings.Contains(out, "=== отложено: alpha-master") ||
+		!strings.Contains(out, "задание J идёт, папку уберёт worker") ||
+		!strings.Contains(out, "не названные: строка без действия, отдельным письмом не шлётся") || strings.Contains(out, "сводка lead") {
+		t.Fatalf("tmpRound неверно отложил живое задание без действия: %s", out)
 	}
 	if !strings.Contains(log.String(), "часть заданий worker не прочиталась") {
 		t.Fatalf("ошибка job.json не записана в журнал: %s", log.String())
+	}
+	a.out = &bytes.Buffer{}
+	if err := a.tmpSendTest(&cfg, "alpha-master", true); err != nil {
+		t.Fatal(err)
+	}
+	sendTestText := a.out.(*bytes.Buffer).String()
+	lineAt := strings.Index(sendTestText, "задание J идёт, папку уберёт worker")
+	if lineAt < 0 {
+		t.Fatalf("send-test не показал живое задание: %s", sendTestText)
+	}
+	lineEnd := strings.IndexByte(sendTestText[lineAt:], '\n')
+	if lineEnd < 0 || strings.Contains(sendTestText[lineAt:lineAt+lineEnd], "rm -rf") {
+		t.Fatalf("send-test предложил удалить живую папку: %s", sendTestText)
+	}
+	workerItem := policy.Item{Entry: record.Entry{Path: "/tmp/w-J-go", Born: now.Add(-10 * time.Minute)}}
+	workerKey := policy.EntryKey(&workerItem)
+	if err := os.MkdirAll(filepath.Dir(a.tmpStatePath()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := &policy.UserState{Mode: cfg.Mode, Alerts: map[string]*policy.AlertState{
+		workerKey: {LastTarget: "alpha-master", LastSent: now.Add(-2 * time.Hour), LastBytes: 1 << 30},
+	}}
+	if err := a.saveUserState(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.tmpRound(&cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.loadUserState().Alerts[workerKey].LastBytes; got != 1<<30 {
+		t.Fatalf("tmpRound потерял last_bytes при записи/чтении состояния: %d", got)
+	}
+	if err := a.saveUserState(&policy.UserState{Mode: cfg.Mode}); err != nil {
+		t.Fatal(err)
+	}
+	a.out = &bytes.Buffer{}
+	if err := a.tmpReport(&cfg, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(a.out.(*bytes.Buffer).String(), "без срока (попутно)") {
+		t.Fatalf("tmp report не показал пустой NextAt как попутный: %s", a.out.(*bytes.Buffer).String())
 	}
 	if err := a.act.Flush(time.Now(), activityKeep); err != nil {
 		t.Fatal(err)
@@ -215,6 +256,105 @@ func TestTmpConfigLogsEscapeParseReason(t *testing.T) {
 		strings.Contains(out, "не удалось проверить путь") {
 		t.Fatalf("журнал не содержит причину разбора: %s", out)
 	}
+}
+
+type tmpPlanLive struct{ target policy.Target }
+
+func (l tmpPlanLive) ByPid(pid int, _ string) (policy.Target, bool) {
+	return l.target, pid == l.target.Pid
+}
+
+func (l tmpPlanLive) ByName(name string) (policy.Target, bool) {
+	return l.target, name == l.target.Name
+}
+
+func (tmpPlanLive) WorkerByUnit(string) (policy.WorkerJob, bool, error) {
+	return policy.WorkerJob{}, false, nil
+}
+
+func TestPrintDryWorkerDeferredReasons(t *testing.T) {
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	target := policy.Target{Name: "alpha-master", Pid: 42}
+	live := tmpPlanLive{target: target}
+	worker := func(path string, size int64) policy.Item {
+		return policy.Item{Entry: record.Entry{Path: path, Born: now.Add(-time.Hour), Bytes: size},
+			WorkerLive: true, WorkerMaster: target.Name, WorkerJobID: "J"}
+	}
+	newConfig := func() policy.Config {
+		c := policy.Default("/home/u")
+		c.Lead = target.Name
+		return c
+	}
+	printPlan := func(t *testing.T, c *policy.Config, groups []policy.Group, st *policy.UserState) string {
+		t.Helper()
+		send, deferred := c.Plan(now, groups, live, st, 1)
+		out := &bytes.Buffer{}
+		(&app{out: out}).printDry(c, groups, send, deferred, now)
+		return out.String()
+	}
+
+	t.Run("unnamed and no send uses its cause", func(t *testing.T) {
+		c := newConfig()
+		item := worker("/tmp/worker-A", 100<<20)
+		out := printPlan(t, &c, []policy.Group{{Items: []policy.Item{item}}}, &policy.UserState{})
+		if !strings.Contains(out, "не названные: строка без действия, отдельным письмом не шлётся") ||
+			!strings.Contains(out, "строки живых заданий отложены") {
+			t.Fatalf("dry-run неверно описал неназванную строку: %s", out)
+		}
+	})
+	t.Run("full summary says it did not fit", func(t *testing.T) {
+		c := newConfig()
+		c.Policy.MaxListed = 1
+		owner := &record.Owner{Proc: record.Proc{UID: 1000, Comm: "go"}, Session: &record.Session{
+			Pid: target.Pid, Name: target.Name, Cwd: "/home/u", ProcStart: "start",
+		}}
+		action := c.Items([]record.Entry{{Path: "/tmp/action", UID: 1000, Born: now.Add(-time.Hour), Bytes: 1 << 30, Owner: owner}}, 1000)
+		item := worker("/tmp/worker-A", 100<<20)
+		out := printPlan(t, &c, []policy.Group{{Items: action}, {Items: []policy.Item{item}}}, &policy.UserState{})
+		if !strings.Contains(out, "не поместились в сводку: уйдут, когда в ней будет место") ||
+			strings.Contains(out, "строка без действия") || strings.Contains(out, "повтор при росте") {
+			t.Fatalf("dry-run неверно описал переполненную сводку: %s", out)
+		}
+	})
+	t.Run("named repeat prints prior size and no expired time", func(t *testing.T) {
+		c := newConfig()
+		item := worker("/tmp/worker-A", 100<<20)
+		key := policy.EntryKey(&item)
+		st := &policy.UserState{Alerts: map[string]*policy.AlertState{
+			key: {LastTarget: target.Name, LastSent: now.Add(-2 * time.Hour), LastBytes: 100 << 20},
+		}}
+		out := printPlan(t, &c, []policy.Group{{Items: []policy.Item{item}}}, st)
+		if !strings.Contains(out, "названные: повтор при росте в 4 раза или давлении") ||
+			!strings.Contains(out, "при прошлом письме 100 МБ") || strings.Contains(out, "не раньше") {
+			t.Fatalf("dry-run неверно описал отложенный повтор: %s", out)
+		}
+	})
+	t.Run("named and unnamed workers name both causes", func(t *testing.T) {
+		c := newConfig()
+		a, b := worker("/tmp/worker-A", 100<<20), worker("/tmp/worker-B", 100<<20)
+		st := &policy.UserState{Alerts: map[string]*policy.AlertState{
+			policy.EntryKey(&a): {LastTarget: target.Name, LastSent: now.Add(-5 * time.Minute), LastBytes: 100 << 20},
+		}}
+		out := printPlan(t, &c, []policy.Group{{Items: []policy.Item{a}}, {Items: []policy.Item{b}}}, st)
+		if !strings.Contains(out, "названные: повтор") || !strings.Contains(out, "не названные: строка без действия") ||
+			strings.Count(out, "без действия") != 1 {
+			t.Fatalf("dry-run не различил причины отложенных строк: %s", out)
+		}
+	})
+	t.Run("unnamed worker beside ladder repeat is not said to be known", func(t *testing.T) {
+		c := newConfig()
+		item := worker("/tmp/worker-A", 100<<20)
+		ordinary := policy.Item{Entry: record.Entry{Path: "/tmp/ordinary", Born: now.Add(-time.Hour), Bytes: 1 << 30}, Class: policy.ClassNonAgent}
+		key := policy.EntryKey(&ordinary)
+		st := &policy.UserState{Alerts: map[string]*policy.AlertState{
+			key: {Sent: c.Escalation.After, LastTarget: target.Name, LastSent: now.Add(-5 * time.Minute)},
+		}}
+		out := printPlan(t, &c, []policy.Group{{Items: []policy.Item{ordinary}}, {Items: []policy.Item{item}}}, st)
+		if !strings.Contains(out, "строки лестницы уже получали") ||
+			!strings.Contains(out, "живые задания: не названные: строка без действия") || strings.Contains(out, "уже получал(а) эти записи") {
+			t.Fatalf("dry-run неверно разделил причины лестницы и worker: %s", out)
+		}
+	})
 }
 
 func TestTmpRoundAndReportHonorUserTmpfiles(t *testing.T) {
