@@ -291,7 +291,7 @@ func TestLiveWorkerJobTmpRouting(t *testing.T) {
 		t.Fatalf("группировка живого задания: %+v", groups)
 	}
 	st := &UserState{}
-	sums, _ := c.Plan(t0, groups, live, st, 1)
+	sums, _ := c.Plan(t0, groups, live, st, 0.5)
 	if got := targets(sums); len(got) != 1 || got[0] != "alpha-master" {
 		t.Fatalf("живое задание адресовано %v", got)
 	}
@@ -301,8 +301,11 @@ func TestLiveWorkerJobTmpRouting(t *testing.T) {
 		strings.Contains(msg, "rm -rf") || strings.Contains(msg, "work-admin") || strings.Contains(msg, "lead") {
 		t.Fatalf("неверное письмо живого задания: %s", msg)
 	}
-	if sums, deferred := c.Plan(t0.Add(c.Interval.D()), groups, live, st, 1); len(sums) != 0 || len(deferred) != 1 {
+	if sums, deferred := c.Plan(t0.Add(30*time.Minute), groups, live, st, 0.5); len(sums) != 0 || len(deferred) != 1 {
 		t.Fatalf("повтор раньше срока: send=%v deferred=%v", targets(sums), targets(deferred))
+	}
+	if sums, _ := c.Plan(t0.Add(61*time.Minute), groups, live, st, 0.5); len(sums) != 1 {
+		t.Fatalf("повтор под давлением через час отсутствует: %v", targets(sums))
 	}
 	if st.Alerts[EntryKey(&items[0])].Sent != 0 {
 		t.Fatal("письма об идущем задании не должны расходовать ступени эскалации")
@@ -312,10 +315,11 @@ func TestLiveWorkerJobTmpRouting(t *testing.T) {
 	if err := ResolveWorkerJobs(items, live); err != nil {
 		t.Fatal(err)
 	}
-	groups = c.Over(t0.Add(time.Hour), items, 1)
-	sums, _ = c.Plan(t0.Add(time.Hour), groups, live, &UserState{}, 1)
+	endedAt := t0.Add(62 * time.Minute)
+	groups = c.Over(endedAt, items, 1)
+	sums, _ = c.Plan(endedAt, groups, live, st, 1)
 	if got := targets(sums); len(got) != 1 || got[0] != master.Name ||
-		!strings.Contains(c.Message(&sums[0], t0.Add(time.Hour), false), "rm -rf") {
+		!strings.Contains(c.Message(&sums[0], endedAt, false), "rm -rf") {
 		t.Fatalf("завершённое задание не перешло на обычную лестницу: %v", targets(sums))
 	}
 	st = &UserState{}
@@ -338,6 +342,148 @@ func TestLiveWorkerJobTmpRouting(t *testing.T) {
 	if got := c.Over(t0, two, 1); len(got) != 2 {
 		t.Fatalf("заказчики должны иметь отдельные пороги: %+v", got)
 	}
+}
+
+func TestLiveWorkerRepeatPolicy(t *testing.T) {
+	c := cfg()
+	master := Target{Name: "alpha-master", Pid: 14, Socket: "/s/14.sock"}
+	live := newLive(tLead, master)
+	makeLive := func(bytes int64) Group {
+		return Group{Key: "w:alpha-master", Items: []Item{{Entry: entry("/tmp/w-job", bytes, time.Hour, plainOwner("go", me)),
+			WorkerLive: true, WorkerMaster: master.Name, WorkerJobID: "J"}}}
+	}
+	withAction := func() Group {
+		owner := sessionOwner(sess(14, master.Name, home), "go")
+		items := c.Items([]record.Entry{entry("/tmp/action", gib, time.Hour, owner)}, me)
+		return Group{Key: "action", Items: items}
+	}
+	assertCounts := func(name string, send, deferred []Summary, wantSend, wantDeferred int) {
+		t.Helper()
+		if len(send) != wantSend || len(deferred) != wantDeferred {
+			t.Fatalf("%s: send=%d deferred=%d; хотим %d/%d", name, len(send), len(deferred), wantSend, wantDeferred)
+		}
+	}
+
+	t.Run("initial without action defers", func(t *testing.T) {
+		st := &UserState{}
+		for i := range 2 {
+			send, deferred := c.Plan(t0.Add(time.Duration(i)*time.Minute), []Group{makeLive(gib)}, live, st, 1)
+			assertCounts("pass", send, deferred, 0, 1)
+			if !st.Alerts[EntryKey(&makeLive(gib).Items[0])].LastSent.IsZero() {
+				t.Fatal("отложенная неназванная строка изменила LastSent")
+			}
+		}
+	})
+	t.Run("action summary carries live row once", func(t *testing.T) {
+		st := &UserState{}
+		send, _ := c.Plan(t0, []Group{makeLive(gib), withAction()}, live, st, 1)
+		assertCounts("first", send, nil, 1, 0)
+		if len(send[0].Lines) != 2 {
+			t.Fatalf("first summary lines=%d, want action and worker", len(send[0].Lines))
+		}
+		if got := st.Alerts[EntryKey(&makeLive(gib).Items[0])].LastBytes; got != gib {
+			t.Fatalf("первая отправка запомнила %d байт, хотим %d", got, gib)
+		}
+		send, deferred := c.Plan(t0.Add(5*time.Minute), []Group{makeLive(gib), withAction()}, live, st, 1)
+		assertCounts("second", send, deferred, 1, 1)
+		for _, line := range send[0].Lines {
+			if line.Rel == RelWorkerLive {
+				t.Fatal("named worker row repeated without growth or pressure")
+			}
+		}
+	})
+	t.Run("repeat remembers latest size", func(t *testing.T) {
+		st := &UserState{Alerts: map[string]*AlertState{
+			EntryKey(&makeLive(100 * mib).Items[0]): {LastSent: t0, LastTarget: master.Name, LastBytes: 100 * mib},
+		}}
+		send, _ := c.Plan(t0.Add(61*time.Minute), []Group{makeLive(400 * mib)}, live, st, 1)
+		assertCounts("growth", send, nil, 1, 0)
+		if got := st.Alerts[EntryKey(&makeLive(100 * mib).Items[0])].LastBytes; got != 400*mib {
+			t.Fatalf("после повтора last_bytes=%d, want %d", got, 400*mib)
+		}
+		msg := c.Message(&send[0], t0.Add(61*time.Minute), false)
+		if !strings.Contains(msg, "при прошлом письме 100 МБ") {
+			t.Fatalf("повтор не объясняет прежний размер: %s", msg)
+		}
+		send, deferred := c.Plan(t0.Add(122*time.Minute), []Group{makeLive(400 * mib)}, live, st, 1)
+		assertCounts("same size after hour", send, deferred, 0, 1)
+	})
+	t.Run("MaxListed controls whether row was named", func(t *testing.T) {
+		for _, maxListed := range []int{1, 2} {
+			name := "room available"
+			if maxListed == 1 {
+				name = "full summary"
+			}
+			t.Run(name, func(t *testing.T) {
+				subCfg := c
+				subCfg.Policy.MaxListed = maxListed
+				st := &UserState{}
+				send, deferred := subCfg.Plan(t0, []Group{withAction(), makeLive(gib)}, live, st, 1)
+				key := EntryKey(&makeLive(gib).Items[0])
+				if maxListed == 1 {
+					assertCounts("full summary", send, deferred, 1, 1)
+					if !st.Alerts[key].LastSent.IsZero() {
+						t.Fatal("непоказанная строка обновила LastSent")
+					}
+				} else {
+					assertCounts("space available", send, deferred, 1, 0)
+					if st.Alerts[key].LastSent.IsZero() {
+						t.Fatal("показанная строка не обновила LastSent")
+					}
+				}
+			})
+		}
+	})
+	t.Run("repeat-only summary does not name another live row", func(t *testing.T) {
+		a := makeLive(400 * mib).Items[0]
+		b := makeLive(100 * mib).Items[0]
+		b.Entry.Path = "/tmp/w-job-B"
+		st := &UserState{Alerts: map[string]*AlertState{
+			EntryKey(&a): {LastSent: t0.Add(-2 * time.Hour), LastTarget: master.Name, LastBytes: 100 * mib},
+		}}
+		send, deferred := c.Plan(t0, []Group{{Items: []Item{a}}, {Items: []Item{b}}}, live, st, 1)
+		assertCounts("repeat A and defer B", send, deferred, 1, 1)
+		if len(send[0].Lines) != 1 || send[0].Lines[0].Item.Entry.Path != a.Entry.Path {
+			t.Fatalf("неназванная B попала к повтору A: %+v", send)
+		}
+		if !st.Alerts[EntryKey(&b)].LastSent.IsZero() {
+			t.Fatal("отложенная B изменила LastSent")
+		}
+	})
+	t.Run("pressure interval", func(t *testing.T) {
+		st := &UserState{}
+		send, _ := c.Plan(t0, []Group{makeLive(gib)}, live, st, 0.5)
+		assertCounts("first", send, nil, 1, 0)
+		for _, d := range []time.Duration{30 * time.Minute} {
+			send, deferred := c.Plan(t0.Add(d), []Group{makeLive(gib)}, live, st, 0.5)
+			assertCounts("too soon", send, deferred, 0, 1)
+		}
+		send, _ = c.Plan(t0.Add(61*time.Minute), []Group{makeLive(gib)}, live, st, 0.5)
+		assertCounts("after hour", send, nil, 1, 0)
+	})
+	t.Run("growth threshold and interval", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			after time.Duration
+			bytes int64
+			want  int
+		}{{"400MB after 61m", 61 * time.Minute, 400 * mib, 1}, {"399MB", 61 * time.Minute, 399 * mib, 0}, {"400MB before hour", 59 * time.Minute, 400 * mib, 0}} {
+			t.Run(tc.name, func(t *testing.T) {
+				st := &UserState{Alerts: map[string]*AlertState{EntryKey(&makeLive(100 * mib).Items[0]): {LastSent: t0, LastTarget: master.Name, LastBytes: 100 * mib}}}
+				send, _ := c.Plan(t0.Add(tc.after), []Group{makeLive(tc.bytes)}, live, st, 1)
+				assertCounts(tc.name, send, nil, tc.want, 0)
+			})
+		}
+	})
+	t.Run("seed legacy state", func(t *testing.T) {
+		item := makeLive(100 * mib).Items[0]
+		st := &UserState{Alerts: map[string]*AlertState{EntryKey(&item): {LastSent: t0, LastTarget: master.Name}}}
+		send, deferred := c.Plan(t0.Add(2*time.Hour), []Group{makeLive(400 * mib)}, live, st, 1)
+		assertCounts("seed", send, deferred, 0, 1)
+		if got := st.Alerts[EntryKey(&item)].LastBytes; got != 400*mib {
+			t.Fatalf("seeded last_bytes=%d, want %d", got, 400*mib)
+		}
+	})
 }
 
 func TestWorkerJobWithoutMasterFallsBackToLead(t *testing.T) {

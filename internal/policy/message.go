@@ -115,6 +115,9 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 		if l.Rel == RelWorkerLive {
 			fmt.Fprintf(&b, "%d. задание %s идёт, папку уберёт worker — %s, %s, возраст %s",
 				listed, l.WorkerJobID, e.Path, HumanBytes(e.Bytes), HumanAge(now.Sub(e.Born)))
+			if l.PreviousBytes > 0 {
+				fmt.Fprintf(&b, ", при прошлом письме %s", HumanBytes(l.PreviousBytes))
+			}
 			b.WriteString("\n")
 			continue
 		}

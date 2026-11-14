@@ -489,6 +489,9 @@ func (a *app) tmpReport(cfg *policy.Config, since time.Duration) error {
 	}
 	factor := a.tmpFactor(cfg)
 	items := cfg.Items(snap.Entries, a.uid)
+	if err := policy.ResolveWorkerJobs(items, live); err != nil {
+		a.warn("tmp", "часть заданий worker не прочиталась, записи сгруппированы прежним способом", "err", err)
+	}
 	groups := cfg.Over(now, items, factor)
 	fmt.Fprintf(a.out, "\n5. Сейчас (режим %s): %s.\n", cfg.Mode, policy.OverText(items, groups, factor))
 	st := a.loadUserState() // только читаем: report счётчики не меняет
@@ -502,7 +505,11 @@ func (a *app) tmpReport(cfg *policy.Config, since time.Duration) error {
 	}
 	for i := range deferred {
 		s := &deferred[i]
-		fmt.Fprintf(a.out, "   отложено для %s до %s: записей %d, %s\n", s.Target.Key(), s.NextAt.Format("15:04"), len(s.Lines), policy.HumanBytes(policy.LinesBytes(s.Lines)))
+		until := "без срока (попутно)"
+		if !s.NextAt.IsZero() {
+			until = "до " + s.NextAt.Format("15:04")
+		}
+		fmt.Fprintf(a.out, "   отложено для %s %s: записей %d, %s\n", s.Target.Key(), until, len(s.Lines), policy.HumanBytes(policy.LinesBytes(s.Lines)))
 	}
 	return nil
 }
@@ -528,7 +535,11 @@ func (a *app) tmpSendTest(cfg *policy.Config, to string, dry bool) error {
 	factor := a.tmpFactor(cfg)
 	st := &policy.UserState{}
 	var sum *policy.Summary
-	planned, _ := cfg.Plan(now, cfg.Over(now, cfg.Items(snap.Entries, a.uid), factor), live, st, factor)
+	items := cfg.Items(snap.Entries, a.uid)
+	if err := policy.ResolveWorkerJobs(items, live); err != nil {
+		a.warn("tmp", "часть заданий worker не прочиталась, записи сгруппированы прежним способом", "err", err)
+	}
+	planned, _ := cfg.Plan(now, cfg.Over(now, items, factor), live, st, factor)
 	for i := range planned {
 		if planned[i].Target.Key() == target.Key() {
 			sum = &planned[i]
@@ -536,7 +547,7 @@ func (a *app) tmpSendTest(cfg *policy.Config, to string, dry bool) error {
 	}
 	if sum == nil { // адресату сейчас нечего слать — покажем формат на любых записях сверх порога
 		sum = &policy.Summary{Target: target, Factor: factor, Pressure: factor < 1}
-		for _, g := range cfg.Over(now, cfg.Items(snap.Entries, a.uid), factor) {
+		for _, g := range cfg.Over(now, items, factor) {
 			for i := range g.Items {
 				sum.Lines = append(sum.Lines, testLine(&g.Items[i]))
 			}
@@ -566,6 +577,10 @@ func (a *app) tmpSendTest(cfg *policy.Config, to string, dry bool) error {
 // testLine — строка тестовой сводки для записи, адресованной не этой сессии.
 func testLine(it *policy.Item) policy.Line {
 	l := policy.Line{Item: *it, Rel: policy.RelNoCreator}
+	if it.WorkerLive {
+		l.Rel, l.CreatorName, l.WorkerJobID = policy.RelWorkerLive, it.WorkerMaster, it.WorkerJobID
+		return l
+	}
 	switch it.Class {
 	case policy.ClassSession, policy.ClassFighter:
 		l.Rel, l.CreatorName = policy.RelIgnored, it.Entry.Owner.Session.Name
@@ -582,16 +597,14 @@ func (a *app) tmpSend(cfg *policy.Config, t policy.Target, kind guide.Kind, msg 
 	return a.sendSocket(t.Pid, t.Key(), t.Socket, cfg.SendAuth, kind, msg)
 }
 
-// printDry печатает то, что ушло бы в этот проход, и отложенное: строки,
-// которые верхняя ступень уже получала, и когда им будет повтор.
+// printDry печатает отправляемые сводки и причину, по которой строки отложены.
 func (a *app) printDry(cfg *policy.Config, groups []policy.Group, sums, deferred []policy.Summary, now time.Time) {
 	for i := range sums {
 		fmt.Fprintf(a.out, "=== сводка %s (pid %d), записей %d\n%s\n\n", sums[i].Target.Key(), sums[i].Target.Pid,
 			len(sums[i].Lines), cfg.Message(&sums[i], now, false))
 	}
 	for i := range deferred {
-		fmt.Fprintf(a.out, "=== отложено: %s уже получал(а) эти записи, повтор не раньше %s (top_repeat), записей %d; текст повтора:\n%s\n\n",
-			deferred[i].Target.Key(), deferred[i].NextAt.Format("15:04"), len(deferred[i].Lines), cfg.Message(&deferred[i], now, false))
+		a.printDeferred(cfg, &deferred[i], now)
 	}
 	switch {
 	case len(groups) == 0:
@@ -599,6 +612,81 @@ func (a *app) printDry(cfg *policy.Config, groups []policy.Group, sums, deferred
 	case len(sums) == 0 && len(deferred) == 0:
 		fmt.Fprintln(a.out, "сводок нет: владельцы сверх порога есть, но ни их сессий, ни лида нет в живых")
 	case len(sums) == 0:
-		fmt.Fprintln(a.out, "в этот проход сводок нет: всё сверх порога отложено до повтора верхней ступени")
+		allLiveDeferred := policy.Count(deferred) > 0
+		for i := range deferred {
+			for j := range deferred[i].Lines {
+				allLiveDeferred = allLiveDeferred && deferred[i].Lines[j].Rel == policy.RelWorkerLive
+			}
+		}
+		if allLiveDeferred {
+			fmt.Fprintln(a.out, "в этот проход сводок нет: строки живых заданий отложены до попутной отправки или условия повтора")
+		} else {
+			fmt.Fprintln(a.out, "в этот проход сводок нет: всё сверх порога отложено до повтора верхней ступени")
+		}
 	}
+}
+
+func (a *app) printDeferred(cfg *policy.Config, s *policy.Summary, now time.Time) {
+	allLive, hasLive, hasOrdinary := len(s.Lines) > 0, false, false
+	for i := range s.Lines {
+		allLive = allLive && s.Lines[i].Rel == policy.RelWorkerLive
+		if s.Lines[i].Rel == policy.RelWorkerLive {
+			hasLive = true
+		} else {
+			hasOrdinary = true
+		}
+	}
+	switch {
+	case allLive:
+		fmt.Fprintf(a.out, "=== отложено: %s — %s; записей %d:\n%s\n\n",
+			s.Target.Key(), liveDeferredText(s, now, true), len(s.Lines), cfg.Message(s, now, false))
+	case hasLive && hasOrdinary:
+		fmt.Fprintf(a.out, "=== отложено: %s — строки лестницы уже получали; живые задания: %s; записей %d:\n%s\n\n",
+			s.Target.Key(), liveDeferredText(s, now, false), len(s.Lines), cfg.Message(s, now, false))
+	default:
+		fmt.Fprintf(a.out, "=== отложено: %s уже получал(а) эти записи, повтор не раньше %s (top_repeat), записей %d; текст повтора:\n%s\n\n",
+			s.Target.Key(), s.NextAt.Format("15:04"), len(s.Lines), cfg.Message(s, now, false))
+	}
+}
+
+// liveNoActionText — причина для не названной строки живого задания.
+const liveNoActionText = "не названные: строка без действия, отдельным письмом не шлётся — уйдёт попутно со сводкой с действием или при давлении памяти"
+
+func liveDeferredText(s *policy.Summary, now time.Time, showNext bool) string {
+	noAction, noRoom, repeat, namedLive := false, false, false, false
+	for i := range s.Lines {
+		switch s.Lines[i].DeferredReason {
+		case policy.DeferredWorkerNoAction:
+			noAction = true
+		case policy.DeferredWorkerNoRoom:
+			noRoom = true
+		case policy.DeferredWorkerRepeat:
+			repeat = true
+			namedLive = true
+		}
+	}
+	var reason strings.Builder
+	if noAction {
+		reason.WriteString(liveNoActionText)
+	}
+	if noRoom {
+		appendReason(&reason, "не поместились в сводку: уйдут, когда в ней будет место")
+	}
+	if repeat && namedLive {
+		appendReason(&reason, fmt.Sprintf("названные: повтор при росте в %d раза или давлении", policy.LiveWorkerGrowth))
+		if showNext && s.NextAt.After(now) {
+			fmt.Fprintf(&reason, ", не раньше %s", s.NextAt.Format("15:04"))
+		}
+	}
+	if reason.Len() == 0 {
+		reason.WriteString("строка живого задания отложена")
+	}
+	return reason.String()
+}
+
+func appendReason(b *strings.Builder, reason string) {
+	if b.Len() > 0 {
+		b.WriteString("; ")
+	}
+	b.WriteString(reason)
 }
