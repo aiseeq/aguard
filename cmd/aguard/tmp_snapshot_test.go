@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,6 +139,115 @@ func TestTmpRoundResolvesWorkerJobForRouting(t *testing.T) {
 	}
 	if !noted {
 		t.Fatal("ошибка поиска задания не попала в учёт")
+	}
+}
+
+func TestTmpRoundAndReportHonorUserTmpfiles(t *testing.T) {
+	a, logs := quietObservedApp(t)
+	a.log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	a.out = &bytes.Buffer{}
+	a.uid = os.Getuid()
+	stat, err := proc.ReadStat("/proc", os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.reg = session.Registry{Dir: filepath.Join(t.TempDir(), "sessions"), ProcRoot: "/proc"}
+	if err := os.MkdirAll(a.reg.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := json.Marshal(session.Info{Pid: os.Getpid(), ProcStart: stat.Start, Name: "lead", SocketPath: "@tmp-config-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.reg.Dir, fmt.Sprint(os.Getpid())+".json"), info, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	configDir := filepath.Join(a.home, ".config", "user-tmpfiles.d")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := "# rules\n\nd! /tmp/from-d 0700 - - - -\nD /tmp/from-D 0700 - - - -\nv /tmp/from-v 0700 - - - -\nq /tmp/from-q 0700 - - - -\nQ /tmp/from-Q 0700 - - - -\nL+ /tmp/from-link - - - - /tmp/from-d\nd /tmp/%h/from-spec 0700 - - - -\nd relative-path 0700 - - - -\nd \"/tmp/from-quoted\" 0700 - - - -\n"
+	confPath := filepath.Join(configDir, "custom.conf")
+	if err := os.WriteFile(confPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	paths := []string{"/tmp/from-d", "/tmp/from-D", "/tmp/from-v", "/tmp/from-q", "/tmp/from-Q",
+		"/tmp/from-link", "/tmp/%h/from-spec", "relative-path", "/var/tmp/outside", "/tmp/from-quoted", "/tmp/neighbor", "/tmp/from-d2"}
+	entries := make([]record.Entry, 0, len(paths))
+	for _, path := range paths {
+		entries = append(entries, record.Entry{Path: path, Born: now.Add(-time.Hour), Bytes: 20 << 20})
+	}
+	run, track := t.TempDir(), t.TempDir()
+	stateBytes, err := json.Marshal(record.State{Updated: now, Entries: entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(run, record.StateFile), stateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(track, record.StateFile), stateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(track, record.OwnersFile), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := policy.Default(a.home)
+	cfg.RunDir, cfg.TrackDir, cfg.Lead = run, track, "lead"
+	cfg.Policy.MinEntry, cfg.Policy.MinOwner, cfg.Policy.BudgetGBM, cfg.Policy.MaxListed = 1, 1, 0.01, 25
+	if err := a.tmpRound(&cfg, true); err != nil {
+		t.Fatal(err)
+	}
+	hasPath := func(output, path string) bool { return strings.Contains(output, path+" —") }
+	summary := a.out.(*bytes.Buffer).String()
+	for _, path := range []string{"/tmp/from-d", "/tmp/from-D", "/tmp/from-v", "/tmp/from-q", "/tmp/from-Q"} {
+		if hasPath(summary, path) {
+			t.Errorf("путь из правила каталога попал в сводку: %s\n%s", path, summary)
+		}
+	}
+	for _, path := range []string{"/tmp/from-link", "/tmp/%h/from-spec", "relative-path", "/var/tmp/outside", "/tmp/from-quoted", "/tmp/neighbor", "/tmp/from-d2"} {
+		if !hasPath(summary, path) {
+			t.Errorf("путь не из применимого правила отсутствует в сводке: %s", path)
+		}
+	}
+
+	a.out = &bytes.Buffer{}
+	if err := a.tmpReport(&cfg, 0); err != nil {
+		t.Fatal(err)
+	}
+	reportText := a.out.(*bytes.Buffer).String()
+	if !strings.Contains(reportText, "живых 7 ") {
+		t.Fatalf("tmp report должен учитывать семь путей без правила каталога: %s", reportText)
+	}
+	if !strings.Contains(logs.String(), `reason="спецификатор %"`) || !strings.Contains(logs.String(), `text="d /tmp/%h/from-spec 0700 - - - -"`) ||
+		!strings.Contains(logs.String(), `reason="путь не абсолютный"`) || !strings.Contains(logs.String(), `text="d relative-path 0700 - - - -"`) {
+		t.Fatalf("пропуск спецификатора не записан с причиной и строкой: %s", logs.String())
+	}
+
+	// d /tmp — корень сводки: строка пропускается, сводка та же, что без правил.
+	summaryWith := func(conf string) string {
+		t.Helper()
+		if err := os.WriteFile(confPath, []byte(conf), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		a.out = &bytes.Buffer{}
+		if err := a.tmpRound(&cfg, true); err != nil {
+			t.Fatal(err)
+		}
+		return a.out.(*bytes.Buffer).String()
+	}
+	baseline := summaryWith("")
+	logs.Reset()
+	rootSummary := summaryWith("d /tmp 0700 - - - -\n")
+	if rootSummary != baseline {
+		t.Errorf("правило d /tmp изменило сводку:\n%s\nбез правил:\n%s", rootSummary, baseline)
+	}
+	if !strings.Contains(baseline, "/tmp/") {
+		t.Fatalf("сводка без правил пуста — проверка корня ничего не доказывает:\n%s", baseline)
+	}
+	if !strings.Contains(logs.String(), `reason="корень сводки tmp"`) {
+		t.Errorf("пропуск d /tmp без причины в журнале: %s", logs.String())
 	}
 }
 

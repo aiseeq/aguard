@@ -74,14 +74,15 @@ func (d Duration) D() time.Duration { return time.Duration(d) }
 // Config — раздел [tmp] конфига aguard. Lead, SendAuth и Escalation.Admins —
 // общие для всего конфига, их подставляет загрузчик aguard.
 type Config struct {
-	Mode     string   `toml:"mode"`
-	Interval Duration `toml:"interval"`
-	TrackDir string   `toml:"track_state_dir"` // owners.jsonl и долговременный снимок
-	RunDir   string   `toml:"track_run_dir"`   // частый снимок state.json
-	Lead     string   `toml:"-"`               // имя сессии лида
-	Fighters []string `toml:"fighters"`        // comm бойцов в цепочке до сессии
-	Ignore   []string `toml:"ignore"`          // шаблоны путей, которые не учитываются
-	SendAuth bool     `toml:"-"`               // слать токен peerToken первой строкой
+	Mode        string   `toml:"mode"`
+	Interval    Duration `toml:"interval"`
+	TrackDir    string   `toml:"track_state_dir"` // owners.jsonl и долговременный снимок
+	RunDir      string   `toml:"track_run_dir"`   // частый снимок state.json
+	TmpfilesDir string   `toml:"-"`               // пользовательские правила systemd-tmpfiles
+	Lead        string   `toml:"-"`               // имя сессии лида
+	Fighters    []string `toml:"fighters"`        // comm бойцов в цепочке до сессии
+	Ignore      []string `toml:"ignore"`          // шаблоны путей, которые не учитываются
+	SendAuth    bool     `toml:"-"`               // слать токен peerToken первой строкой
 
 	Policy     LimitsConfig     `toml:"policy"`
 	Pressure   PressureConfig   `toml:"pressure"`
@@ -123,15 +124,16 @@ type CacheConfig struct {
 // ≈ 100 МБ на 2 часа ≈ 10 МБ на сутки.
 func Default(home string) Config {
 	return Config{
-		Mode:     ModeObserve,
-		Interval: Duration(5 * time.Minute),
-		TrackDir: record.TrackStateDir(home, "track"),
-		RunDir:   record.TrackRunDir("track"),
-		Lead:     "lead",
-		Fighters: []string{"opencode", "opencode.exe", "codex", "claude"},
-		Ignore:   []string{"/tmp/.X11-unix", "/tmp/.ICE-unix", "/tmp/.font-unix", "/tmp/cc-socks"},
-		Policy:   LimitsConfig{MinEntry: 1 << 20, MinOwner: 5 << 20, BudgetGBM: 12, MaxListed: 15},
-		Pressure: PressureConfig{PSISomeAvg60: 5, SwapUsedPct: 50, Factor: 0.25},
+		Mode:        ModeObserve,
+		Interval:    Duration(5 * time.Minute),
+		TrackDir:    record.TrackStateDir(home, "track"),
+		RunDir:      record.TrackRunDir("track"),
+		TmpfilesDir: filepath.Join(home, ".config", "user-tmpfiles.d"),
+		Lead:        "lead",
+		Fighters:    []string{"opencode", "opencode.exe", "codex", "claude"},
+		Ignore:      []string{"/tmp/.X11-unix", "/tmp/.ICE-unix", "/tmp/.font-unix", "/tmp/cc-socks"},
+		Policy:      LimitsConfig{MinEntry: 1 << 20, MinOwner: 5 << 20, BudgetGBM: 12, MaxListed: 15},
+		Pressure:    PressureConfig{PSISomeAvg60: 5, SwapUsedPct: 50, Factor: 0.25},
 		Escalation: EscalationConfig{
 			After: 2, TopRepeat: Duration(30 * time.Minute),
 			Admins: map[string]string{filepath.Join(home, "work"): "work-admin", filepath.Join(home, "git"): "git-admin"},

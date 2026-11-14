@@ -39,6 +39,13 @@ func (c *Config) IsCache(path string) bool { return matchAny(c.Cache.Paths, path
 
 func matchAny(patterns []string, path string) bool {
 	for _, p := range patterns {
+		if before, ok := strings.CutSuffix(p, "/**"); ok {
+			root := before
+			rel, err := filepath.Rel(root, path)
+			if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+				return true
+			}
+		}
 		if ok, _ := filepath.Match(p, path); ok { //nolint:ignored-error // единственная ошибка Match — ErrBadPattern, шаблоны проверены в Config.Validate
 			return true
 		}

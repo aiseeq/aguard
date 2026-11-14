@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -196,8 +198,100 @@ func copyAlerts(m map[string]*policy.AlertState) map[string]*policy.AlertState {
 	return out
 }
 
+const tmpSummaryRoot = "/tmp"
+
+// tmpfilesDirectory разбирает тип и путь правила, возвращая причину пропуска.
+func tmpfilesDirectory(line string) (path, reason string, err error) {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return "", "не хватает полей", nil
+	}
+	typeAndMods := fields[0]
+	switch typeAndMods[0] {
+	case 'd', 'D', 'v', 'q', 'Q':
+	default:
+		return "", "тип строки не создаёт каталог", nil
+	}
+	for _, mod := range typeAndMods[1:] {
+		if !strings.ContainsRune("!-=~^+", mod) {
+			return "", "неизвестный модификатор", nil
+		}
+	}
+	path = fields[1]
+	if strings.Contains(path, "%") {
+		return "", "спецификатор %", nil
+	}
+	if strings.ContainsAny(path, "\\\"'") {
+		return "", "кавычки в пути", nil
+	}
+	if !filepath.IsAbs(path) {
+		return "", "путь не абсолютный", nil
+	}
+	path = filepath.Clean(path)
+	rel, err := filepath.Rel(tmpSummaryRoot, path)
+	if err != nil {
+		return "", "", fmt.Errorf("путь %q: проверить корень сводки tmp: %w", path, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "путь вне корня сводки tmp", nil
+	}
+	if rel == "." { // d /tmp — сама папка сводки: исключить её значило бы молча выключить всю сводку
+		return "", "корень сводки tmp", nil
+	}
+	return path, "", nil
+}
+
+// tmpConfig добавляет user-tmpfiles.d к обычным правилам ignore для всех потребителей [tmp].
+func (a *app) tmpConfig(cfg *policy.Config) *policy.Config {
+	copy := *cfg
+	copy.Ignore = append([]string(nil), cfg.Ignore...)
+	dir := cfg.TmpfilesDir
+	if dir == "" {
+		dir = filepath.Join(a.home, ".config", "user-tmpfiles.d")
+	}
+	patterns, err := filepath.Glob(filepath.Join(dir, "*.conf"))
+	if err != nil {
+		a.log.Warn("aguard tmp: список user-tmpfiles.d", "err", err)
+		return &copy
+	}
+	for _, name := range patterns {
+		f, err := os.Open(name)
+		if err != nil {
+			a.log.Warn("aguard tmp: файл user-tmpfiles.d не прочитан", "path", name, "err", err)
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		lineNo := 0
+		for scanner.Scan() {
+			lineNo++
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			path, reason, parseErr := tmpfilesDirectory(line)
+			if parseErr != nil {
+				a.log.Debug("aguard tmp: строка user-tmpfiles.d пропущена", "path", name, "line", lineNo, "reason", "не удалось проверить путь", "err", parseErr, "text", line)
+				continue
+			}
+			if reason != "" {
+				a.log.Debug("aguard tmp: строка user-tmpfiles.d пропущена", "path", name, "line", lineNo, "reason", reason, "text", line)
+				continue
+			}
+			copy.Ignore = append(copy.Ignore, path, filepath.Join(path, "**"))
+		}
+		if err := scanner.Err(); err != nil {
+			a.log.Warn("aguard tmp: файл user-tmpfiles.d прочитан не полностью", "path", name, "err", err)
+		}
+		if err := f.Close(); err != nil {
+			a.log.Warn("aguard tmp: файл user-tmpfiles.d не закрыт", "path", name, "err", err)
+		}
+	}
+	return &copy
+}
+
 // tmpRound — один проход: учёт, план, доставка (или запись в observe), кеши.
 func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
+	cfg = a.tmpConfig(cfg)
 	now := time.Now()
 	snap, err := a.snapshot(cfg)
 	if err != nil {
@@ -369,6 +463,7 @@ func cleanOld(root string, cutoff time.Time, uid int) cleaned {
 }
 
 func (a *app) tmpReport(cfg *policy.Config, since time.Duration) error {
+	cfg = a.tmpConfig(cfg)
 	snap, err := a.snapshot(cfg)
 	if err != nil {
 		return err
@@ -413,6 +508,7 @@ func (a *app) tmpReport(cfg *policy.Config, since time.Duration) error {
 }
 
 func (a *app) tmpSendTest(cfg *policy.Config, to string, dry bool) error {
+	cfg = a.tmpConfig(cfg)
 	if to == "" {
 		to = cfg.Lead
 	}

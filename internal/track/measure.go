@@ -13,10 +13,11 @@ import (
 
 // meta — сведения о записи верхнего уровня из statx.
 type meta struct {
-	dir  bool
-	ino  uint64
-	uid  int
-	born time.Time // btime, если файловая система его знает, иначе mtime
+	dir     bool
+	ino     uint64
+	uid     int
+	born    time.Time // btime, если файловая система его знает, иначе mtime
+	hasBorn bool
 }
 
 // statMeta — statx записи; ошибка (обычно ENOENT) — записи нет.
@@ -29,6 +30,7 @@ func statMeta(path string) (meta, error) {
 	}
 	m := meta{dir: sx.Mode&unix.S_IFMT == unix.S_IFDIR, ino: sx.Ino, uid: int(sx.Uid)}
 	if sx.Mask&unix.STATX_BTIME != 0 && sx.Btime.Sec > 0 {
+		m.hasBorn = true
 		m.born = time.Unix(sx.Btime.Sec, int64(sx.Btime.Nsec))
 	} else {
 		m.born = time.Unix(sx.Mtime.Sec, int64(sx.Mtime.Nsec))

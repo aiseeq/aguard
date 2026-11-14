@@ -244,6 +244,94 @@ func TestFinishListingWithoutFullReconciles(t *testing.T) {
 	}
 }
 
+func TestRestoreBtimeDirectionOwnerGoneAndNoBtime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "entry")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	disk, err := statMeta(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	owner := &record.Owner{Proc: record.Proc{Pid: 77, Comm: "creator"}, Session: &record.Session{Name: "creator-master"}}
+	makeTracker := func(entry record.Entry, override func(string) (meta, error)) (*Tracker, string) {
+		t.Helper()
+		dir := t.TempDir()
+		b, err := json.Marshal(record.State{Updated: time.Now(), Entries: []record.Entry{entry}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, record.StateFile), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		owners, err := openEventLog(filepath.Join(dir, record.OwnersFile), 0, slog.New(slog.DiscardHandler))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(owners.close)
+		tr := &Tracker{cfg: Config{RunDir: dir, StateDir: dir}, entries: map[string]*record.Entry{}, owners: owners,
+			log: slog.New(slog.DiscardHandler), statMeta: override}
+		return tr, dir
+	}
+
+	t.Run("born after btime keeps creator", func(t *testing.T) {
+		if !disk.hasBorn {
+			t.Skip("файловая система не сообщает STATX_BTIME")
+		}
+		oldBorn := disk.born.Add(3 * time.Second)
+		tr, _ := makeTracker(record.Entry{Path: path, Ino: disk.ino, Born: oldBorn, Owner: owner}, nil)
+		tr.restore()
+		got := tr.entries[path]
+		if got == nil || !got.Born.Equal(oldBorn) || got.Owner == nil || got.Owner.Session == nil || got.Owner.Session.Name != owner.Session.Name {
+			t.Fatalf("снимок с Born позже btime должен восстановиться с создателем: %+v", got)
+		}
+	})
+
+	t.Run("new btime closes old and adopts current", func(t *testing.T) {
+		if !disk.hasBorn {
+			t.Skip("файловая система не сообщает STATX_BTIME")
+		}
+		oldBorn := disk.born.Add(-10 * time.Second)
+		tr, dir := makeTracker(record.Entry{Path: path, Ino: disk.ino, Born: oldBorn, Owner: owner}, nil)
+		tr.restore()
+		got := tr.entries[path]
+		if got == nil || !got.Born.Equal(disk.born) || got.Owner != nil {
+			t.Fatalf("новая запись должна получить disk btime без старого создателя: %+v", got)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, record.OwnersFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var foundGone bool
+		for line := range strings.SplitSeq(strings.TrimSpace(string(b)), "\n") {
+			var event record.Event
+			if err := json.Unmarshal([]byte(line), &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.Ev == record.EvGone && event.Path == path && event.Owner != nil && event.Owner.Session != nil {
+				foundGone = true
+			}
+		}
+		if !foundGone {
+			t.Fatalf("нет события gone для старой записи с создателем: %s", b)
+		}
+	})
+
+	t.Run("filesystem without btime restores by inode", func(t *testing.T) {
+		oldBorn := disk.born.Add(-20 * time.Second)
+		statWithoutBorn := func(string) (meta, error) {
+			return meta{ino: disk.ino, born: disk.born.Add(time.Hour), hasBorn: false}, nil
+		}
+		tr, _ := makeTracker(record.Entry{Path: path, Ino: disk.ino, Born: oldBorn, Owner: owner}, statWithoutBorn)
+		tr.restore()
+		got := tr.entries[path]
+		if got == nil || !got.Born.Equal(oldBorn) || got.Owner == nil {
+			t.Fatalf("без btime должны восстановиться born и создатель снимка: %+v", got)
+		}
+	})
+}
+
 func TestLastFullSaveRestore(t *testing.T) {
 	dir := t.TempDir()
 	lastFull := time.Now().Add(-time.Hour).Round(0)

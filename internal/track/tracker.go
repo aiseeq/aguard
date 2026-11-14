@@ -60,8 +60,9 @@ type Tracker struct {
 	owners     *eventLog // owners.jsonl
 	log        *slog.Logger
 	entries    map[string]*record.Entry
-	watchKey   map[string]string // ключ handle папки -> путь
-	watched    map[string]string // путь папки -> ключ handle
+	statMeta   func(string) (meta, error) // подменяется только в тестах восстановления
+	watchKey   map[string]string          // ключ handle папки -> путь
+	watched    map[string]string          // путь папки -> ключ handle
 	containers map[string]bool
 	started    time.Time
 	lastFull   time.Time
@@ -611,8 +612,14 @@ func (t *Tracker) adopt(p string, now time.Time) {
 	t.owners.write(e.Event(now, record.EvPreexisting))
 }
 
+// restoreMatches использует inode без btime; с btime запись новая, только если
+// рождение на диске позже времени события из снимка больше чем на секунду.
+func restoreMatches(e record.Entry, m meta) bool {
+	return (e.Ino == 0 || m.ino == e.Ino) && (!m.hasBorn || !m.born.After(e.Born.Add(time.Second)))
+}
+
 // restore поднимает таблицу из снимка: свежий из /run, иначе с диска.
-// Записи, которых больше нет (или inode другой), закрываются как gone.
+// Записи, которых больше нет (или inode/btime другой), закрываются как gone.
 func (t *Tracker) restore() {
 	var st *record.State
 	for _, dir := range []string{t.cfg.RunDir, t.cfg.StateDir} {
@@ -635,12 +642,19 @@ func (t *Tracker) restore() {
 	now := time.Now()
 	for i := range st.Entries {
 		e := st.Entries[i]
-		m, err := statMeta(e.Path)
-		if err == nil && (e.Ino == 0 || m.ino == e.Ino) {
+		stat := t.statMeta
+		if stat == nil {
+			stat = statMeta
+		}
+		m, err := stat(e.Path)
+		if err == nil && restoreMatches(e, m) {
 			t.entries[e.Path] = &e
 			continue
 		}
 		t.close(&e, record.EvGone, "", now)
+		if err == nil && m.hasBorn && (e.Ino == 0 || m.ino == e.Ino) {
+			t.adopt(e.Path, now)
+		}
 	}
 }
 
