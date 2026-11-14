@@ -341,70 +341,109 @@ func descendantsSubtree(proc string, pid int) ([]string, error) {
 	for len(queue) > 0 {
 		parent := queue[0]
 		queue = queue[1:]
-		taskDir := filepath.Join(proc, strconv.Itoa(parent), "task")
-		tasks, err := os.ReadDir(taskDir)
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
-			if _, statErr := os.Stat(filepath.Join(proc, strconv.Itoa(parent))); errors.Is(statErr, fs.ErrNotExist) || errors.Is(statErr, syscall.ESRCH) {
-				continue
-			} else if statErr != nil {
-				return nil, fmt.Errorf("процесс %d: %w", parent, statErr)
-			}
-			return nil, errNoProcChildren
-		}
+		kids, err := processChildren(proc, parent)
 		if err != nil {
-			return nil, fmt.Errorf("потоки процесса %d: %w", parent, err)
+			return nil, err
 		}
-		for _, task := range tasks {
-			if !isPID(task.Name()) {
+		for _, child := range kids {
+			if seen[child] {
 				continue
 			}
-			tid := filepath.Join(taskDir, task.Name())
-			childrenFile := filepath.Join(tid, "children")
-			data, err := os.ReadFile(childrenFile)
-			if errors.Is(err, fs.ErrNotExist) {
-				if _, statErr := os.Stat(tid); errors.Is(statErr, fs.ErrNotExist) || errors.Is(statErr, syscall.ESRCH) {
-					continue
-				} else if statErr != nil {
-					return nil, fmt.Errorf("поток %s: %w", task.Name(), statErr)
-				}
-				return nil, errNoProcChildren
-			}
-			if errors.Is(err, syscall.ESRCH) {
-				continue
-			}
+			name, ok, err := childName(proc, child, parent)
 			if err != nil {
-				return nil, fmt.Errorf("потомки потока %s: %w", task.Name(), err)
+				return nil, err
 			}
-			for field := range strings.FieldsSeq(string(data)) {
-				child, err := strconv.Atoi(field)
-				if err != nil {
-					return nil, fmt.Errorf("потомок потока %s: %w", task.Name(), err)
-				}
-				if seen[child] {
-					continue
-				}
-				stat, err := os.ReadFile(filepath.Join(proc, strconv.Itoa(child), "stat"))
-				if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
-					continue
-				}
-				if err != nil {
-					return nil, fmt.Errorf("процесс %d: %w", child, err)
-				}
-				name, ppid, err := parseStat(string(stat))
-				if err != nil {
-					return nil, fmt.Errorf("процесс %d: %w", child, err)
-				}
-				if ppid != parent {
-					continue // PID переиспользован после чтения children
-				}
-				seen[child] = true
-				queue = append(queue, child)
-				out = append(out, strconv.Itoa(child)+" "+name)
+			if !ok {
+				continue
 			}
+			seen[child] = true
+			queue = append(queue, child)
+			out = append(out, strconv.Itoa(child)+" "+name)
 		}
 	}
 	slices.Sort(out)
 	return out, nil
+}
+
+// goneErr — процесса или потока уже нет: ENOENT или ESRCH.
+func goneErr(err error) bool { return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) }
+
+// missingOrNoChildren — файла нет: вышел ли path (пропуск) или ядро не даёт children (errNoProcChildren).
+func missingOrNoChildren(path, what string) (gone bool, err error) {
+	if _, statErr := os.Stat(path); goneErr(statErr) {
+		return true, nil
+	} else if statErr != nil {
+		return false, fmt.Errorf("%s: %w", what, statErr)
+	}
+	return false, errNoProcChildren
+}
+
+// processChildren — дети процесса parent по children всех его потоков; вышедший процесс — пусто.
+func processChildren(proc string, parent int) ([]int, error) {
+	taskDir := filepath.Join(proc, strconv.Itoa(parent), "task")
+	tasks, err := os.ReadDir(taskDir)
+	if goneErr(err) {
+		_, err := missingOrNoChildren(filepath.Join(proc, strconv.Itoa(parent)), fmt.Sprintf("процесс %d", parent))
+		return nil, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("потоки процесса %d: %w", parent, err)
+	}
+	var kids []int
+	for _, task := range tasks {
+		if !isPID(task.Name()) {
+			continue
+		}
+		got, err := threadChildren(filepath.Join(taskDir, task.Name()), task.Name())
+		if err != nil {
+			return nil, err
+		}
+		kids = append(kids, got...)
+	}
+	return kids, nil
+}
+
+// threadChildren — дети одного потока из task/<tid>/children; вышедший поток — пусто.
+func threadChildren(tid, name string) ([]int, error) {
+	data, err := os.ReadFile(filepath.Join(tid, "children"))
+	if errors.Is(err, fs.ErrNotExist) {
+		_, err := missingOrNoChildren(tid, "поток "+name)
+		return nil, err
+	}
+	if errors.Is(err, syscall.ESRCH) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("потомки потока %s: %w", name, err)
+	}
+	var kids []int
+	for field := range strings.FieldsSeq(string(data)) {
+		child, err := strconv.Atoi(field)
+		if err != nil {
+			return nil, fmt.Errorf("потомок потока %s: %w", name, err)
+		}
+		kids = append(kids, child)
+	}
+	return kids, nil
+}
+
+// childName — имя ребёнка из /proc/<child>/stat; ok=false — вышел или pid переиспользован (ppid не parent).
+func childName(proc string, child, parent int) (string, bool, error) {
+	stat, err := os.ReadFile(filepath.Join(proc, strconv.Itoa(child), "stat"))
+	if goneErr(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("процесс %d: %w", child, err)
+	}
+	name, ppid, err := parseStat(string(stat))
+	if err != nil {
+		return "", false, fmt.Errorf("процесс %d: %w", child, err)
+	}
+	if ppid != parent {
+		return "", false, nil // PID переиспользован после чтения children
+	}
+	return name, true, nil
 }
 
 // descendantsFull — прежний полный обход /proc, нужен ядрам без CONFIG_PROC_CHILDREN.
