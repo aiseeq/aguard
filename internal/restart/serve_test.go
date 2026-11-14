@@ -71,6 +71,24 @@ func TestAnswerVersion(t *testing.T) {
 	}
 }
 
+func TestAnswerDescendantsScannedOnce(t *testing.T) {
+	now := time.Now()
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 20 * time.Minute})
+	w.link(t, 4242)
+	reads := 0
+	w.p.scanChildren = func(proc string, pid int) ([]string, error) {
+		reads++
+		return descendants(proc, pid)
+	}
+	cfg, cc := Default(t.TempDir(), t.TempDir()), DefaultCompact()
+	j := NewJudge(t.TempDir())
+	j.paths = &w.p
+	a := j.Answer(&cfg, &cc, Request{V: Version, Pid: 4242}, now)
+	if a.Error != "" || reads != 1 {
+		t.Fatalf("Answer error %q, обход потомков вызван %d раз", a.Error, reads)
+	}
+}
+
 func TestAnswerCompactOff(t *testing.T) {
 	cfg, cc := Default(t.TempDir(), t.TempDir()), DefaultCompact()
 	cc.Mode = CompactOff

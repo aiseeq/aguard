@@ -127,13 +127,14 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 		return Answer{V: Version, Error: fmt.Sprintf("pid %d", req.Pid)}
 	}
 	c := j.cache(req.Pid, now)
+	children := &descendantsCache{}
 	c.mu.Lock()
-	f := probe(j.pathsOf(cfg), &c.scan, req.Pid, now, req.Stale != "")
+	f := probeWithChildren(j.pathsOf(cfg), &c.scan, req.Pid, now, req.Stale != "", children)
 	c.mu.Unlock()
 	f.cleanField(req.Clean)
 	name := firstNonEmpty(f.Name, req.Name)
 	v := decide(f, allowance{idle: cfg.Idle.D(), argsProblem: req.ArgsProblem, typed: req.Typed, stale: req.Stale})
-	cv := j.Compact(cfg, cc, Request{Pid: req.Pid, Name: name, ArgsProblem: req.ArgsProblem, Typed: req.Typed, Clean: req.Clean}, now)
+	cv := j.compactWithChildren(cfg, cc, Request{Pid: req.Pid, Name: name, ArgsProblem: req.ArgsProblem, Typed: req.Typed, Clean: req.Clean}, now, children)
 	if cv.Compact {
 		v.Lost = cv.Lost
 	}

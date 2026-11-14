@@ -62,11 +62,12 @@ type facts struct {
 
 // paths — где cl ищет сведения о сессиях; в тестах — временные папки.
 type paths struct {
-	sessions   string // реестр Claude Code
-	projects   string // транскрипты Claude Code
-	hookStates string // состояния chooks (internal/core/state.go: $XDG_RUNTIME_DIR/chooks/sessions)
-	proc       string
-	claude     string // claude из PATH
+	sessions     string // реестр Claude Code
+	projects     string // транскрипты Claude Code
+	hookStates   string // состояния chooks (internal/core/state.go: $XDG_RUNTIME_DIR/chooks/sessions)
+	proc         string
+	scanChildren func(string, int) ([]string, error)
+	claude       string // claude из PATH
 	// prompt — поле ввода по экрану терминала процесса (screen.Reader.Prompt).
 	prompt func(pid int) (screen.Prompt, error)
 	// tree — незакоммиченное в git-дереве папки (gitStatus); спрашивается только для решения о сбросе.
@@ -129,6 +130,10 @@ func readSession(dir string, pid int) (session.Info, error) {
 // stale — дальше не смотрит: перезапускать незачем. stale — у процесса устарели аргументы (Request.Stale): состояние
 // нужно и при свежей версии, иначе decide видел бы нулевую тишину и пустой экран и всегда был бы против.
 func probe(p paths, cache *scanCache, pid int, now time.Time, stale bool) facts {
+	return probeWithChildren(p, cache, pid, now, stale, &descendantsCache{})
+}
+
+func probeWithChildren(p paths, cache *scanCache, pid int, now time.Time, stale bool, children *descendantsCache) facts {
 	var f facts
 	fail := func(err error) {
 		f.Errors = append(f.Errors, err.Error())
@@ -156,12 +161,12 @@ func probe(p paths, cache *scanCache, pid int, now time.Time, stale bool) facts 
 	if !old && !stale {
 		return f
 	}
-	state(p, cache, pid, now, &f)
+	state(p, cache, pid, now, &f, children)
 	return f
 }
 
 // state — всё о сессии, кроме версий: ход, ввод, дети, транскрипт, экран. f.Info уже прочитан.
-func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
+func state(p paths, cache *scanCache, pid int, now time.Time, f *facts, children *descendantsCache) {
 	fail := func(err error) {
 		f.Errors = append(f.Errors, err.Error())
 	}
@@ -187,7 +192,7 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts) {
 	if f.TTYQuiet, err = ttyQuiet(p, pid, now); err != nil {
 		fail(err)
 	}
-	if f.Children, err = descendants(p.proc, pid); err != nil {
+	if f.Children, err = children.get(p.proc, pid, p.scanChildren); err != nil {
 		fail(err)
 	}
 	if f.Prompt, err = p.prompt(pid); err != nil {
@@ -296,8 +301,114 @@ func ttyQuiet(p paths, pid int, now time.Time) (time.Duration, error) {
 	return now.Sub(time.Unix(st.Atim.Sec, st.Atim.Nsec)), nil
 }
 
-// descendants — все потомки pid по /proc/*/stat: «pid имя». Процесс, вышедший между списком и чтением, — пропуск.
+type descendantsCache struct {
+	loaded bool
+	pid    int
+	proc   string
+	items  []string
+	err    error
+}
+
+func (c *descendantsCache) get(proc string, pid int, scan func(string, int) ([]string, error)) ([]string, error) {
+	if c.loaded && c.pid == pid && c.proc == proc {
+		return slices.Clone(c.items), c.err
+	}
+	c.loaded, c.pid, c.proc = true, pid, proc
+	if scan == nil {
+		scan = descendants
+	}
+	c.items, c.err = scan(proc, pid)
+	return slices.Clone(c.items), c.err
+}
+
+// descendants — потомки pid по /proc/<pid>/task/<tid>/children: «pid имя». Ядро без CONFIG_PROC_CHILDREN — прежний
+// полный обход /proc без строки в журнал: у пакета нет журнала, а вердикт от способа обхода не зависит.
 func descendants(proc string, pid int) ([]string, error) {
+	items, err := descendantsSubtree(proc, pid)
+	if errors.Is(err, errNoProcChildren) {
+		return descendantsFull(proc, pid)
+	}
+	return items, err
+}
+
+var errNoProcChildren = errors.New("нет /proc task children")
+
+// descendantsSubtree читает списки детей только у потоков процессов поддерева pid.
+func descendantsSubtree(proc string, pid int) ([]string, error) {
+	out := make([]string, 0)
+	seen := map[int]bool{pid: true}
+	queue := []int{pid}
+	for len(queue) > 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		taskDir := filepath.Join(proc, strconv.Itoa(parent), "task")
+		tasks, err := os.ReadDir(taskDir)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			if _, statErr := os.Stat(filepath.Join(proc, strconv.Itoa(parent))); errors.Is(statErr, fs.ErrNotExist) || errors.Is(statErr, syscall.ESRCH) {
+				continue
+			} else if statErr != nil {
+				return nil, fmt.Errorf("процесс %d: %w", parent, statErr)
+			}
+			return nil, errNoProcChildren
+		}
+		if err != nil {
+			return nil, fmt.Errorf("потоки процесса %d: %w", parent, err)
+		}
+		for _, task := range tasks {
+			if !isPID(task.Name()) {
+				continue
+			}
+			tid := filepath.Join(taskDir, task.Name())
+			childrenFile := filepath.Join(tid, "children")
+			data, err := os.ReadFile(childrenFile)
+			if errors.Is(err, fs.ErrNotExist) {
+				if _, statErr := os.Stat(tid); errors.Is(statErr, fs.ErrNotExist) || errors.Is(statErr, syscall.ESRCH) {
+					continue
+				} else if statErr != nil {
+					return nil, fmt.Errorf("поток %s: %w", task.Name(), statErr)
+				}
+				return nil, errNoProcChildren
+			}
+			if errors.Is(err, syscall.ESRCH) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("потомки потока %s: %w", task.Name(), err)
+			}
+			for field := range strings.FieldsSeq(string(data)) {
+				child, err := strconv.Atoi(field)
+				if err != nil {
+					return nil, fmt.Errorf("потомок потока %s: %w", task.Name(), err)
+				}
+				if seen[child] {
+					continue
+				}
+				stat, err := os.ReadFile(filepath.Join(proc, strconv.Itoa(child), "stat"))
+				if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+					continue
+				}
+				if err != nil {
+					return nil, fmt.Errorf("процесс %d: %w", child, err)
+				}
+				name, ppid, err := parseStat(string(stat))
+				if err != nil {
+					return nil, fmt.Errorf("процесс %d: %w", child, err)
+				}
+				if ppid != parent {
+					continue // PID переиспользован после чтения children
+				}
+				seen[child] = true
+				queue = append(queue, child)
+				out = append(out, strconv.Itoa(child)+" "+name)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+// descendantsFull — прежний полный обход /proc, нужен ядрам без CONFIG_PROC_CHILDREN.
+func descendantsFull(proc string, pid int) ([]string, error) {
 	entries, err := os.ReadDir(proc)
 	if err != nil {
 		return nil, fmt.Errorf("процессы: %w", err)

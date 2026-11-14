@@ -54,6 +54,7 @@ func newSessionWorld(t *testing.T, at worldTimes, transcript ...string) sessionW
 	stamped(t, tty, "", at.now.Add(-at.ttyAgo), turn)
 	tmpl := filepath.Join(dir, "proc-tmpl")
 	write(t, filepath.Join(tmpl, "stat"), "1 (claude) S 1 1 1 0")
+	write(t, filepath.Join(tmpl, "task", "1", "children"), "")
 	write(t, filepath.Join(tmpl, "cmdline"), "/home/u/.local/bin/claude\x00--dangerously-skip-permissions\x00-n\x00x-master\x00")
 	w.setRunning(t, "2.1.309")
 	// ttyQuiet берёт только ввод с /dev/pts/ или /dev/tty; «/dev/pts/../..» выводит из devpts в корень и дальше к

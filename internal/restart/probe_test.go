@@ -38,12 +38,20 @@ func TestReadHookState(t *testing.T) {
 func TestDescendantsAndVersion(t *testing.T) {
 	proc := t.TempDir()
 	write(t, filepath.Join(proc, "10", "stat"), "10 (claude) S 1 10 10 0")
+	write(t, filepath.Join(proc, "10", "task", "10", "children"), "11 14 99")
+	write(t, filepath.Join(proc, "10", "task", "100", "children"), "15")
 	write(t, filepath.Join(proc, "11", "stat"), "11 (bash) S 10 11 11 0")
+	write(t, filepath.Join(proc, "11", "task", "11", "children"), "12")
 	write(t, filepath.Join(proc, "12", "stat"), "12 (sleep) S 11 12 12 0")
+	write(t, filepath.Join(proc, "12", "task", "12", "children"), "")
+	write(t, filepath.Join(proc, "14", "stat"), "14 (python) S 10 14 14 0")
+	write(t, filepath.Join(proc, "14", "task", "14", "children"), "")
+	write(t, filepath.Join(proc, "15", "stat"), "15 (worker) S 10 15 15 0")
+	write(t, filepath.Join(proc, "15", "task", "15", "children"), "")
 	write(t, filepath.Join(proc, "13", "stat"), "13 (konsole) S 1 13 13 0")
 	write(t, filepath.Join(proc, "self", "stat"), "x")
 	got, err := descendants(proc, 10)
-	if err != nil || !slices.Equal(got, []string{"11 bash", "12 sleep"}) {
+	if err != nil || !slices.Equal(got, []string{"11 bash", "12 sleep", "14 python", "15 worker"}) {
 		t.Errorf("descendants = %q %v", got, err)
 	}
 	if err := os.Symlink("/home/u/.local/share/claude/versions/2.1.309 (deleted)", filepath.Join(proc, "10", "exe")); err != nil {
@@ -51,6 +59,96 @@ func TestDescendantsAndVersion(t *testing.T) {
 	}
 	if v, err := runningVersion(proc, 10); err != nil || v != "2.1.309" {
 		t.Errorf("runningVersion = %q %v", v, err)
+	}
+}
+
+func TestDescendantsFallsBackWithoutChildrenFiles(t *testing.T) {
+	proc := t.TempDir()
+	write(t, filepath.Join(proc, "20", "stat"), "20 (claude) S 1 20 20 0")
+	if err := os.MkdirAll(filepath.Join(proc, "20", "task", "20"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(proc, "21", "stat"), "21 (bash) S 20 21 21 0")
+	write(t, filepath.Join(proc, "22", "stat"), "22 (sleep) S 21 22 22 0")
+	got, err := descendants(proc, 20)
+	if err != nil || !slices.Equal(got, []string{"21 bash", "22 sleep"}) {
+		t.Fatalf("fallback descendants = %q %v", got, err)
+	}
+}
+
+func TestDescendantsSeenAcrossThreadsAndCycles(t *testing.T) {
+	proc := t.TempDir()
+	write(t, filepath.Join(proc, "40", "stat"), "40 (claude) S 1 40 40 0")
+	write(t, filepath.Join(proc, "40", "task", "40", "children"), "41")
+	write(t, filepath.Join(proc, "40", "task", "400", "children"), "41")
+	write(t, filepath.Join(proc, "41", "stat"), "41 (bash) S 40 41 41 0")
+	write(t, filepath.Join(proc, "41", "task", "41", "children"), "40")
+
+	type result struct {
+		items []string
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		items, err := descendants(proc, 40)
+		done <- result{items: items, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil || !slices.Equal(got.items, []string{"41 bash"}) {
+			t.Fatalf("duplicate/cycle descendants = %q %v", got.items, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("цикл в children не завершил обход")
+	}
+}
+
+func TestDescendantsChecksParentPID(t *testing.T) {
+	proc := t.TempDir()
+	write(t, filepath.Join(proc, "50", "stat"), "50 (claude) S 1 50 50 0")
+	write(t, filepath.Join(proc, "50", "task", "50", "children"), "51 52")
+	write(t, filepath.Join(proc, "51", "stat"), "51 (reused) S 99 51 51 0")
+	write(t, filepath.Join(proc, "51", "task", "51", "children"), "")
+	write(t, filepath.Join(proc, "52", "stat"), "52 (valid) S 50 52 52 0")
+	write(t, filepath.Join(proc, "52", "task", "52", "children"), "")
+	got, err := descendants(proc, 50)
+	if err != nil || !slices.Equal(got, []string{"52 valid"}) {
+		t.Fatalf("переиспользованный PID должен быть пропущен: %q %v", got, err)
+	}
+}
+
+func TestDescendantsCacheReadsOnce(t *testing.T) {
+	proc := t.TempDir()
+	write(t, filepath.Join(proc, "30", "task", "30", "children"), "31")
+	write(t, filepath.Join(proc, "31", "stat"), "31 (bash) S 30 31 31 0")
+	write(t, filepath.Join(proc, "31", "task", "31", "children"), "")
+	cache := &descendantsCache{}
+	first, err := cache.get(proc, 30, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(proc, "31", "stat")); err != nil {
+		t.Fatal(err)
+	}
+	second, err := cache.get(proc, 30, nil)
+	if err != nil || !slices.Equal(first, second) || !slices.Equal(second, []string{"31 bash"}) {
+		t.Fatalf("cache results = %q then %q, %v", first, second, err)
+	}
+}
+
+func BenchmarkDescendantsFullLiveProc(b *testing.B) {
+	for range b.N {
+		if _, err := descendantsFull("/proc", os.Getpid()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkDescendantsSubtreeLiveProc(b *testing.B) {
+	for range b.N {
+		if _, err := descendants("/proc", os.Getpid()); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -114,7 +212,9 @@ func TestProbeBusy(t *testing.T) {
 	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 20 * time.Minute},
 		use(now.Add(-30*time.Minute).UTC().Format(time.RFC3339Nano), "t1", "AskUserQuestion", `{}`))
 	w.link(t, 4242)
+	write(t, filepath.Join(w.dir, "proc-tmpl", "task", "1", "children"), "4243")
 	write(t, filepath.Join(w.p.proc, "4243", "stat"), "4243 (bash) S 4242 4243 4243 0")
+	write(t, filepath.Join(w.p.proc, "4243", "task", "4243", "children"), "")
 	f := probe(w.p, &scanCache{}, 4242, now, false)
 	if !slices.Equal(f.Children, []string{"4243 bash"}) || !slices.Equal(f.Transcript.Pending, []string{"AskUserQuestion t1"}) {
 		t.Fatalf("Children %q Pending %q", f.Children, f.Transcript.Pending)

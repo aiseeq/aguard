@@ -192,6 +192,10 @@ type CompactCheck struct {
 // req.ArgsProblem — почему перезапуск потерял бы аргументы (знает только cl; пусто — восстановимы), req.Typed — cl
 // наберёт команду в живой сессии.
 func (j *Judge) Compact(cfg *Config, c *CompactConfig, req Request, now time.Time) CompactCheck {
+	return j.compactWithChildren(cfg, c, req, now, &descendantsCache{})
+}
+
+func (j *Judge) compactWithChildren(cfg *Config, c *CompactConfig, req Request, now time.Time, children *descendantsCache) CompactCheck {
 	pid, allow := req.Pid, allowance{argsProblem: req.ArgsProblem, typed: req.Typed}
 	ch := j.cache(pid, now)
 	ch.mu.Lock()
@@ -202,7 +206,7 @@ func (j *Judge) Compact(cfg *Config, c *CompactConfig, req Request, now time.Tim
 		f.Errors = append(f.Errors, err.Error())
 	} else {
 		f.Info = s
-		state(p, &ch.scan, pid, now, &f)
+		state(p, &ch.scan, pid, now, &f, children)
 	}
 	ch.mu.Unlock()
 	f.cleanField(req.Clean)
