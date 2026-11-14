@@ -1,7 +1,7 @@
 // Package codexwatch — сторож недельного лимита Codex по каждой учётке отдельно (Account): письмо лиду за ~2 ч до 100%, когда 100% наступит раньше
 // планового сброса с простоем больше суток и есть досрочный сброс, и второе — при 100%. Без «да» на окно сброс не
-// делает: исполнитель consume — лид (решение пользователя codex-reset-on-approval в ~/.claude/decisions.md, 02.11,
-// `tl e7192203:147`, `:264`); с «да» на окно — «взвод» (reset.go): consume при 100% вызывает сам.
+// делает: исполнитель досрочного сброса — aguard при 100%, если в файле одобрений есть строка «да»;
+// правило лида — skills/coordinator/SKILL.md, раздел «Лимиты и темп».
 //
 // Замер — чтение account/rateLimits/read у codex app-server раз в шаг; темп — больший из наклонов за 30 мин и
 // за 2 ч: раннее письмо дешевле позднего (противник замысла 02.11: разгон с 2 до 10 %/ч и разгон сразу после
@@ -254,8 +254,8 @@ func (s *State) decide(r Reading, f Forecast, c *Config) ([]Notice, bool) {
 	var out []Notice
 	switch {
 	// без действующего «да» consume не зовётся и после вызова без ответа: кредит тратится только со сбросом, а сброс
-	// сдвигает resetsAt на дни — в том же окне прошлый вызов кредит не потратил, и consume лида своим ключом второго не
-	// потратит (проверка 3 взвода 02.11: удержание взвода нарушало «только с «да»», decisions.md codex-reset-on-approval)
+	// сдвигает resetsAt на дни — в том же окне прошлый вызов кредит не потратил, и повтор с тем же ключом второго не
+	// потратит (проверка 3 взвода 02.11: удержание взвода нарушало «только с «да»»).
 	case r.Used >= 100 && r.Armed != "" && idle > c.MinIdle.D():
 		return s.armed(r, idle)
 	case r.Used >= 100:
@@ -263,8 +263,8 @@ func (s *State) decide(r Reading, f Forecast, c *Config) ([]Notice, bool) {
 			s.Full = true
 			msg := fullText(r, idle)
 			if s.Reset.Called && s.Reset.Outcome == "" { // «да» не совпало после вызова без ответа: один ключ на оба исполнителя
-				msg += fmt.Sprintf(" aguard уже вызывал consume в этом окне без ответа: зови тем же idempotencyKey %s — "+
-					"второго кредита он не потратит.", s.Reset.Key)
+				msg += fmt.Sprintf(" aguard уже вызывал consume в этом окне без ответа; при новой строке «да» aguard повторит вызов "+
+					"с тем же idempotencyKey %s — второго кредита он не потратит.", s.Reset.Key)
 			}
 			out = append(out, Notice{KindFull, msg})
 		}
@@ -299,7 +299,7 @@ func (s *State) armed(r Reading, idle time.Duration) ([]Notice, bool) {
 		s.Full = true
 		un := r
 		un.Armed = ""
-		return []Notice{{KindFull, fullText(un, idle) + " " + spentText(s.Reset)}}, false
+		return []Notice{{KindFull, fullFacts(un, idle) + " " + spentText(s.Reset)}}, false
 	case s.Reset.Outcome != "":
 		return nil, false
 	case r.Available == 0 && !s.Reset.Called: // consume ничего не даст
@@ -354,13 +354,11 @@ func (s *State) Step(r Reading, f Forecast, c *Config) time.Duration {
 	return c.Interval.D()
 }
 
-const ref = "решение пользователя — ~/.claude/decisions.md codex-reset-on-approval (`tl e7192203:147`, `:264`)"
-
 func local(t time.Time) string { return t.Local().Format("02.01 15:04 MST") }
 
 func days(d time.Duration) string { return fmt.Sprintf("%.1f сут", d.Hours()/24) }
 
-// who — учётка в письме: и какое окно, и каким CODEX_HOME лиду звать consume.
+// who — учётка и её CODEX_HOME.
 func who(a Account) string {
 	return fmt.Sprintf("aguard codex: учётка %s (CODEX_HOME=%s):", a.Name, a.Home)
 }
@@ -373,22 +371,30 @@ func warnText(r Reading, f Forecast) string {
 		return head + fmt.Sprintf(" Сброс взведён («да» на окно: %s): consume при 100%% вызову я, исход пришлю; "+
 			"сам не вызывай.", r.Armed)
 	}
-	return head + fmt.Sprintf(" Вопрос пользователю и consume при 100%% — твои (или «да» строкой в %s — тогда "+
-		"сброшу сам); %s. Письмо «100%%» пришлю, когда дойдёт.", r.Account.Approvals, ref)
+	return head + approvalTail(r) + " Письмо «100%» пришлю, когда дойдёт."
+}
+
+func fullFacts(r Reading, idle time.Duration) string {
+	return fmt.Sprintf("%s недельный лимит Codex — %.0f%%; плановый сброс %s, простой %s; досрочных сбросов доступно: %d.",
+		who(r.Account), r.Used, local(r.ResetsAt), days(idle), r.Available)
+}
+
+func approvalTail(r Reading) string {
+	return fmt.Sprintf(" Строки «да» на это окно (плановый сброс %s) в файле одобрений %s нет — aguard не сбросит; "+
+		"появится — сбросит сам при 100%%, если до планового сброса больше суток. Действий не нужно: за лимитом следит "+
+		"пользователь, сброс ему не предлагать (coordinator, «Лимиты и темп»).",
+		r.ResetsAt.Local().Format("02.01 15:04"), r.Account.Approvals)
 }
 
 func fullText(r Reading, idle time.Duration) string {
+	facts := fullFacts(r, idle)
 	if r.Available == 0 && r.Armed != "" {
-		return fmt.Sprintf("%s недельный лимит Codex — %.0f%%, сброс взведён («да»: %s), но досрочных сбросов нет "+
-			"— consume не вызываю; плановый сброс %s, простой %s.", who(r.Account), r.Used, r.Armed, local(r.ResetsAt), days(idle))
+		return facts + fmt.Sprintf(" Сброс взведён («да»: %s), consume не вызываю.", r.Armed)
 	}
 	if r.Available == 0 {
-		return fmt.Sprintf("%s недельный лимит Codex — %.0f%%, но досрочных сбросов больше нет (после прошлого "+
-			"письма кредит пропал); плановый сброс %s, простой %s. consume не поможет.", who(r.Account), r.Used, local(r.ResetsAt), days(idle))
+		return facts + " Свободных досрочных сбросов нет. Действий не нужно: сброс пользователю не предлагать."
 	}
-	return fmt.Sprintf("%s недельный лимит Codex — %.0f%%, пора: плановый сброс %s, простой %s; досрочных "+
-		"сбросов доступно: %d. consume — твой, после «да» пользователя, один раз; %s.", who(r.Account), r.Used, local(r.ResetsAt), days(idle),
-		r.Available, ref)
+	return facts + approvalTail(r)
 }
 
 func blockedText(r Reading) string {
