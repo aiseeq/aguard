@@ -83,13 +83,15 @@ func outcomeText(outcome string, r Reading, key string) string {
 
 // spentText — чем израсходован взвод окна: нашим вызовом (исход или без ответа) или сбросом не через aguard.
 func spentText(r Reset) string {
-	switch {
-	case !r.Called:
-		return "Взвод этого окна уже израсходован: окно сбрасывали не через aguard, «да» на окно — один сброс."
-	case r.Outcome == "":
-		return fmt.Sprintf("Взвод этого окна уже израсходован: outcome=ответа не было, idempotencyKey %s.", r.Key)
+	if !r.Called {
+		return "Взвод этого окна уже израсходован: окно сбросили не через aguard; «да» на окно — один сброс, повтора не будет. Действий не нужно."
 	}
-	return fmt.Sprintf("Взвод этого окна уже израсходован: outcome=%s, idempotencyKey %s.", r.Outcome, r.Key)
+	outcome := r.Outcome
+	if outcome == "" {
+		outcome = "ответа не было"
+	}
+	return fmt.Sprintf("Взвод этого окна уже израсходован: outcome=%s, idempotencyKey %s; «да» на окно — один сброс, "+
+		"повтора не будет. Действий не нужно.", outcome, r.Key)
 }
 
 func lostText(a Account, old, cur time.Time, wasUsed, used float64, key string) string {

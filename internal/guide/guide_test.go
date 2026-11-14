@@ -63,6 +63,24 @@ func parseFile(t *testing.T, fset *token.FileSet, path string) *ast.File {
 	return f
 }
 
+func TestCodexLetterNextText(t *testing.T) {
+	want := map[string]string{
+		"codex.warn": "действий не нужно: при строке «да» на окно aguard сам сбросит при 100%; сброс пользователю не предлагать",
+		"codex.full": "действий не нужно; сброс пользователю не предлагать",
+	}
+	for _, letter := range Letters() {
+		if next, ok := want[string(letter.Kind)]; ok {
+			if letter.Next != next {
+				t.Errorf("%s Next = %q, ожидалось %q", letter.Kind, letter.Next, next)
+			}
+			delete(want, string(letter.Kind))
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("не найдены письма: %v", want)
+	}
+}
+
 func TestLetterRegistryMatchesSendCalls(t *testing.T) {
 	root := moduleRoot(t)
 	fset := token.NewFileSet()

@@ -80,7 +80,9 @@ func kinds(g []got) string {
 func TestFastBurnWarnThenFull(t *testing.T) {
 	var s State
 	c := cfg()
-	g := feed(&s, c, t0, t0.Add(8*time.Hour), 10*time.Minute, linear(70, t0, 4.5), nil)
+	g := feed(&s, c, t0, t0.Add(8*time.Hour), 10*time.Minute, linear(70, t0, 4.5), func(r *Reading) {
+		r.Account = c.Accounts[0]
+	})
 	if len(g) != 2 || g[0].n.Kind != KindWarn || g[1].n.Kind != KindFull {
 		t.Fatalf("письма: %s", kinds(g))
 	}
@@ -91,7 +93,18 @@ func TestFastBurnWarnThenFull(t *testing.T) {
 	if g[1].at.Sub(hit) > 10*time.Minute {
 		t.Fatalf("письмо 100%% в %s, 100%% в %s", g[1].at.Format("15:04"), hit.Format("15:04"))
 	}
-	if !strings.Contains(g[0].n.Message, "codex-reset-on-approval") || !strings.Contains(g[1].n.Message, "пора") {
+	for _, msg := range []string{g[0].n.Message, g[1].n.Message} {
+		for _, forbidden := range []string{"Вопрос пользователю", "твой", "твои", "consume"} {
+			if strings.Contains(msg, forbidden) {
+				t.Fatalf("письмо содержит %q: %s", forbidden, msg)
+			}
+		}
+		if !strings.Contains(msg, "/home/u/.claude/improve/state/codex-reset-approved.tsv") {
+			t.Fatalf("нет пути файла одобрений: %s", msg)
+		}
+	}
+	if !strings.Contains(g[0].n.Message, "coordinator, «Лимиты и темп»") ||
+		!strings.Contains(g[1].n.Message, "coordinator, «Лимиты и темп»") || strings.Contains(g[1].n.Message, "пора:") {
 		t.Fatalf("тексты:\n%s\n%s", g[0].n.Message, g[1].n.Message)
 	}
 }
@@ -150,7 +163,7 @@ func TestFullAfterCreditGone(t *testing.T) {
 			r.Available = 0
 		}
 	})
-	if len(g) != 2 || g[0].n.Kind != KindWarn || g[1].n.Kind != KindFull || !strings.Contains(g[1].n.Message, "больше нет") {
+	if len(g) != 2 || g[0].n.Kind != KindWarn || g[1].n.Kind != KindFull || !strings.Contains(g[1].n.Message, "Свободных досрочных сбросов нет") {
 		t.Fatalf("письма: %s; %v", kinds(g), g)
 	}
 }
@@ -456,7 +469,8 @@ func TestNoSecondConsumeSameResetsAt(t *testing.T) {
 	}
 	// повторная проверка: бойцы снова стоят — лиду письмо «100%, взвод израсходован», один раз
 	if len(ns) != 1 || ns[0].Kind != KindFull || !strings.Contains(ns[0].Message, "израсходован: outcome=reset") ||
-		!strings.Contains(ns[0].Message, "consume — твой") {
+		!strings.Contains(ns[0].Message, "повтора не будет. Действий не нужно.") ||
+		strings.Contains(ns[0].Message, "aguard сбросит сам при 100%") {
 		t.Fatalf("письма при новых 100%%: %+v", ns)
 	}
 	if _, ns, _ := s.Apply(Reading{At: t0.Add(70 * time.Minute), Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c); len(ns) != 0 {
@@ -477,8 +491,8 @@ func TestNoSpentLetterRightAfterOutcome(t *testing.T) {
 	}
 }
 
-// Проверка 3: вызов без ответа, затем «да» снято (или строка не совпала) — consume без «да» не зовётся; лиду письмо
-// «100%, consume — твой» (в том же окне прошлый вызов кредит не потратил: кредит уходит только со сбросом).
+// Проверка 3: вызов без ответа, затем «да» снято (или строка не совпала) — повтор consume без «да» не зовётся;
+// письмо сохраняет факт о прошлом вызове (в том же окне кредит уходит только со сбросом).
 func TestNoConsumeAfterApprovalLost(t *testing.T) {
 	var s State
 	c := cfg()
@@ -487,7 +501,7 @@ func TestNoConsumeAfterApprovalLost(t *testing.T) {
 	s.Calling()
 	key := s.Reset.Key
 	_, ns, consume := s.Apply(Reading{At: t0.Add(2 * time.Minute), Used: 100, ResetsAt: base.Add(time.Second), Available: 1}, c)
-	if consume || s.Reset.Key != key || len(ns) != 1 || !strings.Contains(ns[0].Message, "consume — твой") {
+	if consume || s.Reset.Key != key || len(ns) != 1 || !strings.Contains(ns[0].Message, "Строки «да» на это окно") {
 		t.Fatalf("consume %v, ключ %q→%q, письма %+v", consume, key, s.Reset.Key, ns)
 	}
 }
@@ -575,14 +589,166 @@ func TestSpentByOtherNoConsume(t *testing.T) {
 	}
 }
 
-// Проверка 4: вызов без ответа, «да» не совпало — в письме «consume — твой» ключ прошлого вызова.
-func TestFullLetterNamesPendingKey(t *testing.T) {
-	var s State
+// Проверка 4: вызов без ответа, «да» не совпало — письмо сохраняет ключ прошлого вызова.
+func TestReviewCodexFullPendingLetter(t *testing.T) {
 	c := cfg()
-	s.Apply(Reading{At: t0, Used: 100, ResetsAt: reset, Available: 1, Armed: "x"}, c)
+	a := c.Accounts[0]
+	cet := time.FixedZone("CET", 3600)
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, cet)
+	planned := time.Date(2026, 11, 8, 12, 0, 0, 0, cet)
+	r := Reading{At: at, Used: 100, ResetsAt: planned, Available: 1, Armed: "x", Account: a}
+	var s State
+	s.Apply(r, c)
+	s.Reset.Key = "fixture-key"
 	s.Calling()
-	_, ns, _ := s.Apply(Reading{At: t0.Add(2 * time.Minute), Used: 100, ResetsAt: reset, Available: 1}, c)
-	if len(ns) != 1 || !strings.Contains(ns[0].Message, "тем же idempotencyKey "+s.Reset.Key) {
-		t.Fatalf("письма %+v", ns)
+	r.At = at.Add(2 * time.Minute)
+	r.Armed = ""
+	_, ns, _ := s.Apply(r, c)
+	want := "aguard codex: учётка work (CODEX_HOME=/home/u/.codex): недельный лимит Codex — 100%; " +
+		"плановый сброс " + local(planned) + ", простой " + days(planned.Sub(r.At)) + "; досрочных сбросов доступно: 1. " +
+		"Строки «да» на это окно (плановый сброс " + planned.Local().Format("02.01 15:04") + ") в файле одобрений /home/u/.claude/improve/state/codex-reset-approved.tsv нет — aguard не сбросит; " +
+		"появится — сбросит сам при 100%, если до планового сброса больше суток. Действий не нужно: за лимитом следит пользователь, " +
+		"сброс ему не предлагать (coordinator, «Лимиты и темп»). aguard уже вызывал consume в этом окне без ответа; " +
+		"при новой строке «да» aguard повторит вызов с тем же idempotencyKey fixture-key — второго кредита он не потратит."
+	if len(ns) != 1 || ns[0].Message != want {
+		t.Fatalf("письмо:\n%s\nожидалось:\n%s", message(ns), want)
 	}
+}
+
+func TestReviewCodexSpentLetter(t *testing.T) {
+	c := cfg()
+	a := c.Accounts[0]
+	cet := time.FixedZone("CET", 3600)
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, cet)
+	planned := time.Date(2026, 11, 8, 12, 0, 0, 0, cet)
+	r := Reading{At: at, Used: 100, ResetsAt: planned, Available: 1, Armed: "x", Account: a}
+	var s State
+	s.Apply(r, c)
+	s.Reset.Key = "fixture-key"
+	s.Calling()
+	s.Done("reset", r)
+	r.At = at.Add(10 * time.Minute)
+	r.Used = 0
+	s.Apply(r, c)
+	r.At = at.Add(time.Hour)
+	r.Used = 100
+	_, ns, _ := s.Apply(r, c)
+	want := "aguard codex: учётка work (CODEX_HOME=/home/u/.codex): недельный лимит Codex — 100%; " +
+		"плановый сброс " + local(planned) + ", простой " + days(planned.Sub(r.At)) + "; досрочных сбросов доступно: 1. " +
+		"Взвод этого окна уже израсходован: outcome=reset, idempotencyKey fixture-key; «да» на окно — один сброс, повтора не будет. Действий не нужно."
+	if len(ns) != 1 || ns[0].Message != want {
+		t.Fatalf("письмо:\n%s\nожидалось:\n%s", message(ns), want)
+	}
+}
+
+func TestReviewNoCreditFullLetters(t *testing.T) {
+	acct := Account{Name: "work", Home: "/home/u/.codex", Approvals: "/home/u/.claude/improve/state/codex-reset-approved.tsv"}
+	planned := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	base := "aguard codex: учётка work (CODEX_HOME=/home/u/.codex): недельный лимит Codex — 100%; плановый сброс " +
+		local(planned) + ", простой " + days(planned.Sub(at)) + "; досрочных сбросов доступно: 0."
+	cases := []struct {
+		name string
+		r    Reading
+		want string
+	}{
+		{
+			name: "без взвода",
+			r:    Reading{At: at, Used: 100, ResetsAt: planned, Account: acct},
+			want: base + " Свободных досрочных сбросов нет. Действий не нужно: сброс пользователю не предлагать.",
+		},
+		{
+			name: "взвод есть",
+			r:    Reading{At: at, Used: 100, ResetsAt: planned, Armed: "да на окно", Account: acct},
+			want: base + " Сброс взведён («да»: да на окно), consume не вызываю.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := fullText(tc.r, planned.Sub(at)); got != tc.want {
+				t.Fatalf("письмо:\n%s\nожидалось:\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReviewSpentWithoutCallAndPendingOutcome(t *testing.T) {
+	c := cfg()
+	acct := c.Accounts[0]
+	cet := time.FixedZone("CET", 3600)
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, cet)
+	planned := time.Date(2026, 11, 8, 12, 0, 0, 0, cet)
+	base := "aguard codex: учётка work (CODEX_HOME=/home/u/.codex): недельный лимит Codex — 100%; " +
+		"плановый сброс " + local(planned) + ", простой 6.0 сут; досрочных сбросов доступно: 1. "
+	cases := []struct {
+		name    string
+		called  bool
+		wantEnd string
+	}{
+		{
+			name:    "сбросили не через aguard",
+			wantEnd: "Взвод этого окна уже израсходован: окно сбросили не через aguard; «да» на окно — один сброс, повтора не будет. Действий не нужно.",
+		},
+		{
+			name:    "вызов без ответа",
+			called:  true,
+			wantEnd: "Взвод этого окна уже израсходован: outcome=ответа не было, idempotencyKey fixture-key; «да» на окно — один сброс, повтора не будет. Действий не нужно.",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := Reading{At: at, Used: 100, ResetsAt: planned, Available: 1, Armed: "x", Account: acct}
+			var s State
+			_, _, consume := s.Apply(r, c)
+			if !consume {
+				t.Fatal("ожидался взвод")
+			}
+			s.Reset.Key = "fixture-key"
+			if tc.called {
+				s.Calling()
+			}
+			r.At = at.Add(10 * time.Minute)
+			r.Used = 0
+			s.Apply(r, c)
+			r.At = at.Add(time.Hour)
+			r.Used = 100
+			_, ns, consume := s.Apply(r, c)
+			want := base + tc.wantEnd
+			if consume || len(ns) != 1 || ns[0].Message != want {
+				t.Fatalf("consume %v, письмо:\n%s\nожидалось:\n%s", consume, message(ns), want)
+			}
+		})
+	}
+}
+
+func message(ns []Notice) string {
+	if len(ns) == 0 {
+		return ""
+	}
+	return ns[0].Message
+}
+
+func TestReviewCodexWarnAndFullLetters(t *testing.T) {
+	at := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	planned := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	acct := Account{Name: "work", Home: "/home/u/.codex", Approvals: "/home/u/.claude/improve/state/codex-reset-approved.tsv"}
+	warn := Reading{At: at, Used: 91, ResetsAt: planned, Available: 2, Account: acct}
+	forecast := Forecast{Rate: 4.5, At: at.Add(2 * time.Hour)}
+	wantTail := " Строки «да» на это окно (плановый сброс " + planned.Local().Format("02.01 15:04") + ") в файле одобрений " + acct.Approvals +
+		" нет — aguard не сбросит; появится — сбросит сам при 100%, если до планового сброса больше суток. " +
+		"Действий не нужно: за лимитом следит пользователь, сброс ему не предлагать (coordinator, «Лимиты и темп»)."
+	wantWarn := "aguard codex: учётка work (CODEX_HOME=/home/u/.codex): недельный лимит Codex — 91%, " +
+		"при темпе 4.5 %/ч 100% около " + local(forecast.At) + "; плановый сброс " + local(planned) + ", простой " + days(planned.Sub(forecast.At)) + "; " +
+		"досрочных сбросов доступно: 2." + wantTail + " Письмо «100%» пришлю, когда дойдёт."
+	if got := warnText(warn, forecast); got != wantWarn {
+		t.Fatalf("письмо 1:\n%s\nожидалось:\n%s", got, wantWarn)
+	}
+
+	full := Reading{At: at, Used: 100, ResetsAt: planned, Available: 2, Account: acct}
+	wantFull := "aguard codex: учётка work (CODEX_HOME=/home/u/.codex): недельный лимит Codex — 100%; " +
+		"плановый сброс " + local(planned) + ", простой " + days(planned.Sub(at)) + "; досрочных сбросов доступно: 2." + wantTail
+	if got := fullText(full, planned.Sub(at)); got != wantFull {
+		t.Fatalf("письмо 100%%:\n%s\nожидалось:\n%s", got, wantFull)
+	}
+
 }

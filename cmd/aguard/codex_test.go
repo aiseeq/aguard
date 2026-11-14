@@ -73,7 +73,7 @@ func TestCodexFakeAppServer(t *testing.T) {
 		want    []string // строки журнала по порядку
 		absent  []string
 	}{
-		{"быстрый", 4.5, 1, []string{"написал бы", "100% около", "написал бы", "пора"}, nil},
+		{"быстрый", 4.5, 1, []string{"написал бы", "100% около", "написал бы", "недельный лимит Codex — 100%"}, nil},
 		{"медленный", 0.3, 1, nil, []string{"написал бы", "досрочных сбросов нет"}},
 		{"без сброса", 4.5, 0, []string{"досрочных сбросов нет"}, []string{"написал бы"}},
 	}
@@ -121,7 +121,7 @@ func TestCodexFakeAppServer(t *testing.T) {
 	}
 }
 
-// Подставной app-server, живой лид: письмо 1 о быстром расходе и «пора» приходят в сокет по одному разу и по порядку.
+// Подставной app-server, живой лид: письмо 1 о быстром расходе и фактическое письмо «100%» приходят в сокет по одному разу и по порядку.
 func TestCodexWarnAndFullDelivered(t *testing.T) {
 	dir := t.TempDir()
 	var logs strings.Builder
@@ -148,7 +148,7 @@ func TestCodexWarnAndFullDelivered(t *testing.T) {
 		}
 	}
 	msgs := leadLetters(got)
-	if len(msgs) != 2 || !strings.Contains(msgs[0], "100% около") || !strings.Contains(msgs[1], "пора") {
+	if len(msgs) != 2 || !strings.Contains(msgs[0], "100% около") || !strings.Contains(msgs[1], "недельный лимит Codex — 100%") {
 		t.Fatalf("письма лиду: %q, журнал:\n%s", msgs, logs.String())
 	}
 }
@@ -569,7 +569,7 @@ func TestCodexArmedOnlyOwnAccount(t *testing.T) {
 		t.Fatalf("consume: %q, журнал:\n%s", homes, logs.String())
 	}
 	out := logs.String() // письма — в журнале; «все без лимита» нет: замер снят до сброса
-	for _, want := range []string{"учётка work (CODEX_HOME=" + cfg.Accounts[0].Home + ")", "пора", "Другие учётки: personal 100%",
+	for _, want := range []string{"учётка work (CODEX_HOME=" + cfg.Accounts[0].Home + ")", "недельный лимит Codex — 100%", "Другие учётки: personal 100%",
 		"учётка personal (CODEX_HOME=" + personal.Home + ")", "outcome=reset"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("нет %q в письмах:\n%s", want, out)
