@@ -21,7 +21,8 @@ var cpuProfileFor = time.Minute
 // heapLoop — по SIGUSR1 профиль кучи демона в debug/heap-<время>.pprof (тикет tmpguard-track-swap: что держит
 // anon службы) и профиль CPU за cpuProfileFor в debug/cpu-<время>.pprof (тикет daemon-cpu-day-x3: профиль
 // Go считает и время в системных вызовах, perf без sudo его не видит). Разовые снимки: порта и сокета нет,
-// файлы читает `go tool pprof`.
+// файлы читает `go tool pprof`. Слать только главному процессу: `systemctl --user kill --kill-whom=main -s SIGUSR1 aguard`;
+// без --kill-whom=main сигнал получат и дочерние процессы службы (journalctl наблюдателя sigguard завершается).
 func (a *app) heapLoop(ctx context.Context, sig <-chan os.Signal) {
 	var cpu sync.WaitGroup
 	defer cpu.Wait() // профиль CPU пишет журнал до выхода цикла
