@@ -220,12 +220,15 @@ func parseProcIO(b []byte) (int64, int64, error) {
 // Sample — замер машины: load average, готовые к работе задачи в момент замера (procs_running без себя), потоки машины
 // и, при высоком load average за минуту, готовые потоки по процессам.
 type Sample struct {
-	At        time.Time
-	Load      pressure.LoadAvg
-	Runnable  int
-	Threads   int
-	Tasks     []Task
-	Processes []Process
+	At          time.Time
+	Load        pressure.LoadAvg
+	Runnable    int
+	Threads     int
+	Tasks       []Task
+	Processes   []Process
+	CPULoads    []Load // доли владельцев по usage_usec за предыдущий фактический интервал
+	CPUTracking bool
+	CPUInterval float64
 }
 
 // Over — машина перегружена для наблюдения серии: load average за минуту не меньше числа потоков. Мгновенное число

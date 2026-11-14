@@ -418,6 +418,41 @@ func TestLeadMessageEmpty(t *testing.T) {
 	}
 }
 
+func TestLeadMessageUsesTopEightCPUOwnersAndRemainder(t *testing.T) {
+	loads := []Load{
+		{Owner: Owner{Master: "alpha", Kind: KindSession, Label: "session"}, CPU: .58},
+		{Owner: Owner{Master: "alpha", Kind: KindWorker, Label: "worker"}, CPU: .45},
+		{Owner: Owner{Master: "beta", Kind: KindWorker, Label: "job"}, CPU: .9},
+		{Owner: Owner{Kind: KindOther, Label: "review.scope"}, CPU: .8},
+		{Owner: Owner{Kind: KindSystem}, CPU: .7},
+		{Owner: Owner{Kind: KindOther, Label: "graft-heavy.scope"}, CPU: .6},
+		{Owner: Owner{Kind: KindOther, Label: "lex.scope"}, CPU: .5},
+		{Owner: Owner{Kind: KindOther, Label: "build.scope"}, CPU: .4},
+		{Owner: Owner{Kind: KindOther, Label: "tail.scope"}, CPU: .3},
+		{Owner: Owner{Kind: KindOther, Label: "omitted.scope"}, CPU: .2},
+	}
+	v := Verdict{UseCPU: true, Loads: loads}
+	msg := LeadMessage("host", &v, nil, time.Now())
+	want := "Чьи: alpha 1.03 ядра, beta 0.90 ядра, прочее review.scope 0.80 ядра, система 0.70 ядра, прочее graft-heavy.scope 0.60 ядра, прочее lex.scope 0.50 ядра, прочее build.scope 0.40 ядра, прочее tail.scope 0.30 ядра, остальные 0.20 ядра."
+	if !strings.Contains(msg, want) {
+		t.Fatalf("сводка лиду должна объединять CPU мастера и показывать человекочитаемый топ-8 с остатком:\nwant: %s\ngot:  %s", want, msg)
+	}
+}
+
+func TestLeadMessageSortsMasterAndUnownedCPUTogether(t *testing.T) {
+	loads := make([]Load, 0, 10)
+	for i := range 9 {
+		loads = append(loads, Load{Owner: Owner{Master: fmt.Sprintf("master-%02d", i), Kind: KindSession}, CPU: .05})
+	}
+	loads = append(loads, Load{Owner: Owner{Kind: KindOther, Label: "heavy.scope"}, CPU: 1.9})
+	v := Verdict{UseCPU: true, Loads: loads}
+	msg := LeadMessage("host", &v, nil, time.Now())
+	want := "Чьи: прочее heavy.scope 1.90 ядра, master-00 0.05 ядра, master-01 0.05 ядра, master-02 0.05 ядра, master-03 0.05 ядра, master-04 0.05 ядра, master-05 0.05 ядра, master-06 0.05 ядра, остальные 0.10 ядра."
+	if !strings.Contains(msg, want) {
+		t.Fatalf("крупный неизвестный владелец должен сортироваться вместе с мастерами и попасть в топ-8:\nwant: %s\ngot:  %s", want, msg)
+	}
+}
+
 // id задания по unit бойца: повтор — сначала имя целиком, потом без хвоста -<n>; хвост не число или с нуля — не
 // повтор; служба worker-settle и не worker-* — не боец.
 func TestJobIDs(t *testing.T) {

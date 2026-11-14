@@ -542,7 +542,10 @@ func (s *ioService) step(st iowatch.Step) {
 
 func (s *ioService) pressure() bool { return s.rec.Pressure() }
 
-func (s *ioService) detail(st iowatch.Step) { s.rec.Detail(st) }
+func (s *ioService) detail(st iowatch.Step) {
+	s.rec.Detail(st)
+	s.a.saveCPUDetail(st)
+}
 
 func (s *ioService) sampleErr(key string, err error) {
 	s.warn(time.Now(), key, "замер не удался", err)

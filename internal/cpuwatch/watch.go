@@ -107,6 +107,7 @@ func (h *Host) Break() { h.broken = true }
 type Load struct {
 	Owner Owner
 	N     int
+	CPU   float64 // ядра, занятые в среднем за интервал
 	Comms []Comm
 }
 
@@ -129,16 +130,18 @@ type Spinner struct {
 
 // Verdict — перегрузка машины на момент замера по минутному load average; runnable — снимок для разбора владельцев.
 type Verdict struct {
-	Over     bool          // перегружена в этот замер
-	Started  bool          // перегрузка началась в этот замер
-	Ended    time.Time     // перегрузка кончилась в этот замер: когда началась
-	Lasted   time.Duration // и сколько длилась: до этого замера, а при пропуске — до последнего перед ним
-	Since    time.Time     // начало перегрузки: первый замер из подряд идущих
-	Avg1     float64       // load average за минуту
-	Runnable int           // готовых к работе задач в момент снимка
-	Threads  int
-	Loads    []Load // снимок по владельцам, больше — раньше
-	Spinners []Spinner
+	Over        bool          // перегружена в этот замер
+	Started     bool          // перегрузка началась в этот замер
+	Ended       time.Time     // перегрузка кончилась в этот замер: когда началась
+	Lasted      time.Duration // и сколько длилась: до этого замера, а при пропуске — до последнего перед ним
+	Since       time.Time     // начало перегрузки: первый замер из подряд идущих
+	Avg1        float64       // load average за минуту
+	Runnable    int           // готовых к работе задач в момент снимка
+	Threads     int
+	Loads       []Load // снимок по владельцам, больше — раньше
+	UseCPU      bool   // локальная машина: доля адресата считается по CPU, снимок остаётся пояснением
+	CPUInterval float64
+	Spinners    []Spinner
 }
 
 // Long — перегрузка держится подряд не меньше after: о ней пора писать.
@@ -149,7 +152,7 @@ func (v *Verdict) Long(now time.Time, after time.Duration) bool {
 // Judge — серия перегрузки по минутному load average замера s; владельцы берутся из текущего снимка s.Tasks. Кончилась — забывается,
 // кому писали в эту перегрузку; когда писали — помнится (repeat).
 func (h *Host) Judge(s *Sample, owner func(*Task) Owner) Verdict {
-	v := Verdict{Over: s.Over(), Avg1: s.Load.Avg1, Runnable: s.Runnable, Threads: s.Threads}
+	v := Verdict{Over: s.Over(), Avg1: s.Load.Avg1, Runnable: s.Runnable, Threads: s.Threads, CPUInterval: s.CPUInterval}
 	if !h.since.IsZero() && (h.broken || h.Every > 0 && s.At.Sub(h.last) > 2*h.Every) { // пропуск замеров — не подряд
 		v.Ended, v.Lasted, h.since, h.told = h.since, h.last.Sub(h.since), time.Time{}, nil
 	}
@@ -164,7 +167,30 @@ func (h *Host) Judge(s *Sample, owner func(*Task) Owner) Verdict {
 		return v
 	}
 	v.Since, v.Loads = h.since, Owners(s.Tasks, owner)
+	if s.CPUTracking {
+		v.UseCPU = true
+		v.Loads = mergeCPULoads(v.Loads, s.CPULoads)
+	}
 	return v
+}
+
+func mergeCPULoads(snapshot, cpu []Load) []Load {
+	out := append([]Load(nil), snapshot...)
+	for _, c := range cpu {
+		found := false
+		for i := range out {
+			if out[i].Owner == c.Owner {
+				out[i].CPU += c.CPU
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, c)
+		}
+	}
+	slices.SortFunc(out, func(a, b Load) int { return cmp.Or(cmp.Compare(b.CPU, a.CPU), ownerCmp(a.Owner, b.Owner)) })
+	return out
 }
 
 // Owners — готовые потоки снимка по владельцам, больше — раньше.
@@ -205,6 +231,7 @@ func ownerCmp(a, b Owner) int {
 type Master struct {
 	Name  string
 	N     int
+	CPU   float64
 	Parts []Load
 }
 
@@ -223,20 +250,27 @@ func (v *Verdict) Masters() (ms []Master, total int) {
 			ms = append(ms, Master{Name: l.Owner.Master})
 		}
 		ms[i].N += l.N
+		ms[i].CPU += l.CPU
 		ms[i].Parts = append(ms[i].Parts, l)
 	}
-	slices.SortStableFunc(ms, func(a, b Master) int { return cmp.Or(cmp.Compare(b.N, a.N), cmp.Compare(a.Name, b.Name)) })
+	if v.UseCPU {
+		slices.SortStableFunc(ms, func(a, b Master) int { return cmp.Or(cmp.Compare(b.CPU, a.CPU), cmp.Compare(a.Name, b.Name)) })
+	} else {
+		slices.SortStableFunc(ms, func(a, b Master) int { return cmp.Or(cmp.Compare(b.N, a.N), cmp.Compare(a.Name, b.Name)) })
+	}
 	return ms, total
 }
 
-// Recipients — кому писать: мастера, у которых готовых задач в снимке не меньше доли notify потоков машины. Доля от
-// всех готовых не годится: при трёх готовых и одна — «четверть» (лид 27.10: «Доля ≥25% от трёх задач — не основание
-// для письма»).
+// Recipients — кому писать по доле CPU за фактический интервал замера.
 func (v *Verdict) Recipients(notify float64) []Master {
 	ms, _ := v.Masters()
 	var out []Master
 	for _, m := range ms {
-		if float64(m.N) >= notify*float64(v.Threads) {
+		share := float64(m.N)
+		if v.UseCPU {
+			share = m.CPU
+		}
+		if share >= notify*float64(v.Threads) {
 			out = append(out, m)
 		}
 	}
@@ -287,8 +321,13 @@ func MasterMessage(host string, v *Verdict, m *Master, now time.Time, first bool
 	if !first {
 		state = "всё ещё перегружен"
 	}
-	fmt.Fprintf(&b, "aguard: %s %s %s подряд — load average за минуту %s, сейчас готовых к работе задач %d при %d потоках. Твоих сейчас %d: %s.",
-		host, state, bgtask.Span(now.Sub(v.Since)), dec(v.Avg1), v.Runnable, v.Threads, m.N, parts(m.Parts))
+	if v.UseCPU {
+		fmt.Fprintf(&b, "aguard: %s %s %s подряд — load average за минуту %s, сейчас готовых к работе задач %d при %d потоках. Твоих по CPU за интервал замера %.2f ядра; готовых сейчас %d: %s.",
+			host, state, bgtask.Span(now.Sub(v.Since)), dec(v.Avg1), v.Runnable, v.Threads, m.CPU, m.N, parts(m.Parts))
+	} else {
+		fmt.Fprintf(&b, "aguard: %s %s %s подряд — load average за минуту %s, сейчас готовых к работе задач %d при %d потоках. Твоих сейчас %d: %s.",
+			host, state, bgtask.Span(now.Sub(v.Since)), dec(v.Avg1), v.Runnable, v.Threads, m.N, parts(m.Parts))
+	}
 	b.WriteString(" Это подсказка: aguard ничего не останавливает и не понижает нагрузку; посмотри, почему твои задачи дают столько, и не добавляй новых")
 	if host == HostLocal {
 		b.WriteString("; тяжёлое — на PC (`worker run --pc`, `worker pc --`)")
@@ -317,16 +356,24 @@ func LeadMessage(host string, v *Verdict, told []string, now time.Time) string {
 	ms, total := v.Masters()
 	var who []string
 	for _, m := range ms {
-		who = append(who, m.Name+" "+fmt.Sprint(m.N))
-	}
-	byKind := map[string]int{}
-	for _, l := range v.Loads {
-		if l.Owner.Master == "" {
-			byKind[l.Owner.Kind] += l.N
+		if v.UseCPU {
+			continue
+		} else {
+			who = append(who, m.Name+" "+fmt.Sprint(m.N))
 		}
 	}
-	for _, k := range slices.Sorted(maps.Keys(byKind)) {
-		who = append(who, k+" "+fmt.Sprint(byKind[k]))
+	if v.UseCPU {
+		who = []string{cpuLeadSummary(v, ms)}
+	} else {
+		byKind := map[string]int{}
+		for _, l := range v.Loads {
+			if l.Owner.Master == "" {
+				byKind[l.Owner.Kind] += l.N
+			}
+		}
+		for _, k := range slices.Sorted(maps.Keys(byKind)) {
+			who = append(who, k+" "+fmt.Sprint(byKind[k]))
+		}
 	}
 	if len(who) == 0 { // готовые кончились между чтением числа и обходом потоков
 		who = []string{"в снимке готовых потоков нет"}
@@ -337,6 +384,88 @@ func LeadMessage(host string, v *Verdict, told []string, now time.Time) string {
 	}
 	return fmt.Sprintf("aguard: %s перегружен %s подряд — load average за минуту %s, сейчас готовых к работе задач %d при %d потоках (по процессам %d). Чьи: %s. Написал за перегрузку: %s.",
 		host, bgtask.Span(now.Sub(v.Since)), dec(v.Avg1), v.Runnable, v.Threads, total, strings.Join(who, ", "), sent)
+}
+
+func cpuLeadSummary(v *Verdict, masters []Master) string {
+	type item struct {
+		label  string
+		cpu    float64
+		master bool
+	}
+	items := make([]item, 0, len(masters)+len(v.Loads))
+	var total float64
+	for _, m := range masters {
+		if m.CPU > 0 {
+			items = append(items, item{label: m.Name, cpu: m.CPU, master: true})
+			total += m.CPU
+		}
+	}
+	for _, l := range v.Loads {
+		if l.Owner.Master == "" && l.CPU > 0 {
+			label := l.Owner.Kind
+			if l.Owner.Label != "" {
+				label += " " + l.Owner.Label
+			}
+			items = append(items, item{label: label, cpu: l.CPU})
+			total += l.CPU
+		}
+	}
+	slices.SortFunc(items, func(a, b item) int {
+		if a.cpu != b.cpu {
+			return cmp.Compare(b.cpu, a.cpu)
+		}
+		if a.master != b.master {
+			if a.master {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(a.label, b.label)
+	})
+	shown := min(len(items), 8)
+	parts := make([]string, 0, shown+1)
+	var listed float64
+	for _, it := range items[:shown] {
+		parts = append(parts, fmt.Sprintf("%s %.2f ядра", it.label, it.cpu))
+		listed += it.cpu
+	}
+	if remainder := total - listed; remainder > 0 {
+		parts = append(parts, fmt.Sprintf("остальные %.2f ядра", remainder))
+	}
+	if len(parts) == 0 {
+		return "долей CPU нет"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// CPUShareSummary formats the largest eight CPU owners and combines the rest.
+func CPUShareSummary(loads []Load) string {
+	ordered := append([]Load(nil), loads...)
+	slices.SortFunc(ordered, func(a, b Load) int { return cmp.Or(cmp.Compare(b.CPU, a.CPU), ownerCmp(a.Owner, b.Owner)) })
+	shown := min(len(ordered), 8)
+	parts := make([]string, 0, shown+1)
+	var named, total float64
+	for _, l := range ordered {
+		total += l.CPU
+	}
+	for _, l := range ordered[:shown] {
+		label := l.Owner.Master
+		if l.Owner.Label != "" {
+			if label != "" {
+				label += "/"
+			}
+			label += l.Owner.Label
+		}
+		if label == "" {
+			label = l.Owner.Kind
+		}
+		parts = append(parts, fmt.Sprintf("%s=%.2f", label, l.CPU))
+		named += l.CPU
+	}
+	if total > named {
+		parts = append(parts, fmt.Sprintf("прочие=%.2f", total-named))
+	}
+	return strings.Join(parts, ",")
 }
 
 // HostLocal — своя машина в письмах.
@@ -363,7 +492,13 @@ func parts(ls []Load) string {
 			}
 			cs = append(cs, fmt.Sprintf("ещё %d %s", extra, russianCount(extra, "процесс", "процесса", "процессов")))
 		}
-		out = append(out, name+" — "+fmt.Sprint(l.N)+" ("+strings.Join(cs, ", ")+")")
+		if l.N == 0 && len(cs) == 0 && l.CPU > 0 {
+			out = append(out, fmt.Sprintf("%s — %.2f ядра CPU", name, l.CPU))
+		} else if len(cs) == 0 {
+			out = append(out, name+" — "+fmt.Sprint(l.N))
+		} else {
+			out = append(out, name+" — "+fmt.Sprint(l.N)+" ("+strings.Join(cs, ", ")+")")
+		}
 	}
 	return strings.Join(out, "; ")
 }

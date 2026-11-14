@@ -1,5 +1,5 @@
-// Наблюдатель cpu: серия перегрузки ноута и PC длится, пока load average за минуту не ниже числа потоков. В текущем
-// замере готовые задачи дают снимок владельцев и входят в письмо. После after — письмо мастерам и сводка лиду, повторы
+// Наблюдатель cpu: серия перегрузки ноута и PC длится, пока load average за минуту не ниже числа потоков. На ноуте
+// владельцы определяются по CPU cgroup за интервал, снимок готовых задач остаётся пояснением; после after — письма, повторы
 // не чаще repeat. Окно и отметки писем хранятся в состоянии aguard; наблюдатель ничего не снимает и не понижает.
 package main
 
@@ -13,12 +13,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 
 	"strings"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/guide"
+	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/akit/session"
 )
@@ -28,20 +30,40 @@ const sshTimeout = 10 * time.Second
 
 // cpuHost — машина под наблюдением и её перегрузка.
 type cpuHost struct {
-	ssh      string // "" — своя машина
-	root     string // откуда читать load average: /proc или папка с файлами, снятыми по ssh
-	state    string // файл сохранённого окна
-	win      cpuwatch.Host
-	strays   cpuwatch.StrayWatch
-	strayAt  time.Time // когда смотрели процессы без родителя
-	strayBad bool      // прошлый замер не удался: о сбое пишется раз
-	spinner  spinnerWatch
+	ssh         string // "" — своя машина
+	root        string // откуда читать load average: /proc или папка с файлами, снятыми по ssh
+	cgroup      string
+	cpuUsage    cpuwatch.CgroupCPU
+	cpuDetailAt time.Time
+	state       string // файл сохранённого окна
+	win         cpuwatch.Host
+	strays      cpuwatch.StrayWatch
+	strayAt     time.Time // когда смотрели процессы без родителя
+	strayBad    bool      // прошлый замер не удался: о сбое пишется раз
+	spinner     spinnerWatch
 }
 
 type spinnerRecord struct {
 	at  time.Time
 	cpu float64
 }
+
+type cpuDetailBuffer struct {
+	mu    sync.Mutex
+	steps []iowatch.Step
+}
+
+var cpuDetailInit sync.Mutex
+
+func (a *app) cpuDetailBuffer() *cpuDetailBuffer {
+	cpuDetailInit.Lock()
+	defer cpuDetailInit.Unlock()
+	if a.cpuDetails == nil {
+		a.cpuDetails = &cpuDetailBuffer{}
+	}
+	return a.cpuDetails
+}
+
 type spinnerWatch map[string]spinnerRecord
 
 func (w *spinnerWatch) find(now time.Time, root string, ps []cpuwatch.Process, owner func(*cpuwatch.Task) cpuwatch.Owner, cfg *cpuwatch.Config) ([]cpuwatch.Spinner, error) {
@@ -134,6 +156,14 @@ func (a *app) cpuHosts(cfg *cpuwatch.Config) []*cpuHost {
 		if h == nil {
 			stateName := "local.json"
 			h = &cpuHost{ssh: n, root: procRoot, win: cpuwatch.Host{Name: cpuwatch.HostLocal}}
+			if n == "" {
+				mount := a.cgroupDir
+				if mount == "" {
+					mount = "/sys/fs/cgroup"
+				}
+				h.cgroup = filepath.Join(mount, "user.slice", fmt.Sprintf("user-%d.slice", a.uid), fmt.Sprintf("user@%d.service", a.uid))
+				h.cpuUsage.MountRoot = mount
+			}
 			if n != "" {
 				h.root, h.win.Name = filepath.Join(a.dir("cpu"), "proc-"+n), n
 				stateName = "host-" + n + ".json"
@@ -255,6 +285,17 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 		owner := r.Owner
 		if h.ssh != "" {
 			owner = r.RemoteOwner
+		} else if h.cgroup != "" {
+			loads, ready, e := h.cpuUsage.Sample(h.cgroup, now, owner, a.cpuDetailDeltas(&h.cpuDetailAt, now))
+			s.CPUTracking = ready && e == nil
+			if e != nil {
+				a.warn("cpu", "usage_usec cgroup не прочитан", "err", e)
+			} else {
+				s.CPULoads = loads
+				if ready {
+					s.CPUInterval = h.cpuUsage.IntervalSeconds()
+				}
+			}
 		}
 		v := h.win.Judge(s, owner)
 		if h.ssh == "" {
@@ -285,6 +326,12 @@ func (a *app) cpuAct(cfg *cpuwatch.Config, h *cpuwatch.Host, v *cpuwatch.Verdict
 	}
 	if !v.Over {
 		return
+	}
+	if v.UseCPU {
+		a.log.Info("aguard cpu: доли CPU", "host", h.Name, "owners", cpuwatch.CPUShareSummary(v.Loads), "interval_s", fmt.Sprintf("%.3f", v.CPUInterval))
+	} else {
+		_, snapshotThreads := v.Masters()
+		a.log.Info("aguard cpu: доли CPU", "host", h.Name, "owners", "по снимку", "snapshot_threads", snapshotThreads, "runnable", v.Runnable)
 	}
 	if v.Started {
 		a.log.Info("aguard cpu: перегрузка", "host", h.Name, "load1", v.Avg1, "runnable", v.Runnable, "threads", v.Threads)
@@ -428,4 +475,44 @@ func cpuDryLetters(w io.Writer, cfg *cpuwatch.Config, win *cpuwatch.Host, v *cpu
 		win.Sent(m.Name, now) // отметка та же, что у настоящей отправки: список лиду даёт Host.Told
 	}
 	fmt.Fprintf(w, "  → %s: %s\n", cfg.Lead, cpuwatch.LeadMessage(win.Name, v, win.Told(), now))
+}
+
+// cpuDetailDeltas returns CPU leaf deltas from iowatch since this host's previous sample.
+func (a *app) cpuDetailDeltas(cursor *time.Time, now time.Time) map[string]int64 {
+	b := a.cpuDetailBuffer()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	by := map[string]int64{}
+	lastRead := *cursor
+	for i := range b.steps {
+		step := &b.steps[i]
+		if step.At.After(lastRead) && !step.At.After(now) {
+			for j := range step.Cgroups {
+				cg := &step.Cgroups[j]
+				by[cg.Path] += cg.CPUUS
+			}
+			lastRead = step.At
+		}
+	}
+	*cursor = lastRead
+	cut := now.Add(-2 * time.Minute)
+	i := 0
+	for i < len(b.steps) && b.steps[i].At.Before(cut) {
+		i++
+	}
+	b.steps = b.steps[i:]
+	return by
+}
+
+func (a *app) saveCPUDetail(step iowatch.Step) {
+	b := a.cpuDetailBuffer()
+	b.mu.Lock()
+	b.steps = append(b.steps, iowatch.Step{At: step.At, Cgroups: append([]iowatch.Cgroup(nil), step.Cgroups...)})
+	cut := step.At.Add(-2 * time.Minute)
+	i := 0
+	for i < len(b.steps) && b.steps[i].At.Before(cut) {
+		i++
+	}
+	b.steps = b.steps[i:]
+	b.mu.Unlock()
 }

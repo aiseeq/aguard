@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
+	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/akit/pressure"
 	"github.com/aiseeq/akit/session"
@@ -23,6 +25,180 @@ func cpuApp(t *testing.T, logs *strings.Builder) *app {
 	}
 	return &app{home: dir, stateDir: filepath.Join(dir, "state"), uid: 1000,
 		reg: session.Registry{Dir: filepath.Join(dir, "sessions"), ProcRoot: dir}, log: slog.New(slog.NewTextHandler(logs, nil))}
+}
+
+func TestCpuRoundCgroupDetailOwnerLetter(t *testing.T) {
+	var logs strings.Builder
+	a := cpuApp(t, &logs)
+	cfg := cpuwatch.Default(a.home)
+	cfg.Mode, cfg.Hosts, cfg.Lead = cpuwatch.ModeLog, nil, "lead"
+	cfg.Workers = filepath.Join(a.home, "worker")
+	for id, master := range map[string]string{"short": "worker-master", "stale": "stale-master"} {
+		job := fmt.Sprintf(`{"id":%q,"dir":"/tmp","task":%q,"master":%q,"unit":%q}`, id, id, master, "worker-"+id)
+		cpuWrite(t, filepath.Join(cfg.Workers, id, "job.json"), job)
+	}
+	fs := filepath.Join(a.home, "cgroupfs")
+	a.cgroupDir = fs
+	h := a.cpuHosts(&cfg)[0]
+	wantRoot := filepath.Join(fs, "user.slice", "user-1000.slice", "user@1000.service")
+	if h.cgroup != wantRoot {
+		t.Fatalf("локальный cgroup root = %q, want %q", h.cgroup, wantRoot)
+	}
+	proc := filepath.Join(a.home, "proc")
+	a.procDir = proc
+	h.root = proc
+	writeCPUProc(t, proc, "/user.slice/user-1000.slice/user@1000.service/app.slice/worker-short.service")
+	cpuStatWrite(t, h.cgroup, "", 0)
+	cpuStatWrite(t, h.cgroup, "app.slice", 0)
+	base := time.Now().Add(-time.Minute).Truncate(time.Second)
+	owner := func(*cpuwatch.Task) cpuwatch.Owner { return cpuwatch.Owner{} }
+	if _, ready, err := h.cpuUsage.Sample(h.cgroup, base, owner, nil); err != nil || ready {
+		t.Fatalf("CPU base: ready=%v err=%v", ready, err)
+	}
+	h.cpuDetailAt = base
+	cpuStatWrite(t, h.cgroup, "", 400_000_000)
+	cpuStatWrite(t, h.cgroup, "app.slice", 400_000_000)
+	io := newIOService(context.Background(), a)
+	io.rec = iowatch.NewRecorder(iowatch.Default())
+	io.detail(iowatch.Step{At: base.Add(-time.Second), Cgroups: []iowatch.Cgroup{{Path: "/user.slice/user-1000.slice/user@1000.service/app.slice/worker-stale.service", CPUUS: 400_000_000}}})
+	io.detail(iowatch.Step{At: base.Add(30 * time.Second), Cgroups: []iowatch.Cgroup{{Path: "/user.slice/user-1000.slice/user@1000.service/app.slice/worker-short.service", CPUUS: 400_000_000}}})
+	now := time.Now()
+	h.win.Restore(cpuwatch.State{Since: now.Add(-11 * time.Minute), Last: now.Add(-time.Minute)})
+	h.strayAt = now
+	a.strayRead = func(context.Context, *cpuHost) ([]byte, error) { return []byte("##procs\n##strays\n##end\n"), nil }
+	if err := a.cpuRound(context.Background(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "session=worker-master") || !strings.Contains(logs.String(), "по CPU за интервал замера 6.") || !strings.Contains(logs.String(), "interval_s=60.") || !strings.Contains(logs.String(), "worker-master/short=6.") {
+		t.Fatalf("10 мин перегрузки по коротким процессам должны написать мастеру, снимок из 4 потоков — пояснение:\n%s", logs.String())
+	}
+}
+
+func cpuWrite(t *testing.T, path, data string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func cpuStatWrite(t *testing.T, root, rel string, n int64) {
+	t.Helper()
+	cpuWrite(t, filepath.Join(root, rel, "cpu.stat"), fmt.Sprintf("usage_usec %d\nuser_usec 0\nsystem_usec 0\n", n))
+}
+
+func writeCPUProc(t *testing.T, root, cgroup string) {
+	writeCPUProcN(t, root, cgroup, 4)
+}
+
+func writeCPUProcN(t *testing.T, root, cgroup string, count int) {
+	t.Helper()
+	var stat strings.Builder
+	stat.WriteString("cpu 1 1 1 1\nbtime 1000\nprocs_running 30\n")
+	for i := range 22 {
+		fmt.Fprintf(&stat, "cpu%d 1 1 1 1\n", i)
+	}
+	cpuWrite(t, filepath.Join(root, "stat"), stat.String())
+	cpuWrite(t, filepath.Join(root, "loadavg"), "30.00 30.00 30.00 30/100 1\n")
+	for i := range count {
+		pid := 123 + i
+		dir := filepath.Join(root, "123")
+		tid := fmt.Sprint(pid)
+		cpuWrite(t, filepath.Join(dir, "task", tid, "stat"), tid+" (sh) R 1 2 3\n")
+	}
+	cpuWrite(t, filepath.Join(root, "123", "comm"), "sh\n")
+	cpuWrite(t, filepath.Join(root, "123", "cgroup"), "0::"+cgroup+"\n")
+	cpuWrite(t, filepath.Join(root, "123", "environ"), "")
+}
+
+func TestCPUShareLogTopEightAndRemainder(t *testing.T) {
+	loads := make([]cpuwatch.Load, 10)
+	for i := range loads {
+		loads[i] = cpuwatch.Load{Owner: cpuwatch.Owner{Master: fmt.Sprintf("m%d", i), Kind: cpuwatch.KindSession, Label: fmt.Sprintf("scope-%d", i)}, CPU: float64(10 - i)}
+	}
+	got := cpuwatch.CPUShareSummary(loads)
+	if strings.Count(got, "=") != 9 || !strings.Contains(got, "m0/scope-0=10.00") || !strings.Contains(got, "прочие=3.00") {
+		t.Fatalf("top 8 с метками и сумма остальных: %s", got)
+	}
+}
+
+func TestCPUTrackingBaseAndReadErrorFallBackToSnapshot(t *testing.T) {
+	for _, mode := range []string{"baseline", "error"} {
+		t.Run(mode, func(t *testing.T) {
+			var logs strings.Builder
+			a := cpuApp(t, &logs)
+			cfg := cpuwatch.Default(a.home)
+			cfg.Mode, cfg.Hosts, cfg.Lead = cpuwatch.ModeLog, nil, "lead"
+			cfg.Workers = filepath.Join(a.home, "worker")
+			cpuWrite(t, filepath.Join(cfg.Workers, "short", "job.json"), `{"id":"short","dir":"/tmp","task":"short","master":"worker-master","unit":"worker-short"}`)
+			mount := filepath.Join(a.home, "cgroupfs")
+			a.cgroupDir = mount
+			h := a.cpuHosts(&cfg)[0]
+			proc := filepath.Join(a.home, "proc")
+			h.root = proc
+			writeCPUProcN(t, proc, "/user.slice/user-1000.slice/user@1000.service/app.slice/worker-short.service", 6)
+			cpuStatWrite(t, h.cgroup, "", 0)
+			cpuStatWrite(t, h.cgroup, "app.slice", 0)
+			if mode == "error" {
+				cpuWrite(t, filepath.Join(h.cgroup, "cpu.stat"), "usage_usec broken\n")
+			}
+			now := time.Now()
+			h.win.Restore(cpuwatch.State{Since: now.Add(-11 * time.Minute), Last: now.Add(-time.Minute)})
+			h.strayAt = now
+			a.strayRead = func(context.Context, *cpuHost) ([]byte, error) { return []byte("##procs\n##strays\n##end\n"), nil }
+			if err := a.cpuRound(context.Background(), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(logs.String(), "session=worker-master") {
+				t.Fatalf("%s: без CPU дельты применяется снимок из 6 готовых задач:\n%s", mode, logs.String())
+			}
+			if !strings.Contains(logs.String(), `owners="по снимку" snapshot_threads=6 runnable=29`) || strings.Contains(logs.String(), `owners="worker-master/short=0.00"`) {
+				t.Fatalf("%s: журнал без готовой CPU-дельты должен явно указывать снимок и число потоков:\n%s", mode, logs.String())
+			}
+		})
+	}
+}
+
+func TestCPUDetailCursorReadsLateTimestampOnce(t *testing.T) {
+	var logs strings.Builder
+	a := cpuApp(t, &logs)
+	base := time.Now().Truncate(time.Second)
+	cursor := base.Add(-time.Minute)
+	a.saveCPUDetail(iowatch.Step{At: base.Add(-10 * time.Second), Cgroups: []iowatch.Cgroup{{Path: "/cg/old", CPUUS: 11}}})
+	first := a.cpuDetailDeltas(&cursor, base)
+	if first["/cg/old"] != 11 {
+		t.Fatalf("первый проход: %v", first)
+	}
+	// Поступила после прошлого замера, хотя её время раньше его; она лежит после последней прочитанной записи.
+	a.saveCPUDetail(iowatch.Step{At: base.Add(-5 * time.Second), Cgroups: []iowatch.Cgroup{{Path: "/cg/late", CPUUS: 23}}})
+	second := a.cpuDetailDeltas(&cursor, base.Add(time.Minute))
+	if second["/cg/late"] != 23 || second["/cg/old"] != 0 {
+		t.Fatalf("поздняя запись должна читаться отдельно от уже выданной: %v", second)
+	}
+	third := a.cpuDetailDeltas(&cursor, base.Add(2*time.Minute))
+	if len(third) != 0 {
+		t.Fatalf("прочитанные записи не должны учитываться повторно: %v", third)
+	}
+}
+
+func TestCPUActSnapshotJournalForBaselineAndPC(t *testing.T) {
+	for _, host := range []string{"ноут", "pc"} {
+		t.Run(host, func(t *testing.T) {
+			var logs strings.Builder
+			a := cpuApp(t, &logs)
+			cfg := cpuwatch.Default(a.home)
+			cfg.After = policy.Duration(0)
+			now := time.Now()
+			v := cpuwatch.Verdict{Over: true, Started: true, Since: now.Add(-time.Minute), Runnable: 29, Threads: 22,
+				Loads: []cpuwatch.Load{{Owner: cpuwatch.Owner{Master: "master", Kind: cpuwatch.KindSession}, N: 7}}}
+			a.cpuAct(&cfg, &cpuwatch.Host{Name: host}, &v, now)
+			if !strings.Contains(logs.String(), `owners="по снимку" snapshot_threads=7 runnable=29`) || strings.Contains(logs.String(), "interval_s=") {
+				t.Fatalf("снимок без CPU дельты должен журналироваться явно: %s", logs.String())
+			}
+		})
+	}
 }
 
 // cpuSample — замер при 22 потоках: load average за минуту, готовые сейчас и готовые потоки по мастерам.
