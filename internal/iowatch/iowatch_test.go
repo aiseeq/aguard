@@ -8,11 +8,235 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/evictors"
 	"github.com/aiseeq/aguard/internal/policy"
 )
+
+func TestIsAgentScopeOnlyDirectSessionScope(t *testing.T) {
+	for _, path := range []string{"user.slice/user-1000.slice/user@1000.service/agents.slice/agent-lead-41.scope", "agents.slice/agent-worker-9.scope"} {
+		if !isAgentScope(path) {
+			t.Errorf("не распознан scope сессии: %s", path)
+		}
+	}
+	for _, path := range []string{"app.slice/adream.service", "agents.slice/service.scope", "agents.slice/agent-lead-41.scope/nested.service"} {
+		if isAgentScope(path) {
+			t.Errorf("ошибочно распознан scope: %s", path)
+		}
+	}
+}
+
+func TestCandidateProcessSourceSelectsLargestRssAnon(t *testing.T) {
+	root := t.TempDir()
+	procRoot := filepath.Join(root, "proc")
+	writeFile(t, filepath.Join(root, "app.slice", "adream.service", "cgroup.procs"), "41\n42\n")
+	writeFile(t, filepath.Join(procRoot, "41", "status"), "Name:\tchild\nRssAnon:\t2048 kB\n")
+	writeFile(t, filepath.Join(procRoot, "42", "status"), "Name:\tdreamstats\nRssAnon:\t4096 kB\n")
+	r := newCgroupReader(root, nil)
+	got, err := r.processSource("/app.slice/adream.service", procRoot)
+	if err != nil || got != "dreamstats" {
+		t.Fatalf("имя процесса в службе: %v", got)
+	}
+}
+
+func TestProcessSourceSkipsInaccessibleMembersAndUsesReadablePeer(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "app.slice", "service", "cgroup.procs"), "41\n42\n")
+	r := newCgroupReader(root, nil)
+	r.readStatus = func(path string) ([]byte, error) {
+		if strings.Contains(path, "/41/") {
+			return nil, syscall.EACCES
+		}
+		return []byte("Name:\tworker\nRssAnon:\t4096 kB\n"), nil
+	}
+	if got, err := r.processSource("/app.slice/service", "/proc"); err != nil || got != "worker" {
+		t.Fatalf("доступный участник должен остаться источником: name=%q err=%v", got, err)
+	}
+	r.readStatus = func(string) ([]byte, error) { return nil, syscall.EPERM }
+	if got, err := r.processSource("/app.slice/service", "/proc"); err != nil || got != "" {
+		t.Fatalf("без читаемых участников имя должно быть пустым: name=%q err=%v", got, err)
+	}
+}
+
+func TestMissingSwapCurrentIncludesENODEV(t *testing.T) {
+	for _, err := range []error{os.ErrNotExist, syscall.ENODEV} {
+		if !missingCgroupFile(err) {
+			t.Errorf("ошибка cgroup %v не распознана как исчезновение", err)
+		}
+	}
+}
+
+func TestDetailReaderEvictorsFlowThroughAggregateStorage(t *testing.T) {
+	root := t.TempDir()
+	procRoot := filepath.Join(root, "proc")
+	cgRoot := filepath.Join(root, "cgroup")
+	blockRoot := filepath.Join(root, "block")
+	writeFile(t, filepath.Join(procRoot, "meminfo"), "MemAvailable: 100000 kB\nDirty: 0 kB\nWriteback: 0 kB\nSwapTotal: 100000 kB\nSwapFree: 90000 kB\n")
+	writeFile(t, filepath.Join(blockRoot, "nvme0n1", "dev"), "259:0\n")
+	if err := os.MkdirAll(filepath.Join(blockRoot, "nvme0n1", "holders"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	type sample struct {
+		path       string
+		pids       []int
+		anon, swap int64
+		session    bool
+	}
+	groups := []sample{{path: "agents.slice/agent-alpha-101.scope", pids: []int{101}, anon: 2 << 20, session: true}, {path: "agents.slice/agent-beta-102.scope", pids: []int{102}, anon: 2 << 20, session: true}, {path: "app.slice/adream.service", pids: []int{201, 202}, anon: 3 << 20}, {path: "app.slice/noise.service", pids: []int{301}, anon: 1 << 20}}
+	writeGroup := func(g sample) {
+		base := filepath.Join(cgRoot, g.path)
+		pids := make([]string, 0, len(g.pids))
+		for _, pid := range g.pids {
+			pids = append(pids, strconv.Itoa(pid))
+		}
+		writeFile(t, filepath.Join(base, "cgroup.procs"), strings.Join(pids, "\n")+"\n")
+		writeFile(t, filepath.Join(base, "io.pressure"), "some avg10=0 total=0\nfull avg10=0 total=0\n")
+		writeFile(t, filepath.Join(base, "memory.pressure"), "some avg10=0 total=0\nfull avg10=0 total=0\n")
+		writeFile(t, filepath.Join(base, "memory.stat"), "anon "+strconv.FormatInt(g.anon, 10)+"\npswpin 0\npswpout 0\npgmajfault 0\n")
+		writeFile(t, filepath.Join(base, "cpu.stat"), "usage_usec 0\n")
+		writeFile(t, filepath.Join(base, "io.stat"), "259:0 rbytes=0 wbytes=0 rios=0 wios=0\n")
+		if g.session {
+			writeFile(t, filepath.Join(base, "memory.swap.current"), strconv.FormatInt(g.swap, 10)+"\n")
+		}
+	}
+	for _, g := range groups {
+		writeGroup(g)
+	}
+	procs := fakeProc{t, procRoot}
+	for _, g := range groups {
+		for _, pid := range g.pids {
+			comm := "bash"
+			rss := int64(1024)
+			if pid == 201 {
+				comm = "chrome"
+				rss = 2048
+			}
+			if pid == 202 {
+				comm = "helper"
+				rss = 1024
+			}
+			procs.set(pid, 1, uint64(pid), comm, 0, 0, 0)
+			cgPath := "/" + g.path
+			writeFile(t, filepath.Join(procRoot, strconv.Itoa(pid), "cgroup"), "0::"+cgPath+"\n")
+			writeFile(t, filepath.Join(procRoot, strconv.Itoa(pid), "status"), "Name:\t"+comm+"\nRssAnon:\t"+strconv.FormatInt(rss, 10)+" kB\n")
+		}
+	}
+	r, err := NewDetailReader(Roots{Proc: procRoot, Cgroup: cgRoot, Block: blockRoot}, "nvme0n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	at := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
+	seed, skipped, err := r.Read(at)
+	if err != nil || skipped != nil {
+		t.Fatalf("seed: %v %v", skipped, err)
+	}
+	if seed.TakeEvictorInterval() != nil {
+		t.Fatal("seed создал интервал")
+	}
+	for i := range groups {
+		if groups[i].path == "app.slice/adream.service" {
+			groups[i].anon += 4 << 20
+		} else if groups[i].path == "app.slice/noise.service" {
+			groups[i].anon += 512 << 10
+		} else {
+			groups[i].anon += 2 << 20
+		}
+		if groups[i].session {
+			groups[i].swap = 2 << 20
+		}
+		writeGroup(groups[i])
+	}
+	writeFile(t, filepath.Join(cgRoot, "app.slice", "noise.service", "cgroup.procs"), "not-a-pid\n")
+	s, skipped, err := r.Read(at.Add(time.Minute))
+	if err != nil || skipped != nil {
+		t.Fatalf("снимок с приростом: %v %v", skipped, err)
+	}
+	in := s.TakeEvictorInterval()
+	if in == nil || len(in.Changes) != 4 {
+		t.Fatalf("интервал от DetailReader.Read: %+v", in)
+	}
+	if len(s.memoryGroups) != 0 {
+		t.Fatalf("сырые группы остались в Step после Read: %d", len(s.memoryGroups))
+	}
+	byPath := map[string]evictors.Change{}
+	for _, c := range in.Changes {
+		byPath[c.Path] = c
+	}
+	service := byPath["/app.slice/adream.service"]
+	if !service.Candidate || service.Anon != 4<<20 || service.OtherSwap != 4<<20 || service.Process != "chrome" {
+		t.Fatalf("кандидат из связки cgroup/anon/swap/status: %+v", service)
+	}
+	if byPath["/app.slice/noise.service"].Candidate || byPath["/app.slice/noise.service"].Process != "" {
+		t.Fatalf("для субпорогового anon не должен читаться источник процесса: %+v", byPath["/app.slice/noise.service"])
+	}
+	if !byPath["/agents.slice/agent-alpha-101.scope"].Session {
+		t.Fatalf("session не отмечена кандидатом: %+v", byPath)
+	}
+	agg := evictors.NewAggregate()
+	agg.Add(in)
+	store := filepath.Join(root, "state", "evictors.json")
+	if err := evictors.Save(store, agg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := evictors.Load(store, at.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := loaded.Report(at.Add(-time.Hour), 15)
+	var out bytes.Buffer
+	if err := report.Print(&out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"/app.slice/adream.service", "chrome", "4.0 МБ", "/agents.slice/agent-alpha-101.scope [сессия]"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("нет %q в выводе из файла:\n%s", want, out.String())
+		}
+	}
+	for i := range groups {
+		if groups[i].session {
+			groups[i].swap += 2 << 20
+		}
+		if groups[i].path == "app.slice/adream.service" {
+			groups[i].anon -= 4 << 20
+		}
+		writeGroup(groups[i])
+	}
+	last, skipped, err := r.Read(at.Add(2 * time.Minute))
+	if err != nil || skipped != nil {
+		t.Fatalf("обратный anon delta: %v %v", skipped, err)
+	}
+	back := last.TakeEvictorInterval()
+	if back == nil {
+		t.Fatal("падение anon при приросте swap должно дойти до агрегата")
+	}
+	agg.Add(back)
+	var chromeRow *evictors.Row
+	report = agg.Report(at, 15)
+	for i := range report.Rows {
+		row := &report.Rows[i]
+		if row.Cgroup == "/app.slice/adream.service" {
+			chromeRow = row
+		}
+	}
+	if chromeRow == nil || chromeRow.Anon != 0 || chromeRow.Process != "chrome" {
+		t.Fatalf("отрицательная дельта должна свести anon к нулю без стирания процесса: %+v", chromeRow)
+	}
+	for i := range groups {
+		groups[i].anon += 1 << 20
+		writeGroup(groups[i])
+	}
+	quiet, skipped, err := r.Read(at.Add(3 * time.Minute))
+	if err != nil || skipped != nil {
+		t.Fatalf("интервал без прироста swap: %v %v", skipped, err)
+	}
+	if got := quiet.TakeEvictorInterval(); got != nil {
+		t.Fatalf("интервал без прироста swap засчитан: %+v", got)
+	}
+}
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()

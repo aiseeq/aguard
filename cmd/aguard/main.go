@@ -32,7 +32,7 @@
 //     aguard run                                         демон (user-сервис)
 //     aguard orphans tick [-dry-run] [-min-dead 0s]      один проход сирот
 //     aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
-//     aguard memory tick [-dry-run] | report [-since 168h]
+//     aguard memory tick [-dry-run] | report [-since 168h] | evictors [-since 24h] [-top 15] [-json]
 //     aguard memory ceiling [размер] | --default
 //     aguard restart ask -pid N [-name имя]              вопрос, как его задаёт cl
 //     aguard waits tick [-dry-run] | report [-since 24h]
@@ -256,7 +256,7 @@ func usage() {
   aguard orphans tick [-dry-run] [-min-dead 0s]
   aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]
   aguard track check
-  aguard memory tick [-dry-run] | report [-since 168h]
+  aguard memory tick [-dry-run] | report [-since 168h] | evictors [-since 24h] [-top 15] [-json]
   aguard memory ceiling [размер] | --default
   aguard restart ask -pid N [-name имя]
   aguard waits tick [-dry-run] | report [-since 24h]

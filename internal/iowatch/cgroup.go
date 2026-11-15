@@ -7,10 +7,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cgroupstats"
+	"github.com/aiseeq/aguard/internal/evictors"
+	"github.com/aiseeq/akit/proc"
 )
 
 // cgroupLeavesEvery — как часто дерево cgroup обходится заново без повода: лист мог получить
@@ -25,23 +29,25 @@ const cgroupLeavesEvery = 10 * time.Second
 // Лист, созданный после прошлого обхода, получает счётчики целиком: они начинаются с нуля, а
 // короткий scope иначе не попал бы в итог совсем.
 type cgroupReader struct {
-	root     string
-	devices  []string // major:minor: диск и dm поверх него, см. blockDevices
-	leaves   []string
-	leavesAt time.Time
-	inner    map[string]time.Time // внутренние папки (и корень) → время изменения при обходе
-	newEmpty map[string]bool      // новые пустые листья прошлого обхода: процессы в них вот-вот перенесут
-	groups   map[string]*cgroupEntry
-	buf      []byte
-	ioScr    [][ioFields]int64
-	capFiles map[string]*cachedFile // io.max листьев и предков по пути от root
-	capPass  map[string]Cap         // потолок папки в текущем проходе
+	root       string
+	devices    []string // major:minor: диск и dm поверх него, см. blockDevices
+	leaves     []string
+	leavesAt   time.Time
+	inner      map[string]time.Time // внутренние папки (и корень) → время изменения при обходе
+	newEmpty   map[string]bool      // новые пустые листья прошлого обхода: процессы в них вот-вот перенесут
+	groups     map[string]*cgroupEntry
+	buf        []byte
+	ioScr      [][ioFields]int64
+	capFiles   map[string]*cachedFile       // io.max листьев и предков по пути от root
+	capPass    map[string]Cap               // потолок папки в текущем проходе
+	readStatus func(string) ([]byte, error) // replaceable in tests
 }
 
 type cgroupEntry struct {
 	ioStat, memStat, ioPSI, memPSI, cpuStat cachedFile
 	io                                      [][ioFields]int64 // накопительные по устройствам
 	swapIn, swapOut, majflt                 int64
+	swapCurrent                             cachedFile
 	ioFull, memFull, cpuUS                  int64
 	primed                                  bool // false — первое чтение только запоминает; новый лист — с нулей
 }
@@ -60,7 +66,7 @@ func (r *cgroupReader) close() {
 }
 
 func (g *cgroupEntry) close() {
-	for _, f := range []*cachedFile{&g.ioStat, &g.memStat, &g.ioPSI, &g.memPSI, &g.cpuStat} {
+	for _, f := range []*cachedFile{&g.ioStat, &g.memStat, &g.ioPSI, &g.memPSI, &g.cpuStat, &g.swapCurrent} {
 		f.close()
 	}
 }
@@ -103,11 +109,129 @@ func (r *cgroupReader) read(s *Step) (skipped, err error) {
 			}
 			s.Cgroups = append(s.Cgroups, item)
 		}
+		memoryGroup, err := r.memoryGroup(rel, g, item)
+		if err != nil {
+			if failed++; first == nil {
+				first = err
+			}
+			continue
+		}
+		s.memoryGroups = append(s.memoryGroups, memoryGroup)
 	}
 	if failed > 0 {
 		return fmt.Errorf("пропущено cgroup: %d, первая ошибка: %w", failed, first), nil
 	}
 	return nil, nil
+}
+
+func (r *cgroupReader) memoryGroup(rel string, entry *cgroupEntry, item Cgroup) (evictors.Group, error) {
+	group := evictors.Group{Path: "/" + rel, Anon: item.AnonB}
+	if !isAgentScope(rel) {
+		return group, nil
+	}
+	var data []byte
+	var err error
+	if r.buf, data, err = entry.swapCurrent.read(r.buf); err == nil {
+		group.Swap, err = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	}
+	if missingCgroupFile(err) {
+		err = nil
+	}
+	if err != nil {
+		return evictors.Group{}, fmt.Errorf("memory.swap.current %s: %w", rel, err)
+	}
+	group.Session = true
+	return group, nil
+}
+
+func missingCgroupFile(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENODEV)
+}
+
+// isAgentScope matches direct session scopes, excluding nested services and other cgroups.
+func isAgentScope(rel string) bool {
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		if part != "agents.slice" || i+1 != len(parts)-1 {
+			continue
+		}
+		_, _, ok := proc.ScopeName(parts[i+1])
+		return ok
+	}
+	return false
+}
+
+// processSource chooses the member with greatest RssAnon for an eligible changed cgroup.
+func (r *cgroupReader) processSource(path, procRoot string) (string, error) {
+	rel := strings.TrimPrefix(path, string(filepath.Separator))
+	b, err := os.ReadFile(filepath.Join(r.root, rel, "cgroup.procs"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENODEV) {
+			return "", nil
+		}
+		return "", fmt.Errorf("cgroup.procs %s: %w", path, err)
+	}
+	name, maxAnon := "", int64(-1)
+	for field := range strings.FieldsSeq(string(b)) {
+		pid, err := strconv.Atoi(field)
+		if err != nil {
+			return "", fmt.Errorf("cgroup.procs %s: pid %q: %w", path, field, err)
+		}
+		statusPath := filepath.Join(procRoot, strconv.Itoa(pid), "status")
+		readStatus := r.readStatus
+		if readStatus == nil {
+			readStatus = os.ReadFile
+		}
+		data, err := readStatus(statusPath)
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			continue
+		}
+		if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("/proc/%d/status: %w", pid, err)
+		}
+		process, anon, err := parseStatusAnon(data)
+		// A process with incomplete status is not a usable source; try its peers.
+		//nolint:silent-error-handling // Other members may have readable complete status files
+		if err != nil {
+			continue
+		}
+		if anon > maxAnon {
+			name, maxAnon = process, anon
+		}
+	}
+	return name, nil
+}
+
+func parseStatusAnon(data []byte) (string, int64, error) {
+	name := ""
+	var anon int64 = -1
+	for line := range strings.SplitSeq(string(data), "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		switch key {
+		case "Name":
+			name = strings.TrimSpace(value)
+		case "RssAnon":
+			fields := strings.Fields(value)
+			if len(fields) < 1 {
+				return "", 0, fmt.Errorf("RssAnon без значения")
+			}
+			n, err := strconv.ParseInt(fields[0], 10, 64)
+			if err != nil {
+				return "", 0, fmt.Errorf("RssAnon: %w", err)
+			}
+			anon = n
+		}
+	}
+	if name == "" || anon < 0 {
+		return "", 0, fmt.Errorf("нет Name или RssAnon")
+	}
+	return name, anon, nil
 }
 
 // treeChanged — у какой-то внутренней папки сменилось время изменения (создан или удалён потомок).
@@ -140,7 +264,7 @@ func (r *cgroupReader) refresh(now time.Time) error {
 			}
 			file := func(name string) cachedFile { return cachedFile{path: filepath.Join(base, name)} }
 			r.groups[rel] = &cgroupEntry{ioStat: file("io.stat"), memStat: file("memory.stat"), ioPSI: file("io.pressure"),
-				memPSI: file("memory.pressure"), cpuStat: file("cpu.stat"), io: make([][ioFields]int64, len(r.devices)),
+				memPSI: file("memory.pressure"), cpuStat: file("cpu.stat"), swapCurrent: file("memory.swap.current"), io: make([][ioFields]int64, len(r.devices)),
 				primed: r.newEmpty[rel] || created}
 		}
 	}

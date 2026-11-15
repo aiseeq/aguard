@@ -31,7 +31,7 @@ Run `aguard` without arguments to print the full usage, flags, and subcommands.
 - `aguard quiet`, `aguard quiet on --until <time> --why <text> --by <name>`, and `aguard quiet off` inspect, enable, or disable quiet mode.
 - `aguard orphans tick` checks for processes left by ended Claude Code sessions. Run with `-dry-run` to inspect a pass.
 - `aguard tmp tick`, `report`, and `send-test` check `/tmp`, summarize recorded usage, or verify message delivery.
-- `aguard memory tick` samples session memory; `report` reviews the recorded peaks.
+- `aguard memory tick` samples session memory; `report` reviews the recorded peaks; `evictors [-since 24h] [-top 15] [-json]` ranks anon-growth candidates during intervals when other Claude sessions gained swap.
 - `aguard restart ask -pid N` asks whether `cl` may restart a session; useful for inspecting one decision.
 - `aguard waits tick` processes transcript wait and failure events; `report` summarizes them.
 - `aguard compact tick` evaluates idle sessions for compaction or reset; `report` reviews decisions and outcomes.

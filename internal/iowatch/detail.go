@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/evictors"
 )
 
 // DetailReader — детальная запись раз в detail: Dirty, Writeback, MemAvailable и занятый своп,
@@ -15,6 +17,7 @@ type DetailReader struct {
 	buf       []byte
 	cgroups   *cgroupReader
 	processes *processReader
+	evictors  evictors.Tracker
 }
 
 // Roots — корни файловых систем ядра; в тестах — папки с образцами.
@@ -34,7 +37,12 @@ func NewDetailReader(roots Roots, device string) (*DetailReader, error) {
 		return nil, fmt.Errorf("устройства диска %s: %w", device, err)
 	}
 	return &DetailReader{meminfo: cachedFile{path: filepath.Join(roots.Proc, "meminfo")}, buf: make([]byte, 8192),
-		cgroups: newCgroupReader(roots.Cgroup, devices), processes: newProcessReader(roots.Proc)}, nil
+		cgroups: newCgroupReader(roots.Cgroup, devices), processes: newProcessReader(roots.Proc), evictors: evictors.NewTracker(evictors.DefaultSwapMin, evictors.DefaultAnonMin)}, nil
+}
+
+// SetEvictorThresholds configures the two minimum deltas before the first Read.
+func (r *DetailReader) SetEvictorThresholds(swapMin, anonMin int64) {
+	r.evictors = evictors.NewTracker(swapMin, anonMin)
 }
 
 func (r *DetailReader) Close() {
@@ -47,6 +55,7 @@ func (r *DetailReader) Close() {
 // годна без них; err — записи нет.
 func (r *DetailReader) Read(now time.Time) (s Step, skipped, err error) {
 	s = Step{At: now}
+	defer func() { s.memoryGroups = nil }()
 	var data []byte
 	if r.buf, data, err = r.meminfo.read(r.buf); err != nil {
 		return s, nil, err
@@ -61,5 +70,19 @@ func (r *DetailReader) Read(now time.Time) (s Step, skipped, err error) {
 		return s, nil, err
 	}
 	procs, err := r.processes.read(&s)
+	s.evictorRow = r.evictors.Sample(now, s.memoryGroups)
+	if s.evictorRow != nil {
+		for i := range s.evictorRow.Changes {
+			c := &s.evictorRow.Changes[i]
+			if !c.Candidate {
+				continue
+			}
+			process, procsErr := r.cgroups.processSource(c.Path, r.processes.root)
+			c.Process = process
+			if procsErr != nil {
+				procs = errors.Join(procs, procsErr)
+			}
+		}
+	}
 	return s, errors.Join(groups, procs), err
 }

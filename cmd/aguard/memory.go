@@ -1,6 +1,7 @@
 // Наблюдатель memory: пики памяти сессий агентов в дневные файлы
-// ~/.local/state/aguard/memory/<день>.jsonl. Потолок управляется отдельно:
-// отчёт строится командой aguard memory report; жёсткий потолок ведёт ceiling.
+// ~/.local/state/aguard/memory/<день>.jsonl. Почасовая сводка кандидатов живёт
+// в ~/.local/state/aguard/memory/evictors.json.
+// Потолок управляется отдельно командой ceiling.
 package main
 
 import (
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/daily"
+	"github.com/aiseeq/aguard/internal/evictors"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/policy"
 )
@@ -43,12 +45,60 @@ func (a *app) memoryCmd(args []string) error {
 			return err
 		}
 		return r.Print(a.out)
+	case "evictors":
+		fl := flag.NewFlagSet("memory evictors", flag.ContinueOnError)
+		since := fl.Duration("since", 24*time.Hour, "за какой срок")
+		top := fl.Int("top", 15, "сколько кандидатов показать")
+		asJSON := fl.Bool("json", false, "итог JSON")
+		parse(fl, rest)
+		if *since <= 0 || *top < 0 {
+			return fmt.Errorf("since должен быть положительным, top — неотрицательным")
+		}
+		st, err := evictors.Load(evictorStorePath(a), time.Now())
+		if err != nil {
+			return err
+		}
+		r := st.Report(time.Now().Add(-*since), *top)
+		if *asJSON {
+			rows := make([]evictorJSONRow, 0, len(r.Rows))
+			for _, row := range r.Rows {
+				rows = append(rows, evictorJSONRow{Cgroup: row.Cgroup, Session: row.Session, Process: row.Process,
+					NetAnonB: row.Anon, MatchedSwapB: row.Matched, OtherSwapB: row.Swap, Intervals: row.Intervals, Sessions: row.Sessions})
+			}
+			sum := evictorJSON{From: r.From.Format(time.RFC3339), To: r.To.Format(time.RFC3339), Bad: r.Bad,
+				Note: "кандидаты, не доказанная причина", Rows: rows}
+			enc := json.NewEncoder(a.out)
+			enc.SetIndent("", "  ")
+			return enc.Encode(sum)
+		}
+		return r.Print(a.out)
 	}
 	usage()
 	return nil
 }
 
+type evictorJSON struct {
+	From string           `json:"from"`
+	To   string           `json:"to"`
+	Bad  int              `json:"bad"`
+	Note string           `json:"note"`
+	Rows []evictorJSONRow `json:"rows"`
+}
+
+type evictorJSONRow struct {
+	Cgroup       string `json:"cgroup"`
+	Session      bool   `json:"session"`
+	Process      string `json:"process"`
+	NetAnonB     int64  `json:"net_anon_b"`
+	MatchedSwapB int64  `json:"matched_swap_b"`
+	OtherSwapB   int64  `json:"other_swap_b"`
+	Intervals    int    `json:"intervals"`
+	Sessions     int    `json:"sessions"`
+}
+
 func (a *app) memoryStore() daily.Store[memwatch.Sample] { return memwatch.NewStore(a.dir("memory")) }
+
+func evictorStorePath(a *app) string { return a.dir("memory/evictors.json") }
 
 // memoryRound — один проход: записи по всем сессиям, сжатие прошлых дней.
 func (a *app) memoryRound(mw *memwatch.Watcher, cfg *memwatch.Config, dry bool) error {

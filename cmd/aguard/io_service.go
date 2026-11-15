@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/activity"
+	"github.com/aiseeq/aguard/internal/evictors"
 	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/record"
@@ -91,6 +92,7 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 	if err != nil {
 		return err
 	}
+	detail.SetEvictorThresholds(cfg.EvictorSwapMin, cfg.EvictorAnonMin)
 	details := make(chan ioDetailResult, 4)
 	control := make(chan ioDetailChange, 1)
 	detailCtx, stop := context.WithCancel(ctx)
@@ -223,14 +225,15 @@ func readIODetail(r *iowatch.DetailReader, now time.Time) (res ioDetailResult) {
 }
 
 const (
-	ioReloadEvery   = 10 * time.Second // конфиг перечитывается на ходу
-	ioCleanupEvery  = time.Minute      // старые ручные снимки удаляются
-	ioSaveEvery     = time.Hour        // сводки случаев — копией в файл: на случай падения без остановки
-	ioWarnEvery     = time.Minute      // одно и то же предупреждение — не чаще
-	ioPassEvery     = time.Minute      // цикл 100 мс — не safePass: проход в учёт отмечает сам, не чаще
-	ioNoDeviceEvery = 24 * time.Hour   // нет диска из device — напоминание раз в сутки
-	ioCgroupsEvery  = time.Minute      // кончились ли cgroup профилей (папки нет) — не в цикле 100 мс
-	ioWorkerEvery   = 24 * time.Hour   // вид cgroup неполон (класс бойца, вид задачи graft) — напоминание раз в сутки
+	ioReloadEvery      = 10 * time.Second // конфиг перечитывается на ходу
+	ioCleanupEvery     = time.Minute      // старые ручные снимки удаляются
+	ioSaveEvery        = time.Hour        // сводки случаев — копией в файл: на случай падения без остановки
+	ioEvictorSaveEvery = 10 * time.Minute
+	ioWarnEvery        = time.Minute    // одно и то же предупреждение — не чаще
+	ioPassEvery        = time.Minute    // цикл 100 мс — не safePass: проход в учёт отмечает сам, не чаще
+	ioNoDeviceEvery    = 24 * time.Hour // нет диска из device — напоминание раз в сутки
+	ioCgroupsEvery     = time.Minute    // кончились ли cgroup профилей (папки нет) — не в цикле 100 мс
+	ioWorkerEvery      = 24 * time.Hour // вид cgroup неполон (класс бойца, вид задачи graft) — напоминание раз в сутки
 )
 
 // kindUnknownWhat — предупреждение о неполном виде профиля по источнику (iowatch.KindUnknownError.Source).
@@ -274,11 +277,16 @@ type ioService struct {
 	cover     *iowatch.Coverer // учёт покрытия замера: шаги продлевают интервал, перезапуск цикла — новый
 	offSaveAt time.Time        // mode=off: следующая копия учёта (housekeep не идёт)
 	// Маршрут случаев от alert_min (тикет alert-async): письма хозяину или лиду, тикеты — горутиной tickets.
-	route   *ioroute.Router
-	owners  *ioOwnerFinder
-	tickets *ioTicketer
-	letters sync.WaitGroup // горутины писем: тест дожидается их, прежде чем читать журнал
-	tickAt  time.Time
+	route               *ioroute.Router
+	owners              *ioOwnerFinder
+	tickets             *ioTicketer
+	letters             sync.WaitGroup // горутины писем: тест дожидается их, прежде чем читать журнал
+	tickAt              time.Time
+	evictors            *evictors.Aggregate
+	evictorPath         string
+	evictorSaveDone     chan error                              // only the io sampling goroutine starts and collects this writer
+	evictorWriter       func(string, *evictors.Aggregate) error // injectable file writer for tests
+	evictorStoreBlocked bool                                    // quarantine failed; never overwrite unreadable history
 }
 
 func newIOService(ctx context.Context, a *app) *ioService {
@@ -287,6 +295,7 @@ func newIOService(ctx context.Context, a *app) *ioService {
 	return &ioService{route: ioroute.New(def.Route()), owners: a.ioOwners(&def), a: a, ctx: ctx, dir: filepath.Join(state, "events"), path: filepath.Join(state, ioCasesFile),
 		coverPath: filepath.Join(state, ioCoverageFile), cover: iowatch.NewCoverer(iowatch.CoverRecord{}, time.Now()),
 		seriesPath: filepath.Join(state, ioSeriesFile), profilesPath: filepath.Join(state, ioProfilesFile),
+		evictorPath: evictorStorePath(a), evictors: evictors.NewAggregate(),
 		cgroupRoot: iowatch.SystemRoots().Cgroup, kindSources: iowatch.KindSources{WorkerState: filepath.Join(a.home, ".local", "state", "worker"), GraftHeavy: iowatch.GraftHeavyDir(record.RuntimeDir())},
 		series: iowatch.NewSeries(iowatch.Default().SeriesKeep.D()), profiles: iowatch.NewProfiles(), live: iowatch.NewLive(),
 		extra: make(chan func(), 16), warnAt: map[string]time.Time{},
@@ -378,6 +387,9 @@ func (s *ioService) saveStop(now time.Time) {
 	if err := iowatch.SaveSeries(s.seriesPath, s.series.Rows(time.Time{}).Seconds()); err != nil {
 		s.a.warn("io", "ряд машины при остановке", "err", err)
 	}
+	if err := s.saveEvictorsStop(now); err != nil {
+		s.a.warn("io", "сводка кандидатов при остановке", "err", err)
+	}
 }
 
 // load — сводки, ряд и профили прошлых запусков в сроке из конфига (не прочитался — по умолчанию).
@@ -399,7 +411,26 @@ func (s *ioService) load() {
 	s.ended = loadIOFile(s, s.profilesPath, "профили cgroup", func(path string) ([]iowatch.Profile, error) {
 		return iowatch.LoadProfiles(path, now.Add(-cfg.ProfilesKeep.D()))
 	})
+	s.loadEvictors(now)
 	s.seedRoute(cfg, now)
+}
+
+func (s *ioService) loadEvictors(now time.Time) {
+	if err := evictors.CleanupTemps(s.evictorPath); err != nil {
+		s.a.warn("io", "удаление временных сводок кандидатов", "err", err)
+	}
+	a, err := evictors.Load(s.evictorPath, now)
+	if err == nil {
+		s.evictors = a
+		return
+	}
+	bad := s.evictorPath + ".bad-" + now.Format("20060102T150405")
+	s.a.warn("io", "сводка кандидатов не разобрана, файл отложен", "err", err, "path", bad)
+	if renameErr := os.Rename(s.evictorPath, bad); renameErr != nil {
+		s.a.warn("io", "отложить битую сводку кандидатов", "err", renameErr, "path", bad)
+		s.evictorStoreBlocked = true
+	}
+	s.evictors = evictors.NewAggregate()
 }
 
 // loadCover — учёт покрытия прошлых запусков; файла нет — засев из посекундного ряда (до учёта замер шёл там,
@@ -543,8 +574,67 @@ func (s *ioService) step(st iowatch.Step) {
 func (s *ioService) pressure() bool { return s.rec.Pressure() }
 
 func (s *ioService) detail(st iowatch.Step) {
+	ev := st.TakeEvictorInterval()
 	s.rec.Detail(st)
 	s.a.saveCPUDetail(st)
+	s.evictors.Add(ev)
+}
+
+func (s *ioService) saveEvictors(now time.Time) error {
+	if s.evictors == nil || s.evictorStoreBlocked {
+		return nil
+	}
+	if s.evictorSaveDone != nil {
+		select {
+		case err := <-s.evictorSaveDone:
+			s.evictorSaveDone = nil
+			if err != nil {
+				return err
+			}
+		default:
+			return nil // Never wait for a previous disk write in the sampling loop.
+		}
+	}
+	s.evictors.Prune(now)
+	if !s.evictors.Dirty() {
+		return nil
+	}
+	snapshot, revision := s.evictors.Snapshot()
+	done := make(chan error, 1)
+	s.evictorSaveDone = done
+	writer := s.evictorWriter
+	if writer == nil {
+		writer = evictors.Save
+	}
+	go func() {
+		err := writer(s.evictorPath, snapshot)
+		if err == nil {
+			s.evictors.MarkSaved(revision)
+		}
+		done <- err
+	}()
+	return nil
+}
+
+// saveEvictorsStop waits for any periodic copy and persists the last dirty snapshot before shutdown.
+func (s *ioService) saveEvictorsStop(now time.Time) error {
+	var saveErr error
+	if s.evictorSaveDone != nil {
+		if err := <-s.evictorSaveDone; err != nil {
+			saveErr = err
+		}
+		s.evictorSaveDone = nil
+	}
+	if err := s.saveEvictors(now); err != nil {
+		saveErr = errors.Join(saveErr, err)
+	}
+	if s.evictorSaveDone != nil {
+		if err := <-s.evictorSaveDone; err != nil {
+			saveErr = errors.Join(saveErr, err)
+		}
+		s.evictorSaveDone = nil
+	}
+	return saveErr
 }
 
 func (s *ioService) sampleErr(key string, err error) {
@@ -570,6 +660,7 @@ func (s *ioService) housekeep(ctx context.Context, gen int, keep time.Duration) 
 	reload := time.NewTicker(ioReloadEvery)
 	defer reload.Stop()
 	cleanAt, saveAt, cgroupsAt := time.Time{}, time.Now().Add(ioSaveEvery), time.Now().Add(ioCgroupsEvery)
+	evictorSaveAt := time.Now().Add(ioEvictorSaveEvery)
 	for {
 		now := time.Now()
 		if now.After(cleanAt) {
@@ -583,6 +674,15 @@ func (s *ioService) housekeep(ctx context.Context, gen int, keep time.Duration) 
 		if now.After(cgroupsAt) {
 			cgroupsAt = now.Add(ioCgroupsEvery)
 			s.checkCgroups(ctx, now)
+		}
+		if now.After(evictorSaveAt) {
+			evictorSaveAt = now.Add(ioEvictorSaveEvery)
+			saveAt := now
+			s.post(ctx, func() {
+				if err := s.saveEvictors(saveAt); err != nil {
+					s.warn(saveAt, "evictors-save", "сводка кандидатов вытеснения", err)
+				}
+			})
 		}
 		select {
 		case <-ctx.Done():
@@ -622,7 +722,7 @@ func (s *ioService) reconfigure(gen int, next iowatch.Config, err error) {
 		s.warn(time.Now(), "config", "конфиг не прочитан, работаю по прежнему", err)
 		return
 	}
-	if next.Mode == iowatch.ModeOff || next.Step != s.cfg.Step || next.Detail != s.cfg.Detail || next.DetailIdle != s.cfg.DetailIdle || next.Ring != s.cfg.Ring || next.Device != s.cfg.Device {
+	if next.Mode == iowatch.ModeOff || next.Step != s.cfg.Step || next.Detail != s.cfg.Detail || next.DetailIdle != s.cfg.DetailIdle || next.Ring != s.cfg.Ring || next.Device != s.cfg.Device || next.EvictorSwapMin != s.cfg.EvictorSwapMin || next.EvictorAnonMin != s.cfg.EvictorAnonMin {
 		s.restarted = true
 		s.restart()
 		return
