@@ -183,7 +183,8 @@ Artifact только у админов, скиллы `~/work` вне `~/work` �
 
 Сессия может поднять базу командой `aguard memory ceiling 20G`; без числа команда показывает текущие base, swap, `MemoryMax` и shmem. Поднятый base действует до завершения scope и записывается в `~/.local/state/aguard/ceiling/`. Наблюдатель aguard добавляет к base shmem и откладывает снижение, пока память занята. После OOM письмо сессии содержит снятые процессы и команду подъёма.
 `aguard memory ceiling --default` печатает базу из `memory.max` конфига cl в байтах; worker llmark использует её, чтобы брать тот же потолок, что и сессии.
-Без файла слайса или без systemd-run cl отказывается с ошибкой. В новой вкладке Konsole scope живёт около 1–2 с:
+Без файла слайса cl предупреждает и запускает с весом по умолчанию (100); без systemd-run cl по-прежнему отказывается
+с ошибкой. В новой вкладке Konsole scope живёт около 1–2 с:
 Konsole переносит процесс в scope вкладки `tab(<pid оболочки>).scope` (журнал systemd 23.10 17:09: «agent-…scope:
 Consumed … over 1.5s wall clock»; 24.10 у всех пяти консолей cgroup — `app-org.kde.konsole-….scope/tab(…).scope`).
 В tmux процесс остаётся в `agents.slice`.

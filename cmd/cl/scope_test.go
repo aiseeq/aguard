@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -118,10 +119,50 @@ func TestNameArg(t *testing.T) {
 
 func TestSliceInstalled(t *testing.T) {
 	dir := t.TempDir()
-	if err := sliceInstalled(filepath.Join(dir, "agents.slice")); err == nil {
-		t.Error("нет файла — нужна ошибка")
+	if installed, err := sliceInstalled(filepath.Join(dir, "agents.slice")); err != nil || installed {
+		t.Error("нет файла — не должен считаться установленным")
 	}
-	if err := sliceInstalled("agents.slice"); err != nil {
-		t.Errorf("файл репо: %v", err)
+	path := filepath.Join(dir, "agents.slice")
+	if err := os.WriteFile(path, []byte("[Slice]\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	if installed, err := sliceInstalled(path); err != nil || !installed {
+		t.Error("существующий файл должен считаться установленным")
+	}
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statErr := error(nil)
+	if installed, err := sliceInstalled(filepath.Join(blocker, "agents.slice")); err == nil || installed {
+		t.Error("ошибка Stat, отличная от отсутствующего файла, должна возвращаться")
+	} else {
+		statErr = err
+	}
+	got := captureStderr(t, func() { warnSlice(filepath.Join(blocker, "agents.slice"), statErr) })
+	if !strings.Contains(got, "не удалось проверить файл слайса") || strings.Contains(got, "нет файла") ||
+		strings.Contains(got, "cp ~/git") || strings.Count(got, blocker) != 1 {
+		t.Errorf("предупреждение при ошибке Stat: %q", got)
+	}
+}
+
+// captureStderr — что fn написала в os.Stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"os/exec"
@@ -32,6 +33,11 @@ func runMain(t *testing.T, home, cwd string, args ...string) []string {
 
 // runMainEnv — runMain с добавкой к окружению (CL_UPGRADE и т. п.).
 func runMainEnv(t *testing.T, home, cwd string, env []string, args ...string) []string {
+	got, _, _ := runMainEnvSlice(t, home, cwd, env, true, args...)
+	return got
+}
+
+func runMainEnvSlice(t *testing.T, home, cwd string, env []string, installSlice bool, args ...string) ([]string, string, string) {
 	t.Helper()
 	bin := filepath.Join(home, "bin")
 	write(t, filepath.Join(home, "versions", "2.1.310"), "#!/bin/sh\n")
@@ -43,22 +49,90 @@ func runMainEnv(t *testing.T, home, cwd string, env []string, args ...string) []
 	}
 	argv := filepath.Join(home, "argv")
 	fakeTool(t, bin, "systemd-run", `printf '%s\n' "$@" > '`+argv+`'`)
-	write(t, filepath.Join(home, ".config", "systemd", "user", agentsSlice), "[Slice]\n")
+	if installSlice {
+		write(t, filepath.Join(home, ".config", "systemd", "user", agentsSlice), "[Slice]\n")
+	}
 	if err := os.MkdirAll(cwd, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(os.Args[0], args...)
 	cmd.Dir = cwd
 	cmd.Env = append([]string{"CL_TEST_RUN_MAIN=1", "HOME=" + home, "PATH=" + bin, "XDG_RUNTIME_DIR=" + home}, env...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("cl %q: %v\n%s", args, err, out)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		t.Fatalf("cl %q: %v\nstdout:\n%s\nstderr:\n%s", args, err, stdout.String(), stderr.String())
+	}
+	if slices.Equal(args, []string{checkFlag}) {
+		return nil, stdout.String(), stderr.String()
 	}
 	got := readLines(t, argv)
 	i := slices.Index(got, "--")
 	if i < 0 || i+1 >= len(got) || got[i+1] != filepath.Join(bin, "claude") || !slices.Contains(got[:i], "--slice="+agentsSlice) {
 		t.Fatalf("systemd-run %q", got)
 	}
-	return got[i+2:]
+	return got[i+2:], stdout.String(), stderr.String()
+}
+
+func TestMainSliceWarning(t *testing.T) {
+	for _, installed := range []bool{false, true} {
+		name := "missing"
+		if installed {
+			name = "installed"
+		}
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			got, stdout, stderr := runMainEnvSlice(t, home, filepath.Join(home, "project"), nil, installed, "-p", "hello")
+			if !slices.Contains(got, "-p") || !slices.Contains(got, "hello") {
+				t.Errorf("systemd-run не получил cl -p: %q", got)
+			}
+			weight := sliceCPUWeight(t)
+			warning := "вес CPU/IO будет 100, наравне с приложениями пользователя, вместо " + weight
+			install := "cp ~/git/aguard/cmd/cl/agents.slice ~/.config/systemd/user/ && systemctl --user daemon-reload"
+			if installed {
+				if strings.Contains(stderr, warning) || strings.Contains(stderr, install) {
+					t.Errorf("при установленном файле неожиданное предупреждение: %q", stderr)
+				}
+			} else if strings.Count(stderr, warning) != 1 || !strings.Contains(stderr, install) {
+				t.Errorf("в stderr должно быть ровно одно предупреждение с командой установки: %q", stderr)
+			}
+			if strings.Contains(stdout, warning) || strings.Contains(stdout, install) {
+				t.Errorf("предупреждение попало в stdout: %q", stdout)
+			}
+		})
+	}
+	home := t.TempDir()
+	_, stdout, stderr := runMainEnvSlice(t, home, filepath.Join(home, "project"), nil, false, checkFlag)
+	if strings.Count(stderr, "вес CPU/IO будет 100") != 1 || !strings.Contains(stderr, "cp ~/git/aguard/cmd/cl/agents.slice ~/.config/systemd/user/") {
+		t.Errorf("--cl-check без файла слайса не предупредил ровно один раз: %q", stderr)
+	}
+	if strings.Contains(stdout, "вес CPU/IO") {
+		t.Errorf("--cl-check напечатал предупреждение в stdout: %q", stdout)
+	}
+
+	upgradeEnv := []string{upgradeEnv + `={"v":1,"name":"upgraded","n":2,"args":["-p","hello"]}`}
+	home = t.TempDir()
+	_, stdout, stderr = runMainEnvSlice(t, home, filepath.Join(home, "project"), upgradeEnv, false, "-p", "hello")
+	if strings.Contains(stderr, "вес CPU/IO") || strings.Contains(stdout, "вес CPU/IO") {
+		t.Errorf("после self-upgrade предупреждение нарушает живой экран: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func sliceCPUWeight(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("agents.slice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if value, ok := strings.CutPrefix(line, "CPUWeight="); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	t.Fatal("в cmd/cl/agents.slice нет CPUWeight=")
+	return ""
 }
 
 // Флаги сессии (dafd514: --allowedTools=Grep,Glob) получают сессия и cl -p, подкоманда — нет; имя — по папке, занятое
