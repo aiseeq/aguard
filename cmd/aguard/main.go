@@ -112,10 +112,12 @@ type app struct {
 	act                  *activity.Recorder  // учёт срабатываний; только у демона, у команд nil
 	cpu                  map[string]*cpuHost // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
 	cpuDetails           *cpuDetailBuffer
-	strayRead            strayReader                  // замер процессов без родителя; подменяется в тестах
-	trackFetch           func() (trackfd.Pair, error) // пара дескрипторов слежения; подменяется в тестах
-	diskState            *disk.State                  // состояние наблюдателя disk; загружается один раз демоном
-	diskWalkLoaded       bool                         // sizes и traces загружены до первого обхода
+	strayRead            strayReader                             // замер процессов без родителя; подменяется в тестах
+	trackFetch           func() (trackfd.Pair, error)            // пара дескрипторов слежения; подменяется в тестах
+	diskState            *disk.State                             // состояние наблюдателя disk в памяти демона
+	diskWalkLoaded       bool                                    // sizes и traces загружены до первого обхода
+	diskStateMtimes      diskStateMtimes                         // версии state.json и round.json, принятые кешем
+	diskLoadRound        func(string) (*disk.State, bool, error) // подмена загрузчика в тестах
 	queueCache           queueTicketCache
 	queueExternalAt      time.Time // последний обход внешнего трекера
 	queueNext            map[string]queueNextResult

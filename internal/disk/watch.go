@@ -170,6 +170,11 @@ func (s *State) LowFreeMessage(c *Config, free int64, home string) string {
 
 const roundStateName = "round.json"
 
+// RoundStatePath возвращает путь к частому состоянию рядом с state.json.
+func RoundStatePath(path string) string {
+	return filepath.Join(filepath.Dir(path), roundStateName)
+}
+
 type roundState struct {
 	Free         []Point              `json:"free"`
 	LastWalk     time.Time            `json:"last_walk"`
@@ -229,7 +234,7 @@ func Load(path string) (*State, error) {
 }
 
 func loadFrequent(path string) (roundState, bool, error) {
-	name := filepath.Join(filepath.Dir(path), roundStateName)
+	name := RoundStatePath(path)
 	b, err := os.ReadFile(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return roundState{}, false, nil
@@ -274,7 +279,7 @@ func (s *State) SaveFrequent(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("состояние disk: %w", err)
 	}
-	return writeStateAtomic(filepath.Join(filepath.Dir(path), roundStateName), b)
+	return writeStateAtomic(RoundStatePath(path), b)
 }
 
 // Save пишет полное состояние; используется разовыми сохранениями и тестами.

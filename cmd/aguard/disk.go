@@ -31,6 +31,43 @@ import (
 	"github.com/aiseeq/aguard/internal/yield"
 )
 
+// diskFileMtime отмечает существование файла и время его изменения.
+type diskFileMtime struct {
+	modTime time.Time
+	exists  bool
+}
+
+// diskStateMtimes хранит принятые версии state.json и round.json.
+type diskStateMtimes struct {
+	state diskFileMtime
+	round diskFileMtime
+}
+
+// diskMtime возвращает отметку файла; отсутствующий файл считается пустой отметкой.
+func diskMtime(path string) (diskFileMtime, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return diskFileMtime{}, nil
+	}
+	if err != nil {
+		return diskFileMtime{}, fmt.Errorf("состояние disk %s: stat: %w", path, err)
+	}
+	return diskFileMtime{modTime: info.ModTime(), exists: true}, nil
+}
+
+// readDiskStateMtimes читает отметки обоих файлов состояния disk.
+func readDiskStateMtimes(path string) (diskStateMtimes, error) {
+	state, err := diskMtime(path)
+	if err != nil {
+		return diskStateMtimes{}, err
+	}
+	round, err := diskMtime(disk.RoundStatePath(path))
+	if err != nil {
+		return diskStateMtimes{}, err
+	}
+	return diskStateMtimes{state: state, round: round}, nil
+}
+
 func (a *app) diskCmd(ctx context.Context, args []string) error {
 	cmd, rest := sub(args)
 	cfg, err := a.config()
@@ -176,6 +213,9 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 			return err
 		}
 		a.diskState, a.diskWalkLoaded = restored, true
+		if err := a.refreshDiskStateMtimes(statePath); err != nil {
+			return err
+		}
 		return nil
 	}
 	if err != nil { // список записей неполон: сигналы по прочитанным всё равно пишем
@@ -200,15 +240,38 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	if usage != nil {
-		if err := st.SaveWalk(statePath); err != nil {
+		if err := a.saveDiskState(st.SaveWalk, statePath, statePath, &a.diskStateMtimes.state); err != nil {
 			return err
 		}
 		a.diskWalkLoaded = true
 	}
-	if err := st.SaveFrequent(statePath); err != nil {
+	if err := a.saveDiskState(st.SaveFrequent, statePath, disk.RoundStatePath(statePath), &a.diskStateMtimes.round); err != nil {
 		return err
 	}
 	return store.Rotate(now, cfg.Disk.Keep.D())
+}
+
+// refreshDiskStateMtimes принимает отметки файлов после их загрузки или восстановления.
+func (a *app) refreshDiskStateMtimes(path string) error {
+	mtimes, err := readDiskStateMtimes(path)
+	if err != nil {
+		return err
+	}
+	a.diskStateMtimes = mtimes
+	return nil
+}
+
+// saveDiskState записывает файл и сразу принимает его новую отметку.
+func (a *app) saveDiskState(save func(string) error, savePath, mtimePath string, stamp *diskFileMtime) error {
+	if err := save(savePath); err != nil {
+		return err
+	}
+	mtime, err := diskMtime(mtimePath)
+	if err != nil {
+		return err
+	}
+	*stamp = mtime
+	return nil
 }
 
 // diskFreeSignals — сигнал о свободном месте и прогноз запаса; сбой — WARN, проход идёт. Без хозяев записей: идут и
@@ -225,12 +288,28 @@ func (a *app) diskFreeSignals(cfg *config.Config, st *disk.State, now time.Time,
 }
 
 func (a *app) diskRoundState(path string, cfg *config.Config, now time.Time, free int64) (*disk.State, error) {
+	if a.diskState != nil {
+		mtimes, err := readDiskStateMtimes(path)
+		if err != nil {
+			return nil, err
+		}
+		if mtimes != a.diskStateMtimes {
+			a.diskState, a.diskWalkLoaded = nil, false
+		}
+	}
 	if a.diskState == nil {
-		st, loaded, err := disk.LoadRound(path)
+		loadRound := a.diskLoadRound
+		if loadRound == nil {
+			loadRound = disk.LoadRound
+		}
+		st, loaded, err := loadRound(path)
 		if err != nil {
 			return nil, err
 		}
 		a.diskState, a.diskWalkLoaded = st, loaded
+		if err := a.refreshDiskStateMtimes(path); err != nil {
+			return nil, err
+		}
 	}
 	st := a.diskState
 	needsSizes := cfg.Disk.FreeMode != disk.FreeOff && free < int64(cfg.Disk.FreeMin)
@@ -240,6 +319,9 @@ func (a *app) diskRoundState(path string, cfg *config.Config, now time.Time, fre
 			return nil, err
 		}
 		a.diskState, a.diskWalkLoaded = loaded, true
+		if err := a.refreshDiskStateMtimes(path); err != nil {
+			return nil, err
+		}
 		st = loaded
 	}
 	return st, nil

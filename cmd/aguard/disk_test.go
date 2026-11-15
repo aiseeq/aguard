@@ -78,6 +78,159 @@ func TestDiskRoundRestartPreservesFreeAndTold(t *testing.T) {
 	}
 }
 
+func TestDiskRoundReloadsExternalRoundState(t *testing.T) {
+	a, _ := testIOApp(t)
+	if err := os.MkdirAll(a.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(a.dir("disk"), "state.json")
+	cfg := config.Default(a.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	now := time.Now()
+	initial := &disk.State{LastWalk: now.Add(-48 * time.Hour), Told: map[string]time.Time{}}
+	if err := initial.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.diskRound(t.Context(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !a.diskState.LastWalk.After(initial.LastWalk) {
+		t.Fatalf("начальный просроченный обход не выполнен: last_walk=%v", a.diskState.LastWalk)
+	}
+	stateInfo, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updatedAt := now.Add(24 * time.Hour)
+	updated := &disk.State{LastWalk: updatedAt, Free: []disk.Point{{At: updatedAt, Bytes: 765}},
+		Told: map[string]time.Time{"grew /external": updatedAt}}
+	if err := updated.SaveFrequent(statePath); err != nil {
+		t.Fatal(err)
+	}
+	roundPath := disk.RoundStatePath(statePath)
+	setDiskMtime(t, roundPath, now.Add(time.Minute))
+	if err := a.diskRound(t.Context(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !a.diskState.LastWalk.Equal(updatedAt) || !a.diskState.Told["grew /external"].Equal(updatedAt) {
+		t.Fatalf("внешний round не подхвачен: last_walk=%v told=%v", a.diskState.LastWalk, a.diskState.Told)
+	}
+	if len(a.diskState.Free) == 0 || a.diskState.Free[0].Bytes != 765 {
+		t.Fatalf("внешний free не подхвачен: %v", a.diskState.Free)
+	}
+	gotInfo, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotInfo.ModTime().Equal(stateInfo.ModTime()) {
+		t.Fatalf("проход записал state.json: до %v, после %v", stateInfo.ModTime(), gotInfo.ModTime())
+	}
+}
+
+func TestDiskRoundReloadsExternalWalkState(t *testing.T) {
+	a, _ := testIOApp(t)
+	if err := os.MkdirAll(a.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(a.dir("disk"), "state.json")
+	cfg := config.Default(a.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	now := time.Now()
+	initial := &disk.State{LastWalk: now.Add(-48 * time.Hour), Told: map[string]time.Time{}}
+	if err := initial.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.diskRoundState(statePath, &cfg, now, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	updatedAt := now.Add(24 * time.Hour)
+	updated := &disk.State{Sizes: map[string][]disk.Point{"/external": {{At: updatedAt, Bytes: 321}}}, LastWalk: updatedAt}
+	if err := updated.SaveWalk(statePath); err != nil {
+		t.Fatal(err)
+	}
+	setDiskMtime(t, statePath, now.Add(time.Minute))
+	if _, err := a.diskRoundState(statePath, &cfg, now, 100); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.diskState.Sizes["/external"]; len(got) != 1 || got[0].Bytes != 321 {
+		t.Fatalf("новые sizes не подхвачены: %v", a.diskState.Sizes)
+	}
+}
+
+func TestDiskRoundKeepsCachedRoundState(t *testing.T) {
+	a, _ := testIOApp(t)
+	if err := os.MkdirAll(a.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(a.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	statePath := filepath.Join(a.dir("disk"), "state.json")
+	initial := &disk.State{LastWalk: time.Now().Add(24 * time.Hour), Told: map[string]time.Time{}}
+	if err := initial.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	loads := 0
+	a.diskLoadRound = func(path string) (*disk.State, bool, error) {
+		loads++
+		return disk.LoadRound(path)
+	}
+	for range 3 {
+		if err := a.diskRound(t.Context(), &cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if loads != 1 {
+		t.Fatalf("LoadRound вызван %d раз, нужен один вызов при живом кеше", loads)
+	}
+}
+
+func TestDiskRoundKeepsCacheAfterOwnWalk(t *testing.T) {
+	a, _ := testIOApp(t)
+	if err := os.MkdirAll(a.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(a.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	loads := 0
+	a.diskLoadRound = func(path string) (*disk.State, bool, error) {
+		loads++
+		return disk.LoadRound(path)
+	}
+	var walkAt time.Time
+	for pass := range 3 {
+		if err := a.diskRound(t.Context(), &cfg); err != nil {
+			t.Fatalf("проход %d: %v", pass+1, err)
+		}
+		if pass == 0 {
+			if a.diskState.LastWalk.IsZero() {
+				t.Fatal("первый проход не выполнил обход")
+			}
+			walkAt = a.diskState.LastWalk
+			if _, err := os.Stat(filepath.Join(a.dir("disk"), "state.json")); err != nil {
+				t.Fatalf("state.json после собственного обхода: %v", err)
+			}
+		} else if !a.diskState.LastWalk.Equal(walkAt) {
+			t.Fatalf("проход %d повторил обход: last_walk=%v, после первого обхода %v", pass+1, a.diskState.LastWalk, walkAt)
+		}
+	}
+	if loads != 1 {
+		t.Fatalf("LoadRound вызван %d раз после собственного обхода и двух проходов без обхода, нужен один", loads)
+	}
+}
+
+func setDiskMtime(t *testing.T, path string, at time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDiskRoundYieldsAndMarksInterrupted(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
