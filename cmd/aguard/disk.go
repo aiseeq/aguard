@@ -18,6 +18,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/config"
@@ -27,15 +28,12 @@ import (
 	"github.com/aiseeq/aguard/internal/names"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/statefile"
 	"github.com/aiseeq/aguard/internal/waits"
 	"github.com/aiseeq/aguard/internal/yield"
 )
 
-// diskFileMtime отмечает существование файла и время его изменения.
-type diskFileMtime struct {
-	modTime time.Time
-	exists  bool
-}
+type diskFileMtime = statefile.FileStamp
 
 // diskStateMtimes хранит принятые версии state.json и round.json.
 type diskStateMtimes struct {
@@ -45,14 +43,11 @@ type diskStateMtimes struct {
 
 // diskMtime возвращает отметку файла; отсутствующий файл считается пустой отметкой.
 func diskMtime(path string) (diskFileMtime, error) {
-	info, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return diskFileMtime{}, nil
-	}
+	stamp, err := statefile.FileStampOf(path)
 	if err != nil {
 		return diskFileMtime{}, fmt.Errorf("состояние disk %s: stat: %w", path, err)
 	}
-	return diskFileMtime{modTime: info.ModTime(), exists: true}, nil
+	return stamp, nil
 }
 
 // readDiskStateMtimes читает отметки обоих файлов состояния disk.
@@ -245,10 +240,72 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 		}
 		a.diskWalkLoaded = true
 	}
-	if err := a.saveDiskState(st.SaveFrequent, statePath, disk.RoundStatePath(statePath), &a.diskStateMtimes.round); err != nil {
+	if err := a.saveDiskFrequentState(st, statePath); err != nil {
 		return err
 	}
 	return store.Rotate(now, cfg.Disk.Keep.D())
+}
+
+// saveDiskFrequentState сохраняет отметки прохода, сливая более новые чужие told/letters.
+// Flock нужен только на короткий участок чтение/слияние/rename, не на обход записей.
+func (a *app) saveDiskFrequentState(st *disk.State, statePath string) (retErr error) {
+	roundPath := disk.RoundStatePath(statePath)
+	if err := os.MkdirAll(filepath.Dir(roundPath), 0o700); err != nil {
+		return fmt.Errorf("состояние disk: %w", err)
+	}
+	lock, err := os.OpenFile(roundPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("состояние disk: lock: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		if closeErr := lock.Close(); closeErr != nil {
+			return errors.Join(fmt.Errorf("состояние disk: lock: %w", err), closeErr)
+		}
+		return fmt.Errorf("состояние disk: lock: %w", err)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, syscall.Flock(int(lock.Fd()), syscall.LOCK_UN), lock.Close())
+	}()
+
+	mtime, err := diskMtime(roundPath)
+	if err != nil {
+		return err
+	}
+	if mtime != a.diskStateMtimes.round {
+		foreign, _, err := disk.LoadRound(statePath)
+		if err != nil {
+			return err
+		}
+		mergeDiskTold(st, foreign)
+	}
+	if err := st.SaveFrequent(statePath); err != nil {
+		return err
+	}
+	mtime, err = diskMtime(roundPath)
+	if err != nil {
+		return err
+	}
+	a.diskStateMtimes.round = mtime
+	return nil
+}
+
+func mergeDiskTold(own, foreign *disk.State) {
+	if own.Told == nil {
+		own.Told = make(map[string]time.Time)
+	}
+	for key, at := range foreign.Told {
+		if own.Told[key].Before(at) {
+			own.Told[key] = at
+		}
+	}
+	if own.Letters == nil {
+		own.Letters = make(map[string]disk.FastTold)
+	}
+	for key, letter := range foreign.Letters {
+		if own.Letters[key].At.Before(letter.At) {
+			own.Letters[key] = letter
+		}
+	}
 }
 
 // refreshDiskStateMtimes принимает отметки файлов после их загрузки или восстановления.
@@ -298,6 +355,12 @@ func (a *app) diskRoundState(path string, cfg *config.Config, now time.Time, fre
 		}
 	}
 	if a.diskState == nil {
+		// Снимать baseline до чтения: загрузчик может вернуть старое содержимое, а внешний
+		// писатель успеть заменить round.json до возврата из LoadRound.
+		loadedMtimes, err := readDiskStateMtimes(path)
+		if err != nil {
+			return nil, err
+		}
 		loadRound := a.diskLoadRound
 		if loadRound == nil {
 			loadRound = disk.LoadRound
@@ -307,21 +370,21 @@ func (a *app) diskRoundState(path string, cfg *config.Config, now time.Time, fre
 			return nil, err
 		}
 		a.diskState, a.diskWalkLoaded = st, loaded
-		if err := a.refreshDiskStateMtimes(path); err != nil {
-			return nil, err
-		}
+		a.diskStateMtimes = loadedMtimes
 	}
 	st := a.diskState
 	needsSizes := cfg.Disk.FreeMode != disk.FreeOff && free < int64(cfg.Disk.FreeMin)
 	if !a.diskWalkLoaded && (needsSizes || st.WalkDue(&cfg.Disk, now, free) != "") {
+		loadedMtimes, err := readDiskStateMtimes(path)
+		if err != nil {
+			return nil, err
+		}
 		loaded, err := disk.Load(path)
 		if err != nil {
 			return nil, err
 		}
 		a.diskState, a.diskWalkLoaded = loaded, true
-		if err := a.refreshDiskStateMtimes(path); err != nil {
-			return nil, err
-		}
+		a.diskStateMtimes = loadedMtimes
 		st = loaded
 	}
 	return st, nil

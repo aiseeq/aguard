@@ -13,6 +13,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/disk"
+	"github.com/aiseeq/aguard/internal/statefile"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -221,6 +222,240 @@ func TestDiskRoundKeepsCacheAfterOwnWalk(t *testing.T) {
 	}
 	if loads != 1 {
 		t.Fatalf("LoadRound вызван %d раз после собственного обхода и двух проходов без обхода, нужен один", loads)
+	}
+}
+
+func TestDiskRoundPreservesExternalToldWrittenAfterLoad(t *testing.T) {
+	a, _ := testIOApp(t)
+	if err := os.MkdirAll(a.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(a.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	statePath := filepath.Join(a.dir("disk"), "state.json")
+	initial := &disk.State{LastWalk: time.Now().Add(24 * time.Hour), Told: map[string]time.Time{}}
+	if err := initial.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	foreignAt := time.Now().Add(time.Minute)
+	loads := 0
+	a.diskLoadRound = func(path string) (*disk.State, bool, error) {
+		loads++
+		st, loaded, err := disk.LoadRound(path)
+		if err != nil {
+			return nil, false, err
+		}
+		if loads == 1 {
+			st.Told["foreign"] = foreignAt.Add(-time.Minute)
+			st.Letters = map[string]disk.FastTold{"foreign": {At: foreignAt.Add(-time.Minute)}}
+			foreign := &disk.State{Told: map[string]time.Time{"foreign": foreignAt},
+				Letters: map[string]disk.FastTold{"foreign": {At: foreignAt}}}
+			if err := foreign.SaveFrequent(path); err != nil {
+				return nil, false, err
+			}
+			setDiskMtime(t, disk.RoundStatePath(path), foreignAt)
+		}
+		return st, loaded, nil
+	}
+	for range 2 {
+		if err := a.diskRound(t.Context(), &cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _, err := disk.LoadRound(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Told["foreign"].Equal(foreignAt) {
+		t.Fatalf("чужая told потеряна после двух проходов: got=%v want=%v", got.Told, foreignAt)
+	}
+	if !got.Letters["foreign"].At.Equal(foreignAt) {
+		t.Fatalf("чужая letters потеряна после двух проходов: got=%v want=%v", got.Letters, foreignAt)
+	}
+}
+
+func TestDiskRoundDoesNotRestorePrunedToldWithoutExternalWrite(t *testing.T) {
+	a, _ := testIOApp(t)
+	if err := os.MkdirAll(a.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(a.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	statePath := filepath.Join(a.dir("disk"), "state.json")
+	oldAt := time.Now().Add(-30 * time.Hour)
+	initial := &disk.State{LastWalk: time.Now().Add(-48 * time.Hour), Told: map[string]time.Time{"grew /old": oldAt}}
+	if err := initial.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.diskRound(t.Context(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := disk.LoadRound(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Told["grew /old"]; ok {
+		t.Fatalf("отметка старше суток воскресла: %v", got.Told)
+	}
+}
+
+func TestDiskRoundKeepsOwnLaterTold(t *testing.T) {
+	a, _ := testIOApp(t)
+	if err := os.MkdirAll(a.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(a.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	statePath := filepath.Join(a.dir("disk"), "state.json")
+	initial := &disk.State{LastWalk: time.Now().Add(24 * time.Hour), Told: map[string]time.Time{}}
+	if err := initial.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	ownAt := time.Now()
+	a.diskLoadRound = func(path string) (*disk.State, bool, error) {
+		st, loaded, err := disk.LoadRound(path)
+		if err != nil {
+			return nil, false, err
+		}
+		st.Told["k"] = ownAt
+		if st.Letters == nil {
+			st.Letters = map[string]disk.FastTold{}
+		}
+		st.Letters["l"] = disk.FastTold{At: ownAt, Free: 1}
+		foreign := &disk.State{Told: map[string]time.Time{"k": ownAt.Add(-time.Hour)},
+			Letters: map[string]disk.FastTold{"l": {At: ownAt.Add(-time.Hour), Free: 2}}}
+		if err := foreign.SaveFrequent(path); err != nil {
+			return nil, false, err
+		}
+		setDiskMtime(t, disk.RoundStatePath(path), ownAt.Add(time.Minute))
+		return st, loaded, nil
+	}
+	if err := a.diskRound(t.Context(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := disk.LoadRound(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Told["k"].Equal(ownAt) {
+		t.Fatalf("своя более поздняя told уступила старой чужой: %v", got.Told)
+	}
+	if l := got.Letters["l"]; !l.At.Equal(ownAt) || l.Free != 1 {
+		t.Fatalf("своё более позднее письмо уступило старому чужому: %+v", got.Letters)
+	}
+}
+
+func TestDiskRoundKeepsManualTickTold(t *testing.T) {
+	d, _ := testIOApp(t)
+	if err := os.MkdirAll(d.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(d.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	statePath := filepath.Join(d.dir("disk"), "state.json")
+	initial := &disk.State{LastWalk: time.Now().Add(24 * time.Hour), Told: map[string]time.Time{}}
+	if err := initial.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	manualRan := false
+	d.diskLoadRound = func(path string) (*disk.State, bool, error) {
+		st, loaded, err := disk.LoadRound(path)
+		if err != nil {
+			return nil, false, err
+		}
+		st.Told["daemon"] = at
+		if !manualRan {
+			manualRan = true
+			m := &app{}
+			*m = *d
+			m.diskState, m.diskStateMtimes = nil, diskStateMtimes{}
+			m.diskLoadRound = func(p string) (*disk.State, bool, error) {
+				s, loaded, err := disk.LoadRound(p)
+				if err == nil {
+					s.Told["manual"] = at
+				}
+				return s, loaded, err
+			}
+			if err := m.diskRound(t.Context(), &cfg); err != nil {
+				return nil, false, err
+			}
+		}
+		return st, loaded, nil
+	}
+	for range 2 {
+		if err := d.diskRound(t.Context(), &cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _, err := disk.LoadRound(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Told["manual"].IsZero() || got.Told["daemon"].IsZero() {
+		t.Fatalf("told потеряна: %v", got.Told)
+	}
+}
+
+func TestDiskRoundDetectsReplacementWithSameMtime(t *testing.T) {
+	a, _ := testIOApp(t)
+	if err := os.MkdirAll(a.dir("disk"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default(a.home)
+	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = nil, nil, nil
+	cfg.Disk.FreeMode = disk.FreeOff
+	statePath := filepath.Join(a.dir("disk"), "state.json")
+	oldAt := time.Now().Truncate(time.Second)
+	initial := &disk.State{LastWalk: time.Now().Add(24 * time.Hour), Told: map[string]time.Time{"foreign": oldAt}}
+	if err := initial.Save(statePath); err != nil {
+		t.Fatal(err)
+	}
+	var before statefile.FileStamp
+	newAt := oldAt.Add(time.Hour)
+	a.diskLoadRound = func(path string) (*disk.State, bool, error) {
+		st, loaded, err := disk.LoadRound(path)
+		if err != nil {
+			return nil, false, err
+		}
+		roundPath := disk.RoundStatePath(path)
+		oldFile, err := os.Open(roundPath) // держим старый inode до завершения атомарной замены
+		if err != nil {
+			return nil, false, err
+		}
+		defer oldFile.Close()
+		before, err = statefile.FileStampOf(roundPath)
+		if err != nil {
+			return nil, false, err
+		}
+		foreign := *st
+		foreign.Told = map[string]time.Time{"foreign": newAt}
+		if err := foreign.SaveFrequent(path); err != nil {
+			return nil, false, err
+		}
+		setDiskMtime(t, roundPath, time.Unix(0, before.Mtime))
+		after, err := statefile.FileStampOf(roundPath)
+		if err != nil {
+			return nil, false, err
+		}
+		if after.Size != before.Size || after.Mtime != before.Mtime || after.Inode == before.Inode {
+			return nil, false, fmt.Errorf("замена не сохранила size/mtime и новый inode: before=%+v after=%+v", before, after)
+		}
+		return st, loaded, nil
+	}
+	if err := a.diskRound(t.Context(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := disk.LoadRound(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Told["foreign"].Equal(newAt) {
+		t.Fatalf("чужая замена с прежним mtime не распознана: got=%v want=%v", got.Told, newAt)
 	}
 }
 

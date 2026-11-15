@@ -24,12 +24,16 @@ const (
 	maxCachedStates = 8
 )
 
-type stamp struct {
-	exists bool
-	size   int64
-	mtime  int64
-	inode  uint64
+// FileStamp identifies a file version across atomic replacements, including filesystems
+// where consecutive writes can have the same modification time.
+type FileStamp struct {
+	Exists bool
+	Size   int64
+	Mtime  int64
+	Inode  uint64
 }
+
+type stamp = FileStamp
 
 type loadedState struct {
 	root     *jsonNode
@@ -147,16 +151,25 @@ func takeRemembered(path string) (loadedState, bool) {
 }
 
 func fileStamp(path string) (stamp, error) {
+	s, err := FileStampOf(path)
+	if err != nil {
+		return stamp{}, err
+	}
+	return s, nil
+}
+
+// FileStampOf returns a file's identity and modification stamp; a missing file has a zero stamp.
+func FileStampOf(path string) (FileStamp, error) {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return stamp{}, nil
+		return FileStamp{}, nil
 	}
 	if err != nil {
-		return stamp{}, fmt.Errorf("stat state file %s: %w", path, err)
+		return FileStamp{}, fmt.Errorf("stat file %s: %w", path, err)
 	}
-	s := stamp{exists: true, size: info.Size(), mtime: info.ModTime().UnixNano()}
+	s := FileStamp{Exists: true, Size: info.Size(), Mtime: info.ModTime().UnixNano()}
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		s.inode = stat.Ino
+		s.Inode = stat.Ino
 	}
 	return s, nil
 }
