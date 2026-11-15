@@ -117,23 +117,34 @@ func Read(path string) ([]Entry, int, error) {
 	return out, bad, nil
 }
 
+// chmodFile — подменяется в тесте, чтобы проверить отказ сужения прав.
+var chmodFile = (*os.File).Chmod
+
 // Append дописывает записи: один write с O_APPEND под flock, шапка — если файл пуст. Читателям блокировка не нужна:
 // строка не бывает видна наполовину.
 func Append(path string, entries []Entry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	// 600: в файле цитаты пользователя (решение лида 12.11, тикет said-tsv-perms-600); старый файл 644 сужается при записи.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("указатель сказанного: %w", err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		return errors.Join(fmt.Errorf("указатель сказанного: блокировка: %w", err), f.Close())
 	}
-	var b strings.Builder
-	if info, err := f.Stat(); err != nil {
+	info, err := f.Stat()
+	if err != nil {
 		return errors.Join(fmt.Errorf("указатель сказанного: %w", err), f.Close())
-	} else if info.Size() == 0 {
+	}
+	if info.Mode().Perm() != 0o600 {
+		if err := chmodFile(f, 0o600); err != nil {
+			return errors.Join(fmt.Errorf("указатель сказанного: права 600: %w", err), f.Close())
+		}
+	}
+	var b strings.Builder
+	if info.Size() == 0 {
 		b.WriteString(Header + "\n")
 	}
 	for i := range entries {
