@@ -132,14 +132,14 @@ func unitSafe(s string) string {
 
 // sliceInstalled сообщает, есть ли файл слайса. Если его нет, systemd создаст пустой agents.slice с весом 100
 // вместо 40, но запуск безопасен: предупреждаем и подсказываем установку, а код не запрещает пользователю работать.
-// Ошибка — та, что вернул os.Stat (путь в ней уже есть).
+// В ошибке путь один раз — из os.Stat.
 func sliceInstalled(path string) (bool, error) {
 	_, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("не удалось проверить файл слайса: %w", err)
 	}
 	return true, nil
 }
@@ -148,7 +148,7 @@ func sliceInstalled(path string) (bool, error) {
 // не каталог) — сама ошибка: файл может быть на месте, чинить надо доступ, а не ставить заново.
 func warnSlice(path string, statErr error) {
 	if statErr != nil {
-		fmt.Fprintf(os.Stderr, "cl: не удалось проверить файл слайса: %v; если systemd его тоже не прочтёт, вес CPU/IO будет 100, "+
+		fmt.Fprintf(os.Stderr, "cl: %v; если systemd его тоже не прочтёт, вес CPU/IO будет 100, "+
 			"наравне с приложениями пользователя, вместо 40\n", statErr)
 		return
 	}
