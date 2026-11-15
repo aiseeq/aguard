@@ -10,6 +10,7 @@ import (
 // Case — сводка случая фриза: подряд шаги с простоем (Stalled), спокойные промежутки до gap случай
 // не делят. Хранится только сводка: машина за случай и виновники; сырые шаги остаются в буфере.
 type Case struct {
+	BootID    string    `json:"boot_id,omitempty"`
 	Start     time.Time `json:"start"`  // начало первого шага с простоем
 	End       time.Time `json:"end"`    // конец последнего шага с простоем
 	DurMS     int64     `json:"dur_ms"` // End − Start, по стене
@@ -43,11 +44,27 @@ type Case struct {
 	OutsideIdleMS int64 `json:"outside_idle_ms,omitempty"`
 	// Waiting — диск занят малую долю случая, а cgroup провела в PSI full io не менее 60% окна деталей.
 	// Это локальное ожидание cgroup, не фриз машины.
-	Waiting  bool     `json:"waiting,omitempty"`
-	Culprits *Culprit `json:"culprits,omitempty"` // только у случаев от case_min
+	Waiting     bool      `json:"waiting,omitempty"`
+	Culprits    *Culprit  `json:"culprits,omitempty"` // только у случаев от case_min
+	Sudo        *SudoInfo `json:"sudo,omitempty"`
+	ForeignSudo *SudoInfo `json:"foreign_sudo,omitempty"`
 	// OwnerOffline — хозяин случая был не в сети, когда маршрут решал (ioroute): засев после перезапуска повторяет
 	// тогдашнее решение, а не по сессиям в сети сейчас.
 	OwnerOffline bool `json:"owner_offline,omitempty"`
+}
+
+// SudoInfo — команда, запущенная из root logind session.
+type SudoInfo struct {
+	Command    string    `json:"command"`
+	TTY        string    `json:"tty,omitempty"`
+	PWD        string    `json:"pwd,omitempty"`
+	User       string    `json:"user,omitempty"`
+	Owner      string    `json:"owner,omitempty"`
+	OwnerLabel string    `json:"owner_label,omitempty"`
+	Session    string    `json:"session,omitempty"`
+	BootID     string    `json:"boot_id,omitempty"`
+	OpenedAt   time.Time `json:"opened_at,omitzero"`
+	ClosedAt   time.Time `json:"-"`
 }
 
 // Culprit — виновники случая за окно From..End: до caseTop имён на меру.

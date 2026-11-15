@@ -55,7 +55,7 @@ func TestIOReportCoverageServiceAndFile(t *testing.T) {
 	go s.wait(time.Minute)
 	acceptWaitSocket(t, socket)
 	since, until := now.Add(-4*time.Hour), now
-	if err := s.a.ioReport(s.path, true, since, until, 0, "", true); err != nil {
+	if err := s.a.ioReport(context.Background(), s.path, true, since, until, 0, "", true); err != nil {
 		t.Fatal(err)
 	}
 	live, liveKeys := coverageJSON(t, out.Bytes())
@@ -78,7 +78,7 @@ func TestIOReportCoverageServiceAndFile(t *testing.T) {
 	if err := iowatch.SaveCoverage(filepath.Join(filepath.Dir(f.path), ioCoverageFile), rec); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.a.ioReport(f.path, true, since, until, 0, "", true); err != nil {
+	if err := f.a.ioReport(context.Background(), f.path, true, since, until, 0, "", true); err != nil {
 		t.Fatal(err)
 	}
 	file, fileKeys := coverageJSON(t, fout.Bytes())
@@ -97,7 +97,7 @@ func TestIOReportCoverageBrokenFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now()
-	err := s.a.ioReport(s.path, true, now.Add(-time.Hour), now, 0, "", true)
+	err := s.a.ioReport(context.Background(), s.path, true, now.Add(-time.Hour), now, 0, "", true)
 	if err == nil || !strings.Contains(err.Error(), "учёт покрытия") {
 		t.Fatalf("битый файл учёта: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestIOReportCoverageBrokenFile(t *testing.T) {
 func TestIOReportCoverageBeforeKeep(t *testing.T) {
 	s, out, _ := ioLiveService(t, t.Context())
 	now := time.Now()
-	if err := s.a.ioReport(s.path, false, now.Add(-20*24*time.Hour), now, 0, "", true); err != nil {
+	if err := s.a.ioReport(context.Background(), s.path, false, now.Add(-20*24*time.Hour), now, 0, "", true); err != nil {
 		t.Fatal(err)
 	}
 	cov, _ := coverageJSON(t, out.Bytes())
@@ -124,7 +124,7 @@ func TestIOReportCoverageBeforeKeep(t *testing.T) {
 func TestIOReportCoverageText(t *testing.T) {
 	s, out, _ := ioLiveService(t, t.Context())
 	now := time.Now().Round(0)
-	if err := s.a.ioReport(s.path, false, now.Add(-time.Hour), now, 0, "", false); err != nil {
+	if err := s.a.ioReport(context.Background(), s.path, false, now.Add(-time.Hour), now, 0, "", false); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(out.String(), "\n")

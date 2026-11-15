@@ -281,24 +281,31 @@ type ioService struct {
 	owners              *ioOwnerFinder
 	tickets             *ioTicketer
 	letters             sync.WaitGroup // горутины писем: тест дожидается их, прежде чем читать журнал
+	sudoWorkers         sync.WaitGroup // async sudo attribution is drained before persisting closed cases
 	tickAt              time.Time
 	evictors            *evictors.Aggregate
 	evictorPath         string
 	evictorSaveDone     chan error                              // only the io sampling goroutine starts and collects this writer
 	evictorWriter       func(string, *evictors.Aggregate) error // injectable file writer for tests
 	evictorStoreBlocked bool                                    // quarantine failed; never overwrite unreadable history
+	sudoCache           *sudoLookupCache
+	bootID              string
 }
 
 func newIOService(ctx context.Context, a *app) *ioService {
 	state := a.dir("io")
 	def := iowatch.Default()
+	bootID, bootErr := a.systemBootID()
+	if bootErr != nil {
+		a.debugSudoError("read boot id for io cases", bootErr)
+	}
 	return &ioService{route: ioroute.New(def.Route()), owners: a.ioOwners(&def), a: a, ctx: ctx, dir: filepath.Join(state, "events"), path: filepath.Join(state, ioCasesFile),
 		coverPath: filepath.Join(state, ioCoverageFile), cover: iowatch.NewCoverer(iowatch.CoverRecord{}, time.Now()),
 		seriesPath: filepath.Join(state, ioSeriesFile), profilesPath: filepath.Join(state, ioProfilesFile),
 		evictorPath: evictorStorePath(a), evictors: evictors.NewAggregate(),
 		cgroupRoot: iowatch.SystemRoots().Cgroup, kindSources: iowatch.KindSources{WorkerState: filepath.Join(a.home, ".local", "state", "worker"), GraftHeavy: iowatch.GraftHeavyDir(record.RuntimeDir())},
 		series: iowatch.NewSeries(iowatch.Default().SeriesKeep.D()), profiles: iowatch.NewProfiles(), live: iowatch.NewLive(),
-		extra: make(chan func(), 16), warnAt: map[string]time.Time{},
+		extra: make(chan func(), 16), warnAt: map[string]time.Time{}, sudoCache: newSudoLookupCache(), bootID: bootID,
 		tickets: &ioTicketer{a: a, queue: make(chan ioTicketJob, 64)}}
 }
 
@@ -356,7 +363,37 @@ func (a *app) ioLoop(ctx context.Context, usr2 <-chan os.Signal) {
 			s.wait(time.Second)
 		}
 	}
+	s.drainSudoWorkers()
 	s.saveStop(time.Now())
+}
+
+func (s *ioService) drainSudoWorkers() {
+	done := make(chan struct{})
+	go func() {
+		s.sudoWorkers.Wait()
+		close(done)
+	}()
+	for {
+		select {
+		case action := <-s.extra:
+			runIOExtra(action)
+		case <-done:
+			for {
+				select {
+				case action := <-s.extra:
+					runIOExtra(action)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+func runIOExtra(action func()) {
+	if action != nil {
+		action()
+	}
 }
 
 // offPass — проход цикла в mode=off: учёт пишет off (пробел mode_off, а не not_running); копия учёта раз в
@@ -784,11 +821,48 @@ func (s *ioService) endProfiles(gone map[string]string, now time.Time) {
 
 // closed — случай в сводки; от case_min — строка журнала, от alert_min — в маршрут (письмо или тикет).
 func (s *ioService) closed(c iowatch.Case) {
+	if c.BootID == "" {
+		c.BootID = s.bootID
+	}
 	s.cases = append(s.cases, c)
 	if c.Dur() < s.cfg.CaseMin.D() {
 		return
 	}
-	s.a.log.Info("aguard io: " + ioCaseLine(&c))
+	if hasRootSessionCandidate(&c) {
+		s.enrichRootCase(c)
+		return
+	}
+	s.finishClosedCase(c)
+}
+
+func (s *ioService) enrichRootCase(snapshot iowatch.Case) {
+	s.sudoWorkers.Go(func() {
+		if err := s.a.sudoInfo(s.ctx, &snapshot, s.sudoCache, true); err != nil {
+			s.a.debugSudoError("enrich closed io case", err)
+		}
+		s.extra <- func() {
+			if index := s.findCase(snapshot); index >= 0 {
+				s.cases[index].Sudo, s.cases[index].ForeignSudo = snapshot.Sudo, snapshot.ForeignSudo
+			}
+			s.finishClosedCase(snapshot)
+		}
+	})
+}
+
+func (s *ioService) findCase(key iowatch.Case) int {
+	main := caseSessionPath(key.Culprits, false)
+	for i := range s.cases {
+		candidate := &s.cases[i]
+		if candidate.Start.Equal(key.Start) && caseSessionPath(candidate.Culprits, false) == main {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *ioService) finishClosedCase(value iowatch.Case) {
+	c := &value
+	s.a.log.Info("aguard io: " + ioCaseLine(c))
 	kind := "фриз"
 	switch {
 	case c.Quiet:
@@ -797,8 +871,11 @@ func (s *ioService) closed(c iowatch.Case) {
 		kind = "под потолком"
 	}
 	s.a.note("io", kind, c.Start.Format(time.RFC3339), "", c.DurMS, "ms")
-	if alertable(&c, s.cfg) {
-		s.routeOne(&s.cases[len(s.cases)-1])
+	if alertable(c, s.cfg) {
+		s.routeOne(c)
+		if index := s.findCase(*c); index >= 0 {
+			s.cases[index].OwnerOffline = c.OwnerOffline
+		}
 	}
 }
 

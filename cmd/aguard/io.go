@@ -46,7 +46,7 @@ func (a *app) ioCmd(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return a.ioReport(*file, *file == cases, from, to, *minDur, *who, *asJSON)
+		return a.ioReport(ctx, *file, *file == cases, from, to, *minDur, *who, *asJSON)
 	case "route":
 		fl := flag.NewFlagSet("io route", flag.ContinueOnError)
 		since := fl.Duration("since", 7*24*time.Hour, "глубина")

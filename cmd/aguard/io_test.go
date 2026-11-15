@@ -334,7 +334,7 @@ func TestReportTextAndJSONFromFile(t *testing.T) {
 	if err := iowatch.SaveCases(path, cases); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.ioReport(path, false, base.Add(-time.Minute), time.Now(), 0, "", false); err != nil {
+	if err := a.ioReport(context.Background(), path, false, base.Add(-time.Minute), time.Now(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
@@ -348,7 +348,7 @@ func TestReportTextAndJSONFromFile(t *testing.T) {
 		}
 	}
 	out.Reset()
-	if err := a.ioReport(path, false, base.Add(-time.Minute), time.Now(), time.Second, "", true); err != nil {
+	if err := a.ioReport(context.Background(), path, false, base.Add(-time.Minute), time.Now(), time.Second, "", true); err != nil {
 		t.Fatal(err)
 	}
 	var sum iowatch.Summary

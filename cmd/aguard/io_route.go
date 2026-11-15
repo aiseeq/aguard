@@ -78,6 +78,14 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 		// Пересчёт старой записи оставляет отображаемое имя, если в журнале не было пути cgroup.
 		unit = cul.Main
 	}
+	_, fullRootPath := sessionCandidate(cul.Main)
+	if fullRootPath || (storedSessionRE.MatchString(cul.Main) && c.Sudo != nil) {
+		rc.Class, rc.Generic = "root", true
+		if c.Sudo != nil {
+			rc.Owner = c.Sudo.Owner
+		}
+		return rc, nil
+	}
 	if name, _, ok := proc.SessionScope(cul.Main); ok {
 		rc.Class, rc.Generic = byProc(cul.MainProc, "session")
 		rc.Owner = name

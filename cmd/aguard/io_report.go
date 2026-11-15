@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +30,10 @@ func ioCaseLine(c *iowatch.Case) string {
 		ioSeconds(c.IdleMS), cause, c.PeakMS)
 	if attribution := ioCaseAttribution(c); attribution != "" {
 		line += ", " + attribution
+	}
+	line += sudoAttribution(c.Sudo, "главная")
+	if c.Sudo == nil || c.ForeignSudo == nil || c.Sudo.Session == "" || c.Sudo.Session != c.ForeignSudo.Session {
+		line += sudoAttribution(c.ForeignSudo, "чужая")
 	}
 	if c.Capped {
 		who := make([]string, 0, len(c.Culprits.CappedIdle))
@@ -97,8 +102,33 @@ func ioCaseAttribution(c *iowatch.Case) string {
 	return main
 }
 
+func sudoAttribution(info *iowatch.SudoInfo, where string) string {
+	if info == nil {
+		return ""
+	}
+	return fmt.Sprintf(", sudo (%s) %s (TTY %s, PWD %s, пользователь %s, хозяин %s)", where, info.Command, info.TTY, info.PWD, info.User, sudoOwnerLabel(info))
+}
+
+func sudoOwnerLabel(info *iowatch.SudoInfo) string {
+	if info.OwnerLabel != "" {
+		return info.OwnerLabel
+	}
+	if info.Owner != "" {
+		return info.Owner
+	}
+	return "запуск root"
+}
+
 // writeIOCase — машина за случай и до names виновников на меру.
 func writeIOCase(w io.Writer, c *iowatch.Case, names int) {
+	for _, entry := range []struct {
+		where string
+		info  *iowatch.SudoInfo
+	}{{"главная", c.Sudo}, {"чужая", c.ForeignSudo}} {
+		if entry.info != nil {
+			fmt.Fprintf(w, "sudo %s: %s; TTY %s; PWD %s; пользователь %s; хозяин %s\n", entry.where, entry.info.Command, entry.info.TTY, entry.info.PWD, entry.info.User, sudoOwnerLabel(entry.info))
+		}
+	}
 	fmt.Fprintf(w, "машина: своп in/out %d/%d стр, majflt %d, диск R/W %.0f/%.0f МБ, занят %d мс, ожидание R/W %d/%d мс, очередь до %d, flush %d, dirty %.0f МБ, writeback %.0f МБ\n",
 		c.SwapIn, c.SwapOut, c.Majflt, megabytes(c.ReadB), megabytes(c.WriteB), c.BusyMS, c.RAwaitMS, c.WAwaitMS, c.InFlight,
 		c.Flushes, megabytes(c.Dirty), megabytes(c.Writeback))
@@ -224,7 +254,7 @@ func (a *app) ioLoadCases(cfg *iowatch.Config, path string, live, withCover bool
 
 // ioReport — итог случаев [since, until), с who — только случаев, где он виновник (iowatch.FilterCases): live
 // запрашивает сводки из службы, без службы читает файл.
-func (a *app) ioReport(path string, live bool, since, until time.Time, minDur time.Duration, who string, asJSON bool) error {
+func (a *app) ioReport(ctx context.Context, path string, live bool, since, until time.Time, minDur time.Duration, who string, asJSON bool) error {
 	cfg, err := a.ioConfig()
 	if err != nil {
 		return err
@@ -236,6 +266,25 @@ func (a *app) ioReport(path string, live bool, since, until time.Time, minDur ti
 	if err != nil {
 		return err
 	}
+	cache := newSudoLookupCache()
+	for i := range got.cases {
+		if err := a.sudoInfo(ctx, &got.cases[i], cache, false); err != nil {
+			a.debugSudoError("io report", err)
+		}
+	}
+	sudoMatched, sudoSessions := 0, 0
+	sudoAgentOwners := 0
+	for i := range got.cases {
+		if hasRootSessionCandidate(&got.cases[i]) {
+			sudoSessions++
+			if got.cases[i].Sudo != nil || got.cases[i].ForeignSudo != nil {
+				sudoMatched++
+			}
+			if (got.cases[i].Sudo != nil && got.cases[i].Sudo.Owner != "") || (got.cases[i].ForeignSudo != nil && got.cases[i].ForeignSudo.Owner != "") {
+				sudoAgentOwners++
+			}
+		}
+	}
 	sum := iowatch.Summarize(iowatch.FilterCases(got.cases, who), since, until, minDur)
 	cover := iowatch.Cover(got.cover, got.source, since, until, time.Now().Add(-cfg.CasesKeep.D()))
 	sum.Coverage = &cover
@@ -245,6 +294,7 @@ func (a *app) ioReport(path string, live bool, since, until time.Time, minDur ti
 		return enc.Encode(sum)
 	}
 	writeIOReport(a.out, &sum)
+	fmt.Fprintf(a.out, "root session-c*: сопоставлено %d из %d случаев; найден хозяин-агент у %d\n", sudoMatched, sudoSessions, sudoAgentOwners)
 	gui, guiErr := guiwatch.ReadReport(a.dir("gui"), since)
 	if guiErr != nil {
 		return fmt.Errorf("прочитать отчёт gui: %w", guiErr)

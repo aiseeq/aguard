@@ -124,22 +124,23 @@ type app struct {
 	queueWorkers         func() ([]string, error)
 	namesMem             namesMemory // таблица имён cl: прошлая удачная и письмо лиду о битой
 
-	queueUnsaved  *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
-	codexStep     time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval
-	codexRead     codexReader    // замер лимита Codex; подменяется в тестах
-	codexConsume  codexConsumer  // досрочный сброс Codex; подменяется в тестах
-	codexApproved codexApprovals // «да» на окно из файла одобрений
-	codexNote     codexNoter     // строка исхода в тикет
-	sigSource     sigguardSource
-	sigSend       sigguardSender
-	sigJobs       *cpuwatch.Jobs
-	sigPause      func(context.Context, time.Duration) bool
-	sigAlive      func() (map[string]session.Info, error)
-	now           func() time.Time
-	bootTime      func() (time.Time, error)
-	bootID        func() (string, error)
-	quietRuntime  *quietRuntime
-	benchIO       benchBackend
+	queueUnsaved      *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
+	codexStep         time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval
+	codexRead         codexReader    // замер лимита Codex; подменяется в тестах
+	codexConsume      codexConsumer  // досрочный сброс Codex; подменяется в тестах
+	codexApproved     codexApprovals // «да» на окно из файла одобрений
+	codexNote         codexNoter     // строка исхода в тикет
+	sigSource         sigguardSource
+	sigSend           sigguardSender
+	sigJobs           *cpuwatch.Jobs
+	sigPause          func(context.Context, time.Duration) bool
+	sigAlive          func() (map[string]session.Info, error)
+	now               func() time.Time
+	bootTime          func() (time.Time, error)
+	bootID            func() (string, error)
+	quietRuntime      *quietRuntime
+	benchIO           benchBackend
+	sudoJournalSource func(context.Context, string, string, ...string) ([]journalRecord, error)
 }
 
 type quietRuntime struct {

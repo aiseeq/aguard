@@ -384,7 +384,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 			"cmd/aguard/cpu.go:cpuRemote", "cmd/aguard/queue.go:queueTicketNote", "cmd/aguard/queue.go:queueTickets",
 			"cmd/aguard/queue_wake.go:nextForQueue", "cmd/aguard/queue_wake.go:workerOwners", "cmd/aguard/queue_external.go:readQueueExternal",
 			"cmd/aguard/cpu_stray.go:readStrays", "cmd/aguard/cpu_stray.go:readStrays", "internal/orphans/stop.go:podmanStop",
-			"cmd/aguard/night.go:nightPauseHolds",
+			"cmd/aguard/night.go:nightPauseHolds", "cmd/aguard/io_sudo.go:readJournal",
 		},
 	}
 	entries := map[string]bool{}

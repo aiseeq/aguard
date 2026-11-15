@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -47,11 +46,6 @@ type ceilingOpError struct {
 func (e *ceilingOpError) Error() string { return e.err.Error() }
 func (e *ceilingOpError) Unwrap() error { return e.err }
 
-type kernelOOMRecord struct {
-	Message   string `json:"MESSAGE"`
-	Timestamp string `json:"__REALTIME_TIMESTAMP"`
-}
-
 type ceilingSeedRetry struct {
 	Attempts int
 	Next     time.Time
@@ -69,19 +63,15 @@ func parseCeilingOOMJSONForPIDs(raw, unit string, after time.Time, pids map[int]
 	var victims []oomVictim
 	var matched bool
 	var latest time.Time
-	for line := range strings.SplitSeq(strings.TrimSpace(raw), "\n") {
-		if line == "" {
-			continue
-		}
-		var row kernelOOMRecord
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
-			return nil, latest, fmt.Errorf("journalctl JSON: %w", err)
-		}
-		micros, err := strconv.ParseInt(row.Timestamp, 10, 64)
+	rows, err := parseJournalJSON(raw)
+	if err != nil {
+		return nil, latest, err
+	}
+	for _, row := range rows {
+		at, err := journalTimestamp(row.Timestamp)
 		if err != nil {
-			return nil, latest, fmt.Errorf("journal timestamp %q: %w", row.Timestamp, err)
+			return nil, latest, err
 		}
-		at := time.UnixMicro(micros)
 		if m := oomMemcgRE.FindStringSubmatch(row.Message); m != nil {
 			matched = strings.HasSuffix(m[1], "/"+unit)
 			continue
