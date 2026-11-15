@@ -205,6 +205,9 @@ type Ticket struct {
 	Key, Project, Slug, Title, Prio, Status, Back, Master, Admin string
 	Dir                                                          string
 	Executor                                                     string // для «в работе»: tk next показывает его только исполнителю
+	Path                                                         string // путь тикета относительно проекта
+	CancelAuthor, CancelReason                                   string
+	CancelJournalRead                                            bool
 	Journal                                                      bool   // журнал, а не задача: вне tk next, кроме наступившего wait
 	Transfer                                                     string // перенесён во внешний трекер: ключ и адрес; файла тикета больше нет
 	External                                                     bool   // задача внешнего трекера: файла тикета нет
@@ -216,18 +219,21 @@ type Ticket struct {
 }
 
 const (
-	ModeLog         = "log"
-	ModeOn          = "on"
-	KindCrit        = "crit"
-	KindCritCopy    = "crit_copy"
-	KindHigh        = "high"
-	KindHighAdmin   = "high_admin"
-	KindWake        = "wake"
-	KindWakeStuck   = "wake_stuck"
-	KindWakeAdmin   = "wake_admin"
-	KindBack        = "back"
-	KindBackLost    = "back_lost"
-	KindUnreachable = "unreachable"
+	ModeLog           = "log"
+	ModeOn            = "on"
+	KindCrit          = "crit"
+	KindCritCopy      = "crit_copy"
+	KindHigh          = "high"
+	KindHighAdmin     = "high_admin"
+	KindWake          = "wake"
+	KindWakeStuck     = "wake_stuck"
+	KindWakeAdmin     = "wake_admin"
+	KindBack          = "back"
+	KindBackLost      = "back_lost"
+	KindCancel        = "cancel"
+	KindCancelLost    = "cancel_lost"
+	KindCancelUnknown = "cancel_unknown"
+	KindUnreachable   = "unreachable"
 )
 
 type View struct {
@@ -274,21 +280,29 @@ type mark struct {
 	Mode string    `json:"mode"`
 }
 type ticketState struct {
-	Prio        string    `json:"prio"`
-	Seen        time.Time `json:"seen"`
-	Closed      time.Time `json:"closed,omitzero"`
-	BackSent    bool      `json:"back_sent,omitempty"`
-	BackLost    bool      `json:"back_lost,omitempty"`
-	Crit        mark      `json:"crit,omitzero"`
-	CritTo      string    `json:"crit_to,omitempty"`
-	CritTried   time.Time `json:"crit_tried,omitzero"`
-	CritTriedTo string    `json:"crit_tried_to,omitempty"`
-	CritCopy    mark      `json:"crit_copy,omitzero"`
-	High        mark      `json:"high,omitzero"`
-	Admin       mark      `json:"admin,omitzero"`
-	Taken       bool      `json:"taken,omitempty"`
-	Unreachable bool      `json:"unreachable,omitempty"`
-	Notes       []string  `json:"notes,omitempty"`
+	Prio              string    `json:"prio"`
+	Seen              time.Time `json:"seen"`
+	Closed            time.Time `json:"closed,omitzero"`
+	BackSent          bool      `json:"back_sent,omitempty"`
+	BackLost          bool      `json:"back_lost,omitempty"`
+	Executor          string    `json:"executor,omitempty"`
+	Working           bool      `json:"working,omitempty"`
+	CancelAt          time.Time `json:"cancel_at,omitzero"`
+	CancelSent        bool      `json:"cancel_sent,omitempty"`
+	CancelLost        bool      `json:"cancel_lost,omitempty"`
+	CancelJournalRead bool      `json:"cancel_journal_read,omitempty"`
+	CancelAuthor      string    `json:"cancel_author,omitempty"`
+	CancelReason      string    `json:"cancel_reason,omitempty"`
+	Crit              mark      `json:"crit,omitzero"`
+	CritTo            string    `json:"crit_to,omitempty"`
+	CritTried         time.Time `json:"crit_tried,omitzero"`
+	CritTriedTo       string    `json:"crit_tried_to,omitempty"`
+	CritCopy          mark      `json:"crit_copy,omitzero"`
+	High              mark      `json:"high,omitzero"`
+	Admin             mark      `json:"admin,omitzero"`
+	Taken             bool      `json:"taken,omitempty"`
+	Unreachable       bool      `json:"unreachable,omitempty"`
+	Notes             []string  `json:"notes,omitempty"`
 }
 type Wake struct {
 	Ticket  string    `json:"ticket"`
@@ -342,26 +356,17 @@ func (s *State) Step(ts []Ticket, v View) []Notice {
 
 func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool) []Notice {
 	t.Prio = NormPrio(t.Prio)
-	closedTicket := closed(t.Status)
-	if !closedTicket && !alive(v, t.Master) && frozen(v, t.Dir) {
-		s.dropFrozenWakes(t)
+	st, eligible := s.prepareTicket(t, v, seeded, active)
+	if !eligible {
 		return nil
-	}
-	if closedTicket && t.Back == "" || !closedTicket && t.Prio != "CRIT" && t.Prio != "HIGH" {
-		return nil
-	}
-	active[t.Key] = true
-	st := s.Tickets[t.Key]
-	if st == nil {
-		st = &ticketState{Prio: t.Prio, Seen: v.Now}
-		s.Tickets[t.Key] = st
-		if !seeded && seedTicket(t, st, v.Now) {
-			return nil
-		}
 	}
 	resetCritAttempt(t, st)
-	if closedTicket {
-		return s.backNotices(t, st, v)
+	if closed(t.Status) {
+		var out []Notice
+		if cancelStatus(t.Status) {
+			out = append(out, s.cancelNotices(t, st, v)...)
+		}
+		return append(out, s.backNotices(t, st, v)...)
 	}
 	if t.Journal {
 		return nil
@@ -377,6 +382,95 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 		return s.highNotices(t, st, v)
 	}
 	return nil
+}
+
+func cancelStatus(status string) bool {
+	return status == "отклонён" || status == StatusTransferred
+}
+
+func (s *State) prepareTicket(t Ticket, v View, seeded bool, active map[string]bool) (*ticketState, bool) {
+	t.Prio = NormPrio(t.Prio)
+	working := ticketWorking(t)
+	st := s.Tickets[t.Key]
+	resetCancelOnReopen(st, t, working)
+	if !s.trackable(t, st, v, working) {
+		return nil, false
+	}
+	active[t.Key] = true
+	if st == nil {
+		st = &ticketState{Prio: t.Prio, Seen: v.Now}
+		s.Tickets[t.Key] = st
+		if !seeded && seedTicket(t, st, v.Now) {
+			return st, false
+		}
+	}
+	rememberExecutor(st, t)
+	return st, true
+}
+
+func ticketWorking(t Ticket) bool {
+	return (t.Status == "в работе" || t.Status == "ждёт" && t.Executor != "") && !t.Journal
+}
+
+func resetCancelOnReopen(st *ticketState, t Ticket, working bool) {
+	if st == nil {
+		return
+	}
+	if t.Status == "открыт" || working {
+		st.CancelSent, st.CancelLost = false, false
+		st.CancelAt = time.Time{}
+		st.CancelJournalRead, st.CancelAuthor, st.CancelReason = false, "", ""
+	}
+	if !closed(t.Status) && !working {
+		st.Working = false
+	}
+}
+
+func (s *State) trackable(t Ticket, st *ticketState, v View, working bool) bool {
+	if !closed(t.Status) && !working && !alive(v, t.Master) && frozen(v, t.Dir) {
+		s.dropFrozenWakes(t)
+		return false
+	}
+	if t.Status == "ждёт" && t.Executor == "" || closed(t.Status) && t.Back == "" && !cancelStatus(t.Status) || !closed(t.Status) && !working && t.Prio != "CRIT" && t.Prio != "HIGH" {
+		return false
+	}
+	if cancelStatus(t.Status) && st == nil && t.Back == "" {
+		return false
+	}
+	return true
+}
+
+func rememberExecutor(st *ticketState, t Ticket) {
+	if !ticketWorking(t) {
+		return
+	}
+	st.Executor = t.Executor
+	if t.Status == "в работе" && st.Executor == "" {
+		st.Executor = t.Master
+	}
+	st.Working = st.Executor != ""
+}
+
+// NeedsCancelJournal reports a tracked rejection whose journal has not yet been read.
+func (s *State) NeedsCancelJournal(t Ticket) bool {
+	st := s.Tickets[t.Key]
+	return t.Status == "отклонён" && st != nil && st.Working && st.Executor != "" && !st.CancelSent && !st.CancelLost && !st.CancelJournalRead
+}
+
+// CancelJournal returns the author and reason cached for a rejected ticket.
+func (s *State) CancelJournal(key string) (string, string, bool) {
+	st := s.Tickets[key]
+	if st == nil || !st.CancelJournalRead {
+		return "", "", false
+	}
+	return st.CancelAuthor, st.CancelReason, true
+}
+
+// RememberCancelJournal stores the result, including an empty result after a parse error.
+func (s *State) RememberCancelJournal(key, author, reason string) {
+	if st := s.Tickets[key]; st != nil {
+		st.CancelJournalRead, st.CancelAuthor, st.CancelReason = true, author, reason
+	}
 }
 
 // dropFrozenWakes снимает отметки о письмах по проекту, который заморожен и без живого мастера.
@@ -616,6 +710,57 @@ func (s *State) backNotices(t Ticket, st *ticketState, v View) []Notice {
 	return nil
 }
 
+func (s *State) cancelNotices(t Ticket, st *ticketState, v View) []Notice {
+	if !cancelPending(t, st) {
+		return nil
+	}
+	if st.CancelAt.IsZero() {
+		st.CancelAt = v.Now
+	}
+	if t.Status == StatusTransferred && t.CancelAuthor == "" {
+		st.CancelSent = true
+		return []Notice{notice(t, v, KindCancelUnknown, "", "перенесён, автор неизвестен — исполнителю не пишу")}
+	}
+	to := cancelRecipient(t, st, v)
+	if t.CancelAuthor != "" && strings.EqualFold(t.CancelAuthor, to) {
+		st.CancelSent = true
+		return nil
+	}
+	line := cancelLine(t)
+	if v.restingSessions[to] || to != v.Lead && restingDir(t.Dir, v) {
+		// Отдыхающая сессия и проект на дне отдыха по проекту не работают; лиду — без ожидания.
+		st.CancelAt = v.Rest.End(v.Now)
+		return nil
+	}
+	if v.Now.Sub(st.CancelAt) >= 7*24*time.Hour {
+		st.CancelLost = true
+		return []Notice{notice(t, v, KindCancelLost, "", line)}
+	}
+	if alive(v, to) && v.Free != nil && v.Free(to) {
+		return []Notice{notice(t, v, KindCancel, to, line)}
+	}
+	return nil
+}
+
+func cancelPending(t Ticket, st *ticketState) bool {
+	return st.Working && st.Executor != "" && !st.CancelSent && !st.CancelLost && (t.Status != "отклонён" || t.CancelJournalRead)
+}
+
+func cancelRecipient(t Ticket, st *ticketState, v View) string {
+	if alive(v, st.Executor) {
+		return st.Executor
+	}
+	return t.Master
+}
+
+func cancelLine(t Ticket) string {
+	reason := t.CancelReason
+	if reason == "" {
+		reason = "причина не указана"
+	}
+	return fmt.Sprintf("aguard: отменён %s/%s — %s; бойцов по нему остановить", t.Project, t.Slug, reason)
+}
+
 func (s *State) cleanup(active map[string]bool) {
 	for key := range s.Tickets {
 		if !active[key] {
@@ -652,6 +797,7 @@ func (s *State) Confirm(n Notice, v View) {
 	}
 	m := mark{At: v.Now, Mode: mode}
 	if st != nil {
+		confirmCancel(st, n.Kind)
 		switch n.Kind {
 		case KindCrit:
 			st.Crit = m
@@ -684,6 +830,15 @@ func (s *State) Confirm(n Notice, v View) {
 			w.Stuck = true
 			s.Wakes[n.Master] = w
 		}
+	}
+}
+
+func confirmCancel(st *ticketState, kind string) {
+	switch kind {
+	case KindCancel:
+		st.CancelSent = true
+	case KindCancelLost:
+		st.CancelLost = true
 	}
 }
 

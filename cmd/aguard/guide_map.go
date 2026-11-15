@@ -30,6 +30,12 @@ func queueGuideKind(kind string) guide.Kind {
 		return "queue.back"
 	case queue.KindBackLost:
 		return "queue.back_lost"
+	case queue.KindCancel:
+		return "queue.cancel"
+	case queue.KindCancelLost:
+		return "queue.cancel_lost"
+	case queue.KindCancelUnknown:
+		return "queue.cancel_unknown"
 	case queue.KindUnreachable:
 		return "queue.unreachable"
 	default:

@@ -529,3 +529,132 @@ func TestQueueTicketMasterNote(t *testing.T) {
 		}
 	}
 }
+
+func TestQueueTicketCancelJournalFields(t *testing.T) {
+	// Сокращённые строки используют реальную форму tk ls --json --root:
+	// корневой репозиторий даёт repo + <repo>/docs/tasks/..., а docs-root — repo:null и docs/tasks/....
+	gitList := `[{"repo":"aguard","slug":"cancel","status":"отклонён","prio":"MED","executor":"","why":"не причина отмены","actors":{"aguard-master":"2026-11-10 14:30","lead":"2026-11-10 14:30"},"path":"aguard/docs/tasks/20261103-1205-MED-cancel.md"}]`
+	docsList := `[{"repo":null,"slug":"docs-cancel","status":"отклонён","prio":"MED","path":"docs/tasks/20261103-1206-MED-docs-cancel.md"}]`
+	b := newQueueBench(t, gitList, docsList)
+	gitFile := filepath.Join(b.dir, "git", "aguard", "docs", "tasks", "20261103-1205-MED-cancel.md")
+	docsFile := filepath.Join(b.dir, "docs", "tasks", "20261103-1206-MED-docs-cancel.md")
+	body := "## Причина\nПочему у тикета такой приоритет.\n\n## Журнал\n" +
+		"- 2026-11-10 14:30 открыт — aguard-master\n" +
+		"- 2026-11-10 14:31 отклонён — lead — остановить — по просьбе пользователя\n" +
+		"- 2026-11-10 14:32 note — someone — дополнительный комментарий\n" +
+		"  - продолжение текста, не запись журнала\n" +
+		"  - 2026-11-15 17:28 отклонён — x — y\n\n## Заметки\n" +
+		"- 2026-11-10 14:33 отклонён — wrong — это не журнал тикета\n"
+	for _, path := range []string{gitFile, docsFile} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ts, err := b.a.queueTickets(context.Background(), b.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ts) != 2 {
+		t.Fatalf("список тикетов: %+v", ts)
+	}
+	for _, ticket := range ts {
+		author, reason, err := readCancelJournal(ticket)
+		if err != nil || author != "lead" || reason != "остановить — по просьбе пользователя" {
+			t.Fatalf("%s: журнал даёт последнюю запись «отклонён», независимо от actors/note: автор=%q причина=%q err=%v", ticket.Key, author, reason, err)
+		}
+	}
+}
+
+func TestQueueReadCancelJournalRejectsNonLocalPath(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, "project")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outside.md"), []byte("## Журнал\n- 2026-11-03 12:10 отклонён — lead — причина\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ticket := queue.Ticket{Dir: project, Path: "../outside.md", Status: "отклонён"}
+	if _, _, err := readCancelJournal(ticket); err == nil {
+		t.Fatal("путь за пределами папки проекта принят")
+	}
+}
+
+func TestQueueCancelJournalReadsOnlyTrackedPendingRejections(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	log := b.captureLog()
+	state := queue.State{Seeded: true}
+	ticket := queue.Ticket{Key: "p/20261103-1205-x", Dir: b.dir, Path: "tasks/missing.md", Status: "отклонён"}
+	b.a.queueCancelJournals(&state, []queue.Ticket{ticket})
+	if strings.Contains(log.String(), "журнал отмены тикета") {
+		t.Fatalf("непрочитанный тикет без истории вызвал чтение файла: %s", log)
+	}
+}
+
+func TestQueueCancelJournalResultIsCachedAndErrorsClearPartialFields(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	state := queue.State{Seeded: true}
+	work := queue.Ticket{Key: "p/20261103-1205-x", Prio: "MED", Status: "в работе", Executor: "exec", Master: "master"}
+	state.Step([]queue.Ticket{work}, queue.View{Now: time.Now()})
+	ticket := queue.Ticket{Key: work.Key, Dir: b.dir, Path: "tasks/cancel.md", Status: "отклонён"}
+	path := filepath.Join(ticket.Dir, filepath.FromSlash(ticket.Path))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("## Журнал\n- 2026-11-03 12:10 отклонён — lead — отменить\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	log := b.captureLog()
+	b.a.queueCancelJournals(&state, []queue.Ticket{ticket})
+	if author, reason, ok := state.CancelJournal(ticket.Key); !ok || author != "lead" || reason != "отменить" {
+		t.Fatalf("прочитанный журнал не кеширован: %q %q %v", author, reason, ok)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	b.a.queueCancelJournals(&state, []queue.Ticket{ticket})
+	if strings.Contains(log.String(), "журнал отмены тикета") {
+		t.Fatalf("кешированный файл перечитан: %s", log)
+	}
+
+	bad := []byte("## Журнал\n- invalid-date 12:10 отклонён — lead — причина невалидной даты\n")
+	if err := os.WriteFile(path, bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	work.Status = "в работе"
+	state.Step([]queue.Ticket{work}, queue.View{Now: time.Now().Add(time.Minute)})
+	log.Reset()
+	b.a.queueCancelJournals(&state, []queue.Ticket{ticket})
+	if author, reason, ok := state.CancelJournal(ticket.Key); !ok || author != "" || reason != "" {
+		t.Fatalf("ошибка разбора сохранила частичного автора: %q %q %v", author, reason, ok)
+	}
+	if !strings.Contains(log.String(), "журнал отмены тикета") {
+		t.Fatalf("ошибка журнала не дала WARN: %s", log)
+	}
+}
+
+func TestQueueJournalReadDoesNotMutateTicketCache(t *testing.T) {
+	b := newQueueBench(t, "[]", "[]")
+	ticket := queue.Ticket{Key: "p/20261103-1205-x", Dir: b.dir, Path: "tasks/cancel.md", Status: "отклонён"}
+	path := filepath.Join(ticket.Dir, filepath.FromSlash(ticket.Path))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("## Журнал\n- 2026-11-03 12:10 отклонён — lead — отменить\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b.a.queueCache.Tickets = []queue.Ticket{ticket}
+	state := queue.State{Seeded: true}
+	work := ticket
+	work.Status, work.Executor = "в работе", "exec"
+	state.Step([]queue.Ticket{work}, queue.View{Now: time.Now()})
+	current := queueNoticeTickets(b.a.queueCache.Tickets, nil)
+	b.a.queueCancelJournals(&state, current)
+	cached := b.a.queueCache.Tickets[0]
+	if cached.CancelJournalRead || cached.CancelAuthor != "" || cached.CancelReason != "" {
+		t.Fatalf("чтение журнала изменило кеш: %+v", cached)
+	}
+}
