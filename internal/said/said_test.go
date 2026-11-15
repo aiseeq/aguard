@@ -180,3 +180,57 @@ func TestParseQueued(t *testing.T) {
 		t.Errorf("реплика из очереди: %+v ok=%v err=%v", ev, ok, err)
 	}
 }
+
+// TestAppendFileMode600 — said.tsv с цитатами пользователя: новый файл создаётся 600, старый 644 сужается при записи.
+func TestAppendFileMode600(t *testing.T) {
+	dir := t.TempDir()
+	fresh := filepath.Join(dir, "said.tsv")
+	if err := Append(fresh, []Entry{{Time: time.Now(), Session: "s1", Name: "lead", Kind: "rule", Quote: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(dir, "old.tsv")
+	if err := os.WriteFile(old, []byte(Header+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(old, []Entry{{Time: time.Now(), Session: "s1", Name: "lead", Kind: "rule", Quote: "y"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{fresh, old} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s: права %o, want 600", filepath.Base(p), got)
+		}
+	}
+}
+
+// TestAppendChmodFailureWritesNothing — не сузились права старого файла: Append возвращает ошибку и не дописывает
+// цитаты в файл, видный другим (реплика остаётся в очереди).
+func TestAppendChmodFailureWritesNothing(t *testing.T) {
+	old := filepath.Join(t.TempDir(), "said.tsv")
+	if err := os.WriteFile(old, []byte(Header+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := chmodFile
+	t.Cleanup(func() { chmodFile = orig })
+	chmodFile = func(*os.File, os.FileMode) error { return errors.New("отказ chmod") }
+	err := Append(old, []Entry{{Time: time.Now(), Session: "s1", Name: "lead", Kind: "rule", Quote: "y"}})
+	if err == nil || !strings.Contains(err.Error(), "права 600") {
+		t.Fatalf("Append: err=%v, want ошибку «права 600»", err)
+	}
+	data, rerr := os.ReadFile(old)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if string(data) != Header+"\n" {
+		t.Errorf("файл дописан при отказе chmod: %q", data)
+	}
+}
