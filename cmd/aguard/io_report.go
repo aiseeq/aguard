@@ -47,6 +47,12 @@ func ioCaseAttribution(c *iowatch.Case) string {
 		return ""
 	}
 	k := c.Culprits
+	if c.Waiting {
+		if k.Main != "" {
+			return "ожидание cgroup " + iowatch.CgroupName(k.Main) + ", не фриз машины"
+		}
+		return "ожидание cgroup, не фриз машины"
+	}
 	main := ""
 	if k.Main != "" {
 		main = "главная cgroup " + iowatch.CgroupName(k.Main)
@@ -138,13 +144,6 @@ func writeProcessIOTop(w io.Writer, label string, top []iowatch.Ranked, unit int
 	}
 }
 
-// ioFsyncShare и ioFsyncMin — io.stat cgroup больше записи её процессов во столько раз и на столько байт: остальное —
-// коммит транзакции btrfs, пришедшийся на её fsync (боец 30.10: 724 МБ при своих ≤3 МБ).
-const (
-	ioFsyncShare = 4
-	ioFsyncMin   = 32 << 20
-)
-
 // writeIOCgroupWrite — запись cgroup по io.stat с пометкой коммита по fsync; cgroup не из own — процессы чужого uid;
 // own nil — случай до 30.10, без пометок.
 func writeIOCgroupWrite(w io.Writer, top []iowatch.Ranked, own map[string]int64) {
@@ -160,7 +159,7 @@ func writeIOCgroupWrite(w io.Writer, top []iowatch.Ranked, own map[string]int64)
 		case own == nil:
 		case !ok:
 			note = " (процессы чужого uid — своя запись не видна)"
-		case mine > 0 && item.Value > ioFsyncShare*mine && item.Value-mine > ioFsyncMin:
+		case iowatch.FsyncOverage(item.Value, mine):
 			// своих 0 — процессы cgroup не попали в топ шага: доли не знаем
 			note = fmt.Sprintf(" (своих %.0f — коммит btrfs по её fsync)", megabytes(mine))
 		}
@@ -200,6 +199,7 @@ func (a *app) ioLoadCases(cfg *iowatch.Config, path string, live, withCover bool
 			if ans.Coverage != nil {
 				out.cover = *ans.Coverage
 			}
+			iowatch.ReattributeCases(out.cases)
 			return out, nil
 		}
 		if !errors.Is(err, errIONotRunning) {
@@ -212,6 +212,7 @@ func (a *app) ioLoadCases(cfg *iowatch.Config, path string, live, withCover bool
 		return ioCasesLoad{}, err
 	}
 	out := ioCasesLoad{cases: cases, source: iowatch.CoverFile}
+	iowatch.ReattributeCases(out.cases)
 	if !withCover {
 		return out, nil
 	}
@@ -269,6 +270,10 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 	if s.Capped > 0 {
 		fmt.Fprintf(w, "под потолком io.max (ждали придержанный потолком IO, остальные — нет; не фриз): %d, простой %s; чей потолок: %s\n",
 			s.Capped, ioSeconds(s.CappedIdleMS), ioRankedCases(s.CappedWho, -1))
+	}
+	if s.Waiting > 0 {
+		fmt.Fprintf(w, "ожидание cgroup при малой занятости диска (не фриз машины): %d, простой %s; кто ждал: %s\n",
+			s.Waiting, ioSeconds(s.WaitingIdleMS), ioRankedCases(s.WaitingWho, -1))
 	}
 	if s.Total == 0 {
 		return

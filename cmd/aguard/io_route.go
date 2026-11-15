@@ -74,6 +74,10 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 	}
 	rc.Victim = c.PagingVictim()
 	unit := proc.ServiceUnit(cul.Main)
+	if unit == "" && strings.HasSuffix(cul.Main, ".service") {
+		// Пересчёт старой записи оставляет отображаемое имя, если в журнале не было пути cgroup.
+		unit = cul.Main
+	}
 	if name, _, ok := proc.SessionScope(cul.Main); ok {
 		rc.Class, rc.Generic = byProc(cul.MainProc, "session")
 		rc.Owner = name
@@ -305,7 +309,7 @@ func ioRouteLetter(act ioroute.Action, full []iowatch.Case, alertMin time.Durati
 
 // alertable — случай идёт в маршрут: от alert_min, не тихий и не под потолком.
 func alertable(c *iowatch.Case, cfg iowatch.Config) bool {
-	return c.Dur() >= cfg.AlertMin.D() && !c.Quiet && !c.Capped
+	return c.Dur() >= cfg.AlertMin.D() && !c.Quiet && !c.Capped && !c.Waiting
 }
 
 // setRoute — пороги маршрута и поиск хозяев по конфигу цикла; состояние маршрута сохраняется.

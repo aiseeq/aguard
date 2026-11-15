@@ -157,7 +157,7 @@ type Summary struct {
 	IdleMS   int64         `json:"idle_ms"`
 	Buckets  []Bucket      `json:"buckets"`
 	Hours    []Hour        `json:"hours"`
-	Main     []RankedCases `json:"main"` // cgroup — главный виновник: в скольких случаях от min
+	Main     []RankedCases `json:"main"` // все главные причины: счётчики покрывают случаи-фризы от min
 	Culprits SumCulprit    `json:"culprits"`
 	Cases    []Case        `json:"cases"` // от min, по убыванию длительности
 	Min      int64         `json:"min_ms"`
@@ -169,6 +169,10 @@ type Summary struct {
 	Capped       int           `json:"capped"`
 	CappedIdleMS int64         `json:"capped_idle_ms"`
 	CappedWho    []RankedCases `json:"capped_who"`
+	// Waiting — случаи ожидания одной cgroup при низкой занятости устройства; не считаются фризами машины.
+	Waiting       int           `json:"waiting"`
+	WaitingIdleMS int64         `json:"waiting_idle_ms"`
+	WaitingWho    []RankedCases `json:"waiting_who"`
 	// Coverage — за какую часть [Since, Until) замер шёл (Cover); `aguard io report` задаёт всегда.
 	Coverage *Coverage `json:"coverage,omitempty"`
 }
@@ -253,7 +257,7 @@ func (c *Culprit) mentions(who string) bool {
 // Summarize — итог случаев, начавшихся в [since, until); у случаев от min — виновники.
 func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary {
 	s := Summary{Since: since, Until: until, Min: min.Milliseconds(), Buckets: make([]Bucket, len(bucketEdges)),
-		Hours: []Hour{}, Main: []RankedCases{}, Cases: []Case{}, QuietWho: []RankedCases{}, CappedWho: []RankedCases{}}
+		Hours: []Hour{}, Main: []RankedCases{}, Cases: []Case{}, QuietWho: []RankedCases{}, CappedWho: []RankedCases{}, WaitingWho: []RankedCases{}}
 	for i, from := range bucketEdges {
 		s.Buckets[i].FromMS, s.Buckets[i].Label = from, bucketLabels[i]
 		if i+1 < len(bucketEdges) {
@@ -261,14 +265,14 @@ func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary 
 		}
 	}
 	hours := map[time.Time]*Hour{}
-	main, quiet, capped := map[string]*RankedCases{}, map[string]*RankedCases{}, map[string]*RankedCases{}
+	main, quiet, capped, waiting := map[string]*RankedCases{}, map[string]*RankedCases{}, map[string]*RankedCases{}, map[string]*RankedCases{}
 	acc := newCulpritAcc()
 	for i := range cases {
 		c := &cases[i]
 		if c.Start.Before(since) || !c.Start.Before(until) {
 			continue
 		}
-		if s.notFreeze(c, quiet, capped) {
+		if s.notFreeze(c, quiet, capped, waiting) {
 			continue
 		}
 		s.Total++
@@ -293,11 +297,16 @@ func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary 
 		if c.Culprits == nil {
 			continue
 		}
-		if c.Culprits.Main != "" {
-			name := CgroupName(c.Culprits.Main)
-			if c.Culprits.SnapshotDeletion() {
-				name = "btrfs-cleaner"
-			}
+		name := ""
+		switch {
+		case c.Culprits.SnapshotDeletion():
+			name = "btrfs-cleaner"
+		case c.Culprits.Main != "":
+			name = CgroupName(c.Culprits.Main)
+		case c.Culprits.KernelOver():
+			name = "фон ядра"
+		}
+		if name != "" {
 			countCase(main, name, c.DurMS)
 		}
 		acc.add(c.Culprits)
@@ -309,7 +318,7 @@ func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary 
 	for _, m := range main {
 		s.Main = append(s.Main, *m)
 	}
-	s.Main = rankCases(s.Main)
+	s.Main = rankCasesAll(s.Main)
 	for _, q := range quiet {
 		s.QuietWho = append(s.QuietWho, *q)
 	}
@@ -318,13 +327,17 @@ func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary 
 		s.CappedWho = append(s.CappedWho, *q)
 	}
 	s.CappedWho = rankCases(s.CappedWho)
+	for _, q := range waiting {
+		s.WaitingWho = append(s.WaitingWho, *q)
+	}
+	s.WaitingWho = rankCases(s.WaitingWho)
 	sort.SliceStable(s.Cases, func(i, j int) bool { return s.Cases[i].DurMS > s.Cases[j].DurMS })
 	s.Culprits = acc.result()
 	return s
 }
 
-// notFreeze — случай тихий или под потолком: учтён в своих полях, во фризы не идёт.
-func (s *Summary) notFreeze(c *Case, quiet, capped map[string]*RankedCases) bool {
+// notFreeze — тихий случай, ожидание под потолком или локальное ожидание cgroup: учтён отдельно, во фризы не идёт.
+func (s *Summary) notFreeze(c *Case, quiet, capped, waiting map[string]*RankedCases) bool {
 	switch {
 	case c.Quiet:
 		s.Quiet++
@@ -337,6 +350,12 @@ func (s *Summary) notFreeze(c *Case, quiet, capped map[string]*RankedCases) bool
 		s.CappedIdleMS += c.IdleMS
 		if c.Culprits != nil && len(c.Culprits.CappedIdle) > 0 {
 			countCase(capped, c.Culprits.CappedIdle[0].Name, c.DurMS)
+		}
+	case c.Waiting:
+		s.Waiting++
+		s.WaitingIdleMS += c.IdleMS
+		if c.Culprits != nil && c.Culprits.Main != "" {
+			countCase(waiting, CgroupName(c.Culprits.Main), c.DurMS)
 		}
 	default:
 		return false
@@ -363,6 +382,11 @@ func bucketOf(durMS int64) int {
 
 // rankCases — по числу случаев, затем по сумме меры, затем по имени; до summaryTop.
 func rankCases(list []RankedCases) []RankedCases {
+	list = rankCasesAll(list)
+	return list[:min(summaryTop, len(list))]
+}
+
+func rankCasesAll(list []RankedCases) []RankedCases {
 	slices.SortFunc(list, func(a, b RankedCases) int {
 		if c := cmp.Compare(b.Cases, a.Cases); c != 0 {
 			return c
@@ -372,7 +396,7 @@ func rankCases(list []RankedCases) []RankedCases {
 		}
 		return cmp.Compare(a.Name, b.Name)
 	})
-	return list[:min(summaryTop, len(list))]
+	return list
 }
 
 // culpritAcc — суммы виновников по мерам.

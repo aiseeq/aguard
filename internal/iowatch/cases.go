@@ -1,6 +1,7 @@
 package iowatch
 
 import (
+	"maps"
 	"math"
 	"slices"
 	"time"
@@ -36,10 +37,14 @@ type Case struct {
 	// доля memory full не выше 31 % (io-memory-only-quiet).
 	Quiet bool `json:"quiet,omitempty"`
 	// Capped — ожидание под потолком io.max, а не фриз (cappedWait): только у случаев от case_min. OutsideIdleMS —
-	// наибольший простой cgroup вне потолка за случай. В письма и в счёт фризов не идёт.
-	Capped        bool     `json:"capped,omitempty"`
-	OutsideIdleMS int64    `json:"outside_idle_ms,omitempty"`
-	Culprits      *Culprit `json:"culprits,omitempty"` // только у случаев от case_min
+	// максимум суммы полных PSI-дельт каждой cgroup вне потолка по detail-интервалам, пересекающим случай; может быть больше DurMS.
+	// В письма и в счёт фризов не идёт.
+	Capped        bool  `json:"capped,omitempty"`
+	OutsideIdleMS int64 `json:"outside_idle_ms,omitempty"`
+	// Waiting — диск занят малую долю случая, а cgroup провела в PSI full io не менее 60% окна деталей.
+	// Это локальное ожидание cgroup, не фриз машины.
+	Waiting  bool     `json:"waiting,omitempty"`
+	Culprits *Culprit `json:"culprits,omitempty"` // только у случаев от case_min
 	// OwnerOffline — хозяин случая был не в сети, когда маршрут решал (ioroute): засев после перезапуска повторяет
 	// тогдашнее решение, а не по сессиям в сети сейчас.
 	OwnerOffline bool `json:"owner_offline,omitempty"`
@@ -48,11 +53,14 @@ type Case struct {
 // Culprit — виновники случая за окно From..End: до caseTop имён на меру.
 type Culprit struct {
 	From           time.Time                 `json:"from"`
-	Main           string                    `json:"main,omitempty"`       // путь cgroup с наибольшим I/O
-	MainValue      int64                     `json:"main_value,omitempty"` // мера, по которой главная cgroup выбрана главной
-	MainWrite      int64                     `json:"main_write,omitempty"` // запись процессов главной cgroup
-	MainRead       int64                     `json:"main_read,omitempty"`  // чтение главной cgroup
-	MainProc       string                    `json:"main_proc,omitempty"`  // процесс главной cgroup с наибольшим I/O, comm(pid): класс тикета, хозяин временного scope
+	Main           string                    `json:"main,omitempty"`             // путь cgroup, если известен, иначе сохранённое имя
+	MainValue      int64                     `json:"main_value,omitempty"`       // мера, по которой главная cgroup выбрана главной
+	MainWrite      int64                     `json:"main_write,omitempty"`       // запись процессов; у выбранного io.stat писателя — запись cgroup
+	MainRead       int64                     `json:"main_read,omitempty"`        // чтение главной cgroup
+	MainProc       string                    `json:"main_proc,omitempty"`        // процесс главной cgroup с наибольшим I/O, comm(pid): класс тикета, хозяин временного scope
+	IdleWindowMS   int64                     `json:"idle_window_ms,omitempty"`   // интервал деталей, из которого сложен CgroupIdle
+	CgroupMainProc map[string]string         `json:"cgroup_main_proc,omitempty"` // процесс с наибольшим I/O по имени cgroup
+	CgroupPaths    map[string]string         `json:"cgroup_paths,omitempty"`     // реальные пути cgroup, наблюдавшиеся в деталях
 	ProcWrite      []Ranked                  `json:"proc_write,omitempty"`
 	ProcRead       []Ranked                  `json:"proc_read,omitempty"`
 	ProcMajflt     []Ranked                  `json:"proc_majflt,omitempty"`
@@ -77,11 +85,23 @@ type Culprit struct {
 	CleanerMS   int64 `json:"cleaner_ms,omitempty"`
 }
 
-// ReadMostly — главная cgroup читала больше, чем писали её процессы.
+// ReadMostly — главная cgroup читала больше, чем записала по мере, сохранённой в MainWrite.
 func (c *Culprit) ReadMostly() bool { return c != nil && c.MainRead > c.MainWrite }
 
 // pageBytes — страница свопа и majflt в байтах (x86_64).
 const pageBytes = 4096
+
+// waitDiskBusyPercent — ниже этой доли занятости диска случай относим к ожиданию cgroup.
+// Целевые случаи 10.11 занимали 0,5–5,6%; порог оставляет запас до настоящих фризов с заметной занятостью.
+const waitDiskBusyPercent = 10
+
+const (
+	waitMemoryFullPercent = 25 // существенный PSI памяти означает машинное давление, а не локальное ожидание диска
+	waitIdleWindowPercent = 60 // PSI full io должен занимать большую часть того же окна, что и CgroupIdle
+	writebackOwnerMin     = 20 << 20
+	ioFsyncShare          = 4
+	ioFsyncMin            = 32 << 20
+)
 
 // PagingVictim — главная читала больше, чем писала, и подкачка всей машины за случай (swap-in и majflt) — не меньше
 // половины её чтения: чтение может быть возвратом вытесненного, главная — жертва. Читающая файлы главная (подкачка
@@ -94,7 +114,7 @@ func (c *Case) PagingVictim() bool {
 
 // KernelOver — запись вне cgroup перевешивает главную cgroup и не меньше чужой; без обеих мер любой фон ядра виден.
 func (c *Culprit) KernelOver() bool {
-	return c != nil && (c.MainValue > 0 && c.KernelWrite > c.MainValue || c.Foreign.Value > 0 && c.KernelWrite > c.Foreign.Value || c.Main == "" && c.MainValue == 0 && c.Foreign.Value == 0 && c.KernelWrite > 0) && c.KernelWrite >= c.Foreign.Value
+	return c != nil && (c.MainValue > 0 && c.KernelWrite > c.MainValue || c.Foreign.Value > 0 && c.KernelWrite > c.Foreign.Value || c.Main == "" && c.MainValue == 0 && c.KernelWrite > 0) && c.KernelWrite >= c.Foreign.Value
 }
 
 // cleanerBusyMS — CPU btrfs-cleaner за окно, с которого он виновник фона ядра: за 17 дней (до 03.11) поток набрал
@@ -353,8 +373,32 @@ func (r *Recorder) finish(c *Case) {
 			}
 		}
 	}
+	cgroupMainProc := make(map[string]string)
+	for _, tops := range [][]Ranked{Rank(sum.CgroupDirty, caseTop), Rank(sum.CgroupRead, caseTop), Rank(sum.CgroupIdle, caseTop)} {
+		for _, item := range tops {
+			path := sum.cgroupPath(item.Name)
+			procName := sum.MainProc(path)
+			if procName == "" {
+				continue
+			}
+			cgroupMainProc[item.Name] = procName
+			if info, ok := sum.ProcessDetails[procName]; ok {
+				processDetails[procName] = info
+			}
+		}
+	}
+	cgroupPaths := make(map[string]string)
+	for _, top := range [][]Ranked{Rank(sum.CgroupWrite, caseTop), Rank(sum.CgroupRead, caseTop), Rank(sum.CgroupDirty, caseTop), Rank(sum.CgroupIdle, caseTop)} {
+		for _, item := range top {
+			if path := sum.cgroupPath(item.Name); path != "" {
+				cgroupPaths[item.Name] = path
+			}
+		}
+	}
 	c.Culprits = &Culprit{From: from, Main: main, MainValue: sum.cgroupTotal[main], MainWrite: sum.cgroupWrite[main], MainRead: sum.cgroupRead[main], MainProc: mainProc,
-		ProcWrite: procWrite, ProcRead: procRead, ProcMajflt: Rank(sum.ProcMajflt, caseTop),
+		CgroupMainProc: cgroupMainProc,
+		CgroupPaths:    cgroupPaths,
+		ProcWrite:      procWrite, ProcRead: procRead, ProcMajflt: Rank(sum.ProcMajflt, caseTop),
 		ProcessDetails: processDetails,
 		CgroupWrite:    Rank(sum.CgroupWrite, caseTop), CgroupRead: Rank(sum.CgroupRead, caseTop),
 		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
@@ -363,6 +407,7 @@ func (r *Recorder) finish(c *Case) {
 	firstInterval := r.cfg.Detail.D()
 	if len(details) > 0 {
 		firstInterval = r.ring.DetailInterval(details[0].At, firstInterval)
+		c.Culprits.IdleWindowMS = details[len(details)-1].At.Sub(details[0].At.Add(-firstInterval)).Milliseconds()
 	}
 	v := cappedWaitFirstInterval(details, c.Start, c.End, firstInterval, c.DurMS, c.BusyMS)
 	c.Capped, c.OutsideIdleMS, c.Culprits.CappedIdle = v.Capped, v.OutsideMS, v.Who
@@ -381,6 +426,223 @@ func (r *Recorder) finish(c *Case) {
 			cgroups += v
 		}
 		c.Culprits.KernelWrite = max(0, c.Culprits.DeviceWrite-cgroups)
+	}
+	resolveCaseMain(c, &sum)
+}
+
+// resolveCaseMain assigns one cause to the case: kernel writeback, a cgroup waiting while the disk is mostly idle,
+// or the cgroup with the most process writes plus reads. Reports and routing consume this same Main.
+func resolveCaseMain(c *Case, sum *Culprits) {
+	if c.Culprits == nil || sum == nil {
+		return
+	}
+	c.Waiting = false
+	main := c.Culprits.Main
+	windowMS := c.Culprits.IdleWindowMS
+	if windowMS <= 0 {
+		// Старые строки журнала не хранят окно деталей; восстановим номинальные 5 с контекста и хвоста.
+		windowMS = c.DurMS + 5_000 + 5_000 + 300 + 200
+	}
+	if !c.Quiet && !c.Capped && c.DurMS > 0 && c.BusyMS*100 < c.DurMS*waitDiskBusyPercent &&
+		c.MemFullMS*100 < c.DurMS*waitMemoryFullPercent {
+		if waiting := Rank(sum.CgroupIdle, 1); len(waiting) > 0 && waiting[0].Value*100 >= windowMS*waitIdleWindowPercent {
+			main = sum.cgroupPath(waiting[0].Name)
+			c.Waiting = main != ""
+		}
+	}
+	writeFromIOStat := false
+	if !c.Waiting && c.Culprits.KernelOver() {
+		main, writeFromIOStat = kernelWritebackMain(c.Culprits, sum)
+	}
+	if main == c.Culprits.Main {
+		if writeFromIOStat {
+			c.Culprits.MainValue, _, c.Culprits.MainRead = cgroupMetricsByName(sum, main)
+			c.Culprits.MainWrite = cgroupIOStatWrite(c.Culprits.CgroupWrite, main)
+		}
+		return
+	}
+	c.Culprits.Main = main
+	c.Culprits.MainValue, c.Culprits.MainWrite, c.Culprits.MainRead = cgroupMetricsByName(sum, main)
+	if writeFromIOStat {
+		c.Culprits.MainWrite = cgroupIOStatWrite(c.Culprits.CgroupWrite, main)
+	}
+	c.Culprits.MainProc = sum.MainProc(main)
+	if info, ok := sum.ProcessDetails[c.Culprits.MainProc]; ok {
+		c.Culprits.ProcessDetails[c.Culprits.MainProc] = info
+	}
+}
+
+func kernelWritebackMain(cul *Culprit, sum *Culprits) (string, bool) {
+	if cul.SnapshotDeletion() {
+		return "", false
+	}
+	dirty := Rank(sum.CgroupDirty, 2)
+	if len(dirty) > 0 && dirty[0].Value >= writebackOwnerMin && dirty[0].Value >= 2*dirtyValue(dirty, 1) &&
+		dirty[0].Value >= maxOtherCgroupWrite(cul.CgroupWrite, cul.CgroupOwn, dirty[0].Name) {
+		return cgroupNameOrPath(sum, dirty[0].Name), false
+	}
+	if writer, ok := strongWritebackCgroup(cul.CgroupWrite, cul.CgroupOwn, dirtyValue(dirty, 0)); ok {
+		return cgroupNameOrPath(sum, writer), true
+	}
+	return "", false
+}
+
+func cgroupIOStatWrite(items []Ranked, main string) int64 {
+	name := CgroupName(main)
+	for _, item := range items {
+		if item.Name == name {
+			return item.Value
+		}
+	}
+	return 0
+}
+
+func cgroupMetricsByName(sum *Culprits, path string) (total, write, read int64) {
+	if path == "" {
+		return 0, 0, 0
+	}
+	name := CgroupName(path)
+	for candidate, value := range sum.cgroupTotal {
+		if CgroupName(candidate) == name {
+			total += value
+		}
+	}
+	for candidate, value := range sum.cgroupWrite {
+		if CgroupName(candidate) == name {
+			write += value
+		}
+	}
+	for candidate, value := range sum.cgroupRead {
+		if CgroupName(candidate) == name {
+			read += value
+		}
+	}
+	return total, write, read
+}
+
+func dirtyValue(items []Ranked, i int) int64 {
+	if i >= 0 && i < len(items) {
+		return items[i].Value
+	}
+	return 0
+}
+
+func maxOtherCgroupWrite(items []Ranked, own map[string]int64, owner string) int64 {
+	var maxWrite int64
+	for _, item := range items {
+		if item.Name != owner {
+			value := item.Value
+			if FsyncOverage(value, own[item.Name]) {
+				value = own[item.Name]
+			}
+			maxWrite = max(maxWrite, value)
+		}
+	}
+	return maxWrite
+}
+
+// strongWritebackCgroup finds an io.stat writer only when its volume and margin support attribution.
+// The effective value discounts known btrfs fsync overage using the same evidence as the report.
+func strongWritebackCgroup(items []Ranked, own map[string]int64, dirtyTop int64) (string, bool) {
+	var first, second Ranked
+	for _, item := range items {
+		value := item.Value
+		if FsyncOverage(value, own[item.Name]) {
+			value = own[item.Name]
+		}
+		if value <= 0 {
+			continue
+		}
+		candidate := Ranked{Name: item.Name, Value: value}
+		if first.Name == "" || candidate.Value > first.Value || candidate.Value == first.Value && candidate.Name < first.Name {
+			second, first = first, candidate
+		} else if second.Name == "" || candidate.Value > second.Value || candidate.Value == second.Value && candidate.Name < second.Name {
+			second = candidate
+		}
+	}
+	if first.Name == "" || first.Value < writebackOwnerMin || first.Value < 2*second.Value || first.Value < dirtyTop {
+		return "", false
+	}
+	return first.Name, true
+}
+
+func cgroupNameOrPath(sum *Culprits, name string) string {
+	if path := sum.cgroupPath(name); path != "" {
+		return path
+	}
+	// Старые записи хранят только отображаемые имена, без достаточных данных для восстановления пути.
+	return name
+}
+
+// FsyncOverage is the known btrfs transaction commit that io.stat charges to an fsync caller.
+// The report uses the same predicate to annotate the excess in its cgroup write list.
+func FsyncOverage(write, own int64) bool {
+	return own > 0 && write > ioFsyncShare*own && write-own > ioFsyncMin
+}
+
+// ReattributeCases reapplies current attribution rules to stored summaries, whose detailed steps may have expired.
+// It reads only fields persisted in the case journal and does not modify the journal.
+func ReattributeCases(cases []Case) {
+	for i := range cases {
+		c := &cases[i]
+		if c.Culprits == nil {
+			continue
+		}
+		sum := Culprits{CgroupDirty: map[string]int64{}, CgroupRead: map[string]int64{}, CgroupIdle: map[string]int64{}, cgroupPaths: map[string]string{},
+			cgroupTotal: map[string]int64{}, cgroupWrite: map[string]int64{}, cgroupRead: map[string]int64{},
+			procCgroup: map[string]string{}, procIO: map[string]int64{}, ProcessDetails: c.Culprits.ProcessDetails}
+		pathFor := func(name string) string {
+			if path := c.Culprits.CgroupPaths[name]; path != "" {
+				return path
+			}
+			if previous := c.Culprits.Main; previous != "" && CgroupName(previous) == name {
+				return previous
+			}
+			// Имя cgroup не является путём; не выдумываем user-uid, slice или pid.
+			return name
+		}
+		for _, item := range c.Culprits.CgroupDirty {
+			sum.CgroupDirty[item.Name] = item.Value
+			path := pathFor(item.Name)
+			sum.cgroupWrite[path] = item.Value
+			sum.cgroupTotal[path] = item.Value
+			sum.cgroupPaths[item.Name] = path
+		}
+		for name, procName := range c.Culprits.CgroupMainProc {
+			path := sum.cgroupPaths[name]
+			if path == "" {
+				path = pathFor(name)
+				sum.cgroupPaths[name] = path
+			}
+			sum.procCgroup[procName] = path
+			sum.procIO[procName] = 1
+		}
+		if len(c.Culprits.CgroupMainProc) == 0 && len(c.Culprits.ProcWrite) > 0 {
+			if dirty := Rank(sum.CgroupDirty, 1); len(dirty) > 0 {
+				path := sum.cgroupPaths[dirty[0].Name]
+				procName := c.Culprits.ProcWrite[0].Name
+				sum.procCgroup[procName] = path
+				sum.procIO[procName] = c.Culprits.ProcWrite[0].Value
+			}
+		}
+		for _, item := range c.Culprits.CgroupRead {
+			sum.CgroupRead[item.Name] = item.Value
+			path := sum.cgroupPaths[item.Name]
+			if path == "" {
+				path = pathFor(item.Name)
+				sum.cgroupPaths[item.Name] = path
+			}
+			sum.cgroupRead[path] = item.Value
+			sum.cgroupTotal[path] += item.Value
+		}
+		for _, item := range c.Culprits.CgroupIdle {
+			sum.CgroupIdle[item.Name] = item.Value
+			if sum.cgroupPaths[item.Name] == "" {
+				sum.cgroupPaths[item.Name] = pathFor(item.Name)
+			}
+		}
+		maps.Copy(sum.cgroupPaths, c.Culprits.CgroupPaths)
+		resolveCaseMain(c, &sum)
 	}
 }
 

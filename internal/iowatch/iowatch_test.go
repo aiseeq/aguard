@@ -1448,14 +1448,29 @@ func TestSummarizeCleanerAsMain(t *testing.T) {
 	base := time.Date(2026, 11, 3, 1, 20, 0, 0, time.Local)
 	cases := []Case{{Start: base, DurMS: 2000, Culprits: &Culprit{Main: "/user.slice/agent-sess7-1.scope", MainValue: 100,
 		DeviceWrite: 1000, KernelWrite: 500, CleanerMS: 200}}, {Start: base.Add(time.Minute), DurMS: 2000,
-		Culprits: &Culprit{Main: "/user.slice/agent-sess8-1.scope", MainValue: 100, KernelWrite: 500}}}
+		Culprits: &Culprit{Main: "/user.slice/agent-sess8-1.scope", MainValue: 100, KernelWrite: 500}},
+		{Start: base.Add(2 * time.Minute), DurMS: 2000, Culprits: &Culprit{KernelWrite: 500, CleanerMS: 200}}}
 	s := Summarize(cases, base, base.Add(time.Hour), time.Second)
 	got := map[string]int{}
 	for _, item := range s.Main {
 		got[item.Name] = item.Cases
 	}
-	if len(got) != 2 || got["btrfs-cleaner"] != 1 || got["sess8"] != 1 {
+	if len(got) != 2 || got["btrfs-cleaner"] != 2 || got["sess8"] != 1 || s.Total != 3 {
 		t.Fatalf("главные виновники сводки: %+v", s.Main)
+	}
+}
+
+func TestSummarizeKernelBackgroundAsMain(t *testing.T) {
+	base := time.Date(2026, 11, 15, 12, 0, 0, 0, time.Local)
+	cases := []Case{{Start: base, DurMS: 2500, Culprits: &Culprit{KernelWrite: 100}},
+		{Start: base.Add(time.Minute), DurMS: 3000, Culprits: &Culprit{Main: "worker.service", MainValue: 5}}}
+	s := Summarize(cases, base, base.Add(time.Hour), 2*time.Second)
+	got := map[string]int{}
+	for _, item := range s.Main {
+		got[item.Name] = item.Cases
+	}
+	if s.Total != 2 || got["фон ядра"] != 1 || got["worker.service"] != 1 {
+		t.Fatalf("рейтинг главных не сходится с Total: total=%d main=%+v", s.Total, s.Main)
 	}
 }
 
@@ -1514,6 +1529,10 @@ func TestKernelOverWithoutMainOrForeign(t *testing.T) {
 	small := Culprit{KernelWrite: 500 << 20, Foreign: Ranked{Name: "docker", Value: 1 << 20}} // чужая мала: фон не теряется
 	if !small.KernelOver() {
 		t.Fatalf("фон ядра 500 МБ при чужой 1 МБ без главной: %+v", small)
+	}
+	equal := Culprit{KernelWrite: 500 << 20, Foreign: Ranked{Name: "docker", Value: 500 << 20}}
+	if !equal.KernelOver() {
+		t.Fatalf("фон с пустой главной и равной чужой записью не распознан: %+v", equal)
 	}
 	c.Main = "/user.slice/agent-old.scope" // старый случай с неизвестной мерой главной сохраняет прежнее поведение
 	if c.KernelOver() {

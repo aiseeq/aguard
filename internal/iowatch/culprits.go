@@ -30,13 +30,15 @@ type Culprits struct {
 	// Readable — cgroup своего user-<uid>.slice (user@<uid>.service и вход session-N.scope): /proc/<pid>/io её процессов
 	// aguard читает, своя запись известна.
 	// У системных служб (postgres, journald) процессы чужого uid, их write_bytes не видны — ноль там не значит «не писал».
-	Readable    map[string]bool
-	cgroupWrite map[string]int64  // запись процессов по пути cgroup
-	cgroupRead  map[string]int64  // чтение cgroup по пути
-	cgroupTotal map[string]int64  // запись процессов + чтение: мера главной cgroup
-	procCgroup  map[string]string // имя процесса → путь его cgroup (последней записи)
-	procIO      map[string]int64  // имя процесса → запись и чтение
-	foreignIO   map[string]int64  // по имени cgroup чужого uid: запись и чтение по io.stat — мера, сравнимая с главной
+	Readable        map[string]bool
+	cgroupWrite     map[string]int64  // запись процессов по пути cgroup
+	cgroupRead      map[string]int64  // чтение cgroup по пути
+	cgroupTotal     map[string]int64  // запись процессов + чтение: мера главной cgroup
+	cgroupPaths     map[string]string // путь cgroup по отображаемому имени
+	cgroupPathValue map[string]int64  // наибольший наблюдаемый I/O для выбора пути при совпавших именах
+	procCgroup      map[string]string // имя процесса → путь его cgroup (последней записи)
+	procIO          map[string]int64  // имя процесса → запись и чтение
+	foreignIO       map[string]int64  // по имени cgroup чужого uid: запись и чтение по io.stat — мера, сравнимая с главной
 }
 
 type procID struct {
@@ -51,7 +53,7 @@ func SumCulprits(details []Step) Culprits {
 	c := Culprits{ProcWrite: map[string]int64{}, ProcRead: map[string]int64{}, ProcMajflt: map[string]int64{},
 		CgroupWrite: map[string]int64{}, CgroupRead: map[string]int64{}, CgroupSwapIn: map[string]int64{},
 		CgroupIdle: map[string]int64{}, CgroupWriteOps: map[string]int64{}, CgroupDirty: map[string]int64{}, Readable: map[string]bool{},
-		cgroupWrite: map[string]int64{}, cgroupRead: map[string]int64{}, cgroupTotal: map[string]int64{}, foreignIO: map[string]int64{}, procCgroup: map[string]string{}, procIO: map[string]int64{}}
+		cgroupWrite: map[string]int64{}, cgroupRead: map[string]int64{}, cgroupTotal: map[string]int64{}, cgroupPaths: map[string]string{}, cgroupPathValue: map[string]int64{}, foreignIO: map[string]int64{}, procCgroup: map[string]string{}, procIO: map[string]int64{}}
 	userTree := "/user-" + strconv.Itoa(os.Getuid()) + ".slice/"
 	foreign := map[string]bool{} // имя есть и вне user-<uid>.slice (dbus-broker.service и в system.slice): своя запись неизвестна
 	names := processNames(details)
@@ -69,6 +71,7 @@ func SumCulprits(details []Step) Culprits {
 			c.procIO[name] += p.WriteBytes + p.ReadBytes
 			if p.Cgroup != "" {
 				c.procCgroup[name] = p.Cgroup
+				c.rememberCgroupPath(CgroupName(p.Cgroup), p.Cgroup, p.WriteBytes+p.ReadBytes)
 			}
 			if p.Cgroup != "" && p.WriteBytes > 0 {
 				c.CgroupDirty[CgroupName(p.Cgroup)] += p.WriteBytes
@@ -86,6 +89,7 @@ func SumCulprits(details []Step) Culprits {
 			c.CgroupWriteOps[name] += g.WriteOps
 			c.cgroupRead[g.Path] += g.ReadBytes
 			c.cgroupTotal[g.Path] += g.ReadBytes
+			c.rememberCgroupPath(name, g.Path, g.WriteBytes+g.ReadBytes)
 			if strings.Contains(g.Path, userTree) {
 				c.Readable[name] = true
 			} else {
@@ -98,6 +102,21 @@ func SumCulprits(details []Step) Culprits {
 		delete(c.Readable, name)
 	}
 	return c
+}
+
+// cgroupPath returns a path matching a displayed cgroup name.
+func (c *Culprits) cgroupPath(name string) string { return c.cgroupPaths[name] }
+
+func (c *Culprits) rememberCgroupPath(name, path string, value int64) {
+	if name == "" || path == "" {
+		return
+	}
+	c.cgroupPathValue[path] += value
+	value = c.cgroupPathValue[path]
+	best := c.cgroupPaths[name]
+	if best == "" || value > c.cgroupPathValue[best] || value == c.cgroupPathValue[best] && path < best {
+		c.cgroupPaths[name] = path
+	}
 }
 
 // processNames — имя каждого процесса окна: последний comm, «+дети», если хоть раз был Children.

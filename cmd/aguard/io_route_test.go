@@ -96,6 +96,38 @@ func TestTicketClassAndSlugN(t *testing.T) {
 	}
 }
 
+func TestIOBlameMainDeterminesRouteOwnerAndWaitingIsNotAlertable(t *testing.T) {
+	o := &ioOwnerFinder{units: map[string]string{"adream.service": "adream-master"}}
+	for _, tc := range []struct {
+		name, main, owner, proc string
+		waiting                 bool
+	}{
+		{"writeback preserves normal agent session route", "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-dream-master-1.scope", "dream-master", "writer(1)", false},
+		{"idle device follows waiting service", "/system.slice/adream.service", "adream-master", "", true},
+		{"stored service name still resolves owner", "adream.service", "adream-master", "", false},
+		{"desktop cgroup is not itself an owner", "/user.slice/user-1000.slice/user@1000.service/app.slice/app-com.google.Chrome@123.service", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := iowatch.Case{Start: time.Now().Add(-time.Minute), End: time.Now(), DurMS: 3000, Waiting: tc.waiting,
+				Culprits: &iowatch.Culprit{Main: tc.main, MainProc: tc.proc, ProcessDetails: map[string]iowatch.ProcessDetails{"writer(1)": {Cmdline: "writer", CWD: "/home/u/.cache/claude-tmp/claude-1000/-home-u-git-dream/12345678-1234-1234-1234-123456789012/scratchpad/x"}}}}
+			o.home = "/home/u"
+			o.sessions = func(id string) (string, error) {
+				if id == "12345678-1234-1234-1234-123456789012" {
+					return "dream-master", nil
+				}
+				return "", nil
+			}
+			rc, err := o.routeCase(&c)
+			if err != nil || rc.Owner != tc.owner {
+				t.Fatalf("маршрут: %+v %v, want owner %s", rc, err, tc.owner)
+			}
+			if tc.waiting && alertable(&c, iowatch.Default()) {
+				t.Fatal("локальное ожидание ушло в маршрут фриза")
+			}
+		})
+	}
+}
+
 // Хозяин временного scope (проба через systemd-run) — по scratchpad сессии в cmdline главного процесса: живая сессия с
 // этим SessionID, иначе мастер проекта по ключу; без scratchpad — по cwd.
 func TestIOOwnerByProcess(t *testing.T) {
