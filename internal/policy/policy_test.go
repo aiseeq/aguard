@@ -640,7 +640,7 @@ func TestMessage(t *testing.T) {
 }
 
 func TestHumanFormats(t *testing.T) {
-	bytesCases := map[int64]string{512: "512 Б", 1536: "1.5 КБ", 350 * mib: "350 МБ", 12 * gib / 10: "1.2 ГБ"}
+	bytesCases := map[int64]string{512: "512 Б", 1536: "1.5 КБ", 350 * mib: "350 МБ", 12 * gib / 10: "1.2 ГБ", -58 * mib: "-58 МБ", -512: "-512 Б"}
 	for in, want := range bytesCases {
 		if got := HumanBytes(in); got != want {
 			t.Errorf("HumanBytes(%d) = %q, хотим %q", in, got, want)

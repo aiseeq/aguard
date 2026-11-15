@@ -2,13 +2,17 @@ package policy
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// HumanBytes — «1.2 ГБ», «350 МБ», «12 КБ» (двоичные единицы, точка в дробях).
+// HumanBytes — «1.2 ГБ», «350 МБ», «12 КБ», «-58 МБ» (двоичные единицы, точка в дробях).
 func HumanBytes(b int64) string {
+	if b < 0 && b > math.MinInt64 {
+		return "-" + HumanBytes(-b)
+	}
 	units := []string{"Б", "КБ", "МБ", "ГБ", "ТБ"}
 	f := float64(b)
 	i := 0
