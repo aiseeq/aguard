@@ -3,8 +3,8 @@
 // Имя берётся из таблицы ~/.config/cl/names.tsv (строка «папка<TAB>имя», ~ раскрывается); папки нет в таблице, а
 // она прямо в ~/git или ~/work — имя <папка>-master; иначе имя не задаётся (Claude Code выведет своё). Имя уже
 // занято живой сессией — к нему добавляется -2, -3… Своё -n/--name, режим -p и подкоманды (mcp, auth, …) cl не
-// трогает. Сессия запускается в своём scope слайса agents.slice (scope.go): вес процессора и диска ниже, чем у
-// приложений пользователя.
+// трогает. Сессия запускается в своём scope слайса agents.slice (scope.go): при установленном файле вес процессора
+// и диска ниже, чем у приложений пользователя; без файла cl предупреждает, но запускает с весом по умолчанию.
 //
 // Интерактивную сессию cl держит дочерним процессом (supervise.go): простаивающую сессию на старой версии Claude Code
 // он перезапускает с той же беседой, когда aguard говорит, что можно (internal/restart, ответ по сокету — ask.go),
@@ -50,14 +50,18 @@ func main() {
 		l.journalUpgradeFail(err, "новая беседа, прежний claude без хозяина pty")
 	}
 	args := os.Args[1:]
+	if l.upgraded == nil {
+		slicePath := filepath.Join(home, ".config", "systemd", "user", agentsSlice)
+		installed, statErr := sliceInstalled(slicePath)
+		if statErr != nil || !installed {
+			warnSlice(slicePath, statErr)
+		}
+	}
 	if len(args) == 1 && args[0] == checkFlag {
 		os.Exit(runCheck(l))
 	}
 	if l.systemdRun, err = exec.LookPath("systemd-run"); err != nil {
 		fail(fmt.Errorf("без systemd-run сессия не попадёт в %s: %w", agentsSlice, err))
-	}
-	if err := sliceInstalled(filepath.Join(home, ".config", "systemd", "user", agentsSlice)); err != nil {
-		fail(err)
 	}
 	if !interactive(args) {
 		cfg, configErr := l.readConfig()
