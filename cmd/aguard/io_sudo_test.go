@@ -394,7 +394,7 @@ func TestSudoMissIsRetried(t *testing.T) {
 
 func TestClosedRootCaseDoesNotWaitForJournal(t *testing.T) {
 	ctx := t.Context()
-	started, release := make(chan struct{}), make(chan struct{})
+	started, release := make(chan struct{}, 1), make(chan struct{})
 	a := &app{sudoJournalSource: func(ctx context.Context, _, _ string, _ ...string) ([]journalRecord, error) {
 		select {
 		case started <- struct{}{}:
