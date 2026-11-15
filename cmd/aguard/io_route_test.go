@@ -218,7 +218,7 @@ func TestIOLetterFailedToTicket(t *testing.T) {
 func TestIOOwnerWorkerMaster(t *testing.T) {
 	dir := t.TempDir()
 	writeIOFile(t, filepath.Join(dir, "J", "job.json"), `{"id":"J","master":"sc2go-master","unit":"worker-J"}`)
-	o := &ioOwnerFinder{jobs: &cpuwatch.Jobs{Dir: dir, Units: t.TempDir()}}
+	o := &ioOwnerFinder{jobs: &cpuwatch.Jobs{Dir: dir, Units: []string{t.TempDir()}}}
 	alive := func(s string) bool { return s == "sc2go-master" || s == "lead" }
 	for _, unit := range []string{"worker-J.service", "worker-J-2.service"} {
 		c := iowatch.Case{Start: time.Now().Add(-2500 * time.Millisecond), End: time.Now(), DurMS: 2500,

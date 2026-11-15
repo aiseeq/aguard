@@ -129,7 +129,7 @@ func testJobs(t *testing.T) *Jobs {
 		`{"id":"1027-2338-tk-triage","dir":"/w/sc2demu/tk-triage","task":"tk-triage","master":"sc2demu-master","unit":"worker-1027-2338-tk-triage"}`)
 	write(t, filepath.Join(dir, "1027-2207-r-t07-1", "job.json"),
 		`{"id":"1027-2207-r-t07-1","dir":"/w/glint/r-t07","task":"r-t07-1","master":"glint-master","unit":"worker-1027-2207-r-t07-1"}`)
-	return &Jobs{Dir: dir, Units: units}
+	return &Jobs{Dir: dir, Units: []string{units}}
 }
 
 func TestOwner(t *testing.T) {

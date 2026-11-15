@@ -33,7 +33,7 @@ func TestWorkerByUnitLiveEscaped(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(units, esc), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	l := &liveSessions{jobs: &cpuwatch.Jobs{Dir: dir, Units: units}}
+	l := &liveSessions{jobs: &cpuwatch.Jobs{Dir: dir, Units: []string{units}}}
 	job, ok, err := l.WorkerByUnit(esc)
 	if err != nil || !ok || job.ID != id || !job.Live {
 		t.Fatalf("WorkerByUnit(%q) = %+v ok=%v err=%v", esc, job, ok, err)
@@ -74,7 +74,7 @@ func TestRouteSigguardExactCutSibling(t *testing.T) {
 		t.Fatal(err)
 	}
 	alive := map[string]session.Info{"m0": {Pid: 1, Name: "m0"}, "m1": {Pid: 2, Name: "m1"}}
-	got, job := sigguardRoute(sigguard.Deny{Unit: full[:127]}, "leader", alive, &cpuwatch.Jobs{Dir: dir, Units: units})
+	got, job := sigguardRoute(sigguard.Deny{Unit: full[:127]}, "leader", alive, &cpuwatch.Jobs{Dir: dir, Units: []string{units}})
 	if got != "m1" || job != base+"-2" {
 		t.Fatalf("route = %s %s, want m1 %s-2", got, job, base)
 	}

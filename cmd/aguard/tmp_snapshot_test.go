@@ -31,7 +31,7 @@ func TestTmpWorkerJobOwnerAndLiveUnit(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(units, "worker-J-2.service"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	live := &liveSessions{jobs: &cpuwatch.Jobs{Dir: root, Units: units},
+	live := &liveSessions{jobs: &cpuwatch.Jobs{Dir: root, Units: []string{units}},
 		byName: map[string]session.Info{"alpha-master": {Name: "alpha-master", Cwd: "/home/u/work/project"}}}
 	// Первый unit умер, но папку использует повторный запуск того же задания.
 	jobInfo, ok, err := live.WorkerByUnit("worker-J.service")
@@ -49,7 +49,7 @@ func TestTmpWorkerJobOwnerAndLiveUnit(t *testing.T) {
 	if err := os.WriteFile(job, []byte(`{"id":"J","unit":"worker-J"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	live.jobs = &cpuwatch.Jobs{Dir: root, Units: units}
+	live.jobs = &cpuwatch.Jobs{Dir: root, Units: []string{units}}
 	if jobInfo, ok, err := live.WorkerByUnit("worker-J.service"); err != nil || ok || jobInfo.Master != "" {
 		t.Fatalf("задание без заказчика: %+v, %v, %v", jobInfo, ok, err)
 	}

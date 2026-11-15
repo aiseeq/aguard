@@ -146,11 +146,17 @@ func (a *app) workerJobs() *cpuwatch.Jobs {
 	if jobsDir == "" {
 		jobsDir = filepath.Join(a.home, ".local", "state", "worker")
 	}
-	unitsDir := a.workerUnitsDir
-	if unitsDir == "" {
-		unitsDir = fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/app.slice", a.uid, a.uid)
+	units := a.workerUnitDirs()
+	if a.workerUnitsDir != "" {
+		units = []string{a.workerUnitsDir}
 	}
-	return &cpuwatch.Jobs{Dir: jobsDir, Units: unitsDir}
+	return &cpuwatch.Jobs{Dir: jobsDir, Units: units}
+}
+
+// workerUnitDirs — папки cgroup, где живут unit бойцов worker: app.slice (до переноса) и agents.slice своего user@.
+func (a *app) workerUnitDirs() []string {
+	base := fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service", a.uid, a.uid)
+	return []string{filepath.Join(base, "app.slice"), filepath.Join(base, "agents.slice")}
 }
 
 // tmpFactor — множитель порога по давлению памяти. Давление не прочиталось —

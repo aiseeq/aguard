@@ -38,8 +38,7 @@ func (a *app) ioOwners(cfg *iowatch.Config) *ioOwnerFinder {
 	// хозяина (лиду), а не <проект>-master по догадке — мастеру, которого таблица могла переименовать.
 	table, err := a.namesTable("io")
 	return &ioOwnerFinder{units: cfg.Owners, home: a.home, table: table, tableErr: err,
-		jobs: &cpuwatch.Jobs{Dir: filepath.Join(a.home, ".local", "state", "worker"),
-			Units: fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/app.slice", a.uid, a.uid)},
+		jobs: &cpuwatch.Jobs{Dir: filepath.Join(a.home, ".local", "state", "worker"), Units: a.workerUnitDirs()},
 		sessions: func(id string) (string, error) {
 			alive, err := a.reg.Alive()
 			if err != nil {

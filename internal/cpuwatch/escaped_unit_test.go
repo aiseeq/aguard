@@ -75,7 +75,7 @@ func TestByUnitPrefixAmbiguous(t *testing.T) {
 	writeUnitJob(t, dir, base, now, "first")
 	writeUnitJob(t, dir, base+"-2", now.Add(time.Second), "second")
 	unit := systemdName(t, "worker-"+base+".service")[0][:60]
-	if v, err := (&Jobs{Dir: dir, Units: units}).ByUnitPrefix(unit); err != nil || v != nil {
+	if v, err := (&Jobs{Dir: dir, Units: []string{units}}).ByUnitPrefix(unit); err != nil || v != nil {
 		t.Errorf("живых нет: %+v %v, want nil", v, err)
 	}
 	if v, err := (&Jobs{Dir: dir}).ByUnitPrefix(unit); err != nil || v != nil {
@@ -84,7 +84,7 @@ func TestByUnitPrefixAmbiguous(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(units, systemdName(t, "worker-"+base+".service")[0]), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if v, err := (&Jobs{Dir: dir, Units: units}).ByUnitPrefix(unit); err != nil || v == nil || v.Master != "first" {
+	if v, err := (&Jobs{Dir: dir, Units: []string{units}}).ByUnitPrefix(unit); err != nil || v == nil || v.Master != "first" {
 		t.Errorf("живо первое: %+v %v", v, err)
 	}
 }
@@ -98,7 +98,7 @@ func TestUnitLiveEscaped(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(units, esc), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	j := &Jobs{Dir: dir, Units: units}
+	j := &Jobs{Dir: dir, Units: []string{units}}
 	v, err := j.ByUnit(esc)
 	if err != nil || v == nil {
 		t.Fatalf("ByUnit %q: %+v %v", esc, v, err)
@@ -106,7 +106,7 @@ func TestUnitLiveEscaped(t *testing.T) {
 	if live, err := j.UnitLive(v.Unit); err != nil || !live {
 		t.Errorf("UnitLive(%q) = %v %v", v.Unit, live, err)
 	}
-	fresh := &Jobs{Dir: dir, Units: units}
+	fresh := &Jobs{Dir: dir, Units: []string{units}}
 	if err := fresh.readLive(); err != nil || len(fresh.all) != 1 {
 		t.Errorf("readLive = %d %v", len(fresh.all), err)
 	}

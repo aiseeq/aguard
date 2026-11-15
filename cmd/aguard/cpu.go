@@ -244,8 +244,7 @@ func (a *app) cpuRemote(ctx context.Context, h *cpuHost, tasks bool) ([]cpuwatch
 // cpuResolver — владельцы потоков на этот проход.
 func (a *app) cpuResolver(cfg *cpuwatch.Config) *cpuwatch.Resolver {
 	return &cpuwatch.Resolver{
-		Jobs: &cpuwatch.Jobs{Dir: cfg.Workers,
-			Units: fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%d.slice/user@%d.service/app.slice", a.uid, a.uid)},
+		Jobs:     &cpuwatch.Jobs{Dir: cfg.Workers, Units: a.workerUnitDirs()},
 		ProcRoot: procRoot,
 		Sessions: func(pid int) (string, error) {
 			in, err := a.reg.Get(pid)

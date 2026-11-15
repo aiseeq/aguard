@@ -61,7 +61,7 @@ type JobOwner struct {
 // Jobs — задания worker по папке состояния; читаются по мере надобности.
 type Jobs struct {
 	Dir   string
-	Units string          // папка cgroup, где systemd держит unit бойцов (app.slice user@): живой unit — папка в ней
+	Units []string        // папки cgroup, где systemd держит unit бойцов (app.slice и agents.slice user@): живой unit — папка в одной из них
 	byID  map[string]*Job // nil — задания нет
 	all   []*Job          // живые задания папки, прочитанные ByTree
 	read  bool
@@ -211,7 +211,7 @@ func (j *Jobs) ByUnitPrefix(unit string) (*Job, error) {
 			found = append(found, v)
 		}
 	}
-	if len(found) > 1 && j.Units != "" {
+	if len(found) > 1 && len(j.Units) > 0 {
 		live, err := liveUnits(j.Units)
 		if err != nil {
 			errs = append(errs, err)
@@ -238,17 +238,33 @@ func unitCut(unit, cut string) bool {
 	return strings.HasPrefix(".service", tail)
 }
 
-// liveUnits — работающие unit бойцов: папки <имя>.service в cgroup, имя без экранирования systemd и без .service.
-func liveUnits(dir string) (map[string]bool, error) {
-	units, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("unit бойцов: %w", err)
-	}
+// liveUnits — работающие unit бойцов: папки <имя>.service в папках cgroup dirs, имя без экранирования systemd и без
+// .service. worker переносит тела бойцов из app.slice в agents.slice, старые доживают в app.slice: папки, которой нет,
+// пропускаются; ошибка — если не прочиталась ни одна.
+func liveUnits(dirs []string) (map[string]bool, error) {
 	live := map[string]bool{}
-	for _, u := range units {
-		if name, ok := strings.CutSuffix(u.Name(), ".service"); ok && u.IsDir() {
-			live[UnescapeUnit(name)] = true
+	var errs []error
+	read := 0
+	for _, dir := range dirs {
+		units, err := os.ReadDir(dir)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("unit бойцов: %w", err))
+			}
+			continue
 		}
+		read++
+		for _, u := range units {
+			if name, ok := strings.CutSuffix(u.Name(), ".service"); ok && u.IsDir() {
+				live[UnescapeUnit(name)] = true
+			}
+		}
+	}
+	if read == 0 && len(errs) == 0 {
+		errs = append(errs, fmt.Errorf("unit бойцов: нет ни одной папки из %v", dirs))
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
 	}
 	return live, nil
 }
