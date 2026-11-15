@@ -103,6 +103,9 @@ func (a *app) ceilingCmd(args []string) error {
 	fl.SetOutput(a.out)
 	fl.Usage = func() {
 		fmt.Fprintln(a.out, "Использование: aguard memory ceiling [размер] | --default")
+		fmt.Fprintln(a.out, "  без размера — показать потолок своей сессии: unit, база, своп, MemoryMax и shmem сейчас")
+		fmt.Fprintln(a.out, "  с размером (5G, 512M) — сменить базу потолка своей сессии; рост — сразу, снижение — наблюдатель, когда память опустится ниже цели")
+		fmt.Fprintln(a.out, "  база действует до конца scope сессии: новый scope (запуск cl, подъём claude, /compact) снова берёт memory.max из конфига cl")
 		fl.PrintDefaults()
 	}
 	defaultBase := fl.Bool("default", false, "показать базу потолка из конфига cl (~/.config/cl/config.json или $CL_CONFIG) в байтах")

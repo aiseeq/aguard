@@ -46,7 +46,9 @@ func TestCeilingDefault(t *testing.T) {
 	if got, err := run("--default"); err == nil || got != "" {
 		t.Errorf("bad max: got %q, err %v", got, err)
 	}
-	if got, err := run("-h"); err != nil || !strings.Contains(got, "--default") {
+	if got, err := run("-h"); err != nil || !strings.Contains(got, "--default") || !strings.Contains(got, "без размера") ||
+		!strings.Contains(got, "с размером") || !strings.Contains(got, "до конца scope") || !strings.Contains(got, "рост — сразу") ||
+		!strings.Contains(got, "снижение — наблюдатель") || !strings.Contains(got, "  -default") {
 		t.Errorf("help: got %q, err %v", got, err)
 	}
 	if err := os.WriteFile(configPath, []byte(`{"memory":{"max":"12G"}}`), 0600); err != nil {
