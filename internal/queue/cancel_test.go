@@ -180,6 +180,103 @@ func TestWaitingTicketWithoutExecutorIsSkippedInFrozenDeadProject(t *testing.T) 
 	}
 }
 
+func TestWaitingHighWithoutExecutorCreatesState(t *testing.T) {
+	w := newWorld(ModeOn)
+	s := seeded(w)
+	tk := tick("HIGH", "ждёт")
+	if _, eligible := s.prepareTicket(tk, w.view(), true, map[string]bool{}); !eligible {
+		t.Fatal("HIGH «ждёт» без исполнителя сохраняет обычное состояние")
+	}
+	if s.Tickets[tk.Key] == nil {
+		t.Fatal("состояние HIGH «ждёт» не создано")
+	}
+}
+
+func TestReopenedTicketCanNotifyBackAgain(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.free["git-admin"] = true
+	s := seeded(w)
+	tk := tick("MED", "готово")
+	tk.Back = "git-admin"
+	if ns := step(s, []Ticket{tk}, w); !has(ns, KindBack, "git-admin") {
+		t.Fatalf("первое закрытие уведомляет заказчика: %+v", ns)
+	}
+	tk.Status = "в работе"
+	step(s, []Ticket{tk}, w)
+	tk.Status = "готово"
+	if ns := step(s, []Ticket{tk}, w); !has(ns, KindBack, "git-admin") {
+		t.Fatalf("после переоткрытия второе закрытие снова уведомляет заказчика: %+v", ns)
+	}
+}
+
+// HIGH открыт → отклонён без заказчика, не будучи в работе → взят → отпущен: мастер снова получает строку HIGH,
+// как до запоминания исполнителя (запись отклонённого не из работы не держится).
+func TestHighRejectedThenReleasedNotifiesMasterAgain(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.free["m-master"] = true
+	s := seeded(w)
+	high := freshHigh(w, time.Hour)
+	if ns := step(s, []Ticket{high}, w); !has(ns, KindHigh, "m-master") {
+		t.Fatalf("первое открытие HIGH: %+v", ns)
+	}
+	high.Status = "отклонён"
+	step(s, []Ticket{high}, w)
+	high.Status = "в работе"
+	step(s, []Ticket{high}, w)
+	high.Status = "открыт"
+	if ns := step(s, []Ticket{high}, w); !has(ns, KindHigh, "m-master") {
+		t.Fatalf("HIGH снова открыт после отклонения и взятия: %+v", ns)
+	}
+}
+
+func TestWorkingMEDThenOldHighOpenDoesNotNotifyAdmin(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.live["executor-a"], w.free["m-master"] = true, true
+	s := seeded(w)
+	tk := tick("MED", "в работе")
+	tk.Executor = "executor-a"
+	step(s, []Ticket{tk}, w)
+	w.now = w.now.Add(5 * time.Hour)
+	tk.Status, tk.Prio = "открыт", "HIGH"
+	if ns := step(s, []Ticket{tk}, w); has(ns, KindHighAdmin, "git-admin") {
+		t.Fatalf("прошлая работа считается взятием и сбрасывает старый Seen: %+v", ns)
+	}
+}
+
+func TestFrozenDeadMasterWorkingTicketDropsWakesAndKeepsState(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.live["m-master"] = false
+	s := seeded(w)
+	v := w.view()
+	v.Frozen = func(string) (bool, error) { return true, nil }
+	tk := cancelTicket()
+	tk.Dir = "/m"
+	s.ProjectWakes[tk.Dir] = ProjectWake{Ticket: "m/old"}
+	s.Wakes[tk.Master] = Wake{Ticket: "m/old"}
+	active := map[string]bool{}
+	st, eligible := s.prepareTicket(tk, v, true, active)
+	if !eligible || st == nil || !st.Working || s.Tickets[tk.Key] != st {
+		t.Fatalf("working тикет продолжает обработку после очистки wake: state=%+v eligible=%v", st, eligible)
+	}
+	if len(s.ProjectWakes) != 0 || len(s.Wakes) != 0 {
+		t.Fatalf("замороженный проект очистил wake даже для working тикета: project=%+v sessions=%+v", s.ProjectWakes, s.Wakes)
+	}
+}
+
+func TestFrozenDeadMasterNonworkingTicketRemainsSkipped(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.live["m-master"] = false
+	s := seeded(w)
+	v := w.view()
+	v.Frozen = func(string) (bool, error) { return true, nil }
+	tk := tick("HIGH", "открыт")
+	active := map[string]bool{}
+	st, eligible := s.prepareTicket(tk, v, true, active)
+	if eligible || st != nil || s.Tickets[tk.Key] != nil {
+		t.Fatalf("неработающий тикет замороженного проекта не получает state: state=%+v eligible=%v", st, eligible)
+	}
+}
+
 func TestDeadExecutorFallsBackToProjectMaster(t *testing.T) {
 	w := newWorld(ModeOn)
 	w.live["project-master"], w.free["project-master"] = true, true

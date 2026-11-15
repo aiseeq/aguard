@@ -420,6 +420,7 @@ func resetCancelOnReopen(st *ticketState, t Ticket, working bool) {
 		st.CancelSent, st.CancelLost = false, false
 		st.CancelAt = time.Time{}
 		st.CancelJournalRead, st.CancelAuthor, st.CancelReason = false, "", ""
+		st.Closed, st.BackSent, st.BackLost = time.Time{}, false, false
 	}
 	if !closed(t.Status) && !working {
 		st.Working = false
@@ -427,15 +428,17 @@ func resetCancelOnReopen(st *ticketState, t Ticket, working bool) {
 }
 
 func (s *State) trackable(t Ticket, st *ticketState, v View, working bool) bool {
-	if !closed(t.Status) && !working && !alive(v, t.Master) && frozen(v, t.Dir) {
+	if !closed(t.Status) && !alive(v, t.Master) && frozen(v, t.Dir) {
 		s.dropFrozenWakes(t)
+		if !working {
+			return false
+		}
+	}
+	if closed(t.Status) && t.Back == "" && !cancelStatus(t.Status) || !closed(t.Status) && !working && t.Prio != "CRIT" && t.Prio != "HIGH" {
 		return false
 	}
-	if t.Status == "ждёт" && t.Executor == "" || closed(t.Status) && t.Back == "" && !cancelStatus(t.Status) || !closed(t.Status) && !working && t.Prio != "CRIT" && t.Prio != "HIGH" {
-		return false
-	}
-	if cancelStatus(t.Status) && st == nil && t.Back == "" {
-		return false
+	if cancelStatus(t.Status) && t.Back == "" && (st == nil || !st.Working) {
+		return false // отклонён без заказчика и не из работы: запись не нужна (и отметка HIGH не держится до переоткрытия)
 	}
 	return true
 }
@@ -444,6 +447,7 @@ func rememberExecutor(st *ticketState, t Ticket) {
 	if !ticketWorking(t) {
 		return
 	}
+	st.Taken = true
 	st.Executor = t.Executor
 	if t.Status == "в работе" && st.Executor == "" {
 		st.Executor = t.Master
@@ -728,7 +732,7 @@ func (s *State) cancelNotices(t Ticket, st *ticketState, v View) []Notice {
 	}
 	line := cancelLine(t)
 	if v.restingSessions[to] || to != v.Lead && restingDir(t.Dir, v) {
-		// Отдыхающая сессия и проект на дне отдыха по проекту не работают; лиду — без ожидания.
+		// Отдыхающая сессия и проект на дне отдыха по проекту не работают; срок 7 суток переносится на конец отдыха, лиду — без ожидания.
 		st.CancelAt = v.Rest.End(v.Now)
 		return nil
 	}
