@@ -279,7 +279,8 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		a.warn("queue", "внешний трекер", "err", err)
 		return nil
 	}
-	tickets = append(slices.Clip(tickets), external...)
+	tickets = queueNoticeTickets(tickets, external)
+	a.queueCancelJournals(&before, tickets)
 	alive, err := a.reg.Alive()
 	if err != nil {
 		a.warn("queue", "реестр сессий", "err", err)
@@ -308,6 +309,32 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		a.queueUnsaved = nil
 	}
 	return nil
+}
+
+func queueNoticeTickets(cached, external []queue.Ticket) []queue.Ticket {
+	return append(slices.Clone(cached), external...)
+}
+
+func (a *app) queueCancelJournals(state *queue.State, tickets []queue.Ticket) {
+	for i := range tickets {
+		if tickets[i].Status != "отклонён" {
+			continue
+		}
+		author, reason, journalLoaded := state.CancelJournal(tickets[i].Key)
+		if !journalLoaded && state.NeedsCancelJournal(tickets[i]) {
+			var err error
+			author, reason, err = readCancelJournal(tickets[i])
+			journalLoaded = true
+			if err != nil {
+				a.warn("queue", "журнал отмены тикета", "path", tickets[i].Path, "err", err)
+				author, reason = "", ""
+			}
+			state.RememberCancelJournal(tickets[i].Key, author, reason)
+		}
+		if journalLoaded {
+			tickets[i].CancelAuthor, tickets[i].CancelReason, tickets[i].CancelJournalRead = author, reason, true
+		}
+	}
 }
 
 func (a *app) queueBootGrace(view *queue.View, grace time.Duration) {
@@ -666,7 +693,12 @@ func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticke
 				continue
 			}
 			master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
-			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Journal: r.Journal,
+			ticketPath, pathErr := queueTicketPath(project, rootMode, r.Path)
+			if pathErr != nil {
+				a.warn("queue", "папка тикета", "project", project, "err", pathErr)
+				ticketPath = filepath.Join("docs", "tasks", filepath.Base(filepath.FromSlash(r.Path)))
+			}
+			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Path: ticketPath, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Journal: r.Journal,
 				MasterNote: a.queueMasterNote(r, master)})
 		}
 		return nil
@@ -690,6 +722,23 @@ func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticke
 	return out, nil
 }
 
+func queueTicketPath(project string, rootMode bool, tkPath string) (string, error) {
+	tasks := filepath.Join(project, "docs", "tasks")
+	if !rootMode {
+		info, err := os.Stat(tasks)
+		if errors.Is(err, os.ErrNotExist) || err == nil && !info.IsDir() {
+			tasks = filepath.Join(project, "tasks")
+		} else if err != nil {
+			return "", fmt.Errorf("каталог %s: %w", tasks, err)
+		}
+	}
+	rel, err := filepath.Rel(project, tasks)
+	if err != nil {
+		return "", fmt.Errorf("относительный путь от %s к %s: %w", project, tasks, err)
+	}
+	return filepath.Join(rel, filepath.Base(filepath.FromSlash(tkPath))), nil
+}
+
 // queueTransferLine — строка .transferred.jsonl, которую tk дописывает до удаления перенесённого тикета.
 type queueTransferLine struct {
 	Slug string `json:"slug"`
@@ -697,6 +746,7 @@ type queueTransferLine struct {
 	Back string `json:"back"`
 	Key  string `json:"key"`
 	URL  string `json:"url"`
+	By   string `json:"by"`
 }
 
 // queueTransfers — перенесённые во внешний трекер тикеты с заказчиком как закрытые: доставка, однократность и потеря — те же, что у строки о закрытом.
@@ -724,8 +774,10 @@ func (a *app) queueTransfers(c *config.Config, table map[string]string) ([]queue
 				continue
 			}
 			master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
+			transfer := strings.TrimSpace(line.Key + " " + line.URL)
 			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: line.Slug, Status: queue.StatusTransferred,
-				Back: line.Back, Master: master, Admin: admin, Transfer: strings.TrimSpace(line.Key + " " + line.URL)})
+				Back: line.Back, Master: master, Admin: admin, Transfer: transfer, CancelAuthor: line.By, CancelJournalRead: true,
+				CancelReason: "перенос во внешний трекер " + transfer})
 		}
 	}
 	return out, nil
@@ -758,9 +810,7 @@ func (a *app) readQueueTransfers(path string) ([]queueTransferLine, error) {
 			a.warn("queue", "битая строка переноса", "path", path, "err", err)
 			continue
 		}
-		if line.Back != "" {
-			out = append(out, line)
-		}
+		out = append(out, line)
 	}
 	return out, nil
 }
@@ -833,4 +883,57 @@ func (a *app) queueMasterNote(r *queueTicketJSON, master string) time.Time {
 		return time.Time{}
 	}
 	return at
+}
+
+func readCancelJournal(t queue.Ticket) (string, string, error) {
+	if !filepath.IsLocal(t.Path) {
+		return "", "", fmt.Errorf("путь тикета не локальный: %q", t.Path)
+	}
+	path := filepath.Join(t.Dir, filepath.FromSlash(t.Path))
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", fmt.Errorf("чтение тикета %s: %w", path, err)
+	}
+	return parseCancelJournal(b, t.Status)
+}
+
+func parseCancelJournal(data []byte, status string) (string, string, error) {
+	inJournal := false
+	entry := ""
+	for line := range strings.SplitSeq(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") {
+			inJournal = trimmed == "## Журнал"
+			continue
+		}
+		if !inJournal || !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		candidate := strings.TrimSpace(line)
+		parts := strings.SplitN(strings.TrimPrefix(candidate, "- "), " — ", 3)
+		stampStatus := strings.Fields(parts[0])
+		if len(stampStatus) == 3 && stampStatus[2] == status {
+			entry = candidate
+		}
+	}
+	if entry == "" {
+		return "", "", fmt.Errorf("в тикете нет записи со статусом %q", status)
+	}
+	parts := strings.SplitN(strings.TrimPrefix(entry, "- "), " — ", 3)
+	if len(parts) != 3 {
+		return "", "", fmt.Errorf("неизвестный формат строки журнала: %s", entry)
+	}
+	stampStatus := strings.Fields(parts[0])
+	if len(stampStatus) != 3 || stampStatus[2] != status {
+		return "", "", fmt.Errorf("последняя запись журнала не соответствует статусу %q: %s", status, entry)
+	}
+	author := strings.TrimSpace(parts[1])
+	if author == "" {
+		return "", "", fmt.Errorf("автор последней записи журнала пуст")
+	}
+	reason := strings.TrimSpace(parts[2])
+	if _, err := time.ParseInLocation("2006-01-02 15:04", stampStatus[0]+" "+stampStatus[1], time.Local); err != nil {
+		return author, reason, fmt.Errorf("время последней записи журнала: %w", err)
+	}
+	return author, reason, nil
 }

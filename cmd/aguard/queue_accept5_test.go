@@ -124,6 +124,7 @@ func TestQueueTransfers(t *testing.T) {
 	tasks := filepath.Join(b.dir, "git", "p", "docs", "tasks")
 	body := `{"at":"2026-11-04T10:00:00+01:00","slug":"x","stem":"20261104-1000-HIGH-x","back":"lead","key":"TRK-7","url":"https://x/TRK-7"}
 {"at":"2026-11-04T10:00:00+01:00","slug":"nb","stem":"20261104-1001-MED-nb","back":"","key":"TRK-8","url":"https://x/TRK-8"}
+{"at":"2026-11-04T10:00:00+01:00","slug":"by","stem":"20261104-1003-MED-by","back":"","key":"TRK-10","by":"other-author"}
 не json
 {"slug":"nokey","stem":"20261104-1002-MED-nokey","back":"lead"}
 {"slug":"badstem","stem":"bad","back":"lead","key":"TRK-9"}
@@ -135,8 +136,8 @@ func TestQueueTransfers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Key != "p/20261104-1000-x" || got[0].Back != "lead" || got[0].Transfer != "TRK-7 https://x/TRK-7" ||
-		got[0].Status != queue.StatusTransferred || got[0].Dir != filepath.Join(b.dir, "git", "p") {
+	if len(got) != 3 || got[0].Key != "p/20261104-1000-x" || got[0].Back != "lead" || got[0].Transfer != "TRK-7 https://x/TRK-7" ||
+		got[0].Status != queue.StatusTransferred || got[0].Dir != filepath.Join(b.dir, "git", "p") || got[2].CancelAuthor != "other-author" {
 		t.Fatalf("%+v", got)
 	}
 }
