@@ -75,10 +75,11 @@ type Task struct {
 	ID     string
 	Output string // файл вывода
 	// Holder — pid сессии Claude Code (CLAUDE_PID процессов задачи), 0 — не нашлась.
-	Holder  int
-	Start   time.Time // старт самого раннего процесса задачи
-	Written time.Time // последняя запись в вывод
-	Pids    []int
+	Holder     int
+	Start      time.Time // старт самого раннего процесса задачи
+	Written    time.Time // последняя запись в вывод
+	Pids       []int
+	SessionIDs map[string]struct{} // CLAUDE_CODE_SESSION_ID процессов задачи, без пустых и повторов
 }
 
 // Stale — задача идёт дольше age, и вывод не меняется дольше quiet.
@@ -128,6 +129,12 @@ func Find(snap *proc.Snapshot, procRoot string, uid int) ([]Task, error) {
 			byOutput[link] = t
 		}
 		t.Pids = append(t.Pids, p.Pid)
+		if p.SessionID != "" {
+			if t.SessionIDs == nil {
+				t.SessionIDs = map[string]struct{}{}
+			}
+			t.SessionIDs[p.SessionID] = struct{}{}
+		}
 		if p.StartAt.Before(t.Start) {
 			t.Start = p.StartAt
 		}
@@ -143,7 +150,8 @@ func Find(snap *proc.Snapshot, procRoot string, uid int) ([]Task, error) {
 
 // Origin — как задача попала в фон, по транскрипту беседы.
 type Origin struct {
-	Found bool // результат вызова с этим id нашёлся
+	Found bool     // результат вызова с этим id нашёлся
+	Paths []string // транскрипты, проверенные при поиске
 	// Auto — обычная команда, которую Claude Code увёл в фон по таймауту (timedOutAfterMs); иначе запущена фоном.
 	Auto        bool
 	Description string
@@ -151,30 +159,49 @@ type Origin struct {
 	Agent       string // id суб-агента, если задачу запустил он; пусто — сама сессия
 }
 
-// FindOrigin ищет вызов задачи в транскриптах беседы, которой принадлежит вывод: <projects>/<проект>/<беседа>.jsonl
-// и транскрипты её суб-агентов.
+// FindOrigin ищет вызов в беседе из пути вывода и в беседах из снимка процессов задачи; у каждой проверяет
+// транскрипт и суб-агентов.
 func FindOrigin(projects string, t *Task) (Origin, error) {
 	sessionDir := filepath.Dir(filepath.Dir(t.Output))
 	project, session := filepath.Base(filepath.Dir(sessionDir)), filepath.Base(sessionDir)
-	files := []string{filepath.Join(projects, project, session+".jsonl")}
-	subs, err := filepath.Glob(filepath.Join(projects, project, session, "subagents", "*.jsonl"))
-	if err != nil {
-		return Origin{}, fmt.Errorf("транскрипты суб-агентов: %w", err)
+	sessions := []string{session}
+	for _, id := range slices.Sorted(maps.Keys(t.SessionIDs)) {
+		if id != "" && !slices.Contains(sessions, id) {
+			sessions = append(sessions, id)
+		}
 	}
-	files = append(files, subs...)
+	var files []string
+	var paths []string
+	for _, sid := range sessions {
+		main := filepath.Join(projects, project, sid+".jsonl")
+		files = append(files, main)
+		paths = append(paths, main)
+		subPattern := filepath.Join(projects, project, sid, "subagents", "*.jsonl")
+		subs, err := filepath.Glob(subPattern)
+		if err != nil {
+			return Origin{}, fmt.Errorf("транскрипты суб-агентов: %w", err)
+		}
+		if len(subs) == 0 {
+			paths = append(paths, subPattern)
+		} else {
+			files = append(files, subs...)
+			paths = append(paths, subs...)
+		}
+	}
 	for _, f := range files {
 		o, err := originIn(f, t.ID)
 		if err != nil {
-			return Origin{}, err
+			return Origin{Paths: paths}, err
 		}
 		if o.Found {
-			if f != files[0] {
+			o.Paths = paths
+			if strings.Contains(f, string(filepath.Separator)+"subagents"+string(filepath.Separator)) {
 				o.Agent = strings.TrimPrefix(strings.TrimSuffix(filepath.Base(f), ".jsonl"), "agent-")
 			}
 			return o, nil
 		}
 	}
-	return Origin{}, nil
+	return Origin{Paths: paths}, nil
 }
 
 // event — нужное из строки транскрипта: блоки вызова и результата, результат вызова.
@@ -357,9 +384,10 @@ func short(s string) string {
 
 // Seen — решение по задаче: по разу на задачу, пока она жива.
 type Seen struct {
-	At   time.Time `json:"at"`
-	Auto bool      `json:"auto"`           // уведена в фон по таймауту: письмо (или «написал бы» в log)
-	Wait string    `json:"wait,omitempty"` // нарочно фоновое ожидание (способ): письмо о сроке
+	At      time.Time `json:"at"`
+	Auto    bool      `json:"auto"`              // уведена в фон по таймауту: письмо (или «написал бы» в log)
+	Wait    string    `json:"wait,omitempty"`    // нарочно фоновое ожидание (способ): письмо о сроке
+	Missing bool      `json:"missing,omitempty"` // застывшая задача без вызова в транскриптах: уже записано в журнал
 }
 
 // State — решённые задачи по id; хранится в state.json папки наблюдателя.

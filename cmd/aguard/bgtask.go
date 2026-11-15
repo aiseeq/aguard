@@ -37,14 +37,24 @@ func (a *app) bgtaskRound(cfg *bgtask.Config, dry bool) error {
 		return nil
 	}
 	now := time.Now()
-	snap, err := proc.ReadSnapshot(procRoot, a.uid, now)
+	root := a.procDir
+	if root == "" {
+		root = procRoot
+	}
+	var snap *proc.Snapshot
+	var err error
+	if a.bgtaskSnapshot != nil {
+		snap, err = a.bgtaskSnapshot(root, a.uid, now)
+	} else {
+		snap, err = proc.ReadSnapshot(root, a.uid, now)
+	}
 	if snap == nil {
 		return fmt.Errorf("процессы: %w", err)
 	}
 	if err != nil {
 		a.warn("bgtask", "процессы прочитаны не все", "err", err)
 	}
-	tasks, err := bgtask.Find(snap, procRoot, a.uid)
+	tasks, err := bgtask.Find(snap, root, a.uid)
 	if err != nil {
 		a.warn("bgtask", "задачи", "err", err)
 	}
@@ -61,36 +71,57 @@ func (a *app) bgtaskRound(cfg *bgtask.Config, dry bool) error {
 			fmt.Fprintf(a.out, "%s pids=%v сессия=%d идёт %s, вывод молчит %s, застыла=%v %s\n", t.ID, t.Pids, t.Holder,
 				bgtask.Span(now.Sub(t.Start)), bgtask.Span(now.Sub(t.Written)), stale, t.Output)
 		}
-		if _, seen := st[t.ID]; !old || (seen && !dry) {
+		if !a.bgtaskShouldSearch(st, t, old, dry) {
 			continue
 		}
-		o, err := bgtask.FindOrigin(session.ProjectsDir(a.home), t)
-		if err != nil {
-			a.warn("bgtask", "транскрипт задачи "+t.ID, "err", err)
-			continue
-		}
-		wait := ""
-		if o.Found && !o.Auto {
-			if wait, err = bgtask.WaitHow(o.Command, a.home); err != nil {
-				a.warn("bgtask", "команда задачи "+t.ID, "err", err)
-				continue
-			}
-		}
-		if dry {
-			fmt.Fprintf(a.out, "  вызов найден=%v по таймауту=%v ожидание=%q суб-агент=%q «%s»\n", o.Found, o.Auto, wait, o.Agent, o.Description)
-			continue
-		}
-		// вызова в транскрипте (ещё) нет — решить в следующий проход; уведённая по таймауту и прогон ждут молчания вывода
-		if !o.Found || (wait == "" && !stale) {
-			continue
-		}
-		st[t.ID] = bgtask.Seen{At: now, Auto: o.Auto, Wait: wait}
-		a.bgtaskNotify(cfg, t, &o, wait, now)
+		a.bgtaskHandleOrigin(cfg, st, t, stale, dry, now)
 	}
 	if dry {
 		return nil
 	}
 	return st.Save(statePath, tasks)
+}
+
+func (a *app) bgtaskShouldSearch(st bgtask.State, t *bgtask.Task, old, dry bool) bool {
+	seen, ok := st[t.ID]
+	return old && (!ok || dry || seen.Missing)
+}
+
+func (a *app) bgtaskHandleOrigin(cfg *bgtask.Config, st bgtask.State, t *bgtask.Task, stale, dry bool, now time.Time) {
+	o, err := bgtask.FindOrigin(session.ProjectsDir(a.home), t)
+	if err != nil {
+		a.warn("bgtask", "транскрипт задачи "+t.ID, "err", err)
+		return
+	}
+	wait := ""
+	if o.Found && !o.Auto {
+		if wait, err = bgtask.WaitHow(o.Command, a.home); err != nil {
+			a.warn("bgtask", "команда задачи "+t.ID, "err", err)
+			return
+		}
+	}
+	if dry {
+		fmt.Fprintf(a.out, "  вызов найден=%v по таймауту=%v ожидание=%q суб-агент=%q «%s»\n", o.Found, o.Auto, wait, o.Agent, o.Description)
+		return
+	}
+	if !o.Found {
+		a.bgtaskMissingOrigin(st, t, stale, o.Paths, now)
+		return
+	}
+	if wait == "" && !stale {
+		return
+	}
+	st[t.ID] = bgtask.Seen{At: now, Auto: o.Auto, Wait: wait}
+	a.bgtaskNotify(cfg, t, &o, wait, now)
+}
+
+// bgtaskMissingOrigin отмечает в общем состоянии задачу, о которой уже написано, чтобы следующий проход молчал.
+func (a *app) bgtaskMissingOrigin(st bgtask.State, t *bgtask.Task, stale bool, paths []string, now time.Time) {
+	if !stale || st[t.ID].Missing {
+		return
+	}
+	a.log.Warn("aguard bgtask: вызов задачи не найден в транскриптах", "task", t.ID, "paths", paths)
+	st[t.ID] = bgtask.Seen{At: now, Missing: true}
 }
 
 // bgtaskNotify — письмо владельцу уведённой по таймауту задачи или нарочно фонового ожидания (в log — только

@@ -81,6 +81,7 @@ const procRoot = "/proc"
 type app struct {
 	home                 string
 	procDir              string // подменяется в тестах потолка; пусто — /proc
+	bgtaskSnapshot       func(string, int, time.Time) (*proc.Snapshot, error)
 	cgroupDir            string // подменяется в тестах потолка; пусто — /sys/fs/cgroup
 	ceilingAlive         map[string]session.Info
 	ceilingAliveAt       time.Time

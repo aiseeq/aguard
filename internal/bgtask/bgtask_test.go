@@ -35,12 +35,14 @@ func TestFind(t *testing.T) {
 	}
 	stdout("20", out)
 	stdout("21", out)
+	stdout("22", out)
 	stdout("30", "/dev/pts/3")
 	start := time.Now().Add(-5 * time.Hour)
 	snap := &proc.Snapshot{Procs: map[int]*proc.Proc{
 		10: {Pid: 10, UID: 1000, Comm: "claude"},
-		20: {Pid: 20, UID: 1000, Session: 10, StartAt: start.Add(time.Second)},
-		21: {Pid: 21, UID: 1000, Session: 10, StartAt: start},
+		20: {Pid: 20, UID: 1000, Session: 10, SessionID: "session-new", StartAt: start.Add(time.Second)},
+		21: {Pid: 21, UID: 1000, Session: 10, SessionID: "session-new", StartAt: start},
+		22: {Pid: 22, UID: 1000, Session: 10, StartAt: start.Add(2 * time.Second)},
 		30: {Pid: 30, UID: 1000, Session: 10, StartAt: start},
 		40: {Pid: 40, UID: 0, Session: 10, StartAt: start}, // чужой uid
 	}}
@@ -49,8 +51,12 @@ func TestFind(t *testing.T) {
 		t.Fatalf("%+v %v", got, err)
 	}
 	task := got[0]
-	if task.ID != "b7xi68io0" || task.Holder != 10 || !task.Start.Equal(start) || len(task.Pids) != 2 || !task.Written.Equal(written) {
+	if task.ID != "b7xi68io0" || task.Holder != 10 || !task.Start.Equal(start) || len(task.Pids) != 3 ||
+		!task.Written.Equal(written) || len(task.SessionIDs) != 1 {
 		t.Errorf("%+v", task)
+	}
+	if _, ok := task.SessionIDs["session-new"]; !ok {
+		t.Errorf("session id снимка не записан: %v", task.SessionIDs)
 	}
 	now := time.Now()
 	if !task.Stale(now, time.Hour, time.Hour) || task.Stale(now, time.Hour, 3*time.Hour) || task.Stale(now, 6*time.Hour, time.Hour) {
@@ -76,8 +82,15 @@ func TestFindOrigin(t *testing.T) {
 	write("-home-alice/s1/subagents/agent-ab805f71.jsonl",
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_g","name":"Bash","input":{"command":"grep -o x f.jsonl","description":"Grep transcript for user quote"}}]}}`,
 		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_g","content":"moved to the background (ID: b7xi68io0)"}]},"toolUseResult":{"backgroundTaskId":"b7xi68io0","timedOutAfterMs":120000}}`)
+	write("-home-alice/s2/subagents/agent-newagent.jsonl",
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_new","name":"Bash","input":{"command":"echo compacted","description":"После сжатия"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_new","content":"moved to the background (ID: bnew"}]},"toolUseResult":{"backgroundTaskId":"bnew","timedOutAfterMs":120000}}`)
+	write("-home-alice/s2.jsonl",
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_main","name":"Bash","input":{"command":"echo main","description":"Основная беседа"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_main","content":"moved to the background (ID: bmain"}]},"toolUseResult":{"backgroundTaskId":"bmain","timedOutAfterMs":120000}}`)
 	task := func(id string) *Task {
-		return &Task{ID: id, Output: "/c/claude-1000/-home-alice/s1/tasks/" + id + ".output"}
+		return &Task{ID: id, Output: "/c/claude-1000/-home-alice/s1/tasks/" + id + ".output",
+			SessionIDs: map[string]struct{}{"s2": {}, "": {}, "s1": {}}}
 	}
 	o, err := FindOrigin(projects, task("b7xi68io0"))
 	if err != nil || !o.Found || !o.Auto || o.Agent != "ab805f71" || o.Description != "Grep transcript for user quote" {
@@ -87,9 +100,33 @@ func TestFindOrigin(t *testing.T) {
 	if err != nil || !o.Found || o.Auto || o.Agent != "" || o.Command != "bash wait.sh" {
 		t.Errorf("нарочно фоном: %+v %v", o, err)
 	}
+	o, err = FindOrigin(projects, task("bnew"))
+	if err != nil || !o.Found || o.Agent != "newagent" || o.Description != "После сжатия" {
+		t.Errorf("суб-агент новой беседы: %+v %v", o, err)
+	}
+	o, err = FindOrigin(projects, task("bmain"))
+	if err != nil || !o.Found || o.Agent != "" || o.Description != "Основная беседа" {
+		t.Errorf("новая основная беседа: %+v %v", o, err)
+	}
+	if n := countPath(o.Paths, filepath.Join(projects, "-home-alice", "s2.jsonl")); n != 1 {
+		t.Errorf("путь новой беседы повторился %d раз: %v", n, o.Paths)
+	}
+	if n := countPath(o.Paths, filepath.Join(projects, "-home-alice", "s1.jsonl")); n != 1 {
+		t.Errorf("id из пути вывода добавлен повторно %d раз: %v", n, o.Paths)
+	}
 	if o, err := FindOrigin(projects, task("bnone")); err != nil || o.Found {
 		t.Errorf("нет вызова: %+v %v", o, err)
 	}
+}
+
+func countPath(paths []string, want string) int {
+	n := 0
+	for _, path := range paths {
+		if path == want {
+			n++
+		}
+	}
+	return n
 }
 
 func TestMessage(t *testing.T) {
