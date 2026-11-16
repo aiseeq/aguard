@@ -919,6 +919,13 @@ func parseSudoCommandSegments(command string) []sudoCommandSegment {
 			i = operatorEnd - 1
 			continue
 		}
+		if isSudoCommentStart(command, i, tokenStart) {
+			finishSegment(i)
+			segmentStart = nextSudoLineAfterComment(command, i)
+			i = segmentStart - 1
+			quote, escaped, redirectTarget = 0, false, false
+			continue
+		}
 		if separatorEnd := sudoSeparatorEnd(command, i); separatorEnd > i {
 			finishSegment(i)
 			i = separatorEnd - 1
@@ -931,6 +938,17 @@ func parseSudoCommandSegments(command string) []sudoCommandSegment {
 	}
 	finishSegment(len(command))
 	return segments
+}
+
+func isSudoCommentStart(command string, i, tokenStart int) bool {
+	return tokenStart < 0 && command[i] == '#' && !strings.HasPrefix(command[i:], "#012")
+}
+
+func nextSudoLineAfterComment(command string, i int) int {
+	if nextLine := strings.Index(command[i:], "#012"); nextLine >= 0 {
+		return i + nextLine + len("#012")
+	}
+	return len(command)
 }
 
 func parseSudoRedirection(command string, operatorStart, tokenStart int) (sudoCommandToken, int, bool) {
@@ -1093,14 +1111,107 @@ func sudoCommandIndex(tokens []sudoCommandToken) int {
 			i = timeoutWrapperCommandIndex(tokens, i)
 		case "exec":
 			i++
+		case "nohup":
+			i++
+		case "ionice":
+			i = ioniceWrapperCommandIndex(tokens, i)
+		case "xargs":
+			i = xargsWrapperCommandIndex(tokens, i)
+		case "docker", "podman":
+			if i+1 < len(tokens) && tokens[i+1].text == "exec" {
+				i = containerExecCommandIndex(tokens, i)
+			} else {
+				return i
+			}
 		default:
 			return i
 		}
-		if i >= len(tokens) {
+		if i < 0 || i >= len(tokens) {
 			return -1
 		}
 	}
 	return -1
+}
+
+func ioniceWrapperCommandIndex(tokens []sudoCommandToken, i int) int {
+	return wrapperCommandIndex(tokens, i, "-c -n", "cn", "pPu")
+}
+
+func xargsWrapperCommandIndex(tokens []sudoCommandToken, i int) int {
+	return wrapperCommandIndex(tokens, i, "-I -n -P -L -d -E -s -a --max-args --max-procs --max-lines --delimiter --arg-file --replace", "InPLdEsa", "")
+}
+
+func containerExecCommandIndex(tokens []sudoCommandToken, i int) int {
+	containerIndex := wrapperCommandIndex(tokens, i+1, "-u -e -w --user --env --workdir --env-file --detach-keys", "uew", "")
+	if containerIndex < 0 {
+		return -1
+	}
+	if containerIndex < len(tokens) {
+		return containerIndex + 1
+	}
+	return containerIndex
+}
+
+func wrapperCommandIndex(tokens []sudoCommandToken, wrapperIndex int, valueOptions, shortValueOptions, shortNoCommandOptions string) int {
+	i := wrapperIndex + 1
+	for i < len(tokens) && strings.HasPrefix(tokens[i].text, "-") {
+		option := tokens[i].text
+		if option == "--" {
+			return i + 1
+		}
+		if strings.HasPrefix(option, "--") {
+			if strings.Contains(option, "=") {
+				i++
+				continue
+			}
+			if hasWrapperOption(valueOptions, option) {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		if len(option) == 2 {
+			if strings.ContainsRune(shortNoCommandOptions, rune(option[1])) {
+				return -1
+			}
+			if strings.ContainsRune(shortValueOptions, rune(option[1])) {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		consumedValue := false
+		for j := 1; j < len(option); j++ {
+			letter := rune(option[j])
+			if strings.ContainsRune(shortNoCommandOptions, letter) {
+				return -1
+			}
+			if strings.ContainsRune(shortValueOptions, letter) {
+				if j == len(option)-1 {
+					i += 2
+				} else {
+					i++ // the remaining characters are an attached value
+				}
+				consumedValue = true
+				break
+			}
+		}
+		if !consumedValue {
+			i++
+		}
+	}
+	return i
+}
+
+func hasWrapperOption(options, option string) bool {
+	for candidate := range strings.FieldsSeq(options) {
+		if candidate == option {
+			return true
+		}
+	}
+	return false
 }
 
 func sudoWrapperCommandIndex(tokens []sudoCommandToken, i int) int {
