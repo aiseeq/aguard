@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,6 +96,43 @@ func TestAnswerCompactOff(t *testing.T) {
 	a := NewJudge(t.TempDir()).Answer(&cfg, &cc, Request{V: Version, Pid: 1 << 22}, time.Now())
 	if a.Compact || len(a.CompactAgainst) == 0 || a.CompactAgainst[0].Code != "off" {
 		t.Errorf("сжатие выключено: %+v", a)
+	}
+}
+
+func TestAnswerFullChecksTreeForBusySession(t *testing.T) {
+	now := time.Now()
+	w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 20 * time.Minute})
+	w.link(t, 4245)
+	sessionFile := filepath.Join(w.dir, "session.json")
+	data, err := os.ReadFile(sessionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonSession := strings.Replace(string(data), `"kind":"interactive"`, `"cwd":"/home/u/git/x","kind":"interactive"`, 1)
+	jsonSession = strings.Replace(jsonSession, `"status":"idle"`, `"status":"busy"`, 1)
+	if err := os.WriteFile(sessionFile, []byte(jsonSession), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	treeCalls := 0
+	w.p.tree = func(dir string) ([]string, error) {
+		treeCalls++
+		if dir != "/home/u/git/x" {
+			t.Errorf("git status dir = %q", dir)
+		}
+		return []string{"M draft.md"}, nil
+	}
+	cfg, cc := Default(t.TempDir(), t.TempDir()), DefaultCompact()
+	j := NewJudge(t.TempDir())
+	j.paths = &w.p
+
+	withoutFull := j.Answer(&cfg, &cc, Request{V: Version, Pid: 4245}, now)
+	if treeCalls != 0 || slices.Contains(codes(Verdict{Against: withoutFull.ResetAgainst}), "tree") {
+		t.Fatalf("без Full вызвали git status или добавили tree: calls=%d reset=%+v", treeCalls, withoutFull.ResetAgainst)
+	}
+	withFull := j.Answer(&cfg, &cc, Request{V: Version, Pid: 4245, Full: true}, now)
+	if treeCalls != 1 || !slices.Contains(codes(Verdict{Against: withFull.ResetAgainst}), "tree") ||
+		!strings.Contains(Texts(withFull.ResetAgainst)[len(withFull.ResetAgainst)-1], "/home/u/git/x") {
+		t.Fatalf("Full не показал грязное дерево занятой сессии: calls=%d reset=%+v", treeCalls, withFull.ResetAgainst)
 	}
 }
 

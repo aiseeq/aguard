@@ -1,6 +1,7 @@
 package restart
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -21,6 +22,41 @@ func idleFacts() facts {
 		TTYQuiet:  20 * time.Minute, // ввод — отправка последней реплики, до конца хода
 		TurnQuiet: 15 * time.Minute,
 		Prompt:    screen.Empty,
+	}
+}
+
+func TestTextsFallsBackToCode(t *testing.T) {
+	if got, want := Texts([]Reason{{Code: "missing-text"}}), []string{"missing-text"}; !slices.Equal(got, want) {
+		t.Fatalf("Texts = %q, want %q", got, want)
+	}
+}
+
+func TestChildNamesFiltersAndCounts(t *testing.T) {
+	got := childNames([]string{"12 bash", "13 worker", "14 worker", "15 tail", "16 wfor", "17 python", "18 timeout"})
+	if want := "python, worker ×2"; got != want {
+		t.Fatalf("childNames = %q, want %q", got, want)
+	}
+}
+
+func TestSessionAndHookStateText(t *testing.T) {
+	for _, c := range []struct {
+		status, hook, want string
+	}{
+		{"busy", "done", "сессия занята: Claude Code — busy"},
+		{"", "done", "статус Claude Code неизвестен"},
+		{"error", "done", "Claude Code: ошибка"},
+		{"idle", "working", "сессия занята: chooks — working"},
+		{"idle", "error", "chooks: ошибка"},
+	} {
+		f := idleFacts()
+		f.Status, f.HookState = c.status, c.hook
+		var got []Reason
+		sessionChecks(f, restart, func(code, format string, args ...any) {
+			got = append(got, Reason{Code: code, Text: fmt.Sprintf(format, args...)})
+		})
+		if !slices.ContainsFunc(got, func(r Reason) bool { return r.Text == c.want }) {
+			t.Errorf("status=%q hook=%q reasons=%+v, want %q", c.status, c.hook, got, c.want)
+		}
 	}
 }
 

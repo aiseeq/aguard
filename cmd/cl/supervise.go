@@ -757,10 +757,7 @@ func journalOnce(cfg config, lastKey, key, line string) string {
 
 // journalLine — строка журнала: сессия, версии, режим cl, решение aguard и доводы против.
 func journalLine(mode, name string, pid int, a restart.Answer) string {
-	head := fmt.Sprintf("%s pid=%d %s→%s %s: ", name, pid, restart.OrDash(a.Running), restart.OrDash(a.Installed), mode)
-	if a.Stale != "" && !a.Fresh {
-		head = fmt.Sprintf("%s pid=%d %s→%s, %s %s: ", name, pid, restart.OrDash(a.Running), restart.OrDash(a.Installed), a.Stale, mode)
-	}
+	head := restart.Header(mode, name, pid, a)
 	switch {
 	case a.Fresh:
 		return head + "версия свежая"

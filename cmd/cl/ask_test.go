@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -53,8 +54,34 @@ func TestAskAguard(t *testing.T) {
 	if err != nil || !a.Restart || a.Key != "true false" {
 		t.Fatalf("ответ %+v, %v", a, err)
 	}
-	if note := compactNote(a); note != "; сжатие: нет (); сброс: нет ()" {
+	if note := compactNote(a); note != "; сжатие: нет; сброс: нет" {
 		t.Errorf("сжатие: %q", note)
+	}
+}
+
+func TestCompactStatusContext(t *testing.T) {
+	if got, want := compactStatus(restart.Answer{Compact: true, Tokens: 123_456}), "; сжатие: да, контекст 123 тыс.; сброс: нет"; got != want {
+		t.Fatalf("compactStatus = %q, want %q", got, want)
+	}
+}
+
+func TestCheckDetailsPairsSameCodeWithDifferentText(t *testing.T) {
+	a := restart.Answer{
+		CompactAgainst: []restart.Reason{{Code: "early", Text: "запрос 10 мин назад, окно с 53 мин"}},
+		ResetAgainst:   []restart.Reason{{Code: "early", Text: "запрос 10 мин назад, сброс с 53 мин"}},
+	}
+	if got, want := checkDetails(a), []string{"запрос 10 мин назад; сжатие с 53 мин, сброс с 53 мин"}; !slices.Equal(got, want) {
+		t.Fatalf("checkDetails = %q, want %q", got, want)
+	}
+	if got, want := compactNote(a), "; сжатие: нет — запрос 10 мин назад, окно с 53 мин; сброс: нет — запрос 10 мин назад, сброс с 53 мин"; got != want {
+		t.Fatalf("compactNote = %q, want %q", got, want)
+	}
+}
+
+func TestCheckDetailsEmptyTextUsesCode(t *testing.T) {
+	a := restart.Answer{CompactAgainst: []restart.Reason{{Code: "unknown", Text: ""}}}
+	if got, want := checkDetails(a), []string{"сжатие: unknown"}; !slices.Equal(got, want) {
+		t.Fatalf("checkDetails = %q, want %q", got, want)
 	}
 }
 
