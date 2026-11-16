@@ -1,60 +1,107 @@
 package iowatch
 
 import (
+	"encoding/json"
 	"math"
 	"time"
 )
 
 // MachineSecond — секунда машины из быстрых шагов: простой и байты — сумма, очередь и готовые к
 // работе — пик, ожидание записи — среднее за секунду (WMS/WIOS), Stall — мс шагов с простоем
-// (Stalled); Dirty, Writeback, MemAvail и SwapUsed — последние из детального прохода.
+// (Stalled); Dirty, Writeback, MemAvail, SwapUsed и GraftSliceMem — последние из детального прохода.
 type MachineSecond struct {
-	At          time.Time `json:"at"`
-	IOFullMS    int64     `json:"io_full_ms,omitempty"`
-	IOSomeMS    int64     `json:"io_some_ms,omitempty"`
-	MemFullMS   int64     `json:"mem_full_ms,omitempty"`
-	CPUSomeMS   int64     `json:"cpu_some_ms,omitempty"`
-	RunnableMax int64     `json:"runnable_max,omitempty"`
-	StallMS     int64     `json:"stall_ms,omitempty"`
-	ReadB       int64     `json:"rd_b,omitempty"`
-	WriteB      int64     `json:"wr_b,omitempty"`
-	WAwaitMS    int64     `json:"w_await_ms,omitempty"`
-	InFlightMax int64     `json:"inflight_max,omitempty"`
-	Flushes     int64     `json:"flushes,omitempty"`
-	Dirty       int64     `json:"dirty,omitempty"`
-	Writeback   int64     `json:"writeback,omitempty"`
-	SwapIn      int64     `json:"swapin,omitempty"`
-	Majflt      int64     `json:"majflt,omitempty"`
-	MemAvail    int64     `json:"mem_avail,omitempty"` // байт
-	SwapUsed    int64     `json:"swap_used,omitempty"` // байт
+	At                 time.Time `json:"at"`
+	IOFullMS           int64     `json:"io_full_ms,omitempty"`
+	IOSomeMS           int64     `json:"io_some_ms,omitempty"`
+	MemFullMS          int64     `json:"mem_full_ms,omitempty"`
+	CPUSomeMS          int64     `json:"cpu_some_ms,omitempty"`
+	RunnableMax        int64     `json:"runnable_max,omitempty"`
+	StallMS            int64     `json:"stall_ms,omitempty"`
+	ReadB              int64     `json:"rd_b,omitempty"`
+	WriteB             int64     `json:"wr_b,omitempty"`
+	WAwaitMS           int64     `json:"w_await_ms,omitempty"`
+	InFlightMax        int64     `json:"inflight_max,omitempty"`
+	Flushes            int64     `json:"flushes,omitempty"`
+	Dirty              int64     `json:"dirty,omitempty"`
+	Writeback          int64     `json:"writeback,omitempty"`
+	SwapIn             int64     `json:"swapin,omitempty"`
+	Majflt             int64     `json:"majflt,omitempty"`
+	MemAvail           int64     `json:"mem_avail,omitempty"`       // байт
+	SwapUsed           int64     `json:"swap_used,omitempty"`       // байт
+	GraftSliceMem      int64     `json:"graft_slice_mem,omitempty"` // байт
+	GraftSliceMemKnown bool      `json:"-"`
 }
 
-// secondRow — секунда ряда в памяти: 88 байт (байты диска — int64, остальное — int32, Dirty,
-// Writeback, MemAvail и SwapUsed — КиБ, как в meminfo). Сутки — 86 400 строк, около 7,6 МБ.
+type machineSecondJSON MachineSecond
+
+type machineSecondMarshal struct {
+	machineSecondJSON
+	GraftSliceMem *int64 `json:"graft_slice_mem,omitempty"`
+}
+
+type machineSecondUnmarshal struct {
+	*machineSecondJSON
+	GraftSliceMem *int64 `json:"graft_slice_mem"`
+}
+
+func (s MachineSecond) MarshalJSON() ([]byte, error) {
+	out := machineSecondMarshal{machineSecondJSON: machineSecondJSON(s)}
+	if s.GraftSliceMemKnown || s.GraftSliceMem != 0 {
+		value := s.GraftSliceMem
+		out.GraftSliceMem = &value
+	}
+	return json.Marshal(out)
+}
+
+func (s *MachineSecond) UnmarshalJSON(data []byte) error {
+	decoded := machineSecondUnmarshal{machineSecondJSON: (*machineSecondJSON)(s)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	s.GraftSliceMemKnown = decoded.GraftSliceMem != nil
+	if decoded.GraftSliceMem == nil {
+		s.GraftSliceMem = 0
+	} else {
+		s.GraftSliceMem = *decoded.GraftSliceMem
+	}
+	return nil
+}
+
+// secondRow — секунда ряда в памяти: 88 байт с выравниванием (байты диска — int64, остальное — int32,
+// Dirty, Writeback, MemAvail, SwapUsed и graftSliceMem — КиБ).
 type secondRow struct {
-	at, readB, writeB                                int64 // at — unix-секунды
-	ioFull, ioSome, memFull, stall, wAwait, inflight int32
-	flushes, swapIn, majflt, dirtyKiB, writebackKiB  int32
-	cpuSome, runnable, memAvailKiB, swapUsedKiB      int32
+	at, readB, writeB                                             int64 // at — unix-секунды
+	ioFull, ioSome, memFull, stall, wAwait, inflight              int32
+	flushes, swapIn, majflt, dirtyKiB, writebackKiB               int32
+	cpuSome, runnable, memAvailKiB, swapUsedKiB, graftSliceMemKiB int32
 }
 
 // i32 — значение в int32 с насыщением: ряд не врёт знаком на редком выбросе.
 func i32(v int64) int32 { return int32(max(math.MinInt32, min(math.MaxInt32, v))) }
 
 func (r *secondRow) second() MachineSecond {
+	known := r.graftSliceMemKiB >= 0
+	graftBytes := int64(0)
+	if known {
+		graftBytes = int64(r.graftSliceMemKiB) << 10
+	}
 	return MachineSecond{At: time.Unix(r.at, 0), IOFullMS: int64(r.ioFull), IOSomeMS: int64(r.ioSome), MemFullMS: int64(r.memFull),
 		StallMS: int64(r.stall), ReadB: r.readB, WriteB: r.writeB, WAwaitMS: int64(r.wAwait), InFlightMax: int64(r.inflight),
 		Flushes: int64(r.flushes), Dirty: int64(r.dirtyKiB) << 10, Writeback: int64(r.writebackKiB) << 10,
 		SwapIn: int64(r.swapIn), Majflt: int64(r.majflt), CPUSomeMS: int64(r.cpuSome), RunnableMax: int64(r.runnable),
-		MemAvail: int64(r.memAvailKiB) << 10, SwapUsed: int64(r.swapUsedKiB) << 10}
+		MemAvail: int64(r.memAvailKiB) << 10, SwapUsed: int64(r.swapUsedKiB) << 10, GraftSliceMem: graftBytes, GraftSliceMemKnown: known}
 }
 
 func rowOf(s *MachineSecond) secondRow {
+	graftMem := int32(-1)
+	if s.GraftSliceMemKnown || s.GraftSliceMem != 0 {
+		graftMem = i32(s.GraftSliceMem >> 10)
+	}
 	return secondRow{at: s.At.Unix(), readB: s.ReadB, writeB: s.WriteB, ioFull: i32(s.IOFullMS), ioSome: i32(s.IOSomeMS),
 		memFull: i32(s.MemFullMS), stall: i32(s.StallMS), wAwait: i32(s.WAwaitMS), inflight: i32(s.InFlightMax),
 		flushes: i32(s.Flushes), swapIn: i32(s.SwapIn), majflt: i32(s.Majflt), dirtyKiB: i32(s.Dirty >> 10),
 		writebackKiB: i32(s.Writeback >> 10), cpuSome: i32(s.CPUSomeMS), runnable: i32(s.RunnableMax),
-		memAvailKiB: i32(s.MemAvail >> 10), swapUsedKiB: i32(s.SwapUsed >> 10)}
+		memAvailKiB: i32(s.MemAvail >> 10), swapUsedKiB: i32(s.SwapUsed >> 10), graftSliceMemKiB: graftMem}
 }
 
 // secondAcc — идущая секунда: суммы быстрых шагов в их единицах.
@@ -66,7 +113,10 @@ type secondAcc struct {
 }
 
 // detailLast — последние значения детального прохода: идут в секунды, закрытые после него. Байты.
-type detailLast struct{ dirty, writeback, memAvail, swapUsed int64 }
+type detailLast struct {
+	dirty, writeback, memAvail, swapUsed, graftSliceMem int64
+	graftSliceMemKnown                                  bool
+}
 
 // Series — посекундный ряд машины за keep: кольцо строк, свёрнутых из быстрых шагов. Принадлежит
 // горутине замера; живёт дольше одного цикла (служба передаёт его новому Recorder).
@@ -152,7 +202,8 @@ func (s *Series) acc(sec int64) *secondAcc {
 
 // detail — Dirty, Writeback, MemAvail и SwapUsed детального прохода: идут в секунды, закрытые после него.
 func (s *Series) detail(st *Step) {
-	s.last = detailLast{dirty: st.Dirty, writeback: st.Writeback, memAvail: st.MemAvail, swapUsed: st.SwapUsed}
+	s.last = detailLast{dirty: st.Dirty, writeback: st.Writeback, memAvail: st.MemAvail, swapUsed: st.SwapUsed,
+		graftSliceMem: st.GraftSliceMem, graftSliceMemKnown: st.GraftSliceMemKnown}
 }
 
 // flush — идущая секунда в кольцо.
@@ -161,8 +212,15 @@ func (s *Series) flush() {
 	s.push(secondRow{at: c.at, readB: c.rd, writeB: c.wr, ioFull: i32(c.ioFull / 1000), ioSome: i32(c.ioSome / 1000),
 		memFull: i32(c.memFull / 1000), stall: i32(c.stall / 1000), wAwait: i32(AwaitMS(c.wms, c.wios)), inflight: i32(c.inflight),
 		flushes: i32(c.flush), swapIn: i32(c.swap), majflt: i32(c.majflt), dirtyKiB: i32(d.dirty >> 10), writebackKiB: i32(d.writeback >> 10),
-		cpuSome: i32(c.cpuSome / 1000), runnable: i32(c.runnable), memAvailKiB: i32(d.memAvail >> 10), swapUsedKiB: i32(d.swapUsed >> 10)})
+		cpuSome: i32(c.cpuSome / 1000), runnable: i32(c.runnable), memAvailKiB: i32(d.memAvail >> 10), swapUsedKiB: i32(d.swapUsed >> 10), graftSliceMemKiB: rowGraftMemKiB(d)})
 	s.cur = secondAcc{}
+}
+
+func rowGraftMemKiB(d *detailLast) int32 {
+	if !d.graftSliceMemKnown {
+		return -1
+	}
+	return i32(d.graftSliceMem >> 10)
 }
 
 // push кладёт строку и вытесняет строки старше keep от неё.
@@ -192,6 +250,35 @@ func (s *Series) Add(sec MachineSecond) {
 // Len — сколько закрытых секунд в ряду.
 func (s *Series) Len() int { return s.count }
 
+// LastAt returns the timestamp of the newest closed second.
+func (s *Series) LastAt() (time.Time, bool) {
+	if s.count == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(s.rows[(s.head+s.count-1)%len(s.rows)].at, 0), true
+}
+
+// VisitSince calls visit for each closed second at or after since in chronological order, without allocating.
+func (s *Series) VisitSince(since time.Time, visit func(MachineSecond)) {
+	from := since.Unix()
+	if since.IsZero() {
+		from = math.MinInt64
+	}
+	lo, hi := 0, s.count
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if s.rows[(s.head+mid)%len(s.rows)].at < from {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	for i := lo; i < s.count; i++ {
+		row := s.rows[(s.head+i)%len(s.rows)]
+		visit((&row).second())
+	}
+}
+
 // Rows — закрытые секунды с At не раньше since: копия строк (дешёвая, для горутины замера),
 // развернуть — SeriesRows.Seconds в своей горутине.
 func (s *Series) Rows(since time.Time) SeriesRows {
@@ -199,12 +286,20 @@ func (s *Series) Rows(since time.Time) SeriesRows {
 	if since.IsZero() {
 		from = math.MinInt64
 	}
-	out := make(SeriesRows, 0, s.count)
-	for i := range s.count {
-		if row := s.rows[(s.head+i)%len(s.rows)]; row.at >= from {
-			out = append(out, row)
+	lo, hi := 0, s.count
+	for lo < hi {
+		mid := lo + (hi-lo)/2
+		if s.rows[(s.head+mid)%len(s.rows)].at < from {
+			lo = mid + 1
+		} else {
+			hi = mid
 		}
 	}
+	out := make(SeriesRows, s.count-lo)
+	start := (s.head + lo) % len(s.rows)
+	first := min(len(out), len(s.rows)-start)
+	copy(out, s.rows[start:start+first])
+	copy(out[first:], s.rows[:len(out)-first])
 	return out
 }
 

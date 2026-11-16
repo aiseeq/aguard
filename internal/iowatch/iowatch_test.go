@@ -129,6 +129,11 @@ func TestDetailReaderEvictorsFlowThroughAggregateStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
+	graftRoot := t.TempDir()
+	graftBase := filepath.Join(graftRoot, "user.slice", fmt.Sprintf("user-%d.slice", os.Getuid()), fmt.Sprintf("user@%d.service", os.Getuid()))
+	writeFile(t, filepath.Join(graftBase, "agents.slice", "agents-graft.slice", "memory.current"), "1234\n")
+	writeFile(t, filepath.Join(graftBase, "app.slice", "app-graft.slice", "memory.current"), "5678\n")
+	r.graftMem = NewGraftSliceMemReader(graftRoot, os.Getuid())
 	at := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
 	seed, skipped, err := r.Read(at)
 	if err != nil || skipped != nil {
@@ -136,6 +141,9 @@ func TestDetailReaderEvictorsFlowThroughAggregateStorage(t *testing.T) {
 	}
 	if seed.TakeEvictorInterval() != nil {
 		t.Fatal("seed создал интервал")
+	}
+	if seed.GraftSliceMem != 6912 || !seed.GraftSliceMemKnown {
+		t.Fatalf("graft memory from same detail read: %d known=%v", seed.GraftSliceMem, seed.GraftSliceMemKnown)
 	}
 	for i := range groups {
 		if groups[i].path == "app.slice/adream.service" {
@@ -151,9 +159,13 @@ func TestDetailReaderEvictorsFlowThroughAggregateStorage(t *testing.T) {
 		writeGroup(groups[i])
 	}
 	writeFile(t, filepath.Join(cgRoot, "app.slice", "noise.service", "cgroup.procs"), "not-a-pid\n")
+	writeFile(t, filepath.Join(graftBase, "agents.slice", "agents-graft.slice", "memory.current"), "2000\n")
 	s, skipped, err := r.Read(at.Add(time.Minute))
 	if err != nil || skipped != nil {
 		t.Fatalf("снимок с приростом: %v %v", skipped, err)
+	}
+	if s.GraftSliceMem != 7678 || !s.GraftSliceMemKnown {
+		t.Fatalf("graft memory next detail: %d known=%v", s.GraftSliceMem, s.GraftSliceMemKnown)
 	}
 	in := s.TakeEvictorInterval()
 	if in == nil || len(in.Changes) != 4 {

@@ -119,7 +119,7 @@ func TestLoadSeriesOldLineWithoutCPU(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "series.jsonl")
 	writeFile(t, path, `{"at":"2026-10-29T22:56:30+01:00","io_full_ms":2,"mem_full_ms":2,"wr_b":1048576,"dirty":3145728,"swapin":5349,"majflt":4015}`+"\n")
 	seconds, err := LoadSeries(path, time.Time{})
-	if err != nil || len(seconds) != 1 {
+	if err != nil || len(seconds) != 1 || seconds[0].GraftSliceMemKnown {
 		t.Fatalf("старая строка: %+v %v", seconds, err)
 	}
 	s := NewSeries(time.Hour)
