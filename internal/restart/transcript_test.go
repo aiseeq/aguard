@@ -195,6 +195,35 @@ func TestTranscriptCronCarry(t *testing.T) {
 	}{"A": {"47 1 * * *", true}, "B": {"11 6 * * *", false}})
 }
 
+func TestTranscriptCronCarryBeforeSinceDelete(t *testing.T) {
+	since := mustTime(t, tsNew)
+	before := since.Add(-time.Minute).Format(time.RFC3339)
+	carry := `{"type":"attachment","timestamp":"` + before + `","attachment":{"type":"session_cron_carry","tasks":[{"id":"X","cron":"47 1 * * *","prompt":"Сон","recurring":true}]}}`
+	deleteX := []string{
+		use(before, "del", "CronDelete", `{"id":"X"}`),
+		result(before, "del", "ok", `{"id":"X"}`),
+	}
+
+	f := scanLines(t, since, since.Add(time.Hour), append([]string{carry}, deleteX...)...)
+	if len(f.Crons) != 0 {
+		t.Errorf("после старого CronDelete таймер остался: %+v", f.Crons)
+	}
+
+	f = scanLines(t, since, since.Add(time.Hour), carry)
+	checkCrons(t, f.Crons, map[string]struct {
+		cron string
+		own  bool
+	}{"X": {"47 1 * * *", true}})
+
+	f = scanLines(t, since, since.Add(time.Hour),
+		use(before, "create", "CronCreate", `{"cron":"47 1 * * *","prompt":"Сон","recurring":true}`),
+		result(before, "create", "ok", `{"id":"X","recurring":true}`),
+	)
+	if len(f.Crons) != 0 {
+		t.Errorf("CronCreate до since попал в Crons: %+v", f.Crons)
+	}
+}
+
 func checkCrons(t *testing.T, got []cronJob, want map[string]struct {
 	cron string
 	own  bool

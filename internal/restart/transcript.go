@@ -166,14 +166,15 @@ type transcriptScan struct {
 	// expires — срок монитора: после него Claude Code монитор снимает, а уведомление об этом приходит не всегда.
 	expires map[string]time.Time
 	// waiting — суб-агент, который ждёт свою фоновую работу, и его транскрипт; subs — разбор этих транскриптов.
-	waiting  map[string]string
-	subs     map[string]*scanCache
-	crons    map[string]cronJob
-	fired    map[string]bool
-	wakeup   time.Time
-	userAt   time.Time // последняя реплика или результат инструмента основной ветки: после неё уходит запрос
-	context  contextFacts
-	requests []RequestMark
+	waiting        map[string]string
+	subs           map[string]*scanCache
+	crons          map[string]cronJob
+	oldCronDeletes map[string]struct{}
+	fired          map[string]bool
+	wakeup         time.Time
+	userAt         time.Time // последняя реплика или результат инструмента основной ветки: после неё уходит запрос
+	context        contextFacts
+	requests       []RequestMark
 }
 
 // scanTranscript разбирает транскрипт процесса, начавшегося в since; незакрытое на момент now — s.facts(now).
@@ -189,7 +190,7 @@ func scanTranscript(r io.Reader, since time.Time) (*transcriptScan, error) {
 func newScan(since time.Time) *transcriptScan {
 	return &transcriptScan{since: since, uses: map[string]toolUse{}, pending: map[string]string{}, tasks: map[string]string{},
 		agents: map[string]bool{}, closed: map[string]bool{}, expires: map[string]time.Time{}, waiting: map[string]string{}, subs: map[string]*scanCache{},
-		crons: map[string]cronJob{}, fired: map[string]bool{}}
+		crons: map[string]cronJob{}, oldCronDeletes: map[string]struct{}{}, fired: map[string]bool{}}
 }
 
 // feed разбирает строки до конца r; n — сколько байт целых строк разобрано: с этого места продолжит следующий feed.
@@ -238,6 +239,11 @@ func (s *transcriptScan) line(line []byte) error {
 		}
 	}
 	if at.Before(s.since) {
+		if typ == "assistant" || typ == "user" {
+			if err := s.preSinceCronDelete(typ, rec); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	if typ == "system" && rec.str("subtype") == "scheduled_task_fire" {
@@ -248,6 +254,35 @@ func (s *transcriptScan) line(line []byte) error {
 		return nil
 	}
 	return s.calls(typ, rec, at)
+}
+
+// preSinceCronDelete carries deletions that happened after a carry snapshot in an earlier process.
+// Other old tool calls stay ignored, including CronCreate, as before.
+func (s *transcriptScan) preSinceCronDelete(typ string, rec object) error {
+	msg, err := parseObject(rec["message"])
+	if err != nil {
+		return err
+	}
+	bs, err := blocks(msg["content"])
+	if err != nil {
+		return err
+	}
+	for _, b := range bs {
+		if typ == "assistant" && b.Type == "tool_use" && b.Name == "CronDelete" {
+			s.oldCronDeletes[b.ID] = struct{}{}
+		} else if typ == "user" && b.Type == "tool_result" {
+			if _, ok := s.oldCronDeletes[b.ToolUseID]; !ok {
+				continue
+			}
+			delete(s.oldCronDeletes, b.ToolUseID)
+			res, err := parseObject(rec["toolUseResult"])
+			if err != nil {
+				return err
+			}
+			delete(s.crons, res.str("id"))
+		}
+	}
+	return nil
 }
 
 // calls — вызовы инструментов и их результаты в записи typ (assistant или user).
