@@ -85,6 +85,16 @@ func (a *app) saidCmd(ctx context.Context, args []string) error {
 			a.warn("said", "битые строки журнала", "count", bad)
 		}
 		return said.Print(a.out, days)
+	case "eval":
+		fl := flag.NewFlagSet("said eval", flag.ContinueOnError)
+		cases := fl.String("cases", "", "TSV файл ref, kind, scope")
+		prompt := fl.String("prompt", "", "файл системного промпта вместо встроенного")
+		asJSON := fl.Bool("json", false, "вывести JSON")
+		parse(fl, rest)
+		if *cases == "" {
+			return fmt.Errorf("said eval: нужен -cases")
+		}
+		return a.saidEval(ctx, &cfg, *cases, *prompt, *asJSON)
 	}
 	usage()
 	return nil
@@ -219,9 +229,26 @@ func (a *app) saidClassify(ctx context.Context, c *config.Config, st *said.State
 // запись с Down, как любой сбой модели. refused — отказы перед сменой учётки: каждый вызов идёт в журнал.
 func (a *app) saidAsk(ctx context.Context, cfg *said.Config, st *said.State, accounts *[]said.Account, p *said.Pending,
 	prior []said.Entry) (rec said.Record, entries []said.Entry, refused []said.Record) {
+	return a.saidAskWith(ctx, cfg, st, accounts, p, prior, func(acc said.Account) said.Model {
+		return cfg.OneShot(acc.Home)
+	})
+}
+
+func (a *app) saidAskPrompt(ctx context.Context, cfg *said.Config, st *said.State, accounts *[]said.Account, p *said.Pending,
+	prior []said.Entry, prompt string) (rec said.Record, entries []said.Entry, refused []said.Record) {
+	return a.saidAskWith(ctx, cfg, st, accounts, p, prior, func(acc said.Account) said.Model {
+		if a.saidModel != nil {
+			return a.saidModel(acc.Home, prompt)
+		}
+		return cfg.OneShotPrompt(acc.Home, prompt)
+	})
+}
+
+func (a *app) saidAskWith(ctx context.Context, cfg *said.Config, st *said.State, accounts *[]said.Account, p *said.Pending,
+	prior []said.Entry, modelFor func(said.Account) said.Model) (rec said.Record, entries []said.Entry, refused []said.Record) {
 	for {
 		acc := (*accounts)[0]
-		rec, entries = cfg.Classify(ctx, cfg.OneShot(acc.Home), p, a.home, prior, time.Now())
+		rec, entries = cfg.Classify(ctx, modelFor(acc), p, a.home, prior, time.Now())
 		rec.Account = acc.Name
 		if !rec.Down || ctx.Err() != nil || acc.Name == "" || !said.AccountOut(rec.Err) {
 			return rec, entries, refused

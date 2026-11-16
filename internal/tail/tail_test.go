@@ -66,3 +66,24 @@ func TestLines(t *testing.T) {
 		t.Errorf("третий проход: %+v", evs)
 	}
 }
+
+func TestOnlyFiltersEarlierGlobFile(t *testing.T) {
+	dir := t.TempDir()
+	foreign := filepath.Join(dir, "-aaa-foreign", "foreign0.jsonl")
+	target := filepath.Join(dir, "-zzz-target", "target00.jsonl")
+	appendLines(t, foreign, "foreign-1", "foreign-2", "Xforeign")
+	appendLines(t, target, "target-1", "target-2", "Xtarget")
+	tl := &Tail[ev]{Projects: dir, Only: target, Lines: true,
+		Parse: func(line []byte) (ev, bool, string, error) {
+			if bytes.HasPrefix(line, []byte("X")) {
+				return ev{text: string(line)}, true, "", nil
+			}
+			return ev{}, false, "", nil
+		},
+		Stamp: func(e *ev, src Source) { e.src = src }}
+	st := &State{Files: map[string]*File{}, Started: true}
+	evs, err := tl.Pass(st, time.Now())
+	if err != nil || len(evs) != 1 || evs[0].text != "Xtarget" || evs[0].src.Line != 3 || evs[0].src.Session != "target00" {
+		t.Fatalf("Only events=%+v err=%v", evs, err)
+	}
+}

@@ -73,6 +73,7 @@ import (
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/aguard/internal/said"
 	"github.com/aiseeq/aguard/internal/trackfd"
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
@@ -147,6 +148,7 @@ type app struct {
 	quietRuntime       *quietRuntime
 	benchIO            benchBackend
 	sudoJournalSource  func(context.Context, string, string, ...string) ([]journalRecord, error)
+	saidModel          func(string, string) said.Model
 }
 
 type quietRuntime struct {

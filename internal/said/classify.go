@@ -17,8 +17,13 @@ type Model func(ctx context.Context, input string) (oneshot.Result, error)
 
 // OneShot — Model через akit/oneshot: модель из списка одобренных, без инструментов; codexHome — учётка OpenAI вызова.
 func (c *Config) OneShot(codexHome string) Model {
+	return c.OneShotPrompt(codexHome, Prompt)
+}
+
+// OneShotPrompt — OneShot с prompt, переданным вызывающим кодом (например, для eval-сравнения).
+func (c *Config) OneShotPrompt(codexHome, prompt string) Model {
 	return func(ctx context.Context, input string) (oneshot.Result, error) {
-		return oneshot.Ask(ctx, oneshot.Request{Model: c.Model, Effort: c.Effort, System: Prompt, Schema: Schema,
+		return oneshot.Ask(ctx, oneshot.Request{Model: c.Model, Effort: c.Effort, System: prompt, Schema: Schema,
 			Input: input, CodexHome: codexHome})
 	}
 }

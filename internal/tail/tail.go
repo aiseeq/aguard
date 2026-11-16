@@ -57,6 +57,7 @@ type Tail[E any] struct {
 	// Subagents — читать и транскрипты суб-агентов.
 	Subagents bool
 	Projects  string // ~/.claude/projects
+	Only      string // если задан, читать только этот файл транскрипта
 	// Backfill — насколько назад догружать транскрипты, которые были до первого прохода; 0 — не догружать.
 	Backfill time.Duration
 	// BackfillBytes — сколько байт догрузки читать за проход: старые транскрипты — гигабайты, машину не грузим.
@@ -215,6 +216,9 @@ func (t *Tail[E]) list() ([]file, error) {
 			return nil, fmt.Errorf("транскрипты: %w", err)
 		}
 		for _, p := range paths {
+			if t.Only != "" && filepath.Clean(p) != filepath.Clean(t.Only) {
+				continue
+			}
 			info, err := os.Stat(p)
 			if errors.Is(err, fs.ErrNotExist) {
 				continue // удалили между списком и stat
