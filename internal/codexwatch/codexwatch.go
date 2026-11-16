@@ -102,6 +102,12 @@ func (c *Config) Validate(home string) error {
 	return nil
 }
 
+// EarlyResetDeadline — latest time at which an early reset can be consumed.
+// decide requires the current time to be strictly before this deadline.
+func (c *Config) EarlyResetDeadline(resetsAt time.Time) time.Time {
+	return resetsAt.Add(-c.MinIdle.D())
+}
+
 // Reading — один замер лимита.
 type Reading struct {
 	Account   Account
@@ -256,7 +262,7 @@ func (s *State) decide(r Reading, f Forecast, c *Config) ([]Notice, bool) {
 	// без действующего «да» consume не зовётся и после вызова без ответа: кредит тратится только со сбросом, а сброс
 	// сдвигает resetsAt на дни — в том же окне прошлый вызов кредит не потратил, и повтор с тем же ключом второго не
 	// потратит (проверка 3 взвода 02.11: удержание взвода нарушало «только с «да»»).
-	case r.Used >= 100 && r.Armed != "" && idle > c.MinIdle.D():
+	case r.Used >= 100 && r.Armed != "" && r.At.Before(c.EarlyResetDeadline(r.ResetsAt)):
 		return s.armed(r, idle)
 	case r.Used >= 100:
 		if !s.Full && idle > c.MinIdle.D() && (r.Available > 0 || s.Warned) {

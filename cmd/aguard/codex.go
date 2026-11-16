@@ -5,12 +5,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/bgtask"
 	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/akit/codexlimit"
@@ -88,7 +91,14 @@ func (a *app) codexCmd(ctx context.Context, args []string) error {
 	cmd, rest := sub(args)
 	cfg, err := a.config()
 	if err != nil {
+		if cmd == "approve" {
+			fmt.Fprintf(os.Stderr, "aguard codex approve: конфиг: %v\n", err)
+			return resetBadArgs
+		}
 		return err
+	}
+	if cmd == "approve" {
+		return a.codexApprove(ctx, &cfg.Codex, rest)
 	}
 	if cmd != "tick" {
 		usage()
@@ -98,6 +108,140 @@ func (a *app) codexCmd(ctx context.Context, args []string) error {
 	dry := fl.Bool("dry-run", false, "показать замер, темп, прогноз и решение, ничего не отправлять, не сохранять и не сбрасывать")
 	parse(fl, rest)
 	return a.codexRound(ctx, &cfg.Codex, *dry)
+}
+
+// codexApprove записывает «да» на текущее окно выбранной учётки.
+func (a *app) codexApprove(ctx context.Context, cfg *codexwatch.Config, args []string) error {
+	acc, said, err := codexApprovalInput(args, cfg.Accounts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aguard codex approve: %v\n", err)
+		return resetBadArgs
+	}
+	reader := a.codexRead
+	if reader == nil {
+		reader = readCodex
+	}
+	r, err := reader(ctx, cfg.Codex, acc.Home, a.currentTime())
+	if err != nil || r.ResetsAt.IsZero() {
+		fmt.Fprintf(os.Stderr, "aguard codex approve: resetsAt учётки %s не получен", acc.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, ": %v", err)
+		}
+		fmt.Fprintln(os.Stderr)
+		return resetRefused
+	}
+	deadline := cfg.EarlyResetDeadline(r.ResetsAt)
+	if !a.currentTime().Before(deadline) {
+		fmt.Fprintf(a.out, "до планового сброса меньше %s: aguard не сбросит; плановый сброс %s\n",
+			bgtask.Span(cfg.MinIdle.D()), r.ResetsAt.Format(time.RFC3339))
+		return resetRefused
+	}
+	line := r.ResetsAt.Format(time.RFC3339) + "\t" + said
+	duplicate, err := a.appendCodexApproval(acc.Approvals, line, r.ResetsAt, said)
+	if duplicate && err == nil {
+		fmt.Fprintf(os.Stderr, "aguard codex approve: одобрение окна %s уже есть\n", r.ResetsAt.Format(time.RFC3339))
+		return resetRefused
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aguard codex approve: запись одобрения: %v\n", err)
+		return resetBadArgs
+	}
+	fmt.Fprintln(a.out, line)
+	fmt.Fprintf(a.out, "aguard может выполнить сброс при 100%% до %s\n", deadline.Format(time.RFC3339))
+	if cfg.Mode != codexwatch.ModeAlert {
+		fmt.Fprintf(a.out, "режим %s: aguard сброс не выполнит\n", cfg.Mode)
+	}
+	return nil
+}
+
+func codexApprovalInput(args []string, accounts []codexwatch.Account) (*codexwatch.Account, string, error) {
+	fl := flag.NewFlagSet("codex approve", flag.ContinueOnError)
+	account := fl.String("account", "", "учётка Codex: work или personal")
+	said := fl.String("said", "", "реплика пользователя с датой и tl")
+	parse(fl, args)
+	if fl.NArg() > 0 || *account == "" || strings.TrimSpace(*said) == "" || strings.ContainsAny(*said, "\r\n\t") {
+		return nil, "", errors.New("нужны --account work|personal и --said <реплика одним рядом>")
+	}
+	var acc *codexwatch.Account
+	for i := range accounts {
+		if accounts[i].Name == *account {
+			acc = &accounts[i]
+			break
+		}
+	}
+	if acc == nil {
+		return nil, "", fmt.Errorf("неизвестная учётка %q", *account)
+	}
+	return acc, *said, nil
+}
+
+func (a *app) appendCodexApproval(path, line string, resetsAt time.Time, source string) (duplicate bool, retErr error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return false, fmt.Errorf("каталог одобрений: %w", err)
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, fmt.Errorf("файл блокировки одобрений: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return false, errors.Join(fmt.Errorf("блокировка одобрений: %w", err), lock.Close())
+	}
+	defer func() {
+		retErr = errors.Join(retErr, syscall.Flock(int(lock.Fd()), syscall.LOCK_UN), lock.Close())
+	}()
+	return a.appendCodexApprovalLocked(path, line, resetsAt, source)
+}
+
+func (a *app) appendCodexApprovalLocked(path, line string, resetsAt time.Time, source string) (bool, error) {
+	approvals, err := codexlimit.ReadApproved(path)
+	if err != nil {
+		return false, fmt.Errorf("файл одобрений: %w", err)
+	}
+	if _, ok := approvals.For(resetsAt); ok {
+		return true, nil
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("файл одобрений: %w", err)
+	}
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	open := a.codexApprovalOpen
+	if open == nil {
+		open = os.OpenFile
+	}
+	f, err := open(path, flags, 0o600)
+	if err != nil {
+		return false, fmt.Errorf("файл одобрений: %w", err)
+	}
+	var payload []byte
+	if len(contents) > 0 && contents[len(contents)-1] != '\n' {
+		payload = append(payload, '\n')
+	}
+	payload = append(payload, line...)
+	payload = append(payload, '\n')
+	write := a.codexApprovalWrite
+	if write == nil {
+		write = (*os.File).Write
+	}
+	n, writeErr := write(f, payload)
+	if writeErr == nil && n != len(payload) {
+		writeErr = io.ErrShortWrite
+	}
+	if writeErr != nil {
+		writeErr = errors.Join(writeErr, f.Truncate(int64(len(contents))))
+	}
+	closeErr := f.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		return false, err
+	}
+	verified, err := codexlimit.ReadApproved(path)
+	if err != nil {
+		return false, fmt.Errorf("проверка одобрения: %w", err)
+	}
+	if src, ok := verified.For(resetsAt); !ok || src != source {
+		return false, errors.New("записанное одобрение не найдено при проверке")
+	}
+	return false, nil
 }
 
 // codexLock — исключительная блокировка прохода: ручной `codex tick` и демон не вызывают consume вдвоём (противник

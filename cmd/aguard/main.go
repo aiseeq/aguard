@@ -44,6 +44,7 @@
 //     aguard cpu tick [-dry-run]                        замер ноута и PC: готовые задачи по владельцам
 //     aguard remote tick [-dry-run] [-file путь] [-from-start]  события сломанного пути graft
 //     aguard codex tick [-dry-run]                      замер лимита Codex: темп, прогноз 100%, письма лиду
+//     aguard codex approve --account work|personal --said '<реплика>'  запись «да» на текущее окно
 //     aguard report [-json] [-at время]                 срабатывания и сбои за сутки, неделю, месяц
 package main
 
@@ -124,23 +125,25 @@ type app struct {
 	queueWorkers         func() ([]string, error)
 	namesMem             namesMemory // таблица имён cl: прошлая удачная и письмо лиду о битой
 
-	queueUnsaved      *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
-	codexStep         time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval
-	codexRead         codexReader    // замер лимита Codex; подменяется в тестах
-	codexConsume      codexConsumer  // досрочный сброс Codex; подменяется в тестах
-	codexApproved     codexApprovals // «да» на окно из файла одобрений
-	codexNote         codexNoter     // строка исхода в тикет
-	sigSource         sigguardSource
-	sigSend           sigguardSender
-	sigJobs           *cpuwatch.Jobs
-	sigPause          func(context.Context, time.Duration) bool
-	sigAlive          func() (map[string]session.Info, error)
-	now               func() time.Time
-	bootTime          func() (time.Time, error)
-	bootID            func() (string, error)
-	quietRuntime      *quietRuntime
-	benchIO           benchBackend
-	sudoJournalSource func(context.Context, string, string, ...string) ([]journalRecord, error)
+	queueUnsaved       *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
+	codexStep          time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval
+	codexRead          codexReader    // замер лимита Codex; подменяется в тестах
+	codexConsume       codexConsumer  // досрочный сброс Codex; подменяется в тестах
+	codexApproved      codexApprovals // «да» на окно из файла одобрений
+	codexNote          codexNoter     // строка исхода в тикет
+	codexApprovalOpen  func(string, int, os.FileMode) (*os.File, error)
+	codexApprovalWrite func(*os.File, []byte) (int, error)
+	sigSource          sigguardSource
+	sigSend            sigguardSender
+	sigJobs            *cpuwatch.Jobs
+	sigPause           func(context.Context, time.Duration) bool
+	sigAlive           func() (map[string]session.Info, error)
+	now                func() time.Time
+	bootTime           func() (time.Time, error)
+	bootID             func() (string, error)
+	quietRuntime       *quietRuntime
+	benchIO            benchBackend
+	sudoJournalSource  func(context.Context, string, string, ...string) ([]journalRecord, error)
 }
 
 type quietRuntime struct {
@@ -278,7 +281,7 @@ func usage() {
   aguard gui watch -for 10s [-dir папка] [-pid имя=PID]… | report [-since 24h] [-json] [-dir папка]
   aguard io import [-dir папка] [-remove] [-out файл]   снимки событий прежнего наблюдателя — в сводки, при остановленной службе
   aguard night tick [-dry-run]
-  aguard codex tick [-dry-run]
+  aguard codex tick [-dry-run] | approve --account work|personal --said '<реплика>'
   aguard quiet [on --until время --why текст --by имя | off]
   aguard queue tick [-dry-run] | report [-since 168h] [-json]
   aguard report [-json] [-at время RFC3339]
