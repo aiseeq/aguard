@@ -142,7 +142,7 @@ func TestSeriesProfilesSurviveRestartKeepAndBrokenFile(t *testing.T) {
 	next := newIOService(context.Background(), a)
 	next.load()
 	seconds := next.series.Rows(time.Time{}).Seconds()
-	if len(seconds) != 2 || seconds[0].WriteB != 5<<20 || seconds[0].Dirty != 3<<20 || len(next.ended) != 1 || next.ended[0].WriteB != 70<<20 {
+	if len(seconds) != 3 || seconds[0].WriteB != 5<<20 || seconds[0].Dirty != 3<<20 || len(next.ended) != 1 || next.ended[0].WriteB != 70<<20 {
 		t.Fatalf("после перезапуска: ряд %+v, профили %+v", seconds, next.ended)
 	}
 	for _, path := range []string{s.seriesPath, s.profilesPath} {

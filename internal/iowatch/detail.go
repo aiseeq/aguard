@@ -3,6 +3,7 @@ package iowatch
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -18,6 +19,7 @@ type DetailReader struct {
 	cgroups   *cgroupReader
 	processes *processReader
 	evictors  evictors.Tracker
+	graftMem  *GraftSliceMemReader
 }
 
 // Roots — корни файловых систем ядра; в тестах — папки с образцами.
@@ -37,7 +39,8 @@ func NewDetailReader(roots Roots, device string) (*DetailReader, error) {
 		return nil, fmt.Errorf("устройства диска %s: %w", device, err)
 	}
 	return &DetailReader{meminfo: cachedFile{path: filepath.Join(roots.Proc, "meminfo")}, buf: make([]byte, 8192),
-		cgroups: newCgroupReader(roots.Cgroup, devices), processes: newProcessReader(roots.Proc), evictors: evictors.NewTracker(evictors.DefaultSwapMin, evictors.DefaultAnonMin)}, nil
+		cgroups: newCgroupReader(roots.Cgroup, devices), processes: newProcessReader(roots.Proc), evictors: evictors.NewTracker(evictors.DefaultSwapMin, evictors.DefaultAnonMin),
+		graftMem: NewGraftSliceMemReader(roots.Cgroup, os.Getuid())}, nil
 }
 
 // SetEvictorThresholds configures the two minimum deltas before the first Read.
@@ -65,6 +68,9 @@ func (r *DetailReader) Read(now time.Time) (s Step, skipped, err error) {
 		return s, nil, err
 	}
 	s.Dirty, s.Writeback, s.MemAvail, s.SwapUsed = mem.dirty, mem.writeback, mem.available, mem.swapUsed()
+	s.GraftSliceMem, err = r.graftMem.Sample(now)
+	s.GraftSliceMemKnown = err == nil
+	graftErr := err
 	groups, err := r.cgroups.read(&s)
 	if err != nil {
 		return s, nil, err
@@ -84,5 +90,5 @@ func (r *DetailReader) Read(now time.Time) (s Step, skipped, err error) {
 			}
 		}
 	}
-	return s, errors.Join(groups, procs), err
+	return s, errors.Join(graftErr, groups, procs), err
 }

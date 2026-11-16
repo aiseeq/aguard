@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/quantile"
 )
 
 // Thresholds — пороги, для которых сводка считает, сколько раз их бы перешли.
@@ -101,13 +102,6 @@ func Collect(samples func(fn func(*Sample)) (int, error)) (*Report, error) {
 	return r, nil
 }
 
-func quantile(sorted []int64, q float64) int64 {
-	if len(sorted) == 0 {
-		return 0
-	}
-	return sorted[int(q*float64(len(sorted)-1))]
-}
-
 // Print печатает сводку.
 func (r *Report) Print(w io.Writer) error {
 	if len(r.Roles) == 0 {
@@ -126,8 +120,8 @@ func (r *Report) Print(w io.Writer) error {
 			top = fmt.Sprintf("%s %s: %s", p.Comm, policy.HumanBytes(p.RSS), p.Args)
 		}
 		fmt.Fprintf(tw, "%s\t%d\t%.0f\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n", rs.Name, len(rs.Scopes), rs.Last.Sub(rs.First).Hours(),
-			policy.HumanBytes(quantile(rs.Peaks, 0.5)), policy.HumanBytes(quantile(rs.Peaks, 0.95)),
-			policy.HumanBytes(quantile(rs.Peaks, 0.99)), policy.HumanBytes(rs.Max.Peak), rs.Max.At.Format(at),
+			policy.HumanBytes(quantile.Of(rs.Peaks, 0.5)), policy.HumanBytes(quantile.Of(rs.Peaks, 0.95)),
+			policy.HumanBytes(quantile.Of(rs.Peaks, 0.99)), policy.HumanBytes(rs.Max.Peak), rs.Max.At.Format(at),
 			top, rs.HighHits, rs.OOM, policy.HumanBytes(rs.Before))
 	}
 	if err := tw.Flush(); err != nil {

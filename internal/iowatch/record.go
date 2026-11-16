@@ -19,40 +19,42 @@ const (
 )
 
 // Step — быстрый шаг машины (дельты к прошлому шагу) или детальная запись (Dirty, Writeback,
-// MemAvail, SwapUsed, Processes, Cgroups). Нулевые поля в снимок не пишутся.
+// MemAvail, SwapUsed, GraftSliceMem, Processes, Cgroups). Нулевые поля в снимок не пишутся.
 type Step struct {
-	At           time.Time `json:"at"`
-	IOFullUS     int64     `json:"io_full_us,omitempty"`
-	IOSomeUS     int64     `json:"io_some_us,omitempty"`
-	MemFullUS    int64     `json:"mem_full_us,omitempty"`
-	MemSomeUS    int64     `json:"mem_some_us,omitempty"`
-	CPUSomeUS    int64     `json:"cpu_some_us,omitempty"` // PSI some cpu: время, когда кто-то ждал процессор
-	Runnable     int64     `json:"runnable,omitempty"`    // готовые к работе в момент шага (loadavg)
-	SwapIn       int64     `json:"swapin,omitempty"`
-	SwapOut      int64     `json:"swapout,omitempty"`
-	Majflt       int64     `json:"majflt,omitempty"`
-	CleanerMS    int64     `json:"cleaner_ms,omitempty"` // CPU btrfs-cleaner за детальный интервал
-	ReadBytes    int64     `json:"rd_b,omitempty"`
-	WriteBytes   int64     `json:"wr_b,omitempty"`
-	IOTicks      int64     `json:"io_ticks,omitempty"` // мс занятости устройства
-	RIOS         int64     `json:"r_ios,omitempty"`
-	RMS          int64     `json:"r_ms,omitempty"`
-	WIOS         int64     `json:"w_ios,omitempty"`
-	WMS          int64     `json:"w_ms,omitempty"`
-	InFlight     int64     `json:"inflight,omitempty"` // очередь устройства в момент шага
-	WTimeMS      int64     `json:"wtime_ms,omitempty"` // взвешенное время очереди
-	DIOS         int64     `json:"d_ios,omitempty"`
-	DMS          int64     `json:"d_ms,omitempty"`
-	FIOS         int64     `json:"f_ios,omitempty"`
-	FMS          int64     `json:"f_ms,omitempty"`
-	Dirty        int64     `json:"dirty,omitempty"`
-	Writeback    int64     `json:"writeback,omitempty"`
-	MemAvail     int64     `json:"mem_avail,omitempty"` // MemAvailable, байт
-	SwapUsed     int64     `json:"swap_used,omitempty"` // SwapTotal − SwapFree, байт
-	Processes    []Process `json:"processes,omitempty"`
-	Cgroups      []Cgroup  `json:"cgroups,omitempty"`
-	memoryGroups []evictors.Group
-	evictorRow   *evictors.Interval
+	At                 time.Time `json:"at"`
+	IOFullUS           int64     `json:"io_full_us,omitempty"`
+	IOSomeUS           int64     `json:"io_some_us,omitempty"`
+	MemFullUS          int64     `json:"mem_full_us,omitempty"`
+	MemSomeUS          int64     `json:"mem_some_us,omitempty"`
+	CPUSomeUS          int64     `json:"cpu_some_us,omitempty"` // PSI some cpu: время, когда кто-то ждал процессор
+	Runnable           int64     `json:"runnable,omitempty"`    // готовые к работе в момент шага (loadavg)
+	SwapIn             int64     `json:"swapin,omitempty"`
+	SwapOut            int64     `json:"swapout,omitempty"`
+	Majflt             int64     `json:"majflt,omitempty"`
+	CleanerMS          int64     `json:"cleaner_ms,omitempty"` // CPU btrfs-cleaner за детальный интервал
+	ReadBytes          int64     `json:"rd_b,omitempty"`
+	WriteBytes         int64     `json:"wr_b,omitempty"`
+	IOTicks            int64     `json:"io_ticks,omitempty"` // мс занятости устройства
+	RIOS               int64     `json:"r_ios,omitempty"`
+	RMS                int64     `json:"r_ms,omitempty"`
+	WIOS               int64     `json:"w_ios,omitempty"`
+	WMS                int64     `json:"w_ms,omitempty"`
+	InFlight           int64     `json:"inflight,omitempty"` // очередь устройства в момент шага
+	WTimeMS            int64     `json:"wtime_ms,omitempty"` // взвешенное время очереди
+	DIOS               int64     `json:"d_ios,omitempty"`
+	DMS                int64     `json:"d_ms,omitempty"`
+	FIOS               int64     `json:"f_ios,omitempty"`
+	FMS                int64     `json:"f_ms,omitempty"`
+	Dirty              int64     `json:"dirty,omitempty"`
+	Writeback          int64     `json:"writeback,omitempty"`
+	MemAvail           int64     `json:"mem_avail,omitempty"` // MemAvailable, байт
+	SwapUsed           int64     `json:"swap_used,omitempty"` // SwapTotal − SwapFree, байт
+	GraftSliceMem      int64     `json:"graft_slice_mem,omitempty"`
+	GraftSliceMemKnown bool      `json:"graft_slice_mem_known,omitempty"`
+	Processes          []Process `json:"processes,omitempty"`
+	Cgroups            []Cgroup  `json:"cgroups,omitempty"`
+	memoryGroups       []evictors.Group
+	evictorRow         *evictors.Interval
 }
 
 // TakeEvictorInterval transfers the ephemeral interval to the in-memory aggregator.

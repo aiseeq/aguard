@@ -288,6 +288,11 @@ type ioService struct {
 	evictorSaveDone     chan error                              // only the io sampling goroutine starts and collects this writer
 	evictorWriter       func(string, *evictors.Aggregate) error // injectable file writer for tests
 	evictorStoreBlocked bool                                    // quarantine failed; never overwrite unreadable history
+	dailyPath           string
+	dailyDate           string
+	dailyLastAt         int64
+	dailySamples        []iowatch.DailySample
+	dailySaveDone       chan error
 	sudoCache           *sudoLookupCache
 	bootID              string
 }
@@ -302,19 +307,22 @@ func newIOService(ctx context.Context, a *app) *ioService {
 	return &ioService{route: ioroute.New(def.Route()), owners: a.ioOwners(&def), a: a, ctx: ctx, dir: filepath.Join(state, "events"), path: filepath.Join(state, ioCasesFile),
 		coverPath: filepath.Join(state, ioCoverageFile), cover: iowatch.NewCoverer(iowatch.CoverRecord{}, time.Now()),
 		seriesPath: filepath.Join(state, ioSeriesFile), profilesPath: filepath.Join(state, ioProfilesFile),
+		dailyPath:   filepath.Join(state, ioDailyFile),
 		evictorPath: evictorStorePath(a), evictors: evictors.NewAggregate(),
 		cgroupRoot: iowatch.SystemRoots().Cgroup, kindSources: iowatch.KindSources{WorkerState: filepath.Join(a.home, ".local", "state", "worker"), GraftHeavy: iowatch.GraftHeavyDir(record.RuntimeDir())},
-		series: iowatch.NewSeries(iowatch.Default().SeriesKeep.D()), profiles: iowatch.NewProfiles(), live: iowatch.NewLive(),
+		series: iowatch.NewSeries(max(iowatch.Default().SeriesKeep.D(), ioSeriesMinKeep)), profiles: iowatch.NewProfiles(), live: iowatch.NewLive(),
 		extra: make(chan func(), 16), warnAt: map[string]time.Time{}, sudoCache: newSudoLookupCache(), bootID: bootID,
 		tickets: &ioTicketer{a: a, queue: make(chan ioTicketJob, 64)}}
 }
 
 // Копии в папке состояния io: сводки случаев, посекундный ряд машины, профили cgroup.
 const (
-	ioCasesFile    = "cases.jsonl"
-	ioSeriesFile   = "series.jsonl"
-	ioProfilesFile = "profiles.jsonl"
-	ioCoverageFile = "coverage.json" // учёт покрытия замера: рядом со сводками, срок — cases_keep
+	ioCasesFile     = "cases.jsonl"
+	ioSeriesFile    = "series.jsonl"
+	ioProfilesFile  = "profiles.jsonl"
+	ioDailyFile     = "graft-mem-daily.jsonl"
+	ioCoverageFile  = "coverage.json" // учёт покрытия замера: рядом со сводками, срок — cases_keep
+	ioSeriesMinKeep = 26 * time.Hour
 )
 
 // ioLoop — наблюдатель io: mode=off — не замеряет совсем; паника или ошибка цикла — warn и перезапуск.
@@ -427,6 +435,9 @@ func (s *ioService) saveStop(now time.Time) {
 	if err := s.saveEvictorsStop(now); err != nil {
 		s.a.warn("io", "сводка кандидатов при остановке", "err", err)
 	}
+	if err := s.saveDailyStop(); err != nil {
+		s.a.warn("io", "суточная свёртка памяти при остановке", "err", err)
+	}
 }
 
 // load — сводки, ряд и профили прошлых запусков в сроке из конфига (не прочитался — по умолчанию).
@@ -438,12 +449,14 @@ func (s *ioService) load() {
 	now := time.Now()
 	s.cases = loadIOFile(s, s.path, "сводки случаев", iowatch.LoadCases)
 	seconds := loadIOFile(s, s.seriesPath, "ряд машины", func(path string) ([]iowatch.MachineSecond, error) {
-		return iowatch.LoadSeries(path, now.Add(-cfg.SeriesKeep.D()))
+		return iowatch.LoadSeries(path, now.Add(-max(cfg.SeriesKeep.D(), ioSeriesMinKeep)))
 	})
-	s.series = iowatch.NewSeries(cfg.SeriesKeep.D())
+	s.series = iowatch.NewSeries(max(cfg.SeriesKeep.D(), ioSeriesMinKeep))
 	for i := range seconds {
 		s.series.Add(seconds[i])
 	}
+	loadIOFile(s, s.dailyPath, "суточные свёртки памяти", iowatch.LoadDaily)
+	s.seedDailyDate(now)
 	s.loadCover(seconds, now)
 	s.ended = loadIOFile(s, s.profilesPath, "профили cgroup", func(path string) ([]iowatch.Profile, error) {
 		return iowatch.LoadProfiles(path, now.Add(-cfg.ProfilesKeep.D()))
@@ -602,10 +615,117 @@ func (s *ioService) step(st iowatch.Step) {
 	for i := range closed {
 		s.closed(closed[i])
 	}
+	s.collectDailySave(st.At)
+	s.collectDailyRows()
+	day := st.At.In(time.Local).Format("2006-01-02")
+	if s.dailyDate == "" {
+		s.seedDailyDate(st.At)
+	}
+	if day != s.dailyDate && s.startDailySave(s.dailyDate) {
+		s.dailyDate = day
+	}
+	s.collectDailyRows()
 	if !st.At.Before(s.tickAt) {
 		s.tickAt = st.At.Add(time.Second)
 		s.act(s.route.Tick(st.At))
 	}
+}
+
+func (s *ioService) seedDailyDate(now time.Time) {
+	s.dailySamples = nil
+	at, ok := s.series.LastAt()
+	if !ok {
+		s.dailyDate = now.In(time.Local).Format("2006-01-02")
+		s.dailyLastAt = 0
+		return
+	}
+	s.dailyDate = at.In(time.Local).Format("2006-01-02")
+	s.dailyLastAt = at.Unix()
+	start, err := time.ParseInLocation("2006-01-02", s.dailyDate, time.Local)
+	if err != nil {
+		s.a.warn("io", "дата последней секунды ряда", "err", err)
+		s.dailyDate = now.In(time.Local).Format("2006-01-02")
+		s.dailySamples = nil
+		return
+	}
+	s.series.VisitSince(start, func(sec iowatch.MachineSecond) {
+		if sec.At.In(time.Local).Format("2006-01-02") == s.dailyDate {
+			s.addDailySecond(sec)
+		}
+	})
+}
+
+func (s *ioService) collectDailyRows() {
+	last, ok := s.series.LastAt()
+	if !ok || last.Unix() <= s.dailyLastAt {
+		return
+	}
+	since := time.Time{}
+	if s.dailyLastAt != 0 {
+		since = time.Unix(s.dailyLastAt+1, 0)
+	}
+	consumedAt := s.dailyLastAt
+	s.series.VisitSince(since, func(sec iowatch.MachineSecond) {
+		if sec.At.In(time.Local).Format("2006-01-02") != s.dailyDate {
+			return
+		}
+		s.addDailySecond(sec)
+		consumedAt = sec.At.Unix()
+	})
+	s.dailyLastAt = consumedAt
+}
+
+func (s *ioService) addDailySecond(sec iowatch.MachineSecond) {
+	if sample, ok := iowatch.DailySampleFor(sec, s.dailyDate, time.Local); ok {
+		s.dailySamples = append(s.dailySamples, sample)
+	}
+}
+
+// startDailySave snapshots the previous local date in the sampling loop; decoding and disk I/O run elsewhere.
+func (s *ioService) startDailySave(date string) bool {
+	if s.dailySaveDone != nil {
+		return false
+	}
+	if len(s.dailySamples) == 0 {
+		return true
+	}
+	done := make(chan error, 1)
+	s.dailySaveDone = done
+	samples := s.dailySamples
+	s.dailySamples = nil
+	path, loc := s.dailyPath, time.Local
+	go func() {
+		entry := iowatch.SummarizeDaily(samples, date, loc)
+		if entry.Seconds == 0 {
+			done <- nil
+			return
+		}
+		done <- iowatch.SaveDaily(path, entry)
+	}()
+	return true
+}
+
+func (s *ioService) collectDailySave(now time.Time) {
+	if s.dailySaveDone == nil {
+		return
+	}
+	select {
+	case err := <-s.dailySaveDone:
+		s.dailySaveDone = nil
+		if err != nil {
+			s.warnEvery(now, "daily-memory", ioWarnEvery, "суточная свёртка памяти", err)
+		}
+	default:
+	}
+}
+
+func (s *ioService) saveDailyStop() error {
+	if s.dailySaveDone == nil {
+		return nil
+	}
+	err := <-s.dailySaveDone
+	s.dailySaveDone = nil
+	return err
 }
 
 func (s *ioService) pressure() bool { return s.rec.Pressure() }
@@ -773,8 +893,9 @@ func (s *ioService) reconfigure(gen int, next iowatch.Config, err error) {
 
 // resizeSeries — ряд под series_keep из конфига: строки, которые влезают, сохраняются.
 func (s *ioService) resizeSeries(cfg iowatch.Config) {
-	if s.series.Keep() != cfg.SeriesKeep.D() {
-		s.series = s.series.Resize(cfg.SeriesKeep.D())
+	keep := max(cfg.SeriesKeep.D(), ioSeriesMinKeep)
+	if s.series.Keep() != keep {
+		s.series = s.series.Resize(keep)
 	}
 }
 
