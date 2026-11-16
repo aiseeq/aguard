@@ -68,6 +68,35 @@ func TestGraftSliceMemStoredAsKiBAndSurvivesDetail(t *testing.T) {
 	}
 }
 
+func TestSeriesKeepsGraftMemoryUnknownBeforeFirstDetail(t *testing.T) {
+	series := NewSeries(time.Hour)
+	at := time.Date(2026, 11, 14, 12, 0, 0, 0, time.Local)
+	series.step(&Step{At: at}, 0, time.Second)
+	series.step(&Step{At: at.Add(time.Second)}, 0, time.Second)
+	rows := series.Rows(time.Time{}).Seconds()
+	if len(rows) != 1 || rows[0].GraftSliceMemKnown || rows[0].GraftSliceMem != 0 {
+		t.Fatalf("pre-detail graft memory must remain unknown: %+v", rows)
+	}
+}
+
+func TestSeriesDropsStepsUntilClockPassesLastRow(t *testing.T) {
+	series := NewSeries(time.Hour)
+	base := time.Unix(1_800_000_000, 0)
+	series.Add(MachineSecond{At: base.Add(5 * time.Second), WriteB: 55})
+	for i := range 7 {
+		series.step(&Step{At: base.Add(time.Duration(i) * time.Second), WriteBytes: int64(i + 1)}, 0, time.Second)
+	}
+	rows := series.Rows(time.Time{}).Seconds()
+	if len(rows) != 1 || rows[0].WriteB != 55 {
+		t.Fatalf("backward-clock steps must be discarded through the last stored second: %+v", rows)
+	}
+	series.step(&Step{At: base.Add(7 * time.Second), WriteBytes: 8}, 0, time.Second)
+	rows = series.Rows(time.Time{}).Seconds()
+	if len(rows) != 2 || !rows[0].At.Equal(base.Add(5*time.Second)) || !rows[1].At.Equal(base.Add(6*time.Second)) || rows[1].WriteB != 7 {
+		t.Fatalf("series after the clock catches up: %+v", rows)
+	}
+}
+
 func TestDailyMemorySummaryAndRetention(t *testing.T) {
 	loc := time.FixedZone("test", 2*60*60)
 	start := time.Date(2026, 11, 14, 0, 0, 0, 0, loc)
@@ -134,22 +163,27 @@ func TestSeriesRowsSinceAfterRingWrap(t *testing.T) {
 	}
 }
 
-func TestMachineSecondJSONKeepsKnownZeroAndOmitsLegacy(t *testing.T) {
+func TestSeriesJSONKeepsKnownZeroAndReadsLegacy(t *testing.T) {
 	known := MachineSecond{At: time.Unix(1, 0), GraftSliceMemKnown: true}
-	data, err := json.Marshal(known)
-	if err != nil || !strings.Contains(string(data), `"graft_slice_mem":0`) {
-		t.Fatalf("known zero JSON %s, err %v", data, err)
+	path := filepath.Join(t.TempDir(), "series.jsonl")
+	if err := SaveSeries(path, []MachineSecond{known, {At: time.Unix(2, 0)}}); err != nil {
+		t.Fatal(err)
 	}
-	var decoded MachineSecond
-	if err := json.Unmarshal(data, &decoded); err != nil || !decoded.GraftSliceMemKnown {
-		t.Fatalf("known zero decode %+v, err %v", decoded, err)
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), `"graft_slice_mem":0`) || strings.Contains(strings.Split(string(data), "\n")[1], `graft_slice_mem`) {
+		t.Fatalf("series JSON zero/legacy lines %s, err %v", data, err)
 	}
-	legacy, err := json.Marshal(MachineSecond{At: time.Unix(2, 0)})
-	if err != nil || strings.Contains(string(legacy), `graft_slice_mem`) {
-		t.Fatalf("legacy zero should be omitted: %s, err %v", legacy, err)
+	decoded, err := LoadSeries(path, time.Time{})
+	if err != nil || len(decoded) != 2 || !decoded[0].GraftSliceMemKnown || decoded[1].GraftSliceMemKnown {
+		t.Fatalf("known/legacy decode %+v, err %v", decoded, err)
 	}
-	if err := json.Unmarshal([]byte(`{"at":"1970-01-01T00:00:03Z"}`), &decoded); err != nil || decoded.GraftSliceMemKnown {
-		t.Fatalf("old series line known=%v err=%v", decoded.GraftSliceMemKnown, err)
+	legacyPath := filepath.Join(t.TempDir(), "old-series.jsonl")
+	if err := os.WriteFile(legacyPath, []byte(`{"at":"1970-01-01T00:00:03Z"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err = LoadSeries(legacyPath, time.Time{})
+	if err != nil || len(decoded) != 1 || decoded[0].GraftSliceMemKnown {
+		t.Fatalf("old series line known=%v err=%v", decoded, err)
 	}
 	stepData, err := json.Marshal(Step{At: time.Unix(4, 0), GraftSliceMemKnown: true})
 	if err != nil {
@@ -158,5 +192,32 @@ func TestMachineSecondJSONKeepsKnownZeroAndOmitsLegacy(t *testing.T) {
 	var step Step
 	if err := json.Unmarshal(stepData, &step); err != nil || !step.GraftSliceMemKnown {
 		t.Fatalf("detail snapshot graft-known marker lost: %s, err %v", stepData, err)
+	}
+}
+
+func TestLoadSeriesHeadFormatWithoutLoss(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "series.jsonl")
+	writeFile(t, path, `{"at":"2026-11-14T23:59:59Z","io_full_ms":17,"rd_b":12345,"mem_avail":987654,"graft_slice_mem":0}`+"\n")
+	got, err := LoadSeries(path, time.Time{})
+	if err != nil || len(got) != 1 {
+		t.Fatalf("HEAD series line: %+v, err %v", got, err)
+	}
+	row := got[0]
+	if !row.At.Equal(time.Date(2026, 11, 14, 23, 59, 59, 0, time.UTC)) || row.IOFullMS != 17 || row.ReadB != 12345 ||
+		row.MemAvail != 987654 || row.GraftSliceMem != 0 || !row.GraftSliceMemKnown {
+		t.Fatalf("HEAD series line lost fields: %+v", row)
+	}
+}
+
+func TestLoadSeriesAcceptsLineLongerThan64KiB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "series.jsonl")
+	line := append([]byte(`{"at":"2026-11-14T23:59:59Z","extra":"`), strings.Repeat("x", 70*1024)...)
+	line = append(line, []byte(`"}`+"\n")...)
+	if err := os.WriteFile(path, line, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := LoadSeries(path, time.Time{})
+	if err != nil || len(rows) != 1 || !rows[0].At.Equal(time.Date(2026, 11, 14, 23, 59, 59, 0, time.UTC)) {
+		t.Fatalf("large series line: rows=%+v err=%v", rows, err)
 	}
 }

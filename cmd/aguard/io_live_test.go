@@ -103,7 +103,7 @@ func TestIOSocketNowSeriesProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	var series iowatch.Answer
-	if err := json.Unmarshal(out.Bytes(), &series); err != nil || len(series.Series) != 2 || series.Series[0].WriteB != 10<<20 || series.Now != nil {
+	if err := json.Unmarshal(out.Bytes(), &series); err != nil || len(series.Series) != 2 || series.Series[0].MachineSecond().WriteB != 10<<20 || series.Now != nil {
 		t.Fatalf("series (%v): %s", err, out)
 	}
 
@@ -122,6 +122,55 @@ func TestIOSocketNowSeriesProfiles(t *testing.T) {
 		if raw.V != iowatch.ProtoVersion || !strings.Contains(raw.Error, want) || raw.Now != nil {
 			t.Fatalf("%s: %+v", req, raw)
 		}
+	}
+}
+
+func TestIOSocketSeriesGraftKnownZeroRoundTrip(t *testing.T) {
+	s, _, _ := ioLiveService(t, t.Context())
+	s.series = iowatch.NewSeries(time.Hour)
+	base := time.Unix(1_800_000_000, 0)
+	s.series.Add(iowatch.MachineSecond{At: base, GraftSliceMemKnown: true})
+	s.series.Add(iowatch.MachineSecond{At: base.Add(time.Second)})
+	s.series.Add(iowatch.MachineSecond{At: base.Add(2 * time.Second), GraftSliceMem: 3 << 10, GraftSliceMemKnown: true})
+	go func() {
+		select {
+		case action := <-s.extra:
+			action()
+		case <-time.After(2 * time.Second):
+		}
+	}()
+	answer := s.answer([]byte(`{"v":1,"q":"series"}`))
+	data, err := json.Marshal(answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded iowatch.Answer
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Series) != 3 {
+		t.Fatalf("decoded socket series rows: %d", len(decoded.Series))
+	}
+	zero, unknown, value := decoded.Series[0].MachineSecond(), decoded.Series[1].MachineSecond(), decoded.Series[2].MachineSecond()
+	if !zero.GraftSliceMemKnown || zero.GraftSliceMem != 0 || unknown.GraftSliceMemKnown || unknown.GraftSliceMem != 0 ||
+		!value.GraftSliceMemKnown || value.GraftSliceMem != 3<<10 {
+		t.Fatalf("decoded socket series zero/unknown/value: %+v, %+v, %+v", zero, unknown, value)
+	}
+	data, err = json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Series []struct {
+			GraftSliceMem *int64 `json:"graft_slice_mem"`
+		} `json:"series"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Series) != 3 || wire.Series[0].GraftSliceMem == nil || *wire.Series[0].GraftSliceMem != 0 ||
+		wire.Series[1].GraftSliceMem != nil || wire.Series[2].GraftSliceMem == nil || *wire.Series[2].GraftSliceMem != 3<<10 {
+		t.Fatalf("socket series zero/unknown/value did not survive JSON round trip: %s", data)
 	}
 }
 

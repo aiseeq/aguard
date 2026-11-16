@@ -248,6 +248,11 @@ func TestDetailReaderEvictorsFlowThroughAggregateStorage(t *testing.T) {
 	if got := quiet.TakeEvictorInterval(); got != nil {
 		t.Fatalf("интервал без прироста swap засчитан: %+v", got)
 	}
+	writeFile(t, filepath.Join(graftBase, "agents.slice", "agents-graft.slice", "memory.current"), "invalid\n")
+	failed, skipped, err := r.Read(at.Add(4 * time.Minute))
+	if err != nil || skipped == nil || failed.GraftSliceMemKnown {
+		t.Fatalf("ошибка чтения graft-слайса должна оставить значение неизвестным: known=%v skipped=%v err=%v", failed.GraftSliceMemKnown, skipped, err)
+	}
 }
 
 func writeFile(t *testing.T, path, content string) {

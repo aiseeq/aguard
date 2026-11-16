@@ -293,6 +293,7 @@ type ioService struct {
 	dailyLastAt         int64
 	dailySamples        []iowatch.DailySample
 	dailySaveDone       chan error
+	dailyWriter         func(string, iowatch.DailyMemory) error
 	sudoCache           *sudoLookupCache
 	bootID              string
 }
@@ -700,7 +701,11 @@ func (s *ioService) startDailySave(date string) bool {
 			done <- nil
 			return
 		}
-		done <- iowatch.SaveDaily(path, entry)
+		writer := s.dailyWriter
+		if writer == nil {
+			writer = iowatch.SaveDaily
+		}
+		done <- writer(path, entry)
 	}()
 	return true
 }

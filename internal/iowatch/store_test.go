@@ -10,6 +10,28 @@ import (
 	"time"
 )
 
+func BenchmarkSeriesSaveLoad93600(b *testing.B) {
+	const count = 93_600
+	seconds := make([]MachineSecond, count)
+	base := time.Unix(1_800_000_000, 0)
+	for i := range seconds {
+		seconds[i] = MachineSecond{At: base.Add(time.Duration(i) * time.Second), IOFullMS: int64(i % 1000),
+			ReadB: int64(i) * 4096, WriteB: int64(i) * 2048, MemAvail: 8 << 30, GraftSliceMem: int64(i%10000) << 10, GraftSliceMemKnown: true}
+	}
+	path := filepath.Join(b.TempDir(), "series.jsonl")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if err := SaveSeries(path, seconds); err != nil {
+			b.Fatal(err)
+		}
+		loaded, err := LoadSeries(path, time.Time{})
+		if err != nil || len(loaded) != count {
+			b.Fatalf("loaded %d rows, err %v", len(loaded), err)
+		}
+	}
+}
+
 // Два писателя одного файла друг другу не мешают (копия сводок раз в час и остановка службы — разные горутины): у
 // каждого свой временный файл; сбой записи временного файла не оставляет (01c863b).
 func TestWriteAtomicTwoWritersAndFailure(t *testing.T) {

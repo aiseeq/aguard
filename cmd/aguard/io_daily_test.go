@@ -101,6 +101,69 @@ func TestIODailyRollupUsesLastSeriesDateAndDoesNotDuplicate(t *testing.T) {
 	}
 }
 
+func TestIODailyMidnightStepCollectsLastSecondBeforeChangingDate(t *testing.T) {
+	loc := time.Local
+	day := time.Date(2026, 11, 14, 0, 0, 0, 0, loc)
+	last := day.Add(23*time.Hour + 59*time.Minute + 58*time.Second)
+	s := newDailyTestService(t)
+	s.dailyDate = day.Format("2006-01-02")
+	s.dailyLastAt = last.Unix()
+	s.dailySamples = append(s.dailySamples, iowatch.DailySample{At: last, AvailablePlusGraft: (2 << 30) + (10 << 20), GraftSliceMem: 10 << 20})
+	addDailyTestSecond(s, last, 10<<20, true)
+	s.rec.Detail(iowatch.Step{At: last, GraftSliceMem: 20 << 20, GraftSliceMemKnown: true})
+	s.step(iowatch.Step{At: last.Add(time.Second)})
+	s.step(iowatch.Step{At: day.AddDate(0, 0, 1)})
+	waitDailyTestSave(t, s)
+	rows := readDailyTestRows(t, s.dailyPath)
+	if len(rows) != 1 || rows[0].Date != day.Format("2006-01-02") || rows[0].Seconds != 2 {
+		t.Fatalf("midnight rollup omitted the last second: %+v", rows)
+	}
+}
+
+func TestIODailySaveStopWaitsForPreviousDayFile(t *testing.T) {
+	s := newDailyTestService(t)
+	dir := t.TempDir()
+	s.path = filepath.Join(dir, "cases.jsonl")
+	s.coverPath = filepath.Join(dir, "coverage.json")
+	s.seriesPath = filepath.Join(dir, "series.jsonl")
+	s.profilesPath = filepath.Join(dir, "profiles.jsonl")
+	s.dailyPath = filepath.Join(dir, "graft-mem-daily.jsonl")
+	s.evictorPath = filepath.Join(dir, "evictors.jsonl")
+	date := "2026-11-14"
+	at := time.Date(2026, 11, 14, 23, 59, 59, 0, time.Local)
+	s.dailySamples = append(s.dailySamples, iowatch.DailySample{At: at, AvailablePlusGraft: 2<<30 + 10<<20, GraftSliceMem: 10 << 20})
+	started, release := make(chan struct{}), make(chan struct{})
+	s.dailyWriter = func(path string, entry iowatch.DailyMemory) error {
+		close(started)
+		<-release
+		return iowatch.SaveDaily(path, entry)
+	}
+	if !s.startDailySave(date) {
+		t.Fatal("daily save did not start")
+	}
+	<-started
+	stopped := make(chan struct{})
+	go func() {
+		s.saveStop(at.Add(time.Second))
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("saveStop returned before the daily file was written")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("saveStop did not finish after the daily write")
+	}
+	rows := readDailyTestRows(t, s.dailyPath)
+	if len(rows) != 1 || rows[0].Date != date || rows[0].Seconds != 1 {
+		t.Fatalf("saveStop lost the previous day: %+v", rows)
+	}
+}
+
 func TestIODailyBrokenFileIsQuarantined(t *testing.T) {
 	s := newDailyTestService(t)
 	if err := os.WriteFile(s.dailyPath, []byte("{broken\n"), 0o600); err != nil {
