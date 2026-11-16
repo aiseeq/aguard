@@ -120,6 +120,88 @@ func TestMainSliceWarning(t *testing.T) {
 	}
 }
 
+func TestMainOwnHelp(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "--cl-help")
+	cmd.Env = []string{"CL_TEST_RUN_MAIN=1", "HOME=" + t.TempDir(), "PATH=" + t.TempDir()}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("cl --cl-help: %v; stderr %q", err, stderr.String())
+	}
+	want := `cl — запуск Claude Code с настройками сессии.
+
+cl передаёт строку роли (roles[].text, по настройке roles[].on_start — только при запуске без своих аргументов,
+кроме -n/--name) и системный промпт из ~/.config/cl/config.json (или файла $CL_CONFIG).
+Файл возобновления: restart.resume_dir/<дата>/<имя сессии>.md; cl берёт самый свежий файл не старше
+restart.resume_max_age_hours. Если роль получает строку и задан resume_text, cl включает в неё путь к файлу.
+Выданный файл cl переносит в used/; если перенос не удался, оставляет прежний путь.
+
+Таймеры прошлой беседы, унаследованные через /clear, при подъёме не переживают; роль ставит их заново сама.
+Их список cl пишет в журнал, указанный настройкой restart.journal.
+Другим сессиям после старта не отправляй «ты перезапущен» и не пересылай файл возобновления;
+выполняй порядок из файла возобновления.
+
+Аргументы Claude Code передаются через cl. Справка Claude Code: claude --help.
+`
+	if stdout.String() != want {
+		t.Fatalf("cl --cl-help = %q, want %q", stdout.String(), want)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("справка напечатала stderr: %q", stderr.String())
+	}
+}
+
+func TestMainGuideAndHelpHintsStillLaunch(t *testing.T) {
+	for _, arg := range []string{"guide", "help"} {
+		t.Run(arg, func(t *testing.T) {
+			home := t.TempDir()
+			got, stdout, stderr := runMainEnvSlice(t, home, filepath.Join(home, "project"), nil, true, arg)
+			if !slices.Equal(got, []string{"--dangerously-skip-permissions", "--allowedTools=Grep,Glob", arg}) {
+				t.Fatalf("cl %s → claude %q", arg, got)
+			}
+			if stdout != "" || stderr != "cl: это похоже на подкоманду; справка cl: cl --cl-help\n" {
+				t.Fatalf("cl %s output stdout=%q stderr=%q", arg, stdout, stderr)
+			}
+		})
+	}
+}
+
+func TestMainOwnHelpWithExtraArgumentIsForwarded(t *testing.T) {
+	home := t.TempDir()
+	got, stdout, stderr := runMainEnvSlice(t, home, filepath.Join(home, "project"), nil, true, "--cl-help", "extra")
+	if !slices.Contains(got, "--cl-help") || !slices.Contains(got, "extra") {
+		t.Fatalf("cl --cl-help extra не передал аргументы Claude Code: %q", got)
+	}
+	if stdout != "" || strings.Contains(stderr, "справка cl") {
+		t.Fatalf("лишний аргумент вызвал справку или подсказку: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestMainOOMPrefixTakesPrecedenceOverHelp(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		argv0 string
+		args  []string
+		want  []string
+	}{
+		{"symlink help", "cl-oom-prefix", []string{"help"}, []string{"help"}},
+		{"symlink help flag", "cl-oom-prefix", []string{"--cl-help"}, []string{"--cl-help"}},
+		{"subcommand help", "cl", []string{"oom-prefix", "help"}, []string{"help"}},
+		{"subcommand help flag", "cl", []string{"oom-prefix", "--cl-help"}, []string{"--cl-help"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			var got []string
+			if !dispatchEarlyArgs(tc.argv0, tc.args, &stdout, &stderr, func(args []string) { got = args }) {
+				t.Fatal("обёртка oom-prefix не перехватила аргументы")
+			}
+			if !slices.Equal(got, tc.want) || stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("args=%q forwarded=%q stdout=%q stderr=%q", tc.args, got, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestMainUnknownConfigKeysWarning(t *testing.T) {
 	home := t.TempDir()
 	configFile := filepath.Join(home, "config.json")
