@@ -66,10 +66,18 @@ func TestCpuRoundCgroupDetailOwnerLetter(t *testing.T) {
 	h.win.Restore(cpuwatch.State{Since: now.Add(-11 * time.Minute), Last: now.Add(-time.Minute)})
 	h.strayAt = now
 	a.strayRead = func(context.Context, *cpuHost) ([]byte, error) { return []byte("##procs\n##strays\n##end\n"), nil }
+	before := time.Now()
 	if err := a.cpuRound(context.Background(), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(logs.String(), "session=worker-master") || !strings.Contains(logs.String(), "по CPU за интервал замера 6.") || !strings.Contains(logs.String(), "interval_s=60.") || !strings.Contains(logs.String(), "worker-master/short=6.") {
+	after := time.Now()
+	// cpuRound берёт time.Now() сам: интервал — от базы до момента внутри прохода, не ровно 60 с.
+	interval := h.cpuUsage.IntervalSeconds()
+	if lo, hi := before.Sub(base).Seconds(), after.Sub(base).Seconds(); interval < lo || interval > hi {
+		t.Fatalf("интервал замера %.3f с, want в пределах прохода [%.3f, %.3f]", interval, lo, hi)
+	}
+	wantCPU := fmt.Sprintf("%.2f", 400/interval)
+	if !strings.Contains(logs.String(), "session=worker-master") || !strings.Contains(logs.String(), "по CPU за интервал замера "+wantCPU) || !strings.Contains(logs.String(), fmt.Sprintf("interval_s=%.3f", interval)) || !strings.Contains(logs.String(), "worker-master/short="+wantCPU) {
 		t.Fatalf("10 мин перегрузки по коротким процессам должны написать мастеру, снимок из 4 потоков — пояснение:\n%s", logs.String())
 	}
 }
