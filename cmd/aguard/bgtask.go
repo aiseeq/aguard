@@ -55,6 +55,7 @@ func (a *app) bgtaskRound(cfg *bgtask.Config, dry bool) error {
 		a.warn("bgtask", "процессы прочитаны не все", "err", err)
 	}
 	tasks, err := bgtask.Find(snap, root, a.uid)
+	a.bgtaskOriginCache.RetainTasks(tasks)
 	if err != nil {
 		a.warn("bgtask", "задачи", "err", err)
 	}
@@ -88,7 +89,7 @@ func (a *app) bgtaskShouldSearch(st bgtask.State, t *bgtask.Task, old, dry bool)
 }
 
 func (a *app) bgtaskHandleOrigin(cfg *bgtask.Config, st bgtask.State, t *bgtask.Task, stale, dry bool, now time.Time) {
-	o, err := bgtask.FindOrigin(session.ProjectsDir(a.home), t)
+	o, err := bgtask.FindOrigin(session.ProjectsDir(a.home), t, &a.bgtaskOriginCache)
 	if err != nil {
 		a.warn("bgtask", "транскрипт задачи "+t.ID, "err", err)
 		return

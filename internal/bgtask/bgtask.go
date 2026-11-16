@@ -159,9 +159,61 @@ type Origin struct {
 	Agent       string // id суб-агента, если задачу запустил он; пусто — сама сессия
 }
 
+// OriginCache keeps per-task transcript positions for the lifetime of the daemon.
+// It is intentionally in-memory: a daemon restart searches from the beginning.
+type OriginCache struct {
+	files map[string]map[string]originPosition
+}
+
+type originPosition struct {
+	info   os.FileInfo
+	offset int64
+}
+
+// RetainTasks drops positions belonging to tasks that are no longer running.
+func (c *OriginCache) RetainTasks(tasks []Task) {
+	if c == nil {
+		return
+	}
+	active := make(map[string]struct{}, len(tasks))
+	for _, t := range tasks {
+		active[t.ID] = struct{}{}
+	}
+	for id := range c.files {
+		if _, ok := active[id]; !ok {
+			delete(c.files, id)
+		}
+	}
+}
+
+func (c *OriginCache) position(taskID, file string) (int64, os.FileInfo, error) {
+	info, err := os.Stat(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil, nil
+	}
+	if err != nil {
+		return 0, nil, fmt.Errorf("транскрипт %s: %w", file, err)
+	}
+	pos, ok := c.files[taskID][file]
+	if !ok || !os.SameFile(pos.info, info) || info.Size() < pos.offset {
+		return 0, info, nil
+	}
+	return pos.offset, info, nil
+}
+
+func (c *OriginCache) savePosition(taskID, file string, info os.FileInfo, offset int64) {
+	if c.files == nil {
+		c.files = make(map[string]map[string]originPosition)
+	}
+	if c.files[taskID] == nil {
+		c.files[taskID] = make(map[string]originPosition)
+	}
+	c.files[taskID][file] = originPosition{info: info, offset: offset}
+}
+
 // FindOrigin ищет вызов в беседе из пути вывода и в беседах из снимка процессов задачи; у каждой проверяет
 // транскрипт и суб-агентов.
-func FindOrigin(projects string, t *Task) (Origin, error) {
+func FindOrigin(projects string, t *Task, cache *OriginCache) (Origin, error) {
 	sessionDir := filepath.Dir(filepath.Dir(t.Output))
 	project, session := filepath.Base(filepath.Dir(sessionDir)), filepath.Base(sessionDir)
 	sessions := []string{session}
@@ -189,7 +241,7 @@ func FindOrigin(projects string, t *Task) (Origin, error) {
 		}
 	}
 	for _, f := range files {
-		o, err := originIn(f, t.ID)
+		o, err := findOriginInFile(f, t.ID, cache)
 		if err != nil {
 			return Origin{Paths: paths}, err
 		}
@@ -222,11 +274,23 @@ type block struct {
 	} `json:"input"`
 }
 
-// originIn — вызов задачи id в файле: сначала результат (в нём id задачи), затем сам вызов по его id.
-func originIn(file, id string) (Origin, error) {
+// findOriginInFile ищет результат задачи id, затем её вызов по tool_use id.
+func findOriginInFile(file, id string, cache *OriginCache) (Origin, error) {
 	var o Origin
 	var useID string
-	err := eachLine(file, []byte(`"backgroundTaskId":"`+id+`"`), func(line []byte) bool {
+	from := int64(0)
+	var info os.FileInfo
+	if cache != nil {
+		var err error
+		from, info, err = cache.position(id, file)
+		if err != nil {
+			return o, err
+		}
+		if info == nil {
+			return o, nil
+		}
+	}
+	next, err := eachLine(file, from, []byte(`"backgroundTaskId":"`+id+`"`), func(line []byte) bool {
 		var ev event
 		if json.Unmarshal(line, &ev) != nil {
 			return true
@@ -250,10 +314,13 @@ func originIn(file, id string) (Origin, error) {
 		}
 		return true
 	})
+	if cache != nil && info != nil {
+		cache.savePosition(id, file, info, next)
+	}
 	if err != nil || !o.Found {
 		return o, err
 	}
-	err = eachLine(file, []byte(`"id":"`+useID+`"`), func(line []byte) bool {
+	_, err = eachLine(file, 0, []byte(`"id":"`+useID+`"`), func(line []byte) bool {
 		var ev event
 		if json.Unmarshal(line, &ev) != nil {
 			return true
@@ -273,27 +340,35 @@ func originIn(file, id string) (Origin, error) {
 	return o, err
 }
 
-// eachLine отдаёт fn строки файла, где есть want, пока fn не вернёт false. Файла нет — строк нет.
-func eachLine(file string, want []byte, fn func([]byte) bool) error {
+// eachLine читает с from, отдаёт fn строки с want и возвращает смещение после полных строк.
+// Если fn вернул false, смещение остаётся перед этой строкой. Последнюю строку без '\n' тоже проверяет.
+func eachLine(file string, from int64, want []byte, fn func([]byte) bool) (int64, error) {
 	f, err := os.Open(file)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return from, nil
 	}
 	if err != nil {
-		return fmt.Errorf("транскрипт: %w", err)
+		return from, fmt.Errorf("транскрипт: %w", err)
 	}
 	defer f.Close()
+	if _, err := f.Seek(from, io.SeekStart); err != nil {
+		return from, fmt.Errorf("транскрипт %s: %w", file, err)
+	}
 	r := bufio.NewReaderSize(f, 1<<20)
 	for {
 		line, err := r.ReadBytes('\n')
+		complete := len(line) > 0 && line[len(line)-1] == '\n'
 		if bytes.Contains(line, want) && !fn(line) {
-			return nil
+			return from, nil
+		}
+		if complete {
+			from += int64(len(line))
 		}
 		if errors.Is(err, io.EOF) {
-			return nil
+			return from, nil
 		}
 		if err != nil {
-			return fmt.Errorf("транскрипт %s: %w", file, err)
+			return from, fmt.Errorf("транскрипт %s: %w", file, err)
 		}
 	}
 }

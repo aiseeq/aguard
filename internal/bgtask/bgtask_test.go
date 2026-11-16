@@ -93,19 +93,19 @@ func TestFindOrigin(t *testing.T) {
 		return &Task{ID: id, Output: "/c/claude-1000/-home-alice/s1/tasks/" + id + ".output",
 			SessionIDs: map[string]struct{}{"s2": {}, "": {}, "s1": {}}}
 	}
-	o, err := FindOrigin(projects, task("b7xi68io0"))
+	o, err := FindOrigin(projects, task("b7xi68io0"), nil)
 	if err != nil || !o.Found || !o.Auto || o.Agent != "ab805f71" || o.Description != "Grep transcript for user quote" {
 		t.Errorf("по таймауту у суб-агента: %+v %v", o, err)
 	}
-	o, err = FindOrigin(projects, task("bwait1"))
+	o, err = FindOrigin(projects, task("bwait1"), nil)
 	if err != nil || !o.Found || o.Auto || o.Agent != "" || o.Command != "bash wait.sh" {
 		t.Errorf("нарочно фоном: %+v %v", o, err)
 	}
-	o, err = FindOrigin(projects, task("bnew"))
+	o, err = FindOrigin(projects, task("bnew"), nil)
 	if err != nil || !o.Found || o.Agent != "newagent" || o.Description != "После сжатия" {
 		t.Errorf("суб-агент новой беседы: %+v %v", o, err)
 	}
-	o, err = FindOrigin(projects, task("bmain"))
+	o, err = FindOrigin(projects, task("bmain"), nil)
 	if err != nil || !o.Found || o.Agent != "" || o.Description != "Основная беседа" {
 		t.Errorf("новая основная беседа: %+v %v", o, err)
 	}
@@ -115,8 +115,186 @@ func TestFindOrigin(t *testing.T) {
 	if n := countPath(o.Paths, filepath.Join(projects, "-home-alice", "s1.jsonl")); n != 1 {
 		t.Errorf("id из пути вывода добавлен повторно %d раз: %v", n, o.Paths)
 	}
-	if o, err := FindOrigin(projects, task("bnone")); err != nil || o.Found {
+	if o, err := FindOrigin(projects, task("bnone"), nil); err != nil || o.Found {
 		t.Errorf("нет вызова: %+v %v", o, err)
+	}
+}
+
+func TestFindOriginIncrementalRead(t *testing.T) {
+	projects := t.TempDir()
+	file := filepath.Join(projects, "-home-alice", "s1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cache := &OriginCache{}
+	task := &Task{ID: "blater", Output: "/tmp/-home-alice/s1/tasks/blater.output"}
+	prefixLine := `{"type":"user","message":{"content":[]},"padding":"` + strings.Repeat("x", 900) + `"}` + "\n"
+	prefix := strings.Repeat(prefixLine, 64)
+	if err := os.WriteFile(file, []byte(prefix), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := FindOrigin(projects, task, cache); err != nil || o.Found {
+		t.Fatalf("первый поиск: %+v %v", o, err)
+	}
+	fileOffset := cache.files[task.ID][file].offset
+	if fileOffset != int64(len(prefix)) {
+		t.Fatalf("смещение после префикса %d, ожидалось %d", fileOffset, len(prefix))
+	}
+	before, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoy := `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_decoy","input":{"command":"echo decoy","description":"Подложка"}},{"type":"tool_result","tool_use_id":"toolu_decoy"}]},"toolUseResult":{"backgroundTaskId":"blater"}}`
+	decoyLine := decoy + strings.Repeat(" ", len(prefixLine)-1-len(decoy)) + "\n"
+	if len(decoyLine) != len(prefixLine) {
+		t.Fatalf("строка-подложка длиной %d вместо %d", len(decoyLine), len(prefixLine))
+	}
+	fileHandle, err := os.OpenFile(file, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, writeErr := fileHandle.WriteAt([]byte(decoyLine), 0); writeErr != nil || n != len(decoyLine) {
+		_ = fileHandle.Close()
+		t.Fatalf("запись строки-подложки: записано %d байт, err=%v", n, writeErr)
+	}
+	if err := fileHandle.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || before.Size() != after.Size() {
+		t.Fatalf("подложка изменила inode или размер: same=%v size=%d → %d", os.SameFile(before, after), before.Size(), after.Size())
+	}
+	changedPrefix := decoyLine + prefix[len(prefixLine):]
+	added := `{"type":"user","message":{"content":[]}}` + "\n"
+	if err := os.WriteFile(file, []byte(changedPrefix+added), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := FindOrigin(projects, task, cache); err != nil || o.Found {
+		t.Fatalf("поиск по дописанной строке без результата: %+v %v", o, err)
+	}
+	if got, want := cache.files[task.ID][file].offset-fileOffset, int64(len(added)); got != want {
+		t.Fatalf("второй поиск продвинулся на %d байт, ожидалось %d дописанных байт", got, want)
+	}
+	fileOffset = cache.files[task.ID][file].offset
+	result := `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_later"}]},"toolUseResult":{"backgroundTaskId":"blater","timedOutAfterMs":120000}}` + "\n"
+	use := `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_later","input":{"command":"echo later","description":"Поздний вызов"}}]}}` + "\n"
+	if err := os.WriteFile(file, []byte(changedPrefix+added+result+use), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o, err := FindOrigin(projects, task, cache)
+	if err != nil || !o.Found || o.Command != "echo later" {
+		t.Fatalf("дописанный вызов: %+v %v", o, err)
+	}
+	if got := cache.files[task.ID][file].offset; got != fileOffset {
+		t.Errorf("найденный результат передвинул смещение: %d → %d", fileOffset, got)
+	}
+	o2, err := FindOrigin(projects, task, cache)
+	if err != nil || !o2.Found || o2.Command != o.Command || o2.Description != o.Description {
+		t.Errorf("повторный поиск с тем же кешем: %+v %v; первый: %+v", o2, err, o)
+	}
+}
+
+func TestFindOriginIncrementalResetsChangedFile(t *testing.T) {
+	for _, mode := range []string{"truncate", "replace"} {
+		t.Run(mode, func(t *testing.T) {
+			projects := t.TempDir()
+			file := filepath.Join(projects, "-home-alice", "s1.jsonl")
+			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cache := &OriginCache{}
+			task := &Task{ID: "breset", Output: "/tmp/-home-alice/s1/tasks/breset.output"}
+			if err := os.WriteFile(file, []byte(strings.Repeat("x", 500)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := FindOrigin(projects, task, cache); err != nil {
+				t.Fatal(err)
+			}
+			result := `{"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_reset"}]},"toolUseResult":{"backgroundTaskId":"breset"}}` + "\n"
+			use := `{"message":{"content":[{"type":"tool_use","id":"toolu_reset","input":{"command":"true"}}]}}` + "\n"
+			content := []byte(result + use)
+			if mode == "replace" {
+				content = append(content, []byte(strings.Repeat(`{"type":"user","message":{"content":[]}}`+"\n", 30))...)
+			}
+			if mode == "truncate" {
+				if err := os.WriteFile(file, content, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				tmp := filepath.Join(filepath.Dir(file), "replacement.jsonl")
+				if err := os.WriteFile(tmp, content, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(tmp, file); err != nil {
+					t.Fatal(err)
+				}
+			}
+			o, err := FindOrigin(projects, task, cache)
+			if err != nil || !o.Found || o.Command != "true" {
+				t.Fatalf("после %s вызов не найден с начала: %+v %v", mode, o, err)
+			}
+		})
+	}
+}
+
+func TestFindOriginIncrementalUnterminatedResult(t *testing.T) {
+	projects := t.TempDir()
+	file := filepath.Join(projects, "-home-alice", "s1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cache := &OriginCache{}
+	task := &Task{ID: "bfinal", Output: "/tmp/-home-alice/s1/tasks/bfinal.output"}
+	use := `{"message":{"content":[{"type":"tool_use","id":"toolu_final","input":{"command":"echo final","description":"Последняя строка"}}]}}` + "\n"
+	result := `{"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_final"}]},"toolUseResult":{"backgroundTaskId":"bfinal"}}`
+	if err := os.WriteFile(file, []byte(use+result), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o, err := FindOrigin(projects, task, cache)
+	if err != nil || !o.Found || o.Command != "echo final" || o.Description != "Последняя строка" {
+		t.Fatalf("результат без завершающего перевода строки: %+v %v", o, err)
+	}
+}
+
+func TestOriginCacheRetainTasks(t *testing.T) {
+	cache := &OriginCache{files: map[string]map[string]originPosition{
+		"active": {"a.jsonl": {}},
+		"gone":   {"b.jsonl": {}},
+	}}
+	cache.RetainTasks([]Task{{ID: "active"}})
+	if len(cache.files) != 1 || cache.files["active"] == nil {
+		t.Fatalf("кеш активной задачи потерян: %+v", cache.files)
+	}
+	if _, ok := cache.files["gone"]; ok {
+		t.Fatalf("кеш завершённой задачи остался: %+v", cache.files)
+	}
+}
+
+func TestFindOriginIncrementalIncompleteLine(t *testing.T) {
+	projects := t.TempDir()
+	file := filepath.Join(projects, "-home-alice", "s1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cache := &OriginCache{}
+	task := &Task{ID: "bpartial", Output: "/tmp/-home-alice/s1/tasks/bpartial.output"}
+	partial := `{"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_partial"}]},"toolUseResult":{"backgroundTaskId":"bpartial"}`
+	if err := os.WriteFile(file, []byte(partial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if o, err := FindOrigin(projects, task, cache); err != nil || o.Found {
+		t.Fatalf("неполная строка преждевременно найдена: %+v %v", o, err)
+	}
+	use := `{"message":{"content":[{"type":"tool_use","id":"toolu_partial","input":{"command":"echo complete"}}]}}` + "\n"
+	if err := os.WriteFile(file, []byte(partial+"}\n"+use), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o, err := FindOrigin(projects, task, cache)
+	if err != nil || !o.Found || o.Command != "echo complete" {
+		t.Fatalf("дописанная неполная строка не найдена целиком: %+v %v", o, err)
 	}
 }
 
