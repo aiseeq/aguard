@@ -102,11 +102,11 @@ func implementsReceiver(receiver string, iface types.Type, pkg *types.Package) b
 	if pkg == nil {
 		return false
 	}
-	obj, ok := pkg.Scope().Lookup(receiver).(*types.TypeName)
+	typeName, ok := pkg.Scope().Lookup(receiver).(*types.TypeName)
 	if !ok {
 		return false
 	}
-	t := types.Unalias(obj.Type())
+	t := types.Unalias(typeName.Type())
 	ifaceType, ok := interfaceType(iface)
 	if !ok {
 		return false
@@ -680,6 +680,21 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 	infoByDir := map[string]*types.Info{}
 	pkgByDir := map[string]*types.Package{}
 	astByPath := map[string]*ast.File{}
+	lookup := func(importPath string) (io.ReadCloser, error) {
+		path := exportFiles[importPath]
+		if path == "" {
+			return nil, fmt.Errorf("go list did not provide export data for %s", importPath)
+		}
+		return os.Open(path)
+	}
+	exportImp := importer.ForCompiler(token.NewFileSet(), "gc", lookup)
+	checkedByPath := map[string]*types.Package{}
+	imp := importerFunc(func(path string) (*types.Package, error) {
+		if pkg := checkedByPath[path]; pkg != nil {
+			return pkg, nil
+		}
+		return exportImp.Import(path)
+	})
 	for _, source := range packages {
 		files := make([]*ast.File, 0, len(source.files))
 		fset := token.NewFileSet()
@@ -692,28 +707,22 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 			astByPath[path] = f
 		}
 		info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
-		lookup := func(importPath string) (io.ReadCloser, error) {
-			path := exportFiles[importPath]
-			if path == "" {
-				return nil, fmt.Errorf("go list did not provide export data for %s", importPath)
-			}
-			return os.Open(path)
-		}
 		var firstTypeError error
 		conf := types.Config{
-			Importer: importer.ForCompiler(fset, "gc", lookup),
+			Importer: imp,
 			Error: func(err error) {
 				if firstTypeError == nil {
 					firstTypeError = err
 				}
 			},
 		}
-		pkg, err := conf.Check(source.importPath, fset, files, info)
+		checkedPkg, err := conf.Check(source.importPath, fset, files, info)
 		if err != nil {
 			t.Fatalf("type check %s: %v (first error: %v)", source.importPath, err, firstTypeError)
 		}
 		infoByDir[source.dir] = info
-		pkgByDir[source.dir] = pkg
+		checkedByPath[source.importPath] = checkedPkg
+		pkgByDir[source.dir] = checkedPkg
 	}
 	for _, source := range packages {
 		dir := source.dir
@@ -812,7 +821,8 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 	}
 	for _, dispatch := range interfaceCalls {
 		// Interface dispatch conservatively reaches every same-named method in
-		// this module whose receiver type implements the interface.
+		// this module whose receiver type implements the interface, using the
+		// same checked package objects used while resolving the interface.
 		for candidate := range functions {
 			if candidate.receiver != "" && candidate.name == dispatch.method && implementsReceiver(candidate.receiver, dispatch.iface, pkgByDir[candidate.dir]) {
 				callers[dispatch.caller] = append(callers[dispatch.caller], candidate)
@@ -1001,3 +1011,7 @@ func parentCall(file *ast.File, node ast.Node) (*ast.CallExpr, bool) {
 
 // akitSignal — функции akit/proc, которые шлют сигнал (go doc github.com/aiseeq/akit/proc): место прерывания, как Kill.
 var akitSignal = map[string]bool{"SignalChild": true, "SignalDescendant": true, "CancelByStop": true}
+
+type importerFunc func(string) (*types.Package, error)
+
+func (f importerFunc) Import(path string) (*types.Package, error) { return f(path) }
