@@ -1,11 +1,18 @@
 package guide
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
+	"io"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -74,6 +81,116 @@ func receiverTypeName(expr ast.Expr) string {
 			return ""
 		}
 	}
+}
+
+func namedBase(t types.Type) *types.Named {
+	for {
+		switch x := t.(type) {
+		case *types.Pointer:
+			t = x.Elem()
+		case *types.Named:
+			return x
+		case *types.Alias:
+			t = types.Unalias(x)
+		default:
+			return nil
+		}
+	}
+}
+
+func implementsReceiver(receiver string, iface types.Type, pkg *types.Package) bool {
+	if pkg == nil {
+		return false
+	}
+	obj, ok := pkg.Scope().Lookup(receiver).(*types.TypeName)
+	if !ok {
+		return false
+	}
+	t := types.Unalias(obj.Type())
+	ifaceType, ok := interfaceType(iface)
+	if !ok {
+		return false
+	}
+	return types.Implements(t, ifaceType) || types.Implements(types.NewPointer(t), ifaceType)
+}
+
+func interfaceType(t types.Type) (*types.Interface, bool) {
+	for {
+		switch x := t.(type) {
+		case *types.Pointer:
+			t = x.Elem()
+		case *types.Alias:
+			t = types.Unalias(x)
+		default:
+			iface, ok := t.Underlying().(*types.Interface)
+			return iface, ok
+		}
+	}
+}
+
+type listedPackage struct {
+	ImportPath      string
+	Dir             string
+	Export          string
+	CompiledGoFiles []string
+	GoFiles         []string
+	CgoFiles        []string
+}
+
+type sourcePackage struct {
+	importPath string
+	dir        string
+	files      []string
+}
+
+func goTypePackages(t *testing.T, root string) ([]sourcePackage, map[string]string, map[string]string) {
+	t.Helper()
+	const modulePath = "github.com/aiseeq/aguard"
+	cmd := exec.Command("go", "list", "-export", "-deps", "-json", "./...")
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("go list -export -deps -json ./...: %v: %s", err, exitErr.Stderr)
+		}
+		t.Fatalf("go list -export -deps -json ./...: %v", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(out))
+	exports := map[string]string{}
+	packageDirs := map[string]string{}
+	var packages []sourcePackage
+	for decoder.More() {
+		var listed listedPackage
+		if err := decoder.Decode(&listed); err != nil {
+			t.Fatalf("decode go list output: %v", err)
+		}
+		if listed.Export != "" {
+			exports[listed.ImportPath] = listed.Export
+		}
+		if listed.ImportPath != modulePath && !strings.HasPrefix(listed.ImportPath, modulePath+"/") {
+			continue
+		}
+		rel, err := filepath.Rel(root, listed.Dir)
+		if err != nil {
+			t.Fatalf("package %s is outside module root: %v", listed.ImportPath, err)
+		}
+		dir := filepath.ToSlash(rel)
+		if dir == "." {
+			dir = ""
+		}
+		packageDirs[listed.ImportPath] = dir
+		files := listed.CompiledGoFiles
+		if len(files) == 0 {
+			files = append(append([]string(nil), listed.GoFiles...), listed.CgoFiles...)
+			for i := range files {
+				if !filepath.IsAbs(files[i]) {
+					files[i] = filepath.Join(listed.Dir, files[i])
+				}
+			}
+		}
+		packages = append(packages, sourcePackage{listed.ImportPath, dir, files})
+	}
+	return packages, exports, packageDirs
 }
 
 func TestCodexLetterNextText(t *testing.T) {
@@ -180,6 +297,9 @@ func TestLetterRegistryMatchesSendCalls(t *testing.T) {
 							if !ok {
 								return true
 							}
+							if assign.Pos() >= x.Pos() {
+								return true
+							}
 							for i, lhs := range assign.Lhs {
 								id, ok := lhs.(*ast.Ident)
 								if !ok || id.Name != v.Name || len(assign.Rhs) == 0 {
@@ -211,6 +331,20 @@ func TestLetterRegistryMatchesSendCalls(t *testing.T) {
 							}
 							return true
 						})
+						if mappedAt == token.NoPos {
+							ast.Inspect(enclosingBody, func(inner ast.Node) bool {
+								assign, ok := inner.(*ast.AssignStmt)
+								if !ok || assign.Pos() >= x.Pos() {
+									return true
+								}
+								for _, lhs := range assign.Lhs {
+									if id, ok := lhs.(*ast.Ident); ok && id.Name == v.Name {
+										forwarded = false
+									}
+								}
+								return true
+							})
+						}
 					}
 					if !forwarded {
 						t.Errorf("%s: передача переменного вида вне функции доставки или после переприсваивания", fset.Position(v.Pos()))
@@ -430,6 +564,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 		entries[x.ID] = true
 	}
 	allowed := map[string]bool{}
+	allowedPairs := map[string]map[string]bool{}
 	for id, locs := range locations {
 		if !entries[id] {
 			t.Errorf("нет таблицы прерываний %s", id)
@@ -453,14 +588,39 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 			}
 		}
 	}
-	// Эти управляющие функции уже вызывают сигналящие участки по штатному
-	// маршруту приложения; новые обёртки в этот список автоматически не попадают.
-	for _, loc := range []string{
-		"cmd/aguard/main.go:watchers", "cmd/aguard/orphans.go:orphansCmd", "cmd/aguard/orphans.go:orphansAct",
-		"cmd/aguard/track.go:trackCmd", "cmd/aguard/main.go:dispatch", "cmd/aguard/main.go:run",
-		"cmd/cl/supervise.go:supervise", "cmd/aguard/orphans.go:orphansRound",
+	for caller, targets := range map[string][]string{
+		"cmd/cl/supervise.go:compactSession":   {"cmd/cl/supervise.go:signalChild"},
+		"cmd/aguard/orphans.go:orphansAct":     {"internal/orphans/stop.go:Stop"},
+		"cmd/aguard/track.go:trackCmd":         {"internal/track/check.go:Check"},
+		"internal/orphans/stop.go:Stop":        {"internal/orphans/stop.go:term"},
+		"cmd/aguard/io_report.go:ioImport":     {"cmd/aguard/io.go:ioSignal"},
+		"cmd/cl/supervise.go:start":            {"cmd/cl/supervise.go:launch"},
+		"cmd/aguard/main.go:main":              {"cmd/aguard/main.go:dispatch"},
+		"cmd/aguard/orphans.go:orphansRound":   {"cmd/aguard/orphans.go:orphansAct"},
+		"cmd/aguard/io_bench.go:ioBench":       {"cmd/aguard/io_bench.go:runIOBench"},
+		"cmd/aguard/main.go:watchers":          {"cmd/aguard/orphans.go:orphansRound"},
+		"cmd/aguard/io.go:ioCmd":               {"cmd/aguard/io.go:ioDump", "cmd/aguard/io_report.go:ioImport", "cmd/aguard/io_bench.go:ioBench", "cmd/aguard/io_bench.go:benchHold"},
+		"cmd/aguard/orphans.go:orphansCmd":     {"cmd/aguard/orphans.go:orphansRound"},
+		"cmd/aguard/main.go:run":               {"cmd/aguard/main.go:watchers"},
+		"cmd/cl/supervise.go:supervise":        {"cmd/cl/supervise.go:start", "cmd/cl/supervise.go:watch", "cmd/cl/supervise.go:compactSession"},
+		"cmd/cl/main.go:main":                  {"cmd/cl/supervise.go:supervise"},
+		"cmd/cl/supervise.go:launch":           {"cmd/cl/console.go:start"},
+		"cmd/cl/console.go:start":              {"cmd/cl/console.go:stopChild"},
+		"internal/track/check.go:Check":        {"internal/track/check.go:stopChild"},
+		"cmd/aguard/io_bench.go:benchHold":     {"cmd/aguard/io_bench.go:runBenchHold"},
+		"cmd/aguard/io.go:ioDump":              {"cmd/aguard/io.go:ioSignal"},
+		"cmd/cl/supervise.go:watch":            {"cmd/cl/supervise.go:signalChild"},
+		"cmd/aguard/io_bench.go:runBenchHold":  {"cmd/aguard/io_bench.go:Signal"},
+		"cmd/aguard/io_bench.go:runBenchTrial": {"cmd/aguard/io_bench.go:Stop"},
+		"cmd/aguard/io_bench.go:runIOBench":    {"cmd/aguard/io_bench.go:runBenchTrial"},
+		"cmd/aguard/main.go:dispatch":          {"cmd/aguard/main.go:run", "cmd/aguard/orphans.go:orphansCmd", "cmd/aguard/track.go:trackCmd", "cmd/aguard/io.go:ioCmd"},
 	} {
-		allowed[loc] = true
+		if allowedPairs[caller] == nil {
+			allowedPairs[caller] = map[string]bool{}
+		}
+		for _, target := range targets {
+			allowedPairs[caller][target] = true
+		}
 	}
 	wants := map[string]string{
 		"internal/orphans/stop.go:Stop": "PidfdSendSignal", "internal/orphans/stop.go:term": "PidfdSendSignal",
@@ -510,79 +670,167 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 	functionLocations := map[fnKey]string{}
 	direct := map[fnKey]bool{}
 	callers := map[fnKey][]fnKey{}
-	const modulePath = "github.com/aiseeq/aguard"
-	packageDirs := map[string]string{}
-	for _, path := range goFiles(t, root, false) {
-		rel, _ := filepath.Rel(root, path)
-		dir := filepath.ToSlash(filepath.Dir(rel))
-		packageDirs[modulePath+"/"+dir] = dir
+	type interfaceCall struct {
+		caller fnKey
+		method string
+		iface  types.Type
 	}
-	for _, path := range goFiles(t, root, false) {
-		rel, _ := filepath.Rel(root, path)
-		file := parseFile(t, token.NewFileSet(), path)
-		dir := filepath.ToSlash(filepath.Dir(rel))
-		imports := map[string]string{}
-		for _, imp := range file.Imports {
-			pkg, err := strconv.Unquote(imp.Path.Value)
-			if err != nil || packageDirs[pkg] == "" {
-				continue
+	var interfaceCalls []interfaceCall
+	packages, exportFiles, packageDirs := goTypePackages(t, root)
+	infoByDir := map[string]*types.Info{}
+	pkgByDir := map[string]*types.Package{}
+	astByPath := map[string]*ast.File{}
+	for _, source := range packages {
+		files := make([]*ast.File, 0, len(source.files))
+		fset := token.NewFileSet()
+		for _, path := range source.files {
+			f, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				t.Fatal(err)
 			}
-			name := filepath.Base(pkg)
-			if imp.Name != nil {
-				name = imp.Name.Name
-			}
-			imports[name] = packageDirs[pkg]
+			files = append(files, f)
+			astByPath[path] = f
 		}
-		var current fnKey
-		receiverNames := map[string]string{}
-		ast.Inspect(file, func(n ast.Node) bool {
-			if fn, ok := n.(*ast.FuncDecl); ok {
-				receiver := ""
-				if fn.Recv != nil && len(fn.Recv.List) != 0 {
-					field := fn.Recv.List[0]
-					receiver = receiverTypeName(field.Type)
-					if len(field.Names) != 0 {
-						receiverNames[field.Names[0].Name] = receiver
-					}
+		info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
+		lookup := func(importPath string) (io.ReadCloser, error) {
+			path := exportFiles[importPath]
+			if path == "" {
+				return nil, fmt.Errorf("go list did not provide export data for %s", importPath)
+			}
+			return os.Open(path)
+		}
+		var firstTypeError error
+		conf := types.Config{
+			Importer: importer.ForCompiler(fset, "gc", lookup),
+			Error: func(err error) {
+				if firstTypeError == nil {
+					firstTypeError = err
 				}
-				current = fnKey{dir, receiver, fn.Name.Name}
-				functions[current] = fn
-				functionLocations[current] = filepath.ToSlash(rel) + ":" + fn.Name.Name
-				ast.Inspect(fn.Body, func(inner ast.Node) bool {
-					call, ok := inner.(*ast.CallExpr)
-					if !ok {
-						return true
+			},
+		}
+		pkg, err := conf.Check(source.importPath, fset, files, info)
+		if err != nil {
+			t.Fatalf("type check %s: %v (first error: %v)", source.importPath, err, firstTypeError)
+		}
+		infoByDir[source.dir] = info
+		pkgByDir[source.dir] = pkg
+	}
+	for _, source := range packages {
+		dir := source.dir
+		info := infoByDir[dir]
+		for _, path := range source.files {
+			file := astByPath[path]
+			rel, _ := filepath.Rel(root, path)
+			imports := map[string]string{}
+			for _, imp := range file.Imports {
+				pkgPath, err := strconv.Unquote(imp.Path.Value)
+				if err != nil {
+					t.Fatalf("invalid import path %q in %s: %v", imp.Path.Value, path, err)
+				}
+				if _, ok := packageDirs[pkgPath]; !ok {
+					continue
+				}
+				name := filepath.Base(pkgPath)
+				if imp.Name != nil {
+					name = imp.Name.Name
+				}
+				imports[name] = packageDirs[pkgPath]
+			}
+			var current fnKey
+			ast.Inspect(file, func(n ast.Node) bool {
+				if fn, ok := n.(*ast.FuncDecl); ok {
+					receiver := ""
+					if fn.Recv != nil && len(fn.Recv.List) != 0 {
+						field := fn.Recv.List[0]
+						receiver = receiverTypeName(field.Type)
+						if tv, ok := info.Types[field.Type]; ok && tv.Type != nil {
+							if named := namedBase(tv.Type); named != nil {
+								receiver = named.Obj().Name()
+							}
+						}
 					}
-					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-						name := sel.Sel.Name
-						isSignalType := name == "Signal" && selectorRoot(sel.X) == "syscall"
-						if (name == "Signal" && len(call.Args) > 0 && !isSignalType && !literalSignal(call.Args[0], "SIGWINCH")) || name == "Kill" || name == "Tgkill" || name == "PidfdSendSignal" || akitSignal[name] {
-							if name != "PidfdSendSignal" || len(call.Args) <= 1 || !isZero(call.Args[1]) {
+					current = fnKey{dir, receiver, fn.Name.Name}
+					functions[current] = fn
+					functionLocations[current] = filepath.ToSlash(rel) + ":" + fn.Name.Name
+					ast.Inspect(fn.Body, func(inner ast.Node) bool {
+						call, ok := inner.(*ast.CallExpr)
+						if !ok {
+							return true
+						}
+						if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+							name := sel.Sel.Name
+							isSignalType := name == "Signal" && selectorRoot(sel.X) == "syscall"
+							if (name == "Signal" && len(call.Args) > 0 && !isSignalType && !literalSignal(call.Args[0], "SIGWINCH")) || name == "Kill" || name == "Tgkill" || name == "PidfdSendSignal" || akitSignal[name] {
+								if name != "PidfdSendSignal" || len(call.Args) <= 1 || !isZero(call.Args[1]) {
+									direct[current] = true
+								}
+							}
+							if (name == "Command" || name == "CommandContext") && isStopExec(call) {
 								direct[current] = true
 							}
 						}
-						if (name == "Command" || name == "CommandContext") && isStopExec(call) {
-							direct[current] = true
-						}
-					}
-					switch fun := call.Fun.(type) {
-					case *ast.Ident:
-						callers[current] = append(callers[current], fnKey{dir, "", fun.Name})
-					case *ast.SelectorExpr:
-						if id, ok := fun.X.(*ast.Ident); ok {
-							if targetDir := imports[id.Name]; targetDir != "" {
-								callers[current] = append(callers[current], fnKey{targetDir, "", fun.Sel.Name})
-							} else if typ := receiverNames[id.Name]; typ != "" {
-								callers[current] = append(callers[current], fnKey{dir, typ, fun.Sel.Name})
+						switch fun := call.Fun.(type) {
+						case *ast.Ident:
+							callers[current] = append(callers[current], fnKey{dir, "", fun.Name})
+						case *ast.SelectorExpr:
+							if id, ok := fun.X.(*ast.Ident); ok {
+								if targetDir, ok := imports[id.Name]; ok {
+									callers[current] = append(callers[current], fnKey{targetDir, "", fun.Sel.Name})
+								}
+							}
+							if selection := info.Selections[fun]; selection != nil {
+								method, ok := selection.Obj().(*types.Func)
+								if !ok {
+									return true
+								}
+								signature, ok := method.Type().(*types.Signature)
+								if !ok {
+									return true
+								}
+								methodRecv := selection.Recv()
+								if declaredRecv := signature.Recv(); declaredRecv != nil {
+									methodRecv = declaredRecv.Type()
+								}
+								if _, ok := interfaceType(methodRecv); ok {
+									interfaceCalls = append(interfaceCalls, interfaceCall{current, fun.Sel.Name, methodRecv})
+								} else if declaredRecv := signature.Recv(); declaredRecv != nil {
+									if named := namedBase(declaredRecv.Type()); named != nil && named.Obj().Pkg() != nil {
+										if targetDir, ok := packageDirs[named.Obj().Pkg().Path()]; ok {
+											callers[current] = append(callers[current], fnKey{targetDir, named.Obj().Name(), fun.Sel.Name})
+										}
+									}
+								}
 							}
 						}
-					}
-					return true
-				})
-				return false
+						return true
+					})
+					return false
+				}
+				return true
+			})
+		}
+	}
+	for _, dispatch := range interfaceCalls {
+		// Interface dispatch conservatively reaches every same-named method in
+		// this module whose receiver type implements the interface.
+		for candidate := range functions {
+			if candidate.receiver != "" && candidate.name == dispatch.method && implementsReceiver(candidate.receiver, dispatch.iface, pkgByDir[candidate.dir]) {
+				callers[dispatch.caller] = append(callers[dispatch.caller], candidate)
 			}
-			return true
-		})
+		}
+	}
+	actualPairs := map[string]bool{}
+	for caller, targets := range callers {
+		for _, target := range targets {
+			actualPairs[functionLocations[caller]+"\x00"+functionLocations[target]] = true
+		}
+	}
+	for caller, targets := range allowedPairs {
+		for target := range targets {
+			if !actualPairs[caller+"\x00"+target] {
+				t.Errorf("разрешённая пара %s -> %s отсутствует в графе вызовов", caller, target)
+			}
+		}
 	}
 	signalFns := maps.Clone(direct)
 	changed := true
@@ -602,8 +850,8 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 			continue
 		}
 		for _, target := range targets {
-			if signalFns[target] && !allowed[functionLocations[caller]] {
-				t.Errorf("%s: вызов сигналящей функции %s — новое место прерывания, добавьте в guide", functionLocations[caller], target.name)
+			if signalFns[target] && !allowedPairs[functionLocations[caller]][functionLocations[target]] {
+				t.Errorf("%s: вызов сигналящей функции %s (%q) — новое место прерывания, добавьте в guide", functionLocations[caller], target.name, functionLocations[target])
 			}
 		}
 	}

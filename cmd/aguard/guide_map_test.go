@@ -88,28 +88,104 @@ func nightKeyPrefixes(t *testing.T, root string) []string {
 	paths := []string{filepath.Join(root, "internal/night/night.go"), filepath.Join(root, "cmd/aguard/night.go"), filepath.Join(root, "cmd/aguard/night_fallback.go")}
 	set := map[string]bool{}
 	definitions := map[string][]ast.Expr{}
+	constantSpecs := map[*ast.ValueSpec]bool{}
+	functionReturns := map[string][]ast.Expr{}
 	var keyExprs []ast.Expr
+	allPaths := append([]string(nil), paths...)
+	keySource := map[string]bool{}
 	for _, path := range paths {
+		keySource[path] = true
+	}
+	for _, dir := range []string{filepath.Join(root, "internal/night"), filepath.Join(root, "cmd/aguard")} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") && !strings.HasSuffix(entry.Name(), "_test.go") {
+				allPaths = append(allPaths, filepath.Join(dir, entry.Name()))
+			}
+		}
+	}
+	seenPath := map[string]bool{}
+	for _, path := range allPaths {
+		if seenPath[path] {
+			continue
+		}
+		seenPath[path] = true
 		f := parseSource(t, path)
+		collectKeys := keySource[path]
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch x := n.(type) {
+			case *ast.GenDecl:
+				if x.Tok != token.CONST {
+					break
+				}
+				for _, spec := range x.Specs {
+					v := spec.(*ast.ValueSpec)
+					constantSpecs[v] = true
+					for i, name := range v.Names {
+						if len(v.Values) > 0 {
+							definitions[name.Name] = append(definitions[name.Name], v.Values[min(i, len(v.Values)-1)])
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				if x.Body != nil {
+					ast.Inspect(x.Body, func(n ast.Node) bool {
+						if r, ok := n.(*ast.ReturnStmt); ok {
+							functionReturns[x.Name.Name] = append(functionReturns[x.Name.Name], r.Results...)
+						}
+						return true
+					})
+				}
 			case *ast.KeyValueExpr:
-				if id, ok := x.Key.(*ast.Ident); ok && id.Name == "Key" {
+				if id, ok := x.Key.(*ast.Ident); collectKeys && ok && id.Name == "Key" {
 					keyExprs = append(keyExprs, x.Value)
 				}
 			case *ast.AssignStmt:
+				if !collectKeys {
+					break
+				}
 				for i, lhs := range x.Lhs {
 					if id, ok := lhs.(*ast.Ident); ok && id.Name == "key" && len(x.Rhs) > 0 {
 						keyExprs = append(keyExprs, x.Rhs[min(i, len(x.Rhs)-1)])
 					}
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "Key" && len(x.Rhs) > 0 {
+						keyExprs = append(keyExprs, x.Rhs[min(i, len(x.Rhs)-1)])
+					}
 					if id, ok := lhs.(*ast.Ident); ok && len(x.Rhs) > 0 {
-						definitions[id.Name] = append(definitions[id.Name], x.Rhs[min(i, len(x.Rhs)-1)])
+						rhs := x.Rhs[min(i, len(x.Rhs)-1)]
+						definitions[id.Name] = append(definitions[id.Name], rhs)
+						if fn, ok := rhs.(*ast.FuncLit); ok {
+							ast.Inspect(fn.Body, func(n ast.Node) bool {
+								if r, ok := n.(*ast.ReturnStmt); ok {
+									functionReturns[id.Name] = append(functionReturns[id.Name], r.Results...)
+								}
+								return true
+							})
+						}
 					}
 				}
 			case *ast.ValueSpec:
+				if constantSpecs[x] {
+					break
+				}
 				for i, name := range x.Names {
+					if !collectKeys {
+						continue
+					}
 					if len(x.Values) > 0 {
-						definitions[name.Name] = append(definitions[name.Name], x.Values[min(i, len(x.Values)-1)])
+						rhs := x.Values[min(i, len(x.Values)-1)]
+						definitions[name.Name] = append(definitions[name.Name], rhs)
+						if fn, ok := rhs.(*ast.FuncLit); ok {
+							ast.Inspect(fn.Body, func(n ast.Node) bool {
+								if r, ok := n.(*ast.ReturnStmt); ok {
+									functionReturns[name.Name] = append(functionReturns[name.Name], r.Results...)
+								}
+								return true
+							})
+						}
 					}
 				}
 			}
@@ -131,6 +207,11 @@ func nightKeyPrefixes(t *testing.T, root string) []string {
 		case *ast.CallExpr:
 			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Sprintf" && len(x.Args) > 0 {
 				visit(x.Args[0], seen)
+			}
+			if id, ok := x.Fun.(*ast.Ident); ok {
+				for _, result := range functionReturns[id.Name] {
+					visit(result, seen)
+				}
 			}
 		case *ast.Ident:
 			if seen[x.Name] {
