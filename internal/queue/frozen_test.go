@@ -142,6 +142,47 @@ func TestWakeNoMasterLettersAdmin(t *testing.T) {
 	}
 }
 
+func TestWakeAdminSkipsFreshLiveAuthor(t *testing.T) {
+	cases := []struct {
+		name   string
+		author string
+		age    time.Duration
+		alive  bool
+		want   bool
+	}{
+		{name: "live author recent", author: "author", age: 2 * time.Minute, alive: true, want: false},
+		{name: "live author 29 minutes", author: "author", age: 29 * time.Minute, alive: true, want: false},
+		{name: "live author 31 minutes", author: "author", age: 31 * time.Minute, alive: true, want: true},
+		{name: "dead author recent", author: "author", age: 2 * time.Minute, alive: false, want: true},
+		{name: "live author old", author: "author", age: 40 * time.Minute, alive: true, want: true},
+		{name: "admin only", author: "admin", age: 2 * time.Minute, alive: true, want: true},
+		{name: "future author note", author: "author", age: -2 * time.Minute, alive: true, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := freezeWorld()
+			w.ts[0].Key = w.first.Key // tk next не содержит actors; данные приходят через tk ls по ключу.
+			w.ts[0].ActorNotes = map[string]time.Time{tc.author: w.view.Now.Add(-tc.age)}
+			w.view.Alive = func(name string) bool {
+				if name == "master" {
+					return false
+				}
+				if name == "author" {
+					return tc.alive
+				}
+				return true
+			}
+			ns := w.step()
+			if got := has(ns, KindWakeAdmin, "admin"); got != tc.want {
+				t.Fatalf("wake_admin=%v, ожидалось %v: %+v", got, tc.want, ns)
+			}
+			if !tc.want && len(w.state.ProjectWakes) != 0 {
+				t.Fatalf("свежий тикет отмечен предложенным: %+v", w.state.ProjectWakes)
+			}
+		})
+	}
+}
+
 func TestWakeNoMasterAdminBootGrace(t *testing.T) {
 	w := freezeWorld()
 	w.state.init()
