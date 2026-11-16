@@ -51,6 +51,7 @@ func main() {
 	}
 	args := os.Args[1:]
 	if l.upgraded == nil {
+		warnUnknownConfigKeys(l.configFile)
 		slicePath := filepath.Join(home, ".config", "systemd", "user", agentsSlice)
 		installed, statErr := sliceInstalled(slicePath)
 		if statErr != nil || !installed {

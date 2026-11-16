@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -158,6 +160,109 @@ func loadConfig(file, home string) (config, error) {
 		}
 	}
 	return cfg, memoryErr
+}
+
+// unknownConfigKeys возвращает неизвестные JSON-поля во всех объектах структуры конфига.
+// Известные имена берутся из json-тегов, чтобы схема не дублировалась рядом с типами.
+func unknownConfigKeys(data []byte) []string {
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil || root == nil {
+		return nil
+	}
+	var unknown []string
+	collectUnknownConfigKeys(data, reflect.TypeFor[config](), "", &unknown)
+	slices.Sort(unknown)
+	return unknown
+}
+
+func collectUnknownConfigKeys(raw json.RawMessage, typ reflect.Type, prefix string, unknown *[]string) {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	switch typ.Kind() {
+	case reflect.Struct:
+		var object map[string]json.RawMessage
+		if json.Unmarshal(raw, &object) != nil || object == nil {
+			return
+		}
+		fields := configJSONFields(typ)
+		for _, key := range slices.Sorted(maps.Keys(object)) {
+			fieldPath := key
+			if prefix != "" {
+				fieldPath = prefix + "." + key
+			}
+			fieldType, ok := configJSONFieldType(fields, key)
+			if !ok {
+				*unknown = append(*unknown, fieldPath)
+				continue
+			}
+			collectUnknownConfigKeys(object[key], fieldType, fieldPath, unknown)
+		}
+	case reflect.Slice, reflect.Array:
+		var items []json.RawMessage
+		if json.Unmarshal(raw, &items) != nil {
+			return
+		}
+		for i, item := range items {
+			itemPath := configJSONItemPath(prefix, i, item)
+			collectUnknownConfigKeys(item, typ.Elem(), itemPath, unknown)
+		}
+	}
+}
+
+func configJSONFields(typ reflect.Type) map[string]reflect.Type {
+	fields := make(map[string]reflect.Type, typ.NumField())
+	for field := range typ.Fields() {
+		name := strings.Split(field.Tag.Get("json"), ",")[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields[name] = field.Type
+	}
+	return fields
+}
+
+func configJSONFieldType(fields map[string]reflect.Type, name string) (reflect.Type, bool) {
+	if typ, ok := fields[name]; ok {
+		return typ, true
+	}
+	for _, known := range slices.Sorted(maps.Keys(fields)) {
+		if strings.EqualFold(known, name) {
+			return fields[known], true
+		}
+	}
+	return nil, false
+}
+
+func configJSONItemPath(prefix string, index int, item json.RawMessage) string {
+	itemPath := fmt.Sprintf("%s[%d]", prefix, index)
+	if prefix != "roles" {
+		return itemPath
+	}
+	var roleData struct {
+		Names []string `json:"names"`
+	}
+	if json.Unmarshal(item, &roleData) == nil && len(roleData.Names) > 0 && roleData.Names[0] != "" {
+		return "roles[" + roleData.Names[0] + "]"
+	}
+	return itemPath
+}
+
+func warnUnknownConfigKeys(file string) {
+	data, err := os.ReadFile(file)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "cl: не удалось прочитать конфиг %s: %v\n", file, err)
+		}
+		return
+	}
+	keys := unknownConfigKeys(data)
+	if len(keys) > 0 {
+		fmt.Fprintf(os.Stderr, "cl: неизвестные ключи конфига %s: %s\n", file, strings.Join(keys, ", "))
+	}
 }
 
 // readConfig оставляет конфигурацию целой при ошибке одного потолка памяти.
