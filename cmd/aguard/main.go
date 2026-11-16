@@ -64,6 +64,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/activity"
+	"github.com/aiseeq/aguard/internal/bgtask"
 	"github.com/aiseeq/aguard/internal/ceiling"
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/cpuwatch"
@@ -83,6 +84,7 @@ type app struct {
 	home                 string
 	procDir              string // подменяется в тестах потолка; пусто — /proc
 	bgtaskSnapshot       func(string, int, time.Time) (*proc.Snapshot, error)
+	bgtaskOriginCache    bgtask.OriginCache
 	cgroupDir            string // подменяется в тестах потолка; пусто — /sys/fs/cgroup
 	ceilingAlive         map[string]session.Info
 	ceilingAliveAt       time.Time
