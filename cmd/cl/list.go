@@ -8,23 +8,32 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/akit/session"
 )
 
 const (
 	listFlag  = "--cl-ls"
-	listUsage = "использование: cl --cl-ls [--under <папка>] [--json]"
+	listUsage = "использование: cl --cl-ls [--under <папка>] [--json] [--timers]"
 )
 
+type listedTimer struct {
+	Schedule string `json:"schedule"`
+	Prompt   string `json:"prompt"`
+}
+
 type listedSession struct {
-	Name string `json:"name"`
-	Pid  int    `json:"pid"`
-	Cwd  string `json:"cwd"`
+	Name        string         `json:"name"`
+	Pid         int            `json:"pid"`
+	Cwd         string         `json:"cwd"`
+	Timers      *[]listedTimer `json:"timers,omitempty"`
+	TimersError string         `json:"timers_error,omitempty"`
 }
 
 func runList(args []string, registry session.Registry, stdout, stderr io.Writer) int {
-	under, asJSON, err := parseListArgs(args)
+	under, asJSON, timers, err := parseListArgs(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "cl: %v\n%s\n", err, listUsage)
 		return 2
@@ -58,7 +67,16 @@ func runList(args []string, registry session.Registry, stdout, stderr io.Writer)
 		if under != "" && !pathWithin(cwd, under) {
 			continue
 		}
-		listed = append(listed, listedSession{Name: s.Name, Pid: s.Pid, Cwd: cwd})
+		item := listedSession{Name: s.Name, Pid: s.Pid, Cwd: cwd}
+		if timers {
+			itemTimers, timerErr := listedSessionTimers(registry, *s)
+			if timerErr != nil {
+				item.TimersError = timerErr.Error()
+			} else {
+				item.Timers = &itemTimers
+			}
+		}
+		listed = append(listed, item)
 	}
 	slices.SortFunc(listed, func(a, b listedSession) int {
 		if c := strings.Compare(a.Name, b.Name); c != 0 {
@@ -75,33 +93,69 @@ func runList(args []string, registry session.Registry, stdout, stderr io.Writer)
 		return 0
 	}
 	for _, s := range listed {
+		if timers {
+			if s.TimersError != "" {
+				fmt.Fprintf(stdout, "%s\tошибка: %s\n", s.Name, s.TimersError)
+				continue
+			}
+			for _, timer := range *s.Timers {
+				fmt.Fprintf(stdout, "%s\t%s\t%s\n", s.Name, timer.Schedule, timer.Prompt)
+			}
+			continue
+		}
 		fmt.Fprintf(stdout, "%s\t%d\t%s\n", s.Name, s.Pid, s.Cwd)
 	}
 	return 0
 }
 
-func parseListArgs(args []string) (string, bool, error) {
+func listedSessionTimers(registry session.Registry, s session.Info) ([]listedTimer, error) {
+	timers := make([]listedTimer, 0)
+	if s.SessionID == "" {
+		return timers, nil
+	}
+	crons, err := restart.SessionCrons(filepath.Join(filepath.Dir(registry.Dir), "projects"), s.SessionID,
+		time.UnixMilli(s.StartedAt), time.Now())
+	if err != nil {
+		return nil, err
+	}
+	for _, cron := range crons {
+		timers = append(timers, listedTimer{Schedule: cron.Cron, Prompt: timerPrompt(cron.Prompt)})
+	}
+	return timers, nil
+}
+
+func parseListArgs(args []string) (string, bool, bool, error) {
 	var under string
-	var underSet, asJSON bool
+	var underSet, asJSON, timers bool
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--under":
 			if underSet || i+1 >= len(args) || args[i+1] == "" || strings.HasPrefix(args[i+1], "--") {
-				return "", false, fmt.Errorf("--under требует одну папку")
+				return "", false, false, fmt.Errorf("--under требует одну папку")
 			}
 			i++
 			under = args[i]
 			underSet = true
 		case "--json":
 			if asJSON {
-				return "", false, fmt.Errorf("повторный --json")
+				return "", false, false, fmt.Errorf("повторный --json")
 			}
 			asJSON = true
+		case "--timers":
+			if timers {
+				return "", false, false, fmt.Errorf("повторный --timers")
+			}
+			timers = true
 		default:
-			return "", false, fmt.Errorf("неизвестный аргумент %q", args[i])
+			return "", false, false, fmt.Errorf("неизвестный аргумент %q", args[i])
 		}
 	}
-	return under, asJSON, nil
+	return under, asJSON, timers, nil
+}
+
+func timerPrompt(prompt string) string {
+	prompt = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ").Replace(prompt)
+	return restart.ShortPrompt(prompt)
 }
 
 func pathWithin(path, dir string) bool {

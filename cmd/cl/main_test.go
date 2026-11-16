@@ -143,7 +143,7 @@ restart.resume_max_age_hours. Если роль получает строку и
 выполняй порядок из файла возобновления.
 
 Аргументы Claude Code передаются через cl. Справка Claude Code: claude --help.
-cl --cl-ls [--under <папка>] [--json] — список живых сессий с рабочими папками.
+cl --cl-ls [--under <папка>] [--json] [--timers] — живые сессии; --timers показывает их таймеры CronCreate.
 `
 	if stdout.String() != want {
 		t.Fatalf("cl --cl-help = %q, want %q", stdout.String(), want)

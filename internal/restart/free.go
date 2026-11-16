@@ -132,3 +132,24 @@ func transcriptFile(p paths, sessionID string) (string, os.FileInfo, error) {
 	}
 	return found, foundInfo, nil
 }
+
+// SessionCrons возвращает таймеры, которые перезапуск восстановил бы за время жизни процесса.
+// Отсутствующий транскрипт равен пустому списку таймеров.
+func SessionCrons(projects, sessionID string, startedAt, now time.Time) ([]LostCron, error) {
+	file, info, err := transcriptFile(paths{projects: projects}, sessionID)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	facts, err := (&scanCache{}).read(file, info, startedAt, now)
+	if err != nil {
+		return nil, err
+	}
+	crons := make([]LostCron, 0, len(facts.Crons))
+	for _, job := range facts.Crons {
+		crons = append(crons, LostCron{ID: job.ID, Cron: job.Cron, Prompt: job.Prompt, Recurring: job.Recurring})
+	}
+	return crons, nil
+}

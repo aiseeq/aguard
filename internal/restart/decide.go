@@ -138,7 +138,7 @@ func decide(f facts, p allowance) Verdict {
 	return v
 }
 
-// LostCron — таймер CronCreate, который перезапуск не вернёт (Verdict.Lost).
+// LostCron — таймер CronCreate, который перезапуск не вернёт (Verdict.Lost) или покажет в списке сессий.
 type LostCron struct {
 	ID        string `json:"id"`
 	Cron      string `json:"cron"`
