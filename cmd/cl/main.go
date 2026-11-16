@@ -29,8 +29,7 @@ import (
 )
 
 func main() {
-	if args, ok := oomPrefixArgs(os.Args[0], os.Args[1:]); ok {
-		runOOMPrefix(args)
+	if dispatchEarlyArgs(os.Args[0], os.Args[1:], os.Stdout, os.Stderr, runOOMPrefix) {
 		return
 	}
 	home, err := os.UserHomeDir()
@@ -50,14 +49,7 @@ func main() {
 		l.journalUpgradeFail(err, "новая беседа, прежний claude без хозяина pty")
 	}
 	args := os.Args[1:]
-	if l.upgraded == nil {
-		warnUnknownConfigKeys(l.configFile)
-		slicePath := filepath.Join(home, ".config", "systemd", "user", agentsSlice)
-		installed, statErr := sliceInstalled(slicePath)
-		if statErr != nil || !installed {
-			warnSlice(slicePath, statErr)
-		}
-	}
+	warnBeforeLaunch(l, home)
 	if len(args) == 1 && args[0] == checkFlag {
 		os.Exit(runCheck(l))
 	}
@@ -99,6 +91,53 @@ func main() {
 	}
 	os.Exit(l.supervise(pre, args))
 }
+
+func warnBeforeLaunch(l launcher, home string) {
+	if l.upgraded != nil {
+		return
+	}
+	warnUnknownConfigKeys(l.configFile)
+	slicePath := filepath.Join(home, ".config", "systemd", "user", agentsSlice)
+	installed, statErr := sliceInstalled(slicePath)
+	if statErr != nil || !installed {
+		warnSlice(slicePath, statErr)
+	}
+}
+
+func dispatchEarlyArgs(argv0 string, args []string, stdout, stderr io.Writer, runPrefix func([]string)) bool {
+	if prefixArgs, ok := oomPrefixArgs(argv0, args); ok {
+		runPrefix(prefixArgs)
+		return true
+	}
+	return printClHelp(args, stdout, stderr)
+}
+
+func printClHelp(args []string, stdout, stderr io.Writer) bool {
+	if len(args) == 1 && args[0] == "--cl-help" {
+		fmt.Fprint(stdout, clHelp)
+		return true
+	}
+	if len(args) == 1 && (args[0] == "guide" || args[0] == "help") {
+		fmt.Fprintln(stderr, "cl: это похоже на подкоманду; справка cl: cl --cl-help")
+	}
+	return false
+}
+
+const clHelp = `cl — запуск Claude Code с настройками сессии.
+
+cl передаёт строку роли (roles[].text, по настройке roles[].on_start — только при запуске без своих аргументов,
+кроме -n/--name) и системный промпт из ~/.config/cl/config.json (или файла $CL_CONFIG).
+Файл возобновления: restart.resume_dir/<дата>/<имя сессии>.md; cl берёт самый свежий файл не старше
+restart.resume_max_age_hours. Если роль получает строку и задан resume_text, cl включает в неё путь к файлу.
+Выданный файл cl переносит в used/; если перенос не удался, оставляет прежний путь.
+
+Таймеры прошлой беседы, унаследованные через /clear, при подъёме не переживают; роль ставит их заново сама.
+Их список cl пишет в журнал, указанный настройкой restart.journal.
+Другим сессиям после старта не отправляй «ты перезапущен» и не пересылай файл возобновления;
+выполняй порядок из файла возобновления.
+
+Аргументы Claude Code передаются через cl. Справка Claude Code: claude --help.
+`
 
 func oomPrefixArgs(argv0 string, args []string) ([]string, bool) {
 	if filepath.Base(argv0) == "cl-oom-prefix" {
