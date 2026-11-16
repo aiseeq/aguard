@@ -256,8 +256,8 @@ func (s *transcriptScan) line(line []byte) error {
 	return s.calls(typ, rec, at)
 }
 
-// preSinceCronDelete carries deletions that happened after a carry snapshot in an earlier process.
-// Other old tool calls stay ignored, including CronCreate, as before.
+// preSinceCronDelete применяет к снимку carry удаления таймеров, сделанные до since в прежнем процессе.
+// Прочие старые вызовы, CronCreate тоже, по-прежнему не учитываются.
 func (s *transcriptScan) preSinceCronDelete(typ string, rec object) error {
 	msg, err := parseObject(rec["message"])
 	if err != nil {
