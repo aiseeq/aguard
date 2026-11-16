@@ -3,7 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
@@ -107,6 +109,17 @@ func (a *app) remoteOwners(cfg *remotebroken.Config, events []remotebroken.Event
 			resolved = true
 			return in.Name, nil
 		}, cfg.Lead)
+		project := filepath.Clean(e.Project)
+		mergeTrees := filepath.Join(os.TempDir(), "graft-merge-")
+		if !resolved && !strings.HasPrefix(project, mergeTrees) {
+			j, err := jobs.ByDir(e.Project)
+			if err != nil {
+				a.warn("remote", "не удалось определить владельца по project", "err", err)
+			}
+			if j != nil {
+				owner, resolved = j.Master, j.Master != ""
+			}
+		}
 		if ownerErr != nil {
 			a.warn("remote", "не удалось определить владельца", "worker", e.Worker, "claude_pid", e.ClaudePID, "err", ownerErr)
 		}
