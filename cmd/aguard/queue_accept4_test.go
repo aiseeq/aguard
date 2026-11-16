@@ -515,6 +515,7 @@ func TestQueueTicketMasterNote(t *testing.T) {
 		`{"repo":"p","slug":"d","status":"открыт","prio":"HIGH","title":"t","actors":{"git-admin":"2026-11-10 15:00"},"path":"docs/tasks/20261103-1206-HIGH-d.md"},` +
 		`{"repo":"p","slug":"e","status":"открыт","prio":"HIGH","title":"t","actors":{"p-master":"10.11 14:30"},"path":"docs/tasks/20261103-1207-HIGH-e.md"}]`
 	b := newQueueBench(t, list, "[]")
+	log := b.captureLog()
 	ts, err := b.a.queueTickets(context.Background(), b.c)
 	if err != nil {
 		t.Fatal(err)
@@ -527,6 +528,15 @@ func TestQueueTicketMasterNote(t *testing.T) {
 		if tk.Master != "p-master" || !tk.MasterNote.Equal(want[tk.Slug]) {
 			t.Errorf("%s: мастер %s, запись %v", tk.Slug, tk.Master, tk.MasterNote)
 		}
+		if tk.Slug == "c" && (!tk.ActorNotes["p-master"].Equal(want["c"]) || tk.ActorNotes["git-admin"].IsZero()) {
+			t.Errorf("%s: записи авторов не разобраны: %+v", tk.Slug, tk.ActorNotes)
+		}
+		if tk.Slug == "e" && len(tk.ActorNotes) != 0 {
+			t.Errorf("битое время попало в записи авторов: %+v", tk.ActorNotes)
+		}
+	}
+	if !strings.Contains(log.String(), "время записи автора в журнале тикета") || strings.Count(log.String(), "WARN") != 1 {
+		t.Fatalf("ожидался один WARN на битое время автора: %s", log)
 	}
 }
 

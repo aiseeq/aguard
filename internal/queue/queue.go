@@ -216,6 +216,9 @@ type Ticket struct {
 	// MasterNote — последняя запись мастера в журнале тикета (tk ls --json, поле actors); моложе 4 ч — мастер ведёт
 	// «открытый» тикет без tk start, письма админу «не взят» нет. Нуль — записей мастера нет.
 	MasterNote time.Time
+	// ActorNotes — время последней записи каждого автора журнала из tk ls --json: свежая запись живого автора
+	// (adminFreshActorNote) держит тикет от предложения админу, пока автор ставит задачу.
+	ActorNotes map[string]time.Time
 }
 
 const (
@@ -666,8 +669,13 @@ func (s *State) highNotices(t Ticket, st *ticketState, v View) []Notice {
 // masterNoted — мастер писал в журнал тикета меньше 4 ч назад. Запись из будущего (сдвиг часов, ручная правка) не
 // в счёт: tk пишет минуты с отбрасыванием секунд, своя запись позже now не бывает.
 func masterNoted(t Ticket, now time.Time) bool {
-	d := now.Sub(t.MasterNote)
-	return d >= 0 && d < highWait
+	return noteWithin(t.MasterNote, now, highWait)
+}
+
+// noteWithin — отметка не из будущего и моложе заданного окна.
+func noteWithin(at, now time.Time, window time.Duration) bool {
+	d := now.Sub(at)
+	return d >= 0 && d < window
 }
 
 func (s *State) highAdminNotice(t Ticket, st *ticketState, v View, reason string) []Notice {
