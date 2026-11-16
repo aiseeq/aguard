@@ -97,7 +97,7 @@ func (s *State) wakeDecide(master, session string, first, project Ticket, v View
 	serious := v.Serious != nil && v.Serious(first.Project)
 	w, exists := s.Wakes[master]
 	if !exists || w.Ticket != first.Key || w.Session != session || serious && w.Mode == ModeLog {
-		return Notice{To: master, Kind: KindWake, Key: first.Key, Session: session, Serious: serious, Line: "есть работа: tk next. Первый тикет не взять — поставь tk wait с причиной и сроком, иначе он держит очередь"}, true
+		return Notice{To: master, Kind: KindWake, Key: first.Key, Session: session, Serious: serious, Line: "есть работа: tk next. Первый тикет не взять: ждёт внешнего (срок, человек, чужой тикет) — tk wait <X> --until <когда и чего>; ждёт своего тикета ID — tk set <ID> --blocks <X>, X — первый; просто не сейчас — оставь открытым, но админу уйдёт «встал»"}, true
 	}
 	if w.Stuck || v.TurnAfter == nil || !v.TurnAfter(master, w.At) {
 		return Notice{}, false

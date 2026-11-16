@@ -45,6 +45,10 @@ func TestWakeFreeMasterWithWork(t *testing.T) {
 	if !has(ns, KindWake, "master") || len(w.state.Wakes) != 0 {
 		t.Fatalf("письмо и состояние: %+v %+v", ns, w.state.Wakes)
 	}
+	wantLine := "есть работа: tk next. Первый тикет не взять: ждёт внешнего (срок, человек, чужой тикет) — tk wait <X> --until <когда и чего>; ждёт своего тикета ID — tk set <ID> --blocks <X>, X — первый; просто не сейчас — оставь открытым, но админу уйдёт «встал»"
+	if ns[0].Line != wantLine {
+		t.Fatalf("строка письма: %q, ожидалось %q", ns[0].Line, wantLine)
+	}
 	w.confirm(ns)
 	if w.state.Wakes["master"].Ticket != "p/first" {
 		t.Fatal(w.state.Wakes)

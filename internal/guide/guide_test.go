@@ -285,6 +285,17 @@ func TestGuideHasAllFourteenObserverSections(t *testing.T) {
 	}
 }
 
+func TestQueueWakeGuideNextText(t *testing.T) {
+	letter, ok := Lookup("queue.wake")
+	if !ok {
+		t.Fatal("нет записи queue.wake")
+	}
+	want := "выполните `tk next`; первый тикет не взять: ждёт внешнего (срок, человек, чужой тикет) — `tk wait <X> --until <когда и чего>`; ждёт своего тикета ID — `tk set <ID> --blocks <X>`, X — первый; просто не сейчас — оставьте открытым, но админу уйдёт «встал»"
+	if letter.Next != want {
+		t.Fatalf("строка guide: %q, ожидалось %q", letter.Next, want)
+	}
+}
+
 func TestLettersUseOnlyThreeQuietOutcomes(t *testing.T) {
 	for _, letter := range Letters() {
 		switch letter.Quiet {
