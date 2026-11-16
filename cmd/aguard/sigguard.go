@@ -347,6 +347,37 @@ func (a *app) sigguardSend(cfg *sigguard.Config, g sigguard.Group) {
 	if !g.Unparsed && len(g.Denies) == 0 {
 		return
 	}
+	if !g.Unparsed {
+		eligible := make([]sigguard.Deny, 0, len(g.Denies))
+		var skipped int
+		var skippedDeny *sigguard.Deny
+		for i := range g.Denies {
+			d := &g.Denies[i]
+			if sigguard.EmailAllowed(*d) {
+				eligible = append(eligible, *d)
+				continue
+			}
+			if skippedDeny == nil {
+				skippedDeny = d
+			}
+			skipped += d.Count
+		}
+		if skipped > 0 {
+			a.log.Info("aguard sigguard: отказ без письма", "kind", skippedDeny.Kind, "count", skipped, "lines", g.Lines, "unit", skippedDeny.Unit)
+			a.note("sigguard", "logged", skippedDeny.Unit, "", int64(skipped), "signals")
+		}
+		if len(eligible) == 0 {
+			return
+		}
+		if len(eligible) != len(g.Denies) {
+			g.Denies = eligible
+			g.Count = 0
+			g.Lines = len(eligible)
+			for i := range eligible {
+				g.Count += eligible[i].Count
+			}
+		}
+	}
 	target := cfg.Lead
 	workerID := ""
 	alive, aliveErr := a.sigguardAlive()

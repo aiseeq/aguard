@@ -19,6 +19,11 @@ type Deny struct {
 	HasTargets                                                                    bool
 }
 
+// EmailAllowed сообщает, нужно ли отправлять письмо по отказу.
+func EmailAllowed(d Deny) bool {
+	return d.Kind != "cgroup_ctl" || d.Killed
+}
+
 // Parse принимает только строки deny и would-deny с полями key=value.
 func Parse(msg string) (Deny, bool) {
 	var d Deny
