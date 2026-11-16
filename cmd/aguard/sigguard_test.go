@@ -154,6 +154,106 @@ func TestSigguardMessageCgroupWrite(t *testing.T) {
 	}
 }
 
+func TestSigguardCgroupCtlDoesNotEmail(t *testing.T) {
+	for _, prefix := range []string{"deny", "would-deny"} {
+		t.Run(prefix, func(t *testing.T) {
+			a := testSigguardApp(t.TempDir())
+			sends := 0
+			a.sigSend = func(string, string) error { sends++; return nil }
+			cfg := sigguard.Default()
+			cfg.Lead = "lead"
+			d, ok := sigguard.Parse(prefix + ` kind=cgroup_ctl arg=1 count=3 first=x last=x unit=run-x.scope root=4 pid=2`)
+			if !ok {
+				t.Fatal("cgroup_ctl fixture did not parse")
+			}
+			if prefix == "would-deny" && d.Mode != sigguard.ModeLog {
+				t.Fatalf("mode = %q", d.Mode)
+			}
+			a.sigguardSend(&cfg, sigguard.Group{Denies: []sigguard.Deny{d}, Count: d.Count, Lines: 1})
+			if sends != 0 {
+				t.Fatalf("sent %d emails", sends)
+			}
+			if !hasSigguardEvent(flushSigguardActivity(t, a), "logged") {
+				t.Fatal("suppressed denial missing from activity summary")
+			}
+		})
+	}
+
+	t.Run("other kinds still email", func(t *testing.T) {
+		a := testSigguardApp(t.TempDir())
+		sends := 0
+		a.sigSend = func(to, _ string) error {
+			sends++
+			if to != "lead" {
+				t.Errorf("sent to %q", to)
+			}
+			return nil
+		}
+		cfg := sigguard.Default()
+		cfg.Lead = "lead"
+		d, ok := sigguard.Parse(`deny kind=cgroup_write arg=1 count=1 first=x last=x unit=run-x.scope root=4 pid=2`)
+		if !ok {
+			t.Fatal("cgroup_write fixture did not parse")
+		}
+		a.sigguardSend(&cfg, sigguard.Group{Denies: []sigguard.Deny{d}, Count: 1, Lines: 1})
+		if sends != 1 {
+			t.Fatalf("sent %d emails, want 1", sends)
+		}
+	})
+
+	t.Run("killed cgroup_ctl emails", func(t *testing.T) {
+		a := testSigguardApp(t.TempDir())
+		sends := 0
+		a.sigSend = func(string, string) error { sends++; return nil }
+		cfg := sigguard.Default()
+		cfg.Lead = "lead"
+		d, ok := sigguard.Parse(`deny kind=cgroup_ctl arg=1 count=10 first=x last=x unit=run-x.scope root=4 pid=2 targets=10 killed=1`)
+		if !ok || !d.Killed {
+			t.Fatalf("killed cgroup_ctl fixture did not parse: %#v, %v", d, ok)
+		}
+		a.sigguardSend(&cfg, sigguard.Group{Denies: []sigguard.Deny{d}, Count: d.Count, Lines: 1})
+		if sends != 1 {
+			t.Fatalf("sent %d emails, want 1", sends)
+		}
+	})
+
+	t.Run("mixed group logs skipped kind and emails eligible kind", func(t *testing.T) {
+		a := testSigguardApp(t.TempDir())
+		var sends int
+		var message string
+		a.sigSend = func(_ string, msg string) error { sends++; message = msg; return nil }
+		cfg := sigguard.Default()
+		cfg.Lead = "lead"
+		cgroup, ok := sigguard.Parse(`deny kind=cgroup_ctl arg=1 count=3 first=x last=x unit=run-x.scope root=4 pid=2`)
+		if !ok {
+			t.Fatal("cgroup_ctl fixture did not parse")
+		}
+		signal, ok := sigguard.Parse(`deny kind=signal arg=15 count=4 first=x last=x unit=run-x.scope root=4 pid=2`)
+		if !ok {
+			t.Fatal("signal fixture did not parse")
+		}
+		a.sigguardSend(&cfg, sigguard.Group{Denies: []sigguard.Deny{cgroup, signal}, Count: 7, Lines: 2})
+		if sends != 1 {
+			t.Fatalf("sent %d emails, want 1", sends)
+		}
+		if strings.Contains(message, "cgroup_ctl") || !strings.Contains(message, "signal SIGTERM ×4") {
+			t.Fatalf("email contains wrong group summary: %s", message)
+		}
+		var logged, sent bool
+		for _, r := range flushSigguardActivity(t, a) {
+			switch r.Kind {
+			case "logged":
+				logged = r.Max == 3 && r.What == "run-x.scope"
+			case "sent":
+				sent = r.Max == 4
+			}
+		}
+		if !logged || !sent {
+			t.Fatalf("activity summary lost skipped or emailed counts: logged=%v sent=%v", logged, sent)
+		}
+	})
+}
+
 func TestSigguardMessageSummarizesWholeGroup(t *testing.T) {
 	denies := []sigguard.Deny{
 		{Kind: "signal", Arg: "15", Count: 2, Comm: "bash", PID: 1, PPID: 9, Pcomm: "sh"},
