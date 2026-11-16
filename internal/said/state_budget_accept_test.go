@@ -16,9 +16,9 @@ import (
 // переживают чтение с диска.
 
 const (
-	acceptFiles  = 5000
-	acceptCycles = 200
-	acceptBudget = 32 << 10
+	acceptFiles  = 512 // запись ~387 байт/цикл; полный JSON 673040 байт, бюджет 4 КиБ, запас ×164
+	acceptCycles = 8
+	acceptBudget = 4 << 10
 )
 
 func acceptOldFile(t *testing.T, path string) {
@@ -53,6 +53,9 @@ func TestStateBudgetAccept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := st.Save(path); err != nil {
+		t.Fatal(err)
+	}
 	keys := make([]string, 0, len(st.Tail.Files))
 	for k := range st.Tail.Files {
 		keys = append(keys, k)
@@ -62,24 +65,22 @@ func TestStateBudgetAccept(t *testing.T) {
 		wantOffset[k] = st.Tail.Files[k].Offset
 	}
 	wantLast := map[string]string{}
-	testutil.WriteBudget(t, acceptCycles, acceptBudget, func(c int) error {
-		st, err := LoadState(path)
-		if err != nil {
-			return err
-		}
-		if len(st.Pending) != 300 || len(st.Last) != 400 || !st.Tail.Started {
-			t.Fatalf("цикл %d: очередь %d, last %d, started %v", c, len(st.Pending), len(st.Last), st.Tail.Started)
-		}
-		for i := range 3 {
-			k := keys[(c*7+i)%len(keys)]
-			st.Tail.Files[k].Offset += 1000
-			wantOffset[k] = st.Tail.Files[k].Offset
-		}
-		s := fmt.Sprintf("session-%d", c%400)
-		st.Last[s] = fmt.Sprintf("новый конец %d", c)
-		wantLast[s] = st.Last[s]
-		return st.Save(path)
-	})
+	testutil.StateBudget(t, acceptCycles, acceptBudget, path, func() int { return len(keys) }, LoadState,
+		func(st *State) bool { return st.Tail.Started }, func(st *State) int { return len(st.Tail.Files) },
+		func(st *State, c int) error {
+			if len(st.Pending) != 300 || len(st.Last) != 400 || !st.Tail.Started {
+				return fmt.Errorf("цикл %d: очередь %d, last %d, started %v", c, len(st.Pending), len(st.Last), st.Tail.Started)
+			}
+			for i := range 3 {
+				k := keys[(c*7+i)%len(keys)]
+				st.Tail.Files[k].Offset += 1000
+				wantOffset[k] = st.Tail.Files[k].Offset
+			}
+			s := fmt.Sprintf("session-%d", c%400)
+			st.Last[s] = fmt.Sprintf("новый конец %d", c)
+			wantLast[s] = st.Last[s]
+			return st.Save(path)
+		})
 	got, err := LoadState(path)
 	if err != nil {
 		t.Fatal(err)

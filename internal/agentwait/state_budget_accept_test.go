@@ -14,9 +14,9 @@ import (
 // Мера тикета small-writers: проход меняет единицы записей из тысяч — на диск идёт порядка изменения.
 
 const (
-	acceptFiles  = 9000
-	acceptCycles = 200
-	acceptBudget = 32 << 10
+	acceptFiles  = 512 // запись ~458 байт/цикл; полный JSON 57770 байт, бюджет 4 КиБ, запас ×14,1
+	acceptCycles = 8
+	acceptBudget = 4 << 10
 )
 
 func TestStateBudgetAccept(t *testing.T) {

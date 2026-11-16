@@ -42,7 +42,9 @@ func WriteBudget(t testing.TB, cycles int, budget int64, run func(int) error) {
 		}
 	}
 	spent := Wchar(t) - start
-	if perCycle := spent / int64(cycles); perCycle > budget {
+	perCycle := spent / int64(cycles)
+	t.Logf("запись на цикл: %d байт, бюджет %d", perCycle, budget)
+	if perCycle > budget {
 		t.Fatalf("запись на цикл %d байт, бюджет %d", perCycle, budget)
 	}
 }
@@ -52,6 +54,15 @@ func StateBudget[T any](t testing.TB, cycles int, budget int64, path string, wan
 	load func(string) (*T, error), started func(*T) bool, count func(*T) int,
 	update func(*T, int) error,
 ) {
+	t.Helper()
+	snapshot, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Size() < 4*budget {
+		t.Fatalf("полная запись %d байт не превышает бюджет %d хотя бы в 4 раза", snapshot.Size(), budget)
+	}
+	t.Logf("полная перезапись: %d байт на цикл, запас к бюджету: ×%.1f", snapshot.Size(), float64(snapshot.Size())/float64(budget))
 	WriteBudget(t, cycles, budget, func(cycle int) error {
 		state, err := load(path)
 		if err != nil {
