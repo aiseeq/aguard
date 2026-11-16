@@ -248,6 +248,18 @@ type Usage struct {
 
 type inode struct{ dev, ino uint64 }
 
+func inodeAlreadyCounted(seen map[inode]bool, d fs.DirEntry, st *syscall.Stat_t) bool {
+	if st.Nlink <= 1 || d.IsDir() {
+		return false
+	}
+	key := inode{st.Dev, st.Ino}
+	if seen[key] {
+		return true
+	}
+	seen[key] = true
+	return false
+}
+
 // unreadKept — сколько ошибок обхода записи хранить: остальные только считаются.
 const unreadKept = 3
 
@@ -338,12 +350,8 @@ func measure(ctx context.Context, path string, seen map[inode]bool, buf *fiemapB
 		if ct := time.Unix(st.Ctim.Unix()); ct.After(u.Changed) {
 			u.Changed = ct
 		}
-		if st.Nlink > 1 && !d.IsDir() {
-			key := inode{st.Dev, st.Ino}
-			if seen[key] {
-				return nil
-			}
-			seen[key] = true
+		if inodeAlreadyCounted(seen, d, st) {
+			return nil
 		}
 		u.Blocks += st.Blocks * 512
 		u.Files++
@@ -373,8 +381,12 @@ func Free(path string) (int64, error) {
 func ByDay(ctx context.Context, path string, exact bool, fiemapMin int64) (map[time.Time]int64, error) {
 	out := map[time.Time]int64{}
 	days := map[time.Time]*fileSpace{}
+	seen := map[inode]bool{}
 	buf := new(fiemapBuf)
 	_, err := walkEntry(ctx, path, func(p string, d fs.DirEntry, st *syscall.Stat_t) error {
+		if inodeAlreadyCounted(seen, d, st) {
+			return nil
+		}
 		y, m, dd := time.Unix(st.Ctim.Unix()).Date()
 		day := time.Date(y, m, dd, 0, 0, 0, 0, time.Local)
 		f := days[day]

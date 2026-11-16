@@ -322,6 +322,46 @@ func TestMeasureFiemapMin(t *testing.T) {
 	}
 }
 
+func TestByDayHardlinks(t *testing.T) {
+	dir := t.TempDir()
+	linked := filepath.Join(dir, "linked")
+	if err := os.WriteFile(linked, []byte("hardlink data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(linked, filepath.Join(dir, "hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "separate"), []byte("separate data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var linkedStat, separateStat syscall.Stat_t
+	if err := syscall.Stat(linked, &linkedStat); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Stat(filepath.Join(dir, "separate"), &separateStat); err != nil {
+		t.Fatal(err)
+	}
+	if linkedStat.Dev == separateStat.Dev && linkedStat.Ino == separateStat.Ino {
+		t.Fatal("отдельный файл неожиданно имеет тот же inode")
+	}
+	want := (linkedStat.Blocks + separateStat.Blocks) * 512
+
+	byDay, err := ByDay(t.Context(), dir, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got int64
+	for _, n := range byDay {
+		got += n
+	}
+	if got != want {
+		t.Errorf("ByDay насчитал %d байт, ожидалось по двум inode %d", got, want)
+	}
+	if got := measure(t.Context(), dir, map[inode]bool{}, new(fiemapBuf), false, 0, nil).Bytes; got != want {
+		t.Errorf("measure насчитал %d байт, ожидалось по двум inode %d", got, want)
+	}
+}
+
 func TestValidateFiemapMin(t *testing.T) {
 	c := testConfig(t, t.TempDir())
 	c.FiemapMin = -1
