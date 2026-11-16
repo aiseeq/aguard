@@ -144,6 +144,36 @@ func TestLoadConfigMemoryIgnoresUnknownKeysAndNormalizesBlankMax(t *testing.T) {
 	}
 }
 
+func TestUnknownConfigKeys(t *testing.T) {
+	data := []byte(`{"roles":[{"names":["lead"],"restorable_crons":true}],"restart":{"idle_minutes":5}}`)
+	want := []string{"restart.idle_minutes", "roles[lead].restorable_crons"}
+	if got := unknownConfigKeys(data); !slices.Equal(got, want) {
+		t.Fatalf("unknown keys = %q, want %q", got, want)
+	}
+	if got := unknownConfigKeys([]byte(`{"restart":{"mode":"log"},"memory":{"max":"1G"},"roles":[{"names":["lead"],"settings":[{"dirs":[],"file":"x"}]}]}`)); len(got) != 0 {
+		t.Fatalf("known config keys reported: %q", got)
+	}
+	if got := unknownConfigKeys([]byte(`{"Restart":{"MODE":"act"}}`)); len(got) != 0 {
+		t.Fatalf("known keys with different casing reported: %q", got)
+	}
+	data = []byte(`{"root_extra":1,"memory":{"extra":true},"roles":[{"extra":true,"settings":[{"dirs":[],"file":"x","extra":true}]}]}`)
+	want = []string{"memory.extra", "roles[0].extra", "roles[0].settings[0].extra", "root_extra"}
+	if got := unknownConfigKeys(data); !slices.Equal(got, want) {
+		t.Fatalf("nested unknown keys = %q, want %q", got, want)
+	}
+	if got := unknownConfigKeys([]byte(`{"roles":[{"names":[""],"extra":true}]}`)); !slices.Equal(got, []string{"roles[0].extra"}) {
+		t.Fatalf("role with empty first name should use its index: %q", got)
+	}
+}
+
+func TestWarnUnknownConfigKeysReadError(t *testing.T) {
+	dir := t.TempDir()
+	got := captureStderr(t, func() { warnUnknownConfigKeys(dir) })
+	if !strings.HasPrefix(got, "cl: не удалось прочитать конфиг "+dir+": ") || strings.Count(got, "\n") != 1 {
+		t.Fatalf("read error should produce one stderr line, got %q", got)
+	}
+}
+
 func TestJournalConfigErrorOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cl.log")
 	at := time.Now()

@@ -120,6 +120,55 @@ func TestMainSliceWarning(t *testing.T) {
 	}
 }
 
+func TestMainUnknownConfigKeysWarning(t *testing.T) {
+	home := t.TempDir()
+	configFile := filepath.Join(home, "config.json")
+	write(t, configFile, `{"roles":[{"names":["lead"],"restorable_crons":true}],"restart":{"idle_minutes":5}}`)
+	args, _, stderr := runMainEnvSlice(t, home, filepath.Join(home, "project"), []string{"CL_CONFIG=" + configFile}, true, "-p", "hello")
+	if !slices.Contains(args, "-p") || !slices.Contains(args, "hello") {
+		t.Fatalf("systemd-run did not receive cl -p arguments: %q", args)
+	}
+	warning := "cl: неизвестные ключи конфига " + configFile + ": restart.idle_minutes, roles[lead].restorable_crons\n"
+	if stderr != warning {
+		t.Fatalf("stderr = %q, want exactly %q", stderr, warning)
+	}
+	if got := readLines(t, filepath.Join(home, "argv")); len(got) == 0 || !slices.Contains(got, "--") {
+		t.Fatalf("systemd-run was not invoked: %q", got)
+	}
+}
+
+func TestMainUnknownConfigKeysWarnDespiteLoadConfigError(t *testing.T) {
+	home := t.TempDir()
+	configFile := filepath.Join(home, "config.json")
+	write(t, configFile, `{"roles":[{"names":["lead"],"settings":[{"fiel":"x"}]}]}`)
+	args, _, stderr := runMainEnvSlice(t, home, filepath.Join(home, "project"), []string{"CL_CONFIG=" + configFile}, true, "-p", "hello")
+	warning := "cl: неизвестные ключи конфига " + configFile + ": roles[lead].settings[0].fiel\n"
+	if stderr != warning {
+		t.Fatalf("stderr = %q, want %q", stderr, warning)
+	}
+	if !slices.Contains(args, "-p") || !slices.Contains(args, "hello") {
+		t.Fatalf("systemd-run was not called with cl -p: %q", args)
+	}
+}
+
+func TestMainUnknownConfigKeysCheckAndUpgrade(t *testing.T) {
+	home := t.TempDir()
+	configFile := filepath.Join(home, "config.json")
+	write(t, configFile, `{"restart":{"idle_minutes":5}}`)
+	env := []string{"CL_CONFIG=" + configFile}
+	_, _, stderr := runMainEnvSlice(t, home, filepath.Join(home, "project"), env, true, checkFlag)
+	warning := "cl: неизвестные ключи конфига " + configFile + ": restart.idle_minutes\n"
+	if stderr != warning {
+		t.Fatalf("--cl-check stderr = %q, want %q", stderr, warning)
+	}
+
+	upgradeEnv := append(env, upgradeEnv+`={"v":1,"name":"upgraded","n":2,"args":["-p","hello"]}`)
+	_, stdout, stderr := runMainEnvSlice(t, home, filepath.Join(home, "project"), upgradeEnv, true, "-p", "hello")
+	if strings.Contains(stderr, "неизвестные ключи конфига") || strings.Contains(stdout, "неизвестные ключи конфига") {
+		t.Fatalf("self-upgrade printed unknown config warning: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
 func sliceCPUWeight(t *testing.T) string {
 	t.Helper()
 	data, err := os.ReadFile("agents.slice")
