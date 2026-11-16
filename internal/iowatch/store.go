@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,12 +25,58 @@ const (
 	whatProfiles = "профили cgroup"
 )
 
+type machineSecondFileFields MachineSecond
+
+// MachineSecondFileRow хранит секунду в формате JSON для series.jsonl и ответа сокета series.
+type MachineSecondFileRow struct {
+	machineSecondFileFields
+	GraftSliceMem *int64 `json:"graft_slice_mem,omitempty"`
+}
+
+// MachineSecondFileRowOf переводит секунду машины в её JSON-представление.
+func MachineSecondFileRowOf(second MachineSecond) MachineSecondFileRow {
+	row := MachineSecondFileRow{machineSecondFileFields: machineSecondFileFields(second)}
+	if second.GraftSliceMemKnown || second.GraftSliceMem != 0 {
+		value := second.GraftSliceMem
+		row.GraftSliceMem = &value
+	}
+	return row
+}
+
+func (row MachineSecondFileRow) MachineSecond() MachineSecond {
+	second := MachineSecond(row.machineSecondFileFields)
+	second.GraftSliceMemKnown = row.GraftSliceMem != nil
+	if row.GraftSliceMem == nil {
+		second.GraftSliceMem = 0
+	} else {
+		second.GraftSliceMem = *row.GraftSliceMem
+	}
+	return second
+}
+
+// MachineSecondFileRows преобразует секунды в общий JSON-формат файла и ответа сокета.
+func MachineSecondFileRows(seconds []MachineSecond) []MachineSecondFileRow {
+	rows := make([]MachineSecondFileRow, len(seconds))
+	for i := range seconds {
+		rows[i] = MachineSecondFileRowOf(seconds[i])
+	}
+	return rows
+}
+
 // SaveCases пишет случаи в path целиком (через path.part и переименование).
 func SaveCases(path string, cases []Case) error { return saveLines(path, whatCases, cases) }
 
 // SaveSeries пишет секунды ряда в path целиком.
 func SaveSeries(path string, seconds []MachineSecond) error {
-	return saveLines(path, whatSeries, seconds)
+	return saveLineWriter(path, whatSeries, func(enc *json.Encoder) error {
+		for i := range seconds {
+			row := MachineSecondFileRowOf(seconds[i])
+			if err := enc.Encode(&row); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // SaveProfiles пишет профили в path целиком.
@@ -39,17 +86,22 @@ func SaveProfiles(path string, profiles []Profile) error {
 
 // saveLines пишет записи строками JSON в path целиком (через path.*.part и переименование).
 func saveLines[T any](path, what string, items []T) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("папка %s: %w", what, err)
-	}
-	err := writeAtomic(path, func(w *bufio.Writer) error {
-		enc := json.NewEncoder(w)
+	return saveLineWriter(path, what, func(enc *json.Encoder) error {
 		for i := range items {
 			if err := enc.Encode(&items[i]); err != nil {
 				return err
 			}
 		}
 		return nil
+	})
+}
+
+func saveLineWriter(path, what string, encode func(*json.Encoder) error) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("папка %s: %w", what, err)
+	}
+	err := writeAtomic(path, func(w *bufio.Writer) error {
+		return encode(json.NewEncoder(w))
 	})
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", what, path, err)
@@ -88,8 +140,17 @@ func LoadCases(path string) ([]Case, error) { return loadLines[Case](path, whatC
 
 // LoadSeries читает секунды ряда с At не раньше since, как LoadCases.
 func LoadSeries(path string, since time.Time) ([]MachineSecond, error) {
-	seconds, err := loadLines[MachineSecond](path, whatSeries)
-	return keepSince(seconds, func(s *MachineSecond) time.Time { return s.At }, since), err
+	seconds, err := loadLinesMap[MachineSecond](path, whatSeries, true, func(dec *json.Decoder) (MachineSecond, error) {
+		var row MachineSecondFileRow
+		if err := dec.Decode(&row); err != nil {
+			return MachineSecond{}, err
+		}
+		return row.MachineSecond(), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return keepSince(seconds, func(s *MachineSecond) time.Time { return s.At }, since), nil
 }
 
 // LoadProfiles читает профили с концом не раньше since, как LoadCases.
@@ -112,6 +173,14 @@ func keepSince[T any](items []T, at func(*T) time.Time, since time.Time) []T {
 
 // loadLines читает записи строками JSON из path; файла нет — пусто, битая запись — ошибка.
 func loadLines[T any](path, what string) ([]T, error) {
+	return loadLinesMap[T](path, what, false, func(dec *json.Decoder) (T, error) {
+		var item T
+		err := dec.Decode(&item)
+		return item, err
+	})
+}
+
+func loadLinesMap[T any](path, what string, countFirst bool, decode func(*json.Decoder) (T, error)) ([]T, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -121,15 +190,46 @@ func loadLines[T any](path, what string) ([]T, error) {
 	}
 	defer f.Close()
 	var out []T
+	if countFirst {
+		count, err := countJSONLines(f)
+		if err != nil {
+			return nil, fmt.Errorf("%s %s: %w", what, path, err)
+		}
+		if _, err := f.Seek(0, 0); err != nil {
+			return nil, fmt.Errorf("%s %s: %w", what, path, err)
+		}
+		out = make([]T, 0, count)
+	}
 	dec := json.NewDecoder(bufio.NewReaderSize(f, 64*1024))
 	for dec.More() {
-		var item T
-		if err := dec.Decode(&item); err != nil {
+		item, err := decode(dec)
+		if err != nil {
 			return nil, fmt.Errorf("%s %s, запись %d: %w", what, path, len(out)+1, err)
 		}
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+func countJSONLines(f *os.File) (int, error) {
+	reader := bufio.NewReaderSize(f, 64*1024)
+	count := 0
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		switch err {
+		case nil:
+			count++
+		case bufio.ErrBufferFull:
+			continue
+		case io.EOF:
+			if len(fragment) > 0 {
+				count++
+			}
+			return count, nil
+		default:
+			return 0, err
+		}
+	}
 }
 
 // MergeCases — случаи обоих списков по времени начала, без повторов (одно начало — один случай),

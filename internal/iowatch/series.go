@@ -1,7 +1,6 @@
 package iowatch
 
 import (
-	"encoding/json"
 	"math"
 	"time"
 )
@@ -30,41 +29,6 @@ type MachineSecond struct {
 	SwapUsed           int64     `json:"swap_used,omitempty"`       // байт
 	GraftSliceMem      int64     `json:"graft_slice_mem,omitempty"` // байт
 	GraftSliceMemKnown bool      `json:"-"`
-}
-
-type machineSecondJSON MachineSecond
-
-type machineSecondMarshal struct {
-	machineSecondJSON
-	GraftSliceMem *int64 `json:"graft_slice_mem,omitempty"`
-}
-
-type machineSecondUnmarshal struct {
-	*machineSecondJSON
-	GraftSliceMem *int64 `json:"graft_slice_mem"`
-}
-
-func (s MachineSecond) MarshalJSON() ([]byte, error) {
-	out := machineSecondMarshal{machineSecondJSON: machineSecondJSON(s)}
-	if s.GraftSliceMemKnown || s.GraftSliceMem != 0 {
-		value := s.GraftSliceMem
-		out.GraftSliceMem = &value
-	}
-	return json.Marshal(out)
-}
-
-func (s *MachineSecond) UnmarshalJSON(data []byte) error {
-	decoded := machineSecondUnmarshal{machineSecondJSON: (*machineSecondJSON)(s)}
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	s.GraftSliceMemKnown = decoded.GraftSliceMem != nil
-	if decoded.GraftSliceMem == nil {
-		s.GraftSliceMem = 0
-	} else {
-		s.GraftSliceMem = *decoded.GraftSliceMem
-	}
-	return nil
 }
 
 // secondRow — секунда ряда в памяти: 88 байт с выравниванием (байты диска — int64, остальное — int32,
@@ -225,6 +189,11 @@ func rowGraftMemKiB(d *detailLast) int32 {
 
 // push кладёт строку и вытесняет строки старше keep от неё.
 func (s *Series) push(row secondRow) {
+	// При откате часов строка не попадёт в ряд; шаги потеряны, пока время не обгонит последнюю строку.
+	// Порядок нужен бинарному поиску в Rows и VisitSince.
+	if s.count > 0 && row.at <= s.rows[(s.head+s.count-1)%len(s.rows)].at {
+		return
+	}
 	if s.count == len(s.rows) {
 		s.head = (s.head + 1) % len(s.rows)
 		s.count--
@@ -241,9 +210,6 @@ func (s *Series) push(row secondRow) {
 // Add — секунда из файла копии (при старте службы), по порядку времени; старше уже лежащих — не берётся.
 func (s *Series) Add(sec MachineSecond) {
 	row := rowOf(&sec)
-	if s.count > 0 && row.at <= s.rows[(s.head+s.count-1)%len(s.rows)].at {
-		return
-	}
 	s.push(row)
 }
 

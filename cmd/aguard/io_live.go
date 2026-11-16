@@ -111,13 +111,14 @@ func writeIONow(w io.Writer, n *iowatch.Now) {
 }
 
 // writeIOSeries — строка на секунду.
-func writeIOSeries(w io.Writer, seconds []iowatch.MachineSecond) {
-	if len(seconds) == 0 {
+func writeIOSeries(w io.Writer, rows []iowatch.MachineSecondFileRow) {
+	if len(rows) == 0 {
 		fmt.Fprintln(w, "ряд пуст")
 		return
 	}
-	for i := range seconds {
-		s := &seconds[i]
+	for i := range rows {
+		second := rows[i].MachineSecond()
+		s := &second
 		fmt.Fprintf(w, "%s  io full %d мс  mem full %d мс  простой %d мс  R/W %.0f/%.0f МБ  ожид W %d мс  очередь %d  flush %d  dirty %.0f МБ  writeback %.0f МБ  swapin %d  cpu some %d мс  runnable %d  avail %.0f МБ\n",
 			s.At.Format("02.01 15:04:05"), s.IOFullMS, s.MemFullMS, s.StallMS, megabytes(s.ReadB), megabytes(s.WriteB), s.WAwaitMS,
 			s.InFlightMax, s.Flushes, megabytes(s.Dirty), megabytes(s.Writeback), s.SwapIn, s.CPUSomeMS, s.RunnableMax, megabytes(s.MemAvail))

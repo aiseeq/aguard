@@ -33,9 +33,9 @@ type Answer struct {
 	V     int    `json:"v"`
 	Error string `json:"error,omitempty"`
 	*Now
-	Series   []MachineSecond `json:"series,omitempty"`
-	Profiles []Profile       `json:"profiles,omitempty"`
-	Cases    []Case          `json:"cases,omitempty"`
+	Series   []MachineSecondFileRow `json:"series,omitempty"`
+	Profiles []Profile              `json:"profiles,omitempty"`
+	Cases    []Case                 `json:"cases,omitempty"`
 	// Coverage — учёт покрытия замера на момент ответа cases (всегда в ответе cases; нет — служба старее учёта).
 	Coverage *CoverRecord `json:"coverage,omitempty"`
 }
