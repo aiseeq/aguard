@@ -63,6 +63,19 @@ func parseFile(t *testing.T, fset *token.FileSet, path string) *ast.File {
 	return f
 }
 
+func receiverTypeName(expr ast.Expr) string {
+	for {
+		switch x := expr.(type) {
+		case *ast.StarExpr:
+			expr = x.X
+		case *ast.Ident:
+			return x.Name
+		default:
+			return ""
+		}
+	}
+}
+
 func TestCodexLetterNextText(t *testing.T) {
 	want := map[string]string{
 		"codex.warn": "действий не нужно: при строке «да» на окно aguard сам сбросит при 100%; сброс пользователю не предлагать",
@@ -160,6 +173,7 @@ func TestLetterRegistryMatchesSendCalls(t *testing.T) {
 				case *ast.Ident:
 					forwarded := v.Name == "kind" && (enclosing == "sendAlive" || enclosing == "sendUrgent" || enclosing == "sendSocket" || enclosing == "deliverSocket" || enclosing == "tmpSend" || enclosing == "nightEmail" || enclosing == "codexSend" || enclosing == "cpuSend" || enclosing == "nightRound")
 					forwarded = forwarded || v.Name == "guideKind" && (enclosing == "diskSend" || enclosing == "ioSend" || enclosing == "tmpSend" || enclosing == "nightEmail")
+					mappedAt := token.NoPos
 					if enclosingBody != nil {
 						ast.Inspect(enclosingBody, func(inner ast.Node) bool {
 							assign, ok := inner.(*ast.AssignStmt)
@@ -179,6 +193,19 @@ func TestLetterRegistryMatchesSendCalls(t *testing.T) {
 								mapID, ok := call.Fun.(*ast.Ident)
 								if ok && mapFns[mapID.Name] {
 									forwarded = true
+									mappedAt = assign.Pos()
+									ast.Inspect(enclosingBody, func(candidate ast.Node) bool {
+										later, ok := candidate.(*ast.AssignStmt)
+										if !ok || later.Pos() <= mappedAt || later.Pos() >= x.Pos() {
+											return true
+										}
+										for _, left := range later.Lhs {
+											if ident, ok := left.(*ast.Ident); ok && ident.Name == v.Name {
+												forwarded = false
+											}
+										}
+										return true
+									})
 									calledMaps[mapID.Name] = true
 								}
 							}
@@ -186,7 +213,7 @@ func TestLetterRegistryMatchesSendCalls(t *testing.T) {
 						})
 					}
 					if !forwarded {
-						t.Errorf("%s: передача переменного вида вне функции доставки", fset.Position(v.Pos()))
+						t.Errorf("%s: передача переменного вида вне функции доставки или после переприсваивания", fset.Position(v.Pos()))
 					}
 				default:
 					t.Errorf("%s: неподдерживаемое выражение вида письма", fset.Position(arg.Pos()))
@@ -383,7 +410,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 			"cmd/aguard/codex.go:noteTicket", "cmd/aguard/sigguard.go:startJournal", "cmd/aguard/ceiling.go:ceilingJournalCursor",
 			"cmd/aguard/cpu.go:cpuRemote", "cmd/aguard/queue.go:queueTicketNote", "cmd/aguard/queue.go:queueTickets",
 			"cmd/aguard/queue_wake.go:nextForQueue", "cmd/aguard/queue_wake.go:workerOwners", "cmd/aguard/queue_external.go:readQueueExternal",
-			"cmd/aguard/cpu_stray.go:readStrays", "cmd/aguard/cpu_stray.go:readStrays", "internal/orphans/stop.go:podmanStop",
+			"cmd/aguard/cpu_stray.go:readStrays", "internal/orphans/stop.go:podmanStop",
 			"cmd/aguard/night.go:nightPauseHolds", "cmd/aguard/io_sudo.go:readJournal",
 		},
 	}
@@ -414,6 +441,15 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 				t.Errorf("%s: место %s отсутствует", id, loc)
 			}
 		}
+	}
+	// Эти управляющие функции уже вызывают сигналящие участки по штатному
+	// маршруту приложения; новые обёртки в этот список автоматически не попадают.
+	for _, loc := range []string{
+		"cmd/aguard/main.go:watchers", "cmd/aguard/orphans.go:orphansCmd", "cmd/aguard/orphans.go:orphansAct",
+		"cmd/aguard/track.go:trackCmd", "cmd/aguard/main.go:dispatch", "cmd/aguard/main.go:run",
+		"cmd/cl/supervise.go:supervise", "cmd/aguard/orphans.go:orphansRound",
+	} {
+		allowed[loc] = true
 	}
 	wants := map[string]string{
 		"internal/orphans/stop.go:Stop": "PidfdSendSignal", "internal/orphans/stop.go:term": "PidfdSendSignal",
@@ -456,20 +492,49 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 			t.Errorf("%s: ожидаемое действие %s не найдено", loc, want)
 		}
 	}
-	// Вычисляем сигналящие функции из AST, затем распространяем свойство по
-	// вызовам внутри одного пакета. Имена обёрток здесь не перечисляются.
-	type fnKey struct{ dir, name string }
+	// Вычисляем сигналящие функции из AST и распространяем свойство по вызовам
+	// функций и методов как внутри пакета, так и через импорт модулей.
+	type fnKey struct{ dir, receiver, name string }
 	functions := map[fnKey]*ast.FuncDecl{}
 	functionLocations := map[fnKey]string{}
 	direct := map[fnKey]bool{}
 	callers := map[fnKey][]fnKey{}
+	const modulePath = "github.com/aiseeq/aguard"
+	packageDirs := map[string]string{}
+	for _, path := range goFiles(t, root, false) {
+		rel, _ := filepath.Rel(root, path)
+		dir := filepath.ToSlash(filepath.Dir(rel))
+		packageDirs[modulePath+"/"+dir] = dir
+	}
 	for _, path := range goFiles(t, root, false) {
 		rel, _ := filepath.Rel(root, path)
 		file := parseFile(t, token.NewFileSet(), path)
+		dir := filepath.ToSlash(filepath.Dir(rel))
+		imports := map[string]string{}
+		for _, imp := range file.Imports {
+			pkg, err := strconv.Unquote(imp.Path.Value)
+			if err != nil || packageDirs[pkg] == "" {
+				continue
+			}
+			name := filepath.Base(pkg)
+			if imp.Name != nil {
+				name = imp.Name.Name
+			}
+			imports[name] = packageDirs[pkg]
+		}
 		var current fnKey
+		receiverNames := map[string]string{}
 		ast.Inspect(file, func(n ast.Node) bool {
 			if fn, ok := n.(*ast.FuncDecl); ok {
-				current = fnKey{filepath.ToSlash(filepath.Dir(rel)), fn.Name.Name}
+				receiver := ""
+				if fn.Recv != nil && len(fn.Recv.List) != 0 {
+					field := fn.Recv.List[0]
+					receiver = receiverTypeName(field.Type)
+					if len(field.Names) != 0 {
+						receiverNames[field.Names[0].Name] = receiver
+					}
+				}
+				current = fnKey{dir, receiver, fn.Name.Name}
 				functions[current] = fn
 				functionLocations[current] = filepath.ToSlash(rel) + ":" + fn.Name.Name
 				ast.Inspect(fn.Body, func(inner ast.Node) bool {
@@ -477,21 +542,28 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 					if !ok {
 						return true
 					}
-					sel, ok := call.Fun.(*ast.SelectorExpr)
-					if !ok {
-						return true
-					}
-					name := sel.Sel.Name
-					isSignalType := name == "Signal" && selectorRoot(sel.X) == "syscall"
-					if (name == "Signal" && len(call.Args) > 0 && !isSignalType && !literalSignal(call.Args[0], "SIGWINCH")) || name == "Kill" || name == "Tgkill" || name == "PidfdSendSignal" || akitSignal[name] {
-						if name == "PidfdSendSignal" && len(call.Args) > 1 && isZero(call.Args[1]) {
-							return true
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+						name := sel.Sel.Name
+						isSignalType := name == "Signal" && selectorRoot(sel.X) == "syscall"
+						if (name == "Signal" && len(call.Args) > 0 && !isSignalType && !literalSignal(call.Args[0], "SIGWINCH")) || name == "Kill" || name == "Tgkill" || name == "PidfdSendSignal" || akitSignal[name] {
+							if name != "PidfdSendSignal" || len(call.Args) <= 1 || !isZero(call.Args[1]) {
+								direct[current] = true
+							}
 						}
-						direct[current] = true
-					}
-					if name == "Command" || name == "CommandContext" {
-						if isStopExec(call) {
+						if (name == "Command" || name == "CommandContext") && isStopExec(call) {
 							direct[current] = true
+						}
+					}
+					switch fun := call.Fun.(type) {
+					case *ast.Ident:
+						callers[current] = append(callers[current], fnKey{dir, "", fun.Name})
+					case *ast.SelectorExpr:
+						if id, ok := fun.X.(*ast.Ident); ok {
+							if targetDir := imports[id.Name]; targetDir != "" {
+								callers[current] = append(callers[current], fnKey{targetDir, "", fun.Sel.Name})
+							} else if typ := receiverNames[id.Name]; typ != "" {
+								callers[current] = append(callers[current], fnKey{dir, typ, fun.Sel.Name})
+							}
 						}
 					}
 					return true
@@ -500,21 +572,6 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 			}
 			return true
 		})
-		for key, fn := range functions {
-			if key.dir != filepath.ToSlash(filepath.Dir(rel)) {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if id, ok := call.Fun.(*ast.Ident); ok {
-					callers[key] = append(callers[key], fnKey{key.dir, id.Name})
-				}
-				return true
-			})
-		}
 	}
 	signalFns := maps.Clone(direct)
 	changed := true

@@ -87,40 +87,63 @@ func nightKeyPrefixes(t *testing.T, root string) []string {
 	t.Helper()
 	paths := []string{filepath.Join(root, "internal/night/night.go"), filepath.Join(root, "cmd/aguard/night.go"), filepath.Join(root, "cmd/aguard/night_fallback.go")}
 	set := map[string]bool{}
+	definitions := map[string][]ast.Expr{}
+	var keyExprs []ast.Expr
 	for _, path := range paths {
 		f := parseSource(t, path)
 		ast.Inspect(f, func(n ast.Node) bool {
-			var expr ast.Expr
 			switch x := n.(type) {
 			case *ast.KeyValueExpr:
 				if id, ok := x.Key.(*ast.Ident); ok && id.Name == "Key" {
-					expr = x.Value
+					keyExprs = append(keyExprs, x.Value)
 				}
 			case *ast.AssignStmt:
-				for _, lhs := range x.Lhs {
+				for i, lhs := range x.Lhs {
 					if id, ok := lhs.(*ast.Ident); ok && id.Name == "key" && len(x.Rhs) > 0 {
-						expr = x.Rhs[0]
+						keyExprs = append(keyExprs, x.Rhs[min(i, len(x.Rhs)-1)])
+					}
+					if id, ok := lhs.(*ast.Ident); ok && len(x.Rhs) > 0 {
+						definitions[id.Name] = append(definitions[id.Name], x.Rhs[min(i, len(x.Rhs)-1)])
 					}
 				}
-			}
-			if expr != nil {
-				for expr != nil {
-					if lit, ok := expr.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-						value, err := strconv.Unquote(lit.Value)
-						if err == nil && strings.Contains(value, ":") {
-							set[strings.SplitN(value, ":", 2)[0]+":"] = true
-						}
-						break
+			case *ast.ValueSpec:
+				for i, name := range x.Names {
+					if len(x.Values) > 0 {
+						definitions[name.Name] = append(definitions[name.Name], x.Values[min(i, len(x.Values)-1)])
 					}
-					binary, ok := expr.(*ast.BinaryExpr)
-					if !ok {
-						break
-					}
-					expr = binary.X
 				}
 			}
 			return true
 		})
+	}
+	var visit func(ast.Expr, map[string]bool)
+	visit = func(expr ast.Expr, seen map[string]bool) {
+		switch x := expr.(type) {
+		case *ast.BasicLit:
+			if x.Kind == token.STRING {
+				value, err := strconv.Unquote(x.Value)
+				if err == nil && strings.Contains(value, ":") {
+					set[strings.SplitN(value, ":", 2)[0]+":"] = true
+				}
+			}
+		case *ast.BinaryExpr:
+			visit(x.X, seen)
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Sprintf" && len(x.Args) > 0 {
+				visit(x.Args[0], seen)
+			}
+		case *ast.Ident:
+			if seen[x.Name] {
+				return
+			}
+			seen[x.Name] = true
+			for _, def := range definitions[x.Name] {
+				visit(def, seen)
+			}
+		}
+	}
+	for _, expr := range keyExprs {
+		visit(expr, map[string]bool{})
 	}
 	return sortedKeys(set)
 }
