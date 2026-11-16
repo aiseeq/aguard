@@ -32,7 +32,7 @@ type Interruption struct {
 
 var letters = []Letter{
 	{Kind: "bgtask.stalled", Observer: "bgtask", To: "владелец фоновой задачи", When: "обычная команда, уведённая Claude Code по таймауту, долго работает без нового вывода", Next: "проверьте, нужна ли задача; если нет — `TaskStop <id>` из письма", Quiet: QuietLose},
-	{Kind: "bgtask.wait", Observer: "bgtask", To: "владелец задачи", When: "намеренное фоновое ожидание длится дольше часа", Next: "проверьте, нужен ли новый срок; если нет — `TaskStop <id>` из письма", Quiet: QuietLose},
+	{Kind: "bgtask.wait", Observer: "bgtask", To: "владелец задачи", When: "намеренное фоновое ожидание длится дольше `bgtask.age` (по умолчанию 1 ч)", Next: "снимите ожидание через `TaskStop <id>` из письма; ждать дольше — отложите тикет через `tk wait`", Quiet: QuietLose},
 	{Kind: "bgtask.other", Observer: "bgtask", To: "получатель уведомления", When: "получен неизвестный тип уведомления фоновой задачи; причина в a.log", Next: "проверьте тип уведомления и текст в a.log", Quiet: QuietLose},
 	{Kind: "remote.owner", Observer: "remote", To: "владелец задачи", When: "graft-задача на PC не дошла и выполнена на ноуте", Next: "проверьте результат выполнения на ноуте и причину сбоя из письма", Quiet: QuietLose},
 	{Kind: "remote.copy", Observer: "remote", To: "лид", When: "первый сбой удалённого пути за окно повтора", Next: "проверьте причину сбоя и доступность PC из письма", Quiet: QuietLose},
