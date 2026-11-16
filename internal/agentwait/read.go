@@ -2,6 +2,7 @@ package agentwait
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
@@ -15,8 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/agentwait/waits"
 	"github.com/aiseeq/akit/transcript"
-	"github.com/aiseeq/akit/transcript/waits"
 
 	"github.com/aiseeq/aguard/internal/statefile"
 )
@@ -72,11 +73,54 @@ func List(projects, workers string) ([]Source, error) {
 
 // File — что известно о транскрипте между проходами.
 type File struct {
-	// Offset — откуда читать: конец прочитанного или начало строки незаконченного ожидания.
+	// Offset — конец прочитанного.
 	Offset int64 `json:"offset"`
-	// Seen — записанные ожидания, начатые не раньше Offset: id первого вызова → начало. Перечитывание с Offset отдаёт
-	// их снова, по Seen они не повторяются.
+	// Seen — ожидания для подавления дублей при чтении старого состояния с начала открытого фрагмента.
 	Seen map[string]int64 `json:"seen,omitempty"`
+	// Pending — снимок распознавателя для продолжения открытых ожиданий.
+	Pending *waits.Recognizer `json:"pending,omitempty"`
+	// Line — номер последней строки, назначенный событиям Pending.
+	Line int `json:"line,omitempty"`
+	// PendingAt — начало фрагмента для восстановления при битом снимке.
+	PendingAt    int64         `json:"pending_at,omitempty"`
+	OpenAt       map[int]int64 `json:"open_at,omitempty"`
+	Cwd          string        `json:"cwd,omitempty"`
+	PendingBad   bool          `json:"pending_bad,omitempty"`
+	PendingError string        `json:"pending_error,omitempty"`
+}
+
+func (f *File) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Offset       int64            `json:"offset"`
+		Seen         map[string]int64 `json:"seen,omitempty"`
+		Pending      json.RawMessage  `json:"pending,omitempty"`
+		Line         int              `json:"line,omitempty"`
+		PendingAt    int64            `json:"pending_at,omitempty"`
+		OpenAt       map[int]int64    `json:"open_at,omitempty"`
+		Cwd          string           `json:"cwd,omitempty"`
+		PendingBad   bool             `json:"pending_bad,omitempty"`
+		PendingError string           `json:"pending_error,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*f = File{Offset: raw.Offset, Seen: raw.Seen, Line: raw.Line, PendingAt: raw.PendingAt, OpenAt: raw.OpenAt, Cwd: raw.Cwd, PendingBad: raw.PendingBad, PendingError: raw.PendingError}
+	if len(raw.Pending) == 0 || bytes.Equal(bytes.TrimSpace(raw.Pending), []byte("null")) {
+		return nil
+	}
+	r := waits.New()
+	if err := json.Unmarshal(raw.Pending, r); err != nil {
+		f.PendingBad = true
+		f.PendingError = err.Error()
+		return nil
+	}
+	if len(r.OpenStates()) == 0 {
+		f.PendingBad = true
+		f.PendingError = "снимок не содержит открытых ожиданий"
+		return nil
+	}
+	f.Pending = r
+	return nil
 }
 
 // State — смещения по транскриптам. Started — первый проход был: новые файлы читаются с начала.
@@ -122,7 +166,8 @@ type Pass struct {
 	Budget  int64
 	MaxOpen time.Duration
 	// Name — имя сессии Claude по её папке (names.For); пусто — без имени.
-	Name func(cwd string) string
+	Name     func(cwd string) string
+	openFile func(string) (io.ReaderAt, io.Closer, error)
 }
 
 // Run читает дописанное и отдаёт законченные ожидания. Сначала файлы с меньшим непрочитанным: хвосты живых
@@ -150,19 +195,38 @@ func (p *Pass) Run(st *State, now time.Time) ([]Wait, error) {
 			delete(st.Files, k)
 		}
 	}
-	pending := func(f Source) int64 { return f.size - st.Files[f.Key].Offset }
-	slices.SortStableFunc(files, func(a, b Source) int { return cmp.Compare(pending(a), pending(b)) })
+	unread := func(f Source) int64 { return max(f.size-st.Files[f.Key].Offset, 0) }
+	slices.SortStableFunc(files, func(a, b Source) int { return cmp.Compare(unread(a), unread(b)) })
 	var out []Wait
 	var errs []error
 	var used int64
 	for _, f := range files {
-		if pending(f) <= 0 {
+		s := st.Files[f.Key]
+		badSnapshot := s.PendingBad
+		if badSnapshot {
+			errs = append(errs, recoverSnapshot(f, s))
+		}
+		if f.size < s.Offset && !badSnapshot {
+			s.Offset = f.size
+			continue
+		}
+		if f.size == s.Offset && !badSnapshot {
+			if expired, ok := p.expired(s.Pending, now); ok {
+				name := ""
+				if p.Name != nil && s.Cwd != "" {
+					name = p.Name(s.Cwd)
+				}
+				for i := range expired {
+					out = append(out, f.wait(&expired[i], name))
+				}
+				s.Pending, s.Seen, s.Line, s.PendingAt, s.OpenAt = nil, nil, 0, 0, nil
+			}
 			continue
 		}
 		if used >= p.Budget {
 			break
 		}
-		ws, n, err := p.read(f, st.Files[f.Key], now, p.Budget-used)
+		ws, n, err := p.read(f, s, now, p.Budget-used)
 		used += n
 		out = append(out, ws...)
 		errs = append(errs, err)
@@ -170,21 +234,51 @@ func (p *Pass) Run(st *State, now time.Time) ([]Wait, error) {
 	return out, errors.Join(errs...)
 }
 
+func recoverSnapshot(f Source, s *File) error {
+	// PendingAt is the recovery point used by the former rewind behavior.
+	s.Offset = s.PendingAt
+	if s.Offset < 0 {
+		s.Offset = 0
+	} else if s.Offset >= f.size {
+		s.Offset = f.size
+	}
+	reason := s.PendingError
+	if reason == "" {
+		reason = "снимок распознавателя повреждён"
+	}
+	s.Pending, s.PendingBad, s.PendingError, s.Line, s.PendingAt, s.OpenAt = nil, false, "", 0, 0, nil
+	return fmt.Errorf("снимок распознавателя %s повреждён (%s): перечитаю от начала открытого ожидания", f.Key, reason)
+}
+
+func (p *Pass) expired(r *waits.Recognizer, now time.Time) ([]waits.Wait, bool) {
+	if r == nil {
+		return nil, false
+	}
+	open := r.OpenStates()
+	if len(open) == 0 || open[0].Start.IsZero() || now.Sub(open[0].Start) < p.MaxOpen {
+		return nil, false
+	}
+	return r.Close(), true
+}
+
 // chunk — кусок одного файла за проход: распознаватель, начало и время каждой строки, законченные ожидания.
 type chunk struct {
-	src    Source
-	s      *File
-	rec    *waits.Recognizer
-	seen   map[string]int64 // ожидания этого прохода и прошлых, начатые после смещения: id первого вызова → начало
-	parser *transcript.Parser
-	nameOf func(cwd string) string
-	starts []int64
-	times  []time.Time
-	out    []Wait
-	name   string
-	last   time.Time
-	bad    int
-	badErr error // первая битая строка
+	src          Source
+	rec          *waits.Recognizer
+	seen         map[string]int64 // ожидания этого прохода и прошлых, начатые после смещения: id первого вызова → начало
+	parser       *transcript.Parser
+	nameOf       func(cwd string) string
+	lineCount    int
+	lineBase     int
+	linePos      map[int]int64
+	openAt       map[int]int64
+	cwd          string
+	out          []Wait
+	name         string
+	pendingAt    int64
+	hasPendingAt bool
+	bad          int
+	badErr       error // первая битая строка
 }
 
 // open — есть незаконченное ожидание: кусок на нём не обрывается.
@@ -192,9 +286,6 @@ func (c *chunk) open() bool {
 	_, ok := c.rec.Open()
 	return ok
 }
-
-// line — начало и время строки n (с 1) куска.
-func (c *chunk) line(n int) (int64, time.Time) { return c.starts[n-1], c.times[n-1] }
 
 // keep — законченные ожидания, кроме записанных в прошлый проход (перечитанный кусок отдаёт их снова).
 func (c *chunk) keep(found []waits.Wait) {
@@ -204,7 +295,7 @@ func (c *chunk) keep(found []waits.Wait) {
 		if _, dup := c.seen[key]; dup {
 			continue
 		}
-		c.seen[key], _ = c.line(w.Line)
+		c.seen[key] = 0
 		c.out = append(c.out, c.src.wait(w, c.name))
 	}
 }
@@ -219,23 +310,50 @@ func waitKey(w *waits.Wait) string {
 
 // add — строка raw (без перевода строки) с началом в pos.
 func (c *chunk) add(raw []byte, pos int64) {
+	c.lineCount++
+	line := c.lineBase + c.lineCount
 	evs, err := c.parser.Parse(raw)
 	if err != nil { // строка дописывается прямо сейчас или испорчена: считаем, первую — в ошибку прохода
 		c.bad++
 		if c.badErr == nil {
-			c.badErr = fmt.Errorf("строка %d куска: %w", len(c.starts)+1, err)
+			c.badErr = fmt.Errorf("строка %d куска: %w", c.lineCount, err)
 		}
 	}
 	for i := range evs {
-		c.last = cmp.Or(evs[i].Time, c.last)
-		if c.name == "" && evs[i].Cwd != "" && c.nameOf != nil {
-			c.name = c.nameOf(evs[i].Cwd)
+		if c.cwd == "" && evs[i].Cwd != "" {
+			c.cwd = evs[i].Cwd
+		}
+		if c.name == "" && c.cwd != "" && c.nameOf != nil {
+			c.name = c.nameOf(c.cwd)
 		}
 	}
-	c.starts, c.times = append(c.starts, pos), append(c.times, c.last)
 	for i := range evs {
-		evs[i].Line = len(c.starts)
+		evs[i].Line = line
 		c.keep(c.rec.Add(evs[i]))
+	}
+	c.linePos[line] = pos
+	c.updateOpen()
+}
+
+func (c *chunk) updateOpen() {
+	states := c.rec.OpenStates()
+	active := make(map[int]int64, len(states))
+	for _, state := range states {
+		if pos, ok := c.openAt[state.Line]; ok {
+			active[state.Line] = pos
+		} else if pos, ok := c.linePos[state.Line]; ok {
+			active[state.Line] = pos
+		} else if c.hasPendingAt && len(active) == 0 {
+			active[state.Line] = c.pendingAt // Older snapshots have only the first open start.
+		} else {
+			active[state.Line] = 0
+		}
+	}
+	c.openAt = active
+	if len(states) == 0 {
+		c.pendingAt, c.hasPendingAt = 0, false
+	} else {
+		c.pendingAt, c.hasPendingAt = active[states[0].Line], true
 	}
 }
 
@@ -243,53 +361,91 @@ func (c *chunk) add(raw []byte, pos int64) {
 // limit байт — только пока ожидание открыто: кусок кончается на строке без открытых, и следующий кусок
 // продолжает с неё же.
 func (p *Pass) read(f Source, s *File, now time.Time, limit int64) ([]Wait, int64, error) {
-	fh, err := os.Open(f.Path)
+	openFn := p.openFile
+	if openFn == nil {
+		openFn = func(path string) (io.ReaderAt, io.Closer, error) {
+			fh, err := os.Open(path)
+			return fh, fh, err
+		}
+	}
+	rd, closer, err := openFn(f.Path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("транскрипт: %w", err)
 	}
-	defer fh.Close()
-	if f.size < s.Offset { // файл переписан короче: заново с начала
-		s.Offset, s.Seen = 0, nil
+	defer closer.Close()
+	from, lineBase, pendingAt := s.Offset, s.Line, s.PendingAt
+	oldPending, oldSeen, cwd := s.Pending, s.Seen, s.Cwd
+	openAt := maps.Clone(s.OpenAt)
+	if f.size < from { // файл переписан короче: сдвиг к концу без повторной выдачи
+		s.Offset = f.size
+		return nil, 0, nil
 	}
-	c := &chunk{src: f, s: s, rec: waits.New(), parser: transcript.NewParser(), nameOf: p.Name, seen: map[string]int64{}}
-	maps.Copy(c.seen, s.Seen)
-	r := bufio.NewReaderSize(io.NewSectionReader(fh, s.Offset, f.size-s.Offset), 1<<20)
-	from, pos := s.Offset, s.Offset
-	for pos-from < limit || c.open() {
-		raw, err := r.ReadSlice('\n')
-		if errors.Is(err, bufio.ErrBufferFull) {
-			raw, err = readLong(r, raw)
-		}
-		if errors.Is(err, io.EOF) { // недописанный хвост — следующему проходу
-			break
-		}
+	rec := waits.New()
+	if oldPending != nil {
+		b, err := json.Marshal(oldPending)
 		if err != nil {
-			return c.out, pos - from, fmt.Errorf("транскрипт %s: %w", f.Key, err)
+			return nil, 0, fmt.Errorf("снимок распознавателя %s: %w", f.Key, err)
 		}
-		c.add(raw[:len(raw)-1], pos)
-		pos += int64(len(raw))
+		if err := json.Unmarshal(b, rec); err != nil || len(rec.OpenStates()) == 0 {
+			return nil, 0, fmt.Errorf("снимок распознавателя %s повреждён", f.Key)
+		}
+	}
+	if openAt == nil {
+		openAt = map[int]int64{}
+		if oldPending != nil {
+			states := rec.OpenStates()
+			if len(states) > 0 {
+				openAt[states[0].Line] = pendingAt
+			}
+		}
+	}
+	c := &chunk{src: f, rec: rec, parser: transcript.NewParser(), nameOf: p.Name,
+		seen: map[string]int64{}, lineBase: lineBase, linePos: map[int]int64{}, openAt: openAt, cwd: cwd,
+		pendingAt: pendingAt, hasPendingAt: oldPending != nil}
+	if c.cwd != "" && c.nameOf != nil {
+		c.name = c.nameOf(c.cwd)
+	}
+	maps.Copy(c.seen, oldSeen)
+	pos, err := scan(c, rd, from, f.size, limit)
+	if err != nil {
+		return nil, pos - from, fmt.Errorf("транскрипт %s: %w", f.Key, err)
 	}
 	next := pos
-	if n, ok := c.rec.Open(); ok {
-		if start, at := c.line(n); at.IsZero() || now.Sub(at) < p.MaxOpen {
-			next = start
-		} else {
-			c.keep(c.rec.Close())
-		}
+	open := c.rec.OpenStates()
+	if len(open) > 0 && !open[0].Start.IsZero() && now.Sub(open[0].Start) >= p.MaxOpen {
+		c.keep(c.rec.Close())
+		open = nil
 	}
-	s.Offset, s.Seen = next, nil
-	for k, start := range c.seen { // перечитываться будет только с next: раньше начатые не вернутся
-		if start >= next {
-			if s.Seen == nil {
-				s.Seen = map[string]int64{}
-			}
-			s.Seen[k] = start
-		}
+	s.Offset, s.Cwd = next, c.cwd
+	if len(open) == 0 {
+		s.Pending, s.Seen, s.Line, s.PendingAt, s.OpenAt = nil, nil, 0, 0, nil
+	} else {
+		s.Pending, s.Seen, s.Line, s.PendingAt, s.OpenAt = c.rec, c.seen, c.lineBase+c.lineCount, c.pendingAt, c.openAt
 	}
 	if c.bad > 0 {
 		return c.out, pos - from, fmt.Errorf("транскрипт %s: строк не JSON %d (%w)", f.Key, c.bad, c.badErr)
 	}
 	return c.out, pos - from, nil
+}
+
+func scan(c *chunk, rd io.ReaderAt, from, size, limit int64) (int64, error) {
+	r := bufio.NewReaderSize(io.NewSectionReader(rd, from, max(size-from, 0)), 1<<20)
+	pos := from
+	for pos-from < limit || c.open() {
+		raw, err := r.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			raw, err = readLong(r, raw)
+		}
+		if errors.Is(err, io.EOF) {
+			return pos, nil // недописанный хвост — следующему проходу
+		}
+		if err != nil {
+			return pos, fmt.Errorf("чтение строки транскрипта: %w", err)
+		}
+		c.add(raw[:len(raw)-1], pos)
+		pos += int64(len(raw))
+	}
+	return pos, nil
 }
 
 // readLong дочитывает строку длиннее буфера: записи с выводом инструментов бывают в десятки мегабайт.
