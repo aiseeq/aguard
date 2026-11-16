@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/worktree"
 	"github.com/aiseeq/akit/oneshot"
 	"github.com/aiseeq/akit/price"
 )
@@ -78,10 +80,28 @@ func tilde(path, home string) string {
 	return path
 }
 
+// projectDir resolves a cwd inside a worktree to the repository folder.
+func projectDir(cwd string) string {
+	for dir := cwd; ; dir = filepath.Dir(dir) {
+		repo, err := worktree.Repo(dir)
+		if err == nil && repo != "" {
+			return repo
+		}
+		// A malformed .git file marks the worktree root too; retain the event cwd.
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return cwd
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return cwd
+		}
+	}
+}
+
 // Input — текст для модели: сессия, время, конец сообщения агента, реплика и прежние записи-кандидаты.
 func Input(p *Pending, home string, candidates []Entry) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Сессия: %s, папка %s\nВремя: %s\n", p.Event.Name, tilde(p.Event.Cwd, home),
+	fmt.Fprintf(&b, "Сессия: %s, папка %s\nВремя: %s\n", p.Event.Name, tilde(projectDir(p.Event.Cwd), home),
 		p.Event.At.Local().Format("02.01 15:04 MST"))
 	fmt.Fprintf(&b, "В ответ на (конец сообщения агента): %s\nРеплика:\n%s\n", strings.TrimSpace(p.InReply+" "), p.Event.Text)
 	if len(candidates) == 0 {
@@ -107,7 +127,7 @@ func (c *Config) Classify(ctx context.Context, model Model, p *Pending, home str
 	ref := Ref(ev.Session, ev.Line)
 	rec := Record{At: now, Said: ev.At, Session: ev.Session, Name: ev.Name, Ref: ref, Chars: len([]rune(ev.Text)),
 		Attempt: p.Attempts}
-	project := tilde(ev.Cwd, home)
+	project := tilde(projectDir(ev.Cwd), home)
 	candidates := Candidates(prior, project, ev.Text, c.Candidates)
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout.D())
 	defer cancel()

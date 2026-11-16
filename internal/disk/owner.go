@@ -1,14 +1,11 @@
 package disk
 
 import (
-	"errors"
-	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
+
+	"github.com/aiseeq/aguard/internal/worktree"
 )
 
 // Session — живая сессия реестра: имя и папка.
@@ -54,7 +51,7 @@ func (o *Owners) Of(path string) (owner, why string) {
 		filepath.Base(filepath.Dir(filepath.Dir(parent))) == "claude-tmp" {
 		return o.scratchpad(filepath.Base(path), filepath.Base(parent))
 	}
-	repo, err := worktreeRepo(path)
+	repo, err := worktree.Repo(path)
 	if err != nil {
 		return o.Lead, "lead: " + err.Error()
 	}
@@ -108,28 +105,6 @@ func (o *Owners) admin(match func(prefix string) bool) (string, string) {
 		return o.Lead, "lead"
 	}
 	return o.Admins[best], "admin"
-}
-
-// worktreeRepo — репозиторий worktree по его файлу .git («gitdir: <репо>/.git/worktrees/<имя>»); не worktree (нет
-// .git, .git — папка, path — файл или чужая закрытая папка, как systemd-private-* в /var/tmp) — пусто.
-func worktreeRepo(path string) (string, error) {
-	b, err := os.ReadFile(filepath.Join(path, ".git"))
-	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EISDIR) ||
-		errors.Is(err, syscall.ENOTDIR) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("worktree %s: %w", path, err)
-	}
-	dir, ok := strings.CutPrefix(strings.TrimSpace(string(b)), "gitdir: ")
-	if !ok {
-		return "", nil
-	}
-	repo, _, ok := strings.Cut(dir, "/.git/worktrees/")
-	if !ok {
-		return "", nil
-	}
-	return repo, nil
 }
 
 // AdminOf — через кого сигнал хозяину owner: админ пространства его папки (живая сессия или проект таблицы cl),
