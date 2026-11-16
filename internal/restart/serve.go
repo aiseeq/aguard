@@ -26,6 +26,8 @@ type Request struct {
 	ArgsProblem string `json:"args_problem"`
 	// Typed — сжатие и сброс cl наберёт в живой сессии под pty (type_mode act): /clear не теряет таймеры CronCreate.
 	Typed bool `json:"typed,omitempty"`
+	// Full — cl --cl-check просит проверить git-дерево, даже если другой довод уже запрещает сброс.
+	Full bool `json:"full,omitempty"`
 	// Clean — cl под pty видел весь ввод человека: после запуска claude или последней отправки (Enter, Ctrl+C) текста
 	// он не набирал. Текст в поле тогда — подсказка Claude Code, не черновик (случай chooks-master 30.10: у сессий,
 	// которые ведут письма, реплик человека в транскрипте нет, и признак по atime pts не срабатывал).
@@ -134,7 +136,7 @@ func (j *Judge) Answer(cfg *Config, cc *CompactConfig, req Request, now time.Tim
 	f.cleanField(req.Clean)
 	name := firstNonEmpty(f.Name, req.Name)
 	v := decide(f, allowance{idle: cfg.Idle.D(), argsProblem: req.ArgsProblem, typed: req.Typed, stale: req.Stale})
-	cv := j.compactWithChildren(cfg, cc, Request{Pid: req.Pid, Name: name, ArgsProblem: req.ArgsProblem, Typed: req.Typed, Clean: req.Clean}, now, children)
+	cv := j.compactWithChildren(cfg, cc, Request{Pid: req.Pid, Name: name, ArgsProblem: req.ArgsProblem, Typed: req.Typed, Clean: req.Clean, Full: req.Full}, now, children)
 	if cv.Compact {
 		v.Lost = cv.Lost
 	}

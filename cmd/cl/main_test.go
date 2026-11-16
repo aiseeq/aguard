@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/akit/proc"
 )
 
 // TestMain: с CL_TEST_RUN_MAIN=1 тестовый бинарь — это cl (main с аргументами процесса), так main проверяется
@@ -297,8 +298,18 @@ func TestRunCheck(t *testing.T) {
 	write(t, filepath.Join(w.registry.Dir, "999999999.json"), `{"pid":999999999,"name":"dead","procStart":"500"}`)
 	journalFile := filepath.Join(w.dir, "restart.log")
 	write(t, filepath.Join(w.dir, "config.json"), `{"restart":{"mode":"log","journal":"`+journalFile+`"}}`)
-	socket := fakeAguard(t, `{"v":1,"restart":true,"key":"true,false","session_id":"s1","name":"x-master",`+
-		`"running":"2.1.309","installed":"2.1.310","compact_against":[{"code":"early"}],"reset_against":[{"code":"hint"}]}`)
+	requests := make(chan restart.Request, 1)
+	socket := fakeAguardFunc(t, func(req restart.Request) string {
+		requests <- req
+		return `{"v":1,"restart":true,"fresh":true,"key":"true,true","session_id":"s1","name":"x-master",` +
+			`"running":"2.1.310","installed":"2.1.310","compact_against":[` +
+			`{"code":"status","text":"Claude Code занят: waiting"},` +
+			`{"code":"early","text":"запрос 2 мин назад, окно с 53 мин"}],"reset_against":[` +
+			`{"code":"early","text":"запрос 2 мин назад, сброс с 53 мин"},` +
+			`{"code":"status","text":"Claude Code занят: waiting"},` +
+			`{"code":"tree","text":"в /work/proj незакоммиченное (1): M file.go"},` +
+			`{"code":"crons","text":"таймеры пропали бы: c1 «утренний отчёт»"}]}`
+	})
 	l := launcher{claude: w.claude, home: w.dir, configFile: filepath.Join(w.dir, "config.json"), registry: w.registry, aguard: socket}
 
 	out := captureStdout(t, func() {
@@ -306,13 +317,73 @@ func TestRunCheck(t *testing.T) {
 			t.Errorf("runCheck = %d", code)
 		}
 	})
-	want := "check x-master pid=" + strconv.Itoa(os.Getpid()) + " 2.1.309→2.1.310 log: перезапустил бы: простаивает, ничего не идёт" +
-		"; сжатие: нет (early); сброс: нет (hint)"
+	if req := <-requests; !req.Full {
+		t.Errorf("runCheck sent Full=%v, want true", req.Full)
+	}
+	wantHeader := "check x-master pid=" + strconv.Itoa(os.Getpid()) + " 2.1.310→2.1.310 log: версия свежая"
+	want := wantHeader + "; сжатие: нет; сброс: нет" +
+		"\n  Claude Code занят: waiting" +
+		"\n  запрос 2 мин назад; сжатие с 53 мин, сброс с 53 мин" +
+		"\n  сброс: в /work/proj незакоммиченное (1): M file.go" +
+		"\n  сброс: таймеры пропали бы: c1 «утренний отчёт»"
 	if strings.TrimSpace(out) != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
-	if lines := readLines(t, journalFile); len(lines) != 1 || !strings.HasSuffix(lines[0], " "+want) {
+	journalWant := wantHeader + "; сжатие и сброс: нет — Claude Code занят: waiting" +
+		"; сжатие: нет — запрос 2 мин назад, окно с 53 мин; сброс: нет — запрос 2 мин назад, сброс с 53 мин" +
+		"; сброс: нет — в /work/proj незакоммиченное (1): M file.go; таймеры пропали бы: c1 «утренний отчёт»"
+	if lines := readLines(t, journalFile); len(lines) != 1 || !strings.HasSuffix(lines[0], " "+journalWant) {
 		t.Errorf("журнал = %q", lines)
+	}
+}
+
+func TestCommonCheckReasonPrintedOnce(t *testing.T) {
+	common := restart.Reason{Code: "args", Text: "свой флаг claude --append-system-prompt: потерялся бы"}
+	entries := []checkEntry{
+		{answer: restart.Answer{Verdict: restart.Verdict{Fresh: true}, CompactAgainst: []restart.Reason{common}}},
+		{answer: restart.Answer{Verdict: restart.Verdict{Fresh: true}, ResetAgainst: []restart.Reason{common}}},
+	}
+	omitted, reasons := commonCheckReasons(entries)
+	if len(reasons) != 1 || reasons[0] != common || !omitted[reasonKey(common)] {
+		t.Fatalf("общие доводы = %+v, omitted=%v", reasons, omitted)
+	}
+	for i, entry := range entries {
+		line := checkLineFiltered("log", "x", i+1, entry.answer, nil, omitted)
+		if strings.Contains(line, common.Text) {
+			t.Errorf("сессия %d повторила общий довод: %s", i+1, line)
+		}
+	}
+}
+
+func TestRunCheckCommonReasonAfterTwoSessions(t *testing.T) {
+	w := newWorld(t)
+	w.link(t, os.Getpid())
+	other := exec.Command("sleep", "60")
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = proc.StopChild(other.Process.Pid, 0, func() error { return other.Process.Kill() })
+		_ = other.Wait()
+	})
+	pid := other.Process.Pid
+	symlink(t, filepath.Join(w.dir, "proc-tmpl"), filepath.Join(w.registry.ProcRoot, strconv.Itoa(pid)))
+	write(t, filepath.Join(w.registry.Dir, strconv.Itoa(pid)+".json"),
+		`{"pid":`+strconv.Itoa(pid)+`,"sessionId":"s2","name":"y-master","kind":"interactive","procStart":"500"}`)
+	common := `{"code":"args","text":"свой флаг claude --append-system-prompt: потерялся бы"}`
+	socket := fakeAguard(t, `{"v":1,"fresh":true,"name":"x-master","running":"2.1.310","installed":"2.1.310","against":[`+common+`]}`)
+	l := launcher{claude: w.claude, home: w.dir, configFile: filepath.Join(w.dir, "config.json"), registry: w.registry, aguard: socket}
+	out := captureStdout(t, func() {
+		if code := runCheck(l); code != 0 {
+			t.Errorf("runCheck = %d", code)
+		}
+	})
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "check ") || !strings.HasPrefix(lines[1], "check ") {
+		t.Fatalf("вывод для двух сессий: %q", out)
+	}
+	if want := "у всех: свой флаг claude --append-system-prompt: потерялся бы"; lines[2] != want {
+		t.Errorf("общая строка = %q, want %q", lines[2], want)
 	}
 }
 

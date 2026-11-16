@@ -2,6 +2,8 @@ package restart
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,9 +20,26 @@ type Reason struct {
 func Texts(rs []Reason) []string {
 	texts := make([]string, len(rs))
 	for i, r := range rs {
-		texts[i] = r.Text
+		texts[i] = Text(r)
 	}
 	return texts
+}
+
+// Text — текст довода; пустой Text сохраняет Code, чтобы информация не терялась.
+func Text(r Reason) string {
+	if r.Text != "" {
+		return r.Text
+	}
+	return r.Code
+}
+
+// Header — начало строки с именем сессии, pid, версиями и режимом cl.
+func Header(mode, name string, pid int, a Answer) string {
+	head := fmt.Sprintf("%s pid=%d %s→%s %s: ", name, pid, OrDash(a.Running), OrDash(a.Installed), mode)
+	if a.Stale != "" && !a.Fresh {
+		head = fmt.Sprintf("%s pid=%d %s→%s, %s %s: ", name, pid, OrDash(a.Running), OrDash(a.Installed), a.Stale, mode)
+	}
+	return head
 }
 
 // Verdict — решение о перезапуске сессии и его доводы.
@@ -187,7 +206,18 @@ func sessionChecks(f facts, a action, against againstFunc) {
 		against("kind", "сессия не интерактивная: %q", f.Kind)
 	}
 	if f.Status != "idle" {
-		against("status", "Claude Code: %s", OrDash(f.Status))
+		var text string
+		switch f.Status {
+		case "busy", "working", "waiting":
+			text = "сессия занята: Claude Code — " + f.Status
+		case "":
+			text = "статус Claude Code неизвестен"
+		case "error":
+			text = "Claude Code: ошибка"
+		default:
+			text = "статус Claude Code: " + f.Status
+		}
+		against("status", "%s", text)
 	}
 	hookChecks(f, a, against)
 }
@@ -219,7 +249,7 @@ func inputChecks(f facts, against againstFunc) {
 // Набор под pty процесс не трогает: дети и фоновые задачи живут, против — только суб-агенты у /clear.
 func workChecks(f facts, a action, against againstFunc) {
 	if len(f.Children) > 0 && a == restart {
-		against("children", "дети процесса: %s", strings.Join(f.Children, ", "))
+		against("children", "процессы-потомки: %s", childNames(f.Children))
 	}
 	if len(f.Transcript.Pending) > 0 {
 		against("pending", "инструмент без результата: %s", strings.Join(f.Transcript.Pending, ", "))
@@ -259,8 +289,44 @@ func hookChecks(f facts, a action, against againstFunc) {
 			against("hook-paused", "chooks: paused, а таймеров в транскрипте нет — непонятно, чего ждёт")
 		}
 	default:
-		against("hook", "chooks: %s", OrDash(f.HookState))
+		switch f.HookState {
+		case "busy", "working", "waiting":
+			against("hook", "сессия занята: chooks — %s", f.HookState)
+		case "error":
+			against("hook", "chooks: ошибка")
+		default:
+			against("hook", "chooks: %s", f.HookState)
+		}
 	}
+}
+
+// childNames — имена процессов-потомков без pid и служебных оболочек; одинаковые имена сворачиваются в счётчик.
+func childNames(children []string) string {
+	counts := map[string]int{}
+	for _, child := range children {
+		_, name, ok := strings.Cut(child, " ")
+		if !ok {
+			name = child
+		}
+		name = strings.TrimSpace(name)
+		switch name {
+		case "bash", "sh", "tail", "cut", "wfor", "timeout":
+			continue
+		}
+		if name != "" {
+			counts[name]++
+		}
+	}
+	if len(counts) == 0 {
+		return "только служебные"
+	}
+	names := slices.Sorted(maps.Keys(counts))
+	for i, name := range names {
+		if counts[name] > 1 {
+			names[i] = fmt.Sprintf("%s ×%d", name, counts[name])
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 // cronList — таймеры для довода: id и начало текста.

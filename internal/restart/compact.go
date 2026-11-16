@@ -213,9 +213,13 @@ func (j *Judge) compactWithChildren(cfg *Config, c *CompactConfig, req Request, 
 	ctx := f.Transcript.Context
 	off := []Reason{{Code: "off", Text: "сжатие выключено в конфиге aguard"}}
 	v, r := CompactVerdict{Against: off}, ResetVerdict{Against: off}
-	if c.Mode != CompactOff {
+	if c.Mode == CompactOff {
+		if req.Full {
+			treeCheck(&r, p.tree, f.Cwd)
+		}
+	} else {
 		v = decideCompact(f, c, allow, now)
-		if r = decideReset(f, c, allow, now); r.Reset {
+		if r = decideReset(f, c, allow, now); r.Reset || req.Full {
 			treeCheck(&r, p.tree, f.Cwd)
 		}
 		preferReset(&v, r)
