@@ -32,6 +32,14 @@ func main() {
 	if dispatchEarlyArgs(os.Args[0], os.Args[1:], os.Stdout, os.Stderr, runOOMPrefix) {
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == listFlag {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cl: %v\n", err)
+			os.Exit(2)
+		}
+		os.Exit(runList(os.Args[2:], session.ForHome(home), os.Stdout, os.Stderr))
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fail(err)
@@ -137,6 +145,7 @@ restart.resume_max_age_hours. Если роль получает строку и
 выполняй порядок из файла возобновления.
 
 Аргументы Claude Code передаются через cl. Справка Claude Code: claude --help.
+cl --cl-ls [--under <папка>] [--json] — список живых сессий с рабочими папками.
 `
 
 func oomPrefixArgs(argv0 string, args []string) ([]string, bool) {
