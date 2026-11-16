@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/akit/proc"
 )
 
@@ -142,11 +143,17 @@ func TestMessage(t *testing.T) {
 	if strings.Contains(got, "\n") {
 		t.Error("письмо — одной строкой")
 	}
-	got = WaitMessage(task, &Origin{Command: "until grep -q DONE out.txt; do sleep 60; done"}, now)
-	want = "aguard: фоновое ожидание b7xi68io0 «until grep -q DONE out.txt; do sleep 60; done» идёт 4 ч 30 мин, срок по " +
-		"правилу — час: проверь, нужен ли новый срок, или сними — TaskStop b7xi68io0."
+	cfg := Default()
+	cfg.Age = policy.Duration(90 * time.Minute)
+	got = WaitMessage(task, &Origin{Command: "until grep -q DONE out.txt; do sleep 60; done"}, now, cfg)
+	want = "aguard: фоновое ожидание b7xi68io0 «until grep -q DONE out.txt; do sleep 60; done» идёт 4 ч 30 мин, " +
+		"срок — 1 ч 30 мин (bgtask.age): сними — TaskStop b7xi68io0; ждать дольше — отложи тикет: " +
+		"tk wait <тикет> --until <когда>."
 	if got != want {
 		t.Errorf("\n got %s\nwant %s", got, want)
+	}
+	if got := Span(time.Hour); got != "1 ч" {
+		t.Errorf("Span(time.Hour) = %q, want %q", got, "1 ч")
 	}
 }
 

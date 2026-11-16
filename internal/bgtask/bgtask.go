@@ -304,10 +304,11 @@ func Message(t *Task, o *Origin, now time.Time) string {
 		"увёл в фон по таймауту. Нужна ли? Если нет — TaskStop %s.", title(t, o), Span(now.Sub(t.Start)), Span(now.Sub(t.Written)), t.ID)
 }
 
-// WaitMessage — письмо владельцу нарочно фонового ожидания дольше часа, одной строкой.
-func WaitMessage(t *Task, o *Origin, now time.Time) string {
-	return fmt.Sprintf("aguard: фоновое ожидание %s идёт %s, срок по правилу — час: проверь, нужен ли новый срок, "+
-		"или сними — TaskStop %s.", title(t, o), Span(now.Sub(t.Start)), t.ID)
+// WaitMessage — письмо владельцу нарочно фонового ожидания дольше срока из конфига, одной строкой.
+func WaitMessage(t *Task, o *Origin, now time.Time, cfg Config) string {
+	return fmt.Sprintf("aguard: фоновое ожидание %s идёт %s, срок — %s (bgtask.age): сними — TaskStop %s; "+
+		"ждать дольше — отложи тикет: tk wait <тикет> --until <когда>.",
+		title(t, o), Span(now.Sub(t.Start)), Span(cfg.Age.D()), t.ID)
 }
 
 // title — id задачи, её описание или начало команды и суб-агент.
@@ -370,6 +371,9 @@ func Span(d time.Duration) string {
 	m := int(d.Minutes())
 	if m < 60 {
 		return fmt.Sprintf("%d мин", m)
+	}
+	if m%60 == 0 {
+		return fmt.Sprintf("%d ч", m/60)
 	}
 	return fmt.Sprintf("%d ч %02d мин", m/60, m%60)
 }

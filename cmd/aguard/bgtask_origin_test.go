@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/bgtask"
+	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
 )
@@ -104,6 +105,93 @@ func TestBgtaskRoundDoesNotNotifyAlreadySeenTaskAgain(t *testing.T) {
 	}
 	if !state["balready"].Auto || state["balready"].Missing {
 		t.Fatalf("состояние ранее уведомлённой задачи изменилось: %+v", state["balready"])
+	}
+}
+
+func TestBgtaskRoundWaitLetterUsesConfiguredAge(t *testing.T) {
+	var logs strings.Builder
+	home, root, stateDir, registryDir := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	sock, delivered := quietListener(t)
+	const uid, pid, holder = 1000, 500, 501
+	started := time.Now().Add(-2 * time.Hour)
+	output := filepath.Join(t.TempDir(), "-home-alice", "s1", "tasks", "bwaitcfg.output")
+	if err := os.MkdirAll(filepath.Dir(output), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(output, []byte("waiting\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fdDir := filepath.Join(root, "500", "fd")
+	if err := os.MkdirAll(fdDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(output, filepath.Join(fdDir, "1")); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(session.ProjectsDir(home), "-home-alice", "s1.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_wait","name":"Bash","input":{"command":"until grep -q DONE out.txt; do sleep 60; done","description":"Ждать завершения"}}]}}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_wait","content":"Command running in background with ID: bwaitcfg."}]},"toolUseResult":{"backgroundTaskId":"bwaitcfg"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcript, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "bgtask"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(registryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := json.Marshal(session.Info{Pid: holder, Name: "test", SocketPath: sock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(registryDir, "501.json"), info, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{
+		home: home, stateDir: stateDir, procDir: root, uid: uid,
+		reg: session.Registry{Dir: registryDir},
+		log: slog.New(slog.NewTextHandler(&logs, nil)),
+		bgtaskSnapshot: func(string, int, time.Time) (*proc.Snapshot, error) {
+			return &proc.Snapshot{Procs: map[int]*proc.Proc{
+				pid:    {Pid: pid, UID: uid, Session: holder, SessionID: "s1", StartAt: started},
+				holder: {Pid: holder, UID: uid, StartAt: started},
+			}}, nil
+		},
+	}
+	cfg := bgtask.Default()
+	cfg.Mode = bgtask.ModeAlert
+	cfg.Age = policy.Duration(90 * time.Minute)
+	if err := a.bgtaskRound(&cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	var msg string
+	select {
+	case msg = <-delivered:
+	case <-time.After(time.Second):
+		t.Fatal("bgtaskRound не доставил письмо")
+	}
+	var envelope struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(msg), &envelope); err != nil {
+		t.Fatalf("доставлено некорректное письмо: %v: %s", err, msg)
+	}
+	msg = envelope.Message.Content
+	for _, want := range []string{
+		"срок — 1 ч 30 мин (bgtask.age)",
+		"TaskStop bwaitcfg",
+		"tk wait <тикет> --until <когда>",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("отправленное письмо не содержит %q:\n%s", want, msg)
+		}
 	}
 }
 

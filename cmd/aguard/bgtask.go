@@ -132,7 +132,7 @@ func (a *app) bgtaskNotify(cfg *bgtask.Config, t *bgtask.Task, o *bgtask.Origin,
 	case o.Auto:
 		msg = bgtask.Message(t, o, now)
 	case wait != "":
-		value, prefix, msg = int64(now.Sub(t.Start).Minutes()), "wait_", bgtask.WaitMessage(t, o, now)
+		value, prefix, msg = int64(now.Sub(t.Start).Minutes()), "wait_", bgtask.WaitMessage(t, o, now, *cfg)
 	default:
 		a.log.Info("aguard bgtask: застывшая задача — нарочно фоновый прогон, не пишу", "task", t.ID,
 			"description", o.Description, "age", bgtask.Span(now.Sub(t.Start)), "quiet", bgtask.Span(now.Sub(t.Written)))
