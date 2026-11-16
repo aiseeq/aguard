@@ -50,6 +50,8 @@ Observer commands support `-dry-run` where shown by `aguard` usage. Reports acce
 
 The repository also includes [`cl`](cmd/cl/README.md), a Claude Code session launcher that asks aguard for restart and compaction decisions.
 
+`cl --cl-ls [--under <папка>] [--json] [--timers]` lists live sessions. Add `--timers` to show each session's recovered CronCreate timers; JSON output includes them in each session's `timers` field; if the session transcript cannot be read, the text output prints `<session>	ошибка: <text>` and JSON has `timers_error` instead of `timers`.
+
 ## Configuration
 
 The daemon reads `~/.config/aguard/config.toml` and reloads it on each observer pass. The [example configuration](deploy/config.example.toml) documents all available fields and defaults. The main sections are:

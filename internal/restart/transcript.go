@@ -628,6 +628,9 @@ func short(s string) string {
 	return s
 }
 
+// ShortPrompt возвращает начало промпта в формате подписи таймера.
+func ShortPrompt(s string) string { return short(s) }
+
 // scanCache — разбор транскрипта между проверками: транскрипт лида — десятки мегабайт, а проверка раз в минуту.
 // Файл не менялся — прошлый разбор; дописан — разбор продолжается с конца разобранного.
 type scanCache struct {
