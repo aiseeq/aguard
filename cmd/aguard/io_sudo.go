@@ -35,6 +35,7 @@ var (
 
 const (
 	sudoJournalTimeout       = 2 * time.Second
+	sudoReportJournalTimeout = 15 * time.Second
 	sudoHistoricalWindow     = 12 * time.Hour
 	sudoLiveWindow           = 24 * time.Hour
 	sudoNegativeCacheWindow  = 5 * time.Minute
@@ -122,6 +123,10 @@ func (c *sudoLookupCache) add(number string, checkedAt time.Time, bootID string,
 
 // sudoInfo enriches only root cgroups, preserves loaded attribution and handles main and foreign sessions independently.
 func (a *app) sudoInfo(ctx context.Context, c *iowatch.Case, cache *sudoLookupCache, live bool) error {
+	return a.sudoInfoWithTimeout(ctx, c, cache, live, sudoJournalTimeout)
+}
+
+func (a *app) sudoInfoWithTimeout(ctx context.Context, c *iowatch.Case, cache *sudoLookupCache, live bool, journalTimeout time.Duration) error {
 	if c == nil || c.Culprits == nil {
 		return nil
 	}
@@ -148,7 +153,7 @@ func (a *app) sudoInfo(ctx context.Context, c *iowatch.Case, cache *sudoLookupCa
 		}
 		if info == nil {
 			var err error
-			info, err = a.lookupSudoSession(ctx, number, c.BootID, c.Start, live && fullRootPath)
+			info, err = a.lookupSudoSession(ctx, number, c.BootID, c.Start, live && fullRootPath, journalTimeout)
 			if err != nil {
 				lookupErrors = append(lookupErrors, fmt.Errorf("session-c%s: %w", number, err))
 				continue
@@ -203,29 +208,29 @@ func infoBootID(info *iowatch.SudoInfo, fallback string) string {
 	return fallback
 }
 
-func (a *app) lookupSudoSession(parent context.Context, number, caseBootID string, at time.Time, live bool) (*iowatch.SudoInfo, error) {
+func (a *app) lookupSudoSession(parent context.Context, number, caseBootID string, at time.Time, live bool, journalTimeout time.Duration) (*iowatch.SudoInfo, error) {
 	until := at.Add(sudoHistoricalWindow).Format(time.RFC3339)
 	if live {
-		if info := a.liveSudoSession(parent, number, caseBootID, at, until); info != nil {
+		if info := a.liveSudoSession(parent, number, caseBootID, at, until, journalTimeout); info != nil {
 			return info, nil
 		}
 	}
 	since := at.Add(-sudoHistoricalWindow).Format(time.RFC3339)
-	sudoRows, err := a.readSudoJournal(parent, since, until, "_COMM=sudo")
+	sudoRows, err := a.readSudoJournal(parent, journalTimeout, since, until, "_COMM=sudo")
 	if err != nil {
 		return nil, err
 	}
 	if info := sudoForExactSession(a.log, number, caseBootID, at, sudoRows); info != nil {
 		return info, nil
 	}
-	logindRows, err := a.readSudoJournal(parent, since, until, "_SYSTEMD_UNIT=systemd-logind.service")
+	logindRows, err := a.readSudoJournal(parent, journalTimeout, since, until, "_SYSTEMD_UNIT=systemd-logind.service")
 	if err != nil {
 		return nil, err
 	}
 	return sudoForLogindSession(a.log, number, caseBootID, at, sudoRows, logindRows), nil
 }
 
-func (a *app) liveSudoSession(ctx context.Context, number, caseBootID string, at time.Time, until string) *iowatch.SudoInfo {
+func (a *app) liveSudoSession(ctx context.Context, number, caseBootID string, at time.Time, until string, journalTimeout time.Duration) *iowatch.SudoInfo {
 	pids, err := a.sessionPIDs(number)
 	if err != nil || len(pids) == 0 {
 		a.debugSudoError("read live sudo session PIDs", err)
@@ -236,7 +241,7 @@ func (a *app) liveSudoSession(ctx context.Context, number, caseBootID string, at
 		a.debugSudoError("read live sudo session boot ID", err)
 		return nil
 	}
-	rows, err := a.readSudoJournal(ctx, at.Add(-sudoLiveWindow).Format(time.RFC3339), until, sudoPIDFilters(pids)...)
+	rows, err := a.readSudoJournal(ctx, journalTimeout, at.Add(-sudoLiveWindow).Format(time.RFC3339), until, sudoPIDFilters(pids)...)
 	if err != nil {
 		a.debugSudoError("read live sudo session journal", err)
 		return nil
@@ -258,24 +263,36 @@ func sudoPIDFilters(pids []int) []string {
 	return filters
 }
 
-func (a *app) readSudoJournal(ctx context.Context, since, until string, filters ...string) ([]journalRecord, error) {
-	callCtx, cancel := context.WithTimeout(ctx, sudoJournalTimeout)
+func (a *app) readSudoJournal(ctx context.Context, timeout time.Duration, since, until string, filters ...string) ([]journalRecord, error) {
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if a.sudoJournalSource != nil {
-		return a.sudoJournalSource(callCtx, since, until, filters...)
+		rows, err := a.sudoJournalSource(callCtx, since, until, filters...)
+		if err != nil && callCtx.Err() != nil {
+			return nil, journalContextError(callCtx.Err(), timeout)
+		}
+		return rows, err
 	}
-	return readJournal(callCtx, since, until, filters...)
+	return readJournal(callCtx, timeout, since, until, filters...)
 }
 
-func readJournal(parent context.Context, since, until string, filters ...string) ([]journalRecord, error) {
-	ctx, cancel := context.WithTimeout(parent, sudoJournalTimeout)
-	defer cancel()
+func readJournal(parent context.Context, timeout time.Duration, since, until string, filters ...string) ([]journalRecord, error) {
 	args := append([]string{"--no-pager", "-o", "json", "--since", since, "--until", until}, filters...)
-	b, err := exec.CommandContext(ctx, "journalctl", args...).Output()
+	b, err := exec.CommandContext(parent, "journalctl", args...).Output()
 	if err != nil {
+		if parent.Err() != nil {
+			return nil, journalContextError(parent.Err(), timeout)
+		}
 		return nil, fmt.Errorf("journalctl: %w", err)
 	}
 	return parseJournalJSON(string(b))
+}
+
+func journalContextError(err error, timeout time.Duration) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("journalctl: прерван: %w", err)
+	}
+	return fmt.Errorf("journalctl: таймаут %s: %w", timeout, err)
 }
 
 func liveSudoForPIDs(logger *slog.Logger, number string, rows []journalRecord, pids []int, bootID string, at time.Time) *iowatch.SudoInfo {

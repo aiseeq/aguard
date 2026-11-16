@@ -266,25 +266,7 @@ func (a *app) ioReport(ctx context.Context, path string, live bool, since, until
 	if err != nil {
 		return err
 	}
-	cache := newSudoLookupCache()
-	for i := range got.cases {
-		if err := a.sudoInfo(ctx, &got.cases[i], cache, false); err != nil {
-			a.debugSudoError("io report", err)
-		}
-	}
-	sudoMatched, sudoSessions := 0, 0
-	sudoAgentOwners := 0
-	for i := range got.cases {
-		if hasRootSessionCandidate(&got.cases[i]) {
-			sudoSessions++
-			if got.cases[i].Sudo != nil || got.cases[i].ForeignSudo != nil {
-				sudoMatched++
-			}
-			if (got.cases[i].Sudo != nil && got.cases[i].Sudo.Owner != "") || (got.cases[i].ForeignSudo != nil && got.cases[i].ForeignSudo.Owner != "") {
-				sudoAgentOwners++
-			}
-		}
-	}
+	sudoStats := a.ioReportSudoStats(ctx, got.cases)
 	sum := iowatch.Summarize(iowatch.FilterCases(got.cases, who), since, until, minDur)
 	cover := iowatch.Cover(got.cover, got.source, since, until, time.Now().Add(-cfg.CasesKeep.D()))
 	sum.Coverage = &cover
@@ -294,13 +276,70 @@ func (a *app) ioReport(ctx context.Context, path string, live bool, since, until
 		return enc.Encode(sum)
 	}
 	writeIOReport(a.out, &sum)
-	fmt.Fprintf(a.out, "root session-c*: сопоставлено %d из %d случаев; найден хозяин-агент у %d\n", sudoMatched, sudoSessions, sudoAgentOwners)
+	fmt.Fprintf(a.out, "root session-c*: сопоставлено %d из %d случаев; найден хозяин-агент у %d\n", sudoStats.matched, sudoStats.sessions, sudoStats.agentOwners)
+	if sudoStats.journalErrorCases > 0 {
+		fmt.Fprintf(a.out, "не сопоставлено из-за ошибки журнала: %d (первая ошибка: %s)\n", sudoStats.journalErrorCases, sudoStats.firstJournalError)
+	}
 	gui, guiErr := guiwatch.ReadReport(a.dir("gui"), since)
 	if guiErr != nil {
 		return fmt.Errorf("прочитать отчёт gui: %w", guiErr)
 	}
 	fmt.Fprintf(a.out, "срезов интерфейса: %d, самый длинный S по wchan: %s\n", len(gui.Slices), guiwatch.LongestSleep(gui))
 	return nil
+}
+
+type ioReportSudoStats struct {
+	matched           int
+	sessions          int
+	agentOwners       int
+	journalErrorCases int
+	firstJournalError string
+}
+
+func (a *app) ioReportSudoStats(ctx context.Context, cases []iowatch.Case) ioReportSudoStats {
+	stats := ioReportSudoStats{}
+	cache := newSudoLookupCache()
+	for i := range cases {
+		c := &cases[i]
+		err := a.sudoInfoWithTimeout(ctx, c, cache, false, sudoReportJournalTimeout)
+		if err != nil {
+			a.debugSudoError("io report", err)
+		}
+		if !hasRootSessionCandidate(c) {
+			continue
+		}
+		stats.sessions++
+		matched := c.Sudo != nil || c.ForeignSudo != nil
+		if matched {
+			stats.matched++
+		}
+		if (c.Sudo != nil && c.Sudo.Owner != "") || (c.ForeignSudo != nil && c.ForeignSudo.Owner != "") {
+			stats.agentOwners++
+		}
+		if err == nil || matched {
+			continue
+		}
+		stats.journalErrorCases++
+		if stats.firstJournalError == "" {
+			stats.firstJournalError = oneLineError(firstJoinedError(err))
+		}
+	}
+	return stats
+}
+
+func firstJoinedError(err error) error {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		if errs := joined.Unwrap(); len(errs) > 0 {
+			return errs[0]
+		}
+	}
+	return err
+}
+
+func oneLineError(err error) string {
+	message := strings.ReplaceAll(err.Error(), "\r\n", "\n")
+	message = strings.ReplaceAll(message, "\r", "; ")
+	return strings.ReplaceAll(message, "\n", "; ")
 }
 
 // ioReportCases — сколько самых длинных случаев в тексте итога.
