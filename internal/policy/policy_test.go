@@ -278,6 +278,83 @@ func TestPlanEscalation(t *testing.T) {
 	}
 }
 
+func TestBusyEntryRepeatsWithActionsAndStaysAtCreator(t *testing.T) {
+	c := cfg()
+	c.Lead = sLead
+	c.Escalation.After = 2
+	c.Escalation.TopRepeat = Duration(30 * time.Minute)
+	shop := sess(11, "shop-master", home+"/work/shop")
+	c.Escalation.Admins[home+"/work"] = tAdmin.Name
+	entries := []record.Entry{
+		entry("/tmp/held", gib, time.Hour, sessionOwner(shop, "go")),
+		entry("/tmp/action", gib, time.Hour, sessionOwner(shop, "go")),
+	}
+	items := c.Items(entries, me)
+	groups := c.Over(t0, items, 1)
+	if len(groups) != 1 || len(groups[0].Items) != 2 {
+		t.Fatalf("over groups: %+v", groups)
+	}
+	for gi := range groups {
+		for ii := range groups[gi].Items {
+			if groups[gi].Items[ii].Entry.Path == "/tmp/held" {
+				groups[gi].Items[ii].Busy = true
+				groups[gi].Items[ii].BusyCommand = "go"
+				groups[gi].Items[ii].BusyPid = 99
+			}
+		}
+	}
+	state := &UserState{}
+	live := newLive(tLead, tShop, tAdmin)
+	busySends, actionSends := 0, 0
+	for i := range 6 {
+		send, _ := c.Plan(t0.Add(time.Duration(i)*5*time.Minute), groups, live, state, 1)
+		for si := range send {
+			for li := range send[si].Lines {
+				if send[si].Lines[li].Item.Entry.Path == "/tmp/held" {
+					busySends++
+				}
+				if send[si].Lines[li].Item.Entry.Path == "/tmp/action" {
+					actionSends++
+				}
+			}
+		}
+	}
+	if busySends > actionSends || busySends > 3 {
+		t.Fatalf("занятая/обычная запись: писем %d/%d; занятая чаще нормы", busySends, actionSends)
+	}
+	var occupied Item
+	for i := range groups[0].Items {
+		if groups[0].Items[i].Entry.Path == "/tmp/held" {
+			occupied = groups[0].Items[i]
+		}
+	}
+	key := EntryKey(&occupied)
+	state = &UserState{Alerts: map[string]*AlertState{key: {
+		Sent: 4, LastTarget: tLead.Key(), LastSent: t0.Add(-time.Hour),
+	}}}
+	send, _ := c.Plan(t0, []Group{{Items: []Item{occupied}}}, live, state, 1)
+	if len(send) != 1 || send[0].Target.Key() != tShop.Key() || state.Alerts[key].Sent != 4 {
+		t.Fatalf("занятая запись выше создателя или вырос счётчик: send=%v state=%+v", targets(send), state.Alerts[key])
+	}
+}
+
+func TestBusyDeadOwnerMessageDoesNotRecommendRemoval(t *testing.T) {
+	c := cfg()
+	c.Lead = sLead
+	owner := sessionOwner(sess(999, "ended-master", home), "go")
+	item := Item{Entry: entry("/tmp/busy-dead", gib, time.Hour, owner), Class: ClassSession, Busy: true,
+		BusyCommand: "worker", BusyPid: 90}
+	send, _ := c.Plan(t0, []Group{{Items: []Item{item}}}, newLive(tLead), &UserState{}, 1)
+	if len(send) != 1 {
+		t.Fatalf("сводки нет: %v", send)
+	}
+	msg := c.Message(&send[0], t0, false)
+	if strings.Contains(msg, "уберите за неё") || strings.Contains(msg, "Ненужное удалите") ||
+		!strings.Contains(msg, "занята: worker (pid 90)") {
+		t.Fatalf("неверная сводка занятой записи мёртвого создателя: %s", msg)
+	}
+}
+
 func TestLiveWorkerJobTmpRouting(t *testing.T) {
 	c := cfg()
 	c.Policy.BudgetGBM = 1

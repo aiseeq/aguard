@@ -186,6 +186,12 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 		st.Alerts = map[string]*AlertState{}
 	}
 	sendB, deferB := newSummaries(factor), newSummaries(factor)
+	type busyNotice struct {
+		target Target
+		line   Line
+		state  *AlertState
+	}
+	var busy []busyNotice
 	for _, g := range groups {
 		for i := range g.Items {
 			it := &g.Items[i]
@@ -203,8 +209,15 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 				st.Alerts[key] = as
 			}
 			idx := min(as.Sent/c.Escalation.After, len(steps)-1)
+			if it.Busy {
+				idx = 0 // занятая запись остаётся у создателя или первой ступени после него
+			}
 			s := steps[idx]
 			line := Line{Item: *it, Rel: relation(it, s, calive), CreatorName: cname, Sent: as.Sent}
+			if it.Busy {
+				busy = append(busy, busyNotice{target: s.t, line: line, state: as})
+				continue
+			}
 			if idx == len(steps)-1 && as.Sent >= c.Escalation.After && as.LastTarget == s.t.Key() &&
 				now.Sub(as.LastSent) < c.Escalation.TopRepeat.D() {
 				deferB.add(s.t, line, as.LastSent.Add(c.Escalation.TopRepeat.D())) // верхняя ступень уже знает
@@ -215,6 +228,16 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 			as.LastTarget = s.t.Key()
 			as.LastSent = now
 		}
+	}
+	for i := range busy {
+		notice := &busy[i]
+		if hasActionLine(sendB.by[notice.target.Key()]) || notice.state.LastTarget != notice.target.Key() ||
+			notice.state.LastSent.IsZero() || now.Sub(notice.state.LastSent) >= c.Escalation.TopRepeat.D() {
+			sendB.add(notice.target, notice.line, time.Time{})
+			notice.state.LastTarget, notice.state.LastSent = notice.target.Key(), now
+			continue
+		}
+		deferB.add(notice.target, notice.line, notice.state.LastSent.Add(c.Escalation.TopRepeat.D()))
 	}
 	c.planWorkerLive(now, groups, live, st, factor, sendB, deferB)
 	return sendB.list(now), deferB.list(now)
@@ -292,7 +315,7 @@ func hasActionLine(s *Summary) bool {
 		return false
 	}
 	for i := range s.Lines {
-		if s.Lines[i].Rel != RelWorkerLive {
+		if s.Lines[i].Rel != RelWorkerLive && !s.Lines[i].Item.Busy {
 			return true
 		}
 	}

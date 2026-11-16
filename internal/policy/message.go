@@ -74,6 +74,9 @@ func sectionTitle(l *Line) string {
 	case RelFighter:
 		return "Записи ваших бойцов:"
 	case RelDeadOwner:
+		if l.Item.Busy {
+			return "Записи завершившейся сессии " + name + ":"
+		}
 		return "Записи завершившейся сессии " + name + " (вы следующая ступень, уберите за неё):"
 	case RelIgnored:
 		return fmt.Sprintf("Записи сессии %s, не убранные за %d сводки (напомните ей или уберите сами):", name, l.Sent)
@@ -94,11 +97,15 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 		b.WriteString(TestMark + "\n\n")
 	}
 	onlyLiveJobs := len(s.Lines) > 0
+	onlyBusy := len(s.Lines) > 0
 	for i := range s.Lines {
 		onlyLiveJobs = onlyLiveJobs && s.Lines[i].Rel == RelWorkerLive
+		onlyBusy = onlyBusy && s.Lines[i].Item.Busy
 	}
 	if onlyLiveJobs {
 		b.WriteString("aguard: временные папки заданий worker.\n")
+	} else if onlyBusy {
+		b.WriteString("aguard: занятые временные записи; дождитесь завершения использующих их процессов.\n")
 	} else {
 		b.WriteString("aguard: сводка по временным записям. /tmp и /tmp/claude-tmp — tmpfs, то есть оперативка; " +
 			"записи ниже держат её дольше порога. Ненужное удалите, нужное перенесите на диск в scratchpad сессии.\n")
@@ -131,6 +138,9 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 		}
 		fmt.Fprintf(&b, ", возраст %s, мера %s ГБ·мин; создал: %s", HumanAge(now.Sub(e.Born)),
 			FormatGBMin(l.Item.GBMin(now)), CreatorText(e.Owner))
+		if l.Item.Busy {
+			fmt.Fprintf(&b, "; занята: %s (pid %d)", l.Item.BusyCommand, l.Item.BusyPid)
+		}
 		if l.Item.Fighter != "" {
 			b.WriteString(", боец " + l.Item.Fighter)
 		}
@@ -161,6 +171,9 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 func action(l *Line) string {
 	p := l.Item.Entry.Path
 	q := shellQuote(p)
+	if l.Item.Busy {
+		return "не удалять, пока занята"
+	}
 	switch l.Rel {
 	case RelOtherUID:
 		return "проверить, нужна ли; если нет — sudo rm -rf " + q
