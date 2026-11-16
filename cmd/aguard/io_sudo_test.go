@@ -663,6 +663,54 @@ func TestTrimDuringSudoLookupDoesNotAttachToDifferentCase(t *testing.T) {
 	}
 }
 
+func TestTrimmedRootCaseStillLogsAndRoutesAfterSudoLookup(t *testing.T) {
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	var logs bytes.Buffer
+	a, _ := testIOApp(t)
+	a.log = slog.New(slog.NewTextHandler(&logs, nil))
+	a.sudoJournalSource = func(ctx context.Context, _, _ string, _ ...string) ([]journalRecord, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+			return nil, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	cfg := iowatch.Default()
+	cfg.Mode, cfg.Lead, cfg.UrgentMin = iowatch.ModeLog, "lead", cfg.AlertMin
+	service := &ioService{a: a, ctx: t.Context(), cfg: cfg, extra: make(chan func(), 4), sudoCache: newSudoLookupCache(),
+		route: ioroute.New(cfg.Route()), owners: &ioOwnerFinder{}, tickets: &ioTicketer{a: a, queue: make(chan ioTicketJob, 4)}}
+	start := time.Now()
+	root := iowatch.Case{Start: start, End: start.Add(5 * time.Second), DurMS: 5000, BootID: "boot",
+		Culprits: &iowatch.Culprit{Main: "/user.slice/user-0.slice/session-c497.scope"}}
+	service.closed(root)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("sudo search did not start")
+	}
+	service.kept(time.Now().Add(400 * 24 * time.Hour))
+	if len(service.cases) != 0 {
+		close(release)
+		t.Fatalf("root case was not trimmed while lookup was pending: %+v", service.cases)
+	}
+	close(release)
+	select {
+	case apply := <-service.extra:
+		apply()
+	case <-time.After(time.Second):
+		t.Fatal("sudo result did not return after trim")
+	}
+	service.letters.Wait()
+	if !strings.Contains(logs.String(), "session-c497.scope") || !strings.Contains(logs.String(), "написал бы") {
+		t.Fatalf("trimmed root case was not logged and routed: %s", logs.String())
+	}
+}
+
 func TestParseSudoMessageOptionalTTYAndCommandSemicolons(t *testing.T) {
 	info, ok := parseSudoMessage("aisee : PWD=/tmp ; USER=root ; COMMAND=/usr/bin/sh -c 'echo a ; echo b'")
 	if !ok || info.TTY != "" || info.Command != "sh -c 'echo a ; echo b'" {
@@ -671,60 +719,246 @@ func TestParseSudoMessageOptionalTTYAndCommandSemicolons(t *testing.T) {
 }
 
 func TestSudoSecretMaskingAndLimit(t *testing.T) {
-	cases := []struct {
+	type maskCase struct {
 		command string
 		masked  bool
-	}{
-		{"mysql -pS3cretPW", true},
-		{"bash -c 'mysql -pX'", true},
-		{"MYSQL_PWD=MySQLPass mysql", true},
-		{"docker login -p DockPass registry.example", true},
-		{"mariadb-dump -pDumpPW", true},
-		{"tool --password secret", true},
-		{"tool --password=secret", true},
-		{"tool --token abc123", true},
-		{"tool --token=abc123", true},
-		{"tool --api-key abc123", true},
-		{"tool --api-key=abc123", true},
-		{"tool --secret abc123", true},
-		{"tool --secret=abc123", true},
-		{"curl -u user:pass https://example.test", true},
-		{"curl -uuser:pass https://example.test", true},
-		{"curl --user=user:pass https://example.test", true},
-		{"curl -H 'Authorization: Basic dXNlcjpwYXNz' https://example.test", true},
-		{"curl -H 'Authorization: Bearer abc123' https://example.test", true},
-		{"curl -H 'X-Api-Key: abc123' https://example.test", true},
-		{"tool --access-token abc123", true},
-		{"tool --passphrase abc123", true},
-		{"curl -H 'Authorization: Bearer abc123'", true},
-		{"git clone https://user:ghp_tok@github.com/x", true},
-		{"psql postgresql://u:pgpw@h/db", true},
-		{"curl https://example.test:8443/x", false},
-		{"mkdir -p /home/aisee/.cache/x", false},
-		{"ssh -p 2222 host", false},
-		{"tool -p abc123", false},
-		{"tar -pxf a.tar", false},
+		want    string
 	}
+	caseOf := func(command string, masked bool, want ...string) maskCase {
+		result := maskCase{command: command, masked: masked}
+		if len(want) > 0 {
+			result.want = want[0]
+		}
+		return result
+	}
+	cases := []maskCase{
+		caseOf("mysql -uo\\'brien -pPW db", true, "mysql -uo\\'brien -p[REDACTED] db"),
+		caseOf("mysql -e select\\'1\\' -pPW db", true, "mysql -e select\\'1\\' -p[REDACTED] db"),
+		caseOf("mysql -pit\\'s db", true, "mysql -p[REDACTED] db"),
+		caseOf("htpasswd -b f o\\'brien PW", true, "htpasswd -b f o\\'brien [REDACTED]"),
+		caseOf("htpasswd -b f admin '<s e>'", true, "htpasswd -b f admin '[REDACTED]'"),
+		caseOf("htpasswd -b f admin <secret", true, "htpasswd -b f admin [REDACTED]"),
+		caseOf("mysql -pab& db", true, "mysql -p[REDACTED] db"),
+		caseOf("mysql -pab|| db", true, "mysql -p[REDACTED] db"),
+		caseOf("bash -c 'echo \\'a\\\\\\' ; mysql -pX'", true, "bash -c 'echo \\'a\\\\\\' ; mysql -p[REDACTED]'"),
+		caseOf("bash -c 'mysql -pX ; echo -pNotSecret ; mysql -pY'", true, "bash -c 'mysql -p[REDACTED] ; echo -pNotSecret ; mysql -p[REDACTED]'"),
+		caseOf("bash -c -- 'mysql -pX'", true, "bash -c -- 'mysql -p[REDACTED]'"),
+		caseOf("mysql -pab&cd db", true, "mysql -p[REDACTED] db"),
+		caseOf("mysql -pab|cd db", true, "mysql -p[REDACTED] db"),
+		caseOf("mysql -pab>cd db", true, "mysql -p[REDACTED] db"),
+		caseOf("bash -c 'mysql -p\\'ab&cd\\' db'", true, "bash -c 'mysql -p\\'[REDACTED]\\' db'"),
+		caseOf("bash -c 'mysql -pab&cd'", true, "bash -c 'mysql -p[REDACTED]&cd'"),
+		caseOf(`mysql -e select"x -pPW`, true, `mysql -e select"x -p[REDACTED]`),
+		caseOf("mysql '-pa b' db", true, "mysql '-p[REDACTED]' db"),
+		caseOf("bash -c 'mysql -p\\'a b\\''", true, "bash -c 'mysql -p\\'[REDACTED]\\''"),
+		caseOf("htpasswd -b f admin ab&cd", true, "htpasswd -b f admin [REDACTED]"),
+		caseOf("bash --norc -c 'mysql -pX'", true, "bash --norc -c 'mysql -p[REDACTED]'"),
+		caseOf("bash --rcfile /x -c 'mysql -pX'", true, "bash --rcfile /x -c 'mysql -p[REDACTED]'"),
+		caseOf("mysql -pS3cretPW", true),
+		caseOf("mysql -pab#cd db", true, "mysql -p[REDACTED] db"),
+		caseOf("mysql -pab#012x", true, "mysql -p[REDACTED]"),
+		caseOf("mysql -e 'select 1; select 2' -pX", true, "mysql -e 'select 1; select 2' -p[REDACTED]"),
+		caseOf(`mysql -e 'select "a;b"' -pX`, true, `mysql -e 'select "a;b"' -p[REDACTED]`),
+		caseOf("mysql -e 'select 1 # c' -pX", true, "mysql -e 'select 1 # c' -p[REDACTED]"),
+		caseOf("mysql -P3306 -pPW", true, "mysql -P3306 -p[REDACTED]"),
+		caseOf("mysqldump -P3306 -u root -pPW db", true, "mysqldump -P3306 -u root -p[REDACTED] db"),
+		caseOf("bash -c 'mysql -pX'", true, `bash -c 'mysql -p[REDACTED]'`),
+		caseOf(`sh -c "cd /x && mysql -pX"`, true, `sh -c "cd /x && mysql -p[REDACTED]"`),
+		caseOf("mysqldump -pDumpPW db", true, "mysqldump -p[REDACTED] db"),
+		caseOf("mysqladmin -u root -pAdmPW status", true, "mysqladmin -u root -p[REDACTED] status"),
+		caseOf("mysql_upgrade -pX", true, "mysql_upgrade -p[REDACTED]"),
+		caseOf("htpasswd -b f user pw", true, "htpasswd -b f user [REDACTED]"),
+		caseOf("htpasswd -cb f admin PW", true, "htpasswd -cb f admin [REDACTED]"),
+		caseOf("htpasswd -bc f admin PW", true, "htpasswd -bc f admin [REDACTED]"),
+		caseOf("htpasswd -nb admin PW", true, "htpasswd -nb admin [REDACTED]"),
+		caseOf("htpasswd -Bbn admin PW", true, "htpasswd -Bbn admin [REDACTED]"),
+		caseOf("htpasswd -b -c f admin PW", true, "htpasswd -b -c f admin [REDACTED]"),
+		caseOf("htpasswd -B -b f admin PW", true, "htpasswd -B -b f admin [REDACTED]"),
+		caseOf("htpasswd -b -C 10 f admin PW", true, "htpasswd -b -C 10 f admin [REDACTED]"),
+		caseOf("htpasswd -b f admin PW; echo ok", true, "htpasswd -b f admin PW; echo [REDACTED]"),
+		caseOf("htpasswd -b f admin PW | cat", true, "htpasswd -b f admin PW | [REDACTED]"),
+		caseOf("bash -c 'htpasswd -b f admin PW > /dev/null'", true, "bash -c 'htpasswd -b f admin [REDACTED] > /dev/null'"),
+		caseOf("bash -c 'htpasswd -b f admin PW 2>/dev/null'", true, "bash -c 'htpasswd -b f admin [REDACTED] 2>/dev/null'"),
+		caseOf("bash -c 'htpasswd -b f admin PW >/dev/null'", true, "bash -c 'htpasswd -b f admin [REDACTED] >/dev/null'"),
+		caseOf("bash -c 'htpasswd -nbB admin PWp | tee f'", true, "bash -c 'htpasswd -nbB admin [REDACTED] | tee f'"),
+		caseOf("htpasswd -b f admin 'a b c'", true, "htpasswd -b f admin '[REDACTED]'"),
+		caseOf("htpasswd -b f admin PW>/dev/null", true, "htpasswd -b f admin [REDACTED]"),
+		caseOf("htpasswd -b f admin pa>ss", true, "htpasswd -b f admin [REDACTED]"),
+		caseOf("htpasswd -b f admin 'pa>ss'", true, "htpasswd -b f admin '[REDACTED]'"),
+		caseOf("sudo htpasswd -b f admin PWs", true, "sudo htpasswd -b f admin [REDACTED]"),
+		caseOf("env X=1 htpasswd -b f admin PWe", true, "env X=1 htpasswd -b f admin [REDACTED]"),
+		caseOf("nice mysql -pX", true, "nice mysql -p[REDACTED]"),
+		caseOf("timeout 30 mysqldump -pX db", true, "timeout 30 mysqldump -p[REDACTED] db"),
+		caseOf("sudo -u mysql mysql -pX", true, "sudo -u mysql mysql -p[REDACTED]"),
+		caseOf("htpasswd -B -c f admin", false, "htpasswd -B -c f admin"),
+		caseOf("sh -c 'cd /x && mysql -u root -pS3c'", true, "sh -c 'cd /x && mysql -u root -p[REDACTED]'"),
+		caseOf(`bash -c "cd /x; mysql -pX"`, true, `bash -c "cd /x; mysql -p[REDACTED]"`),
+		caseOf("mysql -u root -p'quoted pw' db", true, "mysql -u root '-p[REDACTED]' db"),
+		caseOf("htpasswd -b /etc/nginx/.htpasswd admin 'my secret'", true, "htpasswd -b /etc/nginx/.htpasswd admin '[REDACTED]'"),
+		caseOf("htpasswd -cb /etc/nginx/.htpasswd admin PWcb", true, "htpasswd -cb /etc/nginx/.htpasswd admin [REDACTED]"),
+		caseOf("htpasswd -bc f admin PWbc", true, "htpasswd -bc f admin [REDACTED]"),
+		caseOf("htpasswd -b -c f admin PWbc2", true, "htpasswd -b -c f admin [REDACTED]"),
+		caseOf("htpasswd -B -b f admin PWBb", true, "htpasswd -B -b f admin [REDACTED]"),
+		caseOf("htpasswd -bB f admin PWbB", true, "htpasswd -bB f admin [REDACTED]"),
+		caseOf("htpasswd -nb admin PWnb", true, "htpasswd -nb admin [REDACTED]"),
+		caseOf("htpasswd -Bbn admin PWBbn", true, "htpasswd -Bbn admin [REDACTED]"),
+		caseOf("htpasswd -b -C 10 f admin PWC", true, "htpasswd -b -C 10 f admin [REDACTED]"),
+		caseOf(`curl -H "X-Api-Key: 'v'" https://example.test`, true, `curl -H "X-Api-Key: '[REDACTED]'" https://example.test`),
+		caseOf("curl -H 'X-Api-Key: abc123' https://example.test", true, "curl -H 'X-Api-Key: [REDACTED]' https://example.test"),
+		caseOf(`curl -H "X-Api-Key: abc123" https://example.test`, true, `curl -H "X-Api-Key: [REDACTED]" https://example.test`),
+		caseOf(`curl -H 'X-Api-Key: "abc"' https://example.test`, true, `curl -H 'X-Api-Key: "[REDACTED]"' https://example.test`),
+		caseOf(`curl -H "X-Api-Key: 'abc" https://e`, true, `curl -H "X-Api-Key: '[REDACTED]" https://e`),
+		caseOf(`curl -H 'X-Api-Key: ab"c' https://h`, true, `curl -H 'X-Api-Key: [REDACTED]' https://h`),
+		caseOf("echo bearer of news", false, "echo bearer of news"),
+		caseOf("/usr/bin/htpasswd -b f u PW", true, "/usr/bin/htpasswd -b f u [REDACTED]"),
+		caseOf("env MYSQL_PWD=x mysql -pY", true, "env MYSQL_PWD=[REDACTED] mysql -p[REDACTED]"),
+		caseOf("env -i mysql -pX", true, "env -i mysql -p[REDACTED]"),
+		caseOf("mysql -u root -p\"q\" db", true, "mysql -u root -p\"[REDACTED]\" db"),
+		caseOf(`sh -c "sudo -u mysql mysql -pX"`, true, `sh -c "sudo -u mysql mysql -p[REDACTED]"`),
+		caseOf("exec mysql -pX", true, "exec mysql -p[REDACTED]"),
+		caseOf("htpasswd -b f admin 'my secret'", true, "htpasswd -b f admin '[REDACTED]'"),
+		caseOf("htpasswd -b f admin \"my secret\"", true, "htpasswd -b f admin \"my [REDACTED]"),
+		caseOf(`curl -H "X-Api-Key: 'v'" https://h`, true, `curl -H "X-Api-Key: '[REDACTED]'" https://h`),
+		caseOf("curl -H X-Api-Key:'abcdZ", true, "curl -H X-Api-Key:'[REDACTED]"),
+		caseOf("curl --oauth2-bearer=TOKEN123 https://e", true, "curl --oauth2-bearer=[REDACTED] https://e"),
+		caseOf("bash -euo pipefail -c '#012cd /x#012mysql -pX db#012'", true, "bash -euo pipefail -c '#012cd /x#012mysql -p[REDACTED] db#012'"),
+		caseOf("bash -c 'cd /x#012mysqldump -pX db > /b.sql'", true, "bash -c 'cd /x#012mysqldump -p[REDACTED] db > /b.sql'"),
+		caseOf("bash -c 'cd /x; mysql -pX'", true, "bash -c 'cd /x; mysql -p[REDACTED]'"),
+		caseOf("bash -c 'htpasswd -b f admin PW; echo ok'", true, "bash -c 'htpasswd -b f admin [REDACTED]; echo ok'"),
+		caseOf("htpasswd -b f admin PW extra", true, "htpasswd -b f admin PW [REDACTED]"),
+		caseOf("mysql -u root -p'it''s' db", true, "mysql -u root '-p[REDACTED]' db"),
+		caseOf("bash -c 'htpasswd -b f admin PW#012systemctl reload nginx'", true, "bash -c 'htpasswd -b f admin [REDACTED]#012systemctl reload nginx'"),
+		caseOf("bash -c 'mysql -pX#012echo ok'", true, "bash -c 'mysql -p[REDACTED]#012echo ok'"),
+		caseOf("bash -c 'echo a#012mysql -pX'", true, "bash -c 'echo a#012mysql -p[REDACTED]'"),
+		caseOf("bash -c 'cd /x && htpasswd -b f a PWc'", true, "bash -c 'cd /x && htpasswd -b f a [REDACTED]'"),
+		caseOf("htpasswd -b f admin \"a b c\"", true, "htpasswd -b f admin \"a b [REDACTED]"),
+		caseOf("MYSQL_PWD=MySQLPass mysql", true),
+		caseOf("docker login -p DockPass registry.example", true),
+		caseOf("mariadb-dump -pDumpPW", true, "mariadb-dump -p[REDACTED]"),
+		caseOf("tool --password secret", true),
+		caseOf("tool --password=secret", true),
+		caseOf("tool --token abc123", true),
+		caseOf("tool --token=abc123", true),
+		caseOf("tool --api-key abc123", true),
+		caseOf("tool --api-key=abc123", true),
+		caseOf("tool --secret abc123", true),
+		caseOf("tool --secret=abc123", true),
+		caseOf("curl --oauth2-bearer TOKEN123", true, "curl --oauth2-bearer [REDACTED]"),
+		caseOf("curl -u user:pass https://example.test", true),
+		caseOf("curl -uuser:pass https://example.test", true),
+		caseOf("curl --user=user:pass https://example.test", true),
+		caseOf("curl -H 'Authorization: Basic dXNlcjpwYXNz' https://example.test", true),
+		caseOf("curl -H 'Authorization: Bearer abc123' https://example.test", true, "curl -H 'Authorization: Bearer [REDACTED]' https://example.test"),
+		caseOf("curl -H 'X-Api-Key: abc123' https://h", true, "curl -H 'X-Api-Key: [REDACTED]' https://h"),
+		caseOf(`curl -H "X-Api-Key: abc123" https://h`, true, `curl -H "X-Api-Key: [REDACTED]" https://h`),
+		caseOf(`curl -H 'Authorization: Bearer "a b"' https://example.test`, true, `curl -H 'Authorization: Bearer "[REDACTED]"' https://example.test`),
+		caseOf("tool --access-token abc123", true),
+		caseOf("tool --passphrase abc123", true),
+		caseOf("curl -H 'Authorization: Bearer abc123'", true),
+		caseOf("git clone https://user:ghp_tok@github.com/x", true),
+		caseOf("psql postgresql://u:pgpw@h/db", true),
+		caseOf("curl https://example.test:8443/x", false),
+		caseOf("mkdir -p /home/aisee/.cache/x", false),
+		caseOf("ssh -p 2222 host", false),
+		caseOf("cp -p source destination", false),
+		caseOf("find . -perm 0644", false),
+		caseOf("find /var/lib/mysql -perm 0644", false, "find /var/lib/mysql -perm 0644"),
+		caseOf("ls /usr/share/htpasswd -b x y z", false, "ls /usr/share/htpasswd -b x y z"),
+		caseOf("tool -p abc123", false),
+		caseOf("tar -pxf a.tar", false),
+		caseOf("tar -C /var/lib/mysql -pxf a.tar", false, "tar -C /var/lib/mysql -pxf a.tar"),
+		// Corpus rows whose output intentionally differs from the older shell-like parser.
+		caseOf("mysql -u root -pX'", true, "mysql -u root '-p[REDACTED]'"),
+		caseOf("mysql -pab;cd db", true, "mysql -p[REDACTED] db"),
+		caseOf("htpasswd -b f admin ab|cd", true, "htpasswd -b f admin [REDACTED]"),
+		caseOf("htpasswd -b f admin ab;cd", true, "htpasswd -b f admin [REDACTED]"),
+		caseOf("mysql -pab\\'cd db", true, "mysql -p[REDACTED] db"),
+		caseOf("mysql -p'a b\\'c' db", true, "mysql '-p[REDACTED]' db"),
+		caseOf("bash -c 'mysql -pX&&echo ok'", true, "bash -c 'mysql -p[REDACTED]&&echo ok'"),
+		caseOf("bash -c 'cd /x&&mysql -pX||echo fail'", true, "bash -c 'cd /x&&mysql -p[REDACTED]||echo fail'"),
+		caseOf("bash -c 'true||mysql -pX'", true, "bash -c 'true||mysql -p[REDACTED]'"),
+		caseOf("bash -c 'mysql -pX>/tmp/o'", true, "bash -c 'mysql -p[REDACTED]>/tmp/o'"),
+		caseOf("bash -c 'sh -c \"cd /x && htpasswd -b f a PWn\"'", true, "bash -c 'sh -c \"cd /x && htpasswd -b f a [REDACTED]\"'"),
+		caseOf("bash -lc 'mysql -pX'", true, "bash -lc 'mysql -p[REDACTED]'"),
+		caseOf("bash -ec 'mysql -pX'", true, "bash -ec 'mysql -p[REDACTED]'"),
+		caseOf("sudo -E -u root mysqldump -pX db", true, "sudo -E -u root mysqldump -p[REDACTED] db"),
+		caseOf("env -i PATH=/bin mysql -pX", true, "env -i PATH=/bin mysql -p[REDACTED]"),
+		caseOf("env MYSQL_HOST=h mysql -pX", true, "env MYSQL_HOST=h mysql -p[REDACTED]"),
+		caseOf("nice -n 10 mysql -pX", true, "nice -n 10 mysql -p[REDACTED]"),
+		caseOf("timeout -k 5 30 mysql -pX", true, "timeout -k 5 30 mysql -p[REDACTED]"),
+		caseOf("timeout -s KILL 30 mysql -pX", true, "timeout -s KILL 30 mysql -p[REDACTED]"),
+		caseOf("htpasswd -i -b f admin", true, "htpasswd -i -b f [REDACTED]"),
+		caseOf("htpasswd -bi f admin PWi", true, "htpasswd -bi f admin [REDACTED]"),
+		caseOf("htpasswd -b f admin PW # comment", true, "htpasswd -b f admin PW # [REDACTED]"),
+		caseOf("sudo -p prompt mysql -pX", true, "sudo -p prompt mysql -p[REDACTED]"),
+	}
+	seenCommands := make(map[string]bool, len(cases))
 	for _, tc := range cases {
+		if seenCommands[tc.command] {
+			t.Fatalf("duplicate sudo masking test input: %q", tc.command)
+		}
+		seenCommands[tc.command] = true
 		t.Run(tc.command, func(t *testing.T) {
 			got := maskSudoSecrets(tc.command)
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("output=%q, want %q", got, tc.want)
+			}
 			redacted := strings.Contains(got, "[REDACTED]")
 			if redacted != tc.masked {
 				t.Fatalf("masked=%v, want %v: %q", redacted, tc.masked, got)
 			}
-			for _, secret := range []string{"S3cretPW", "MySQLPass", "DockPass", "DumpPW", "abc123", "user:pass", "dXNlcjpwYXNz", "2222", "ghp_tok", "pgpw"} {
+			for _, secret := range []string{"S3cretPW", "MySQLPass", "DockPass", "DumpPW", "AdmPW", "TOKEN123", "PW", "X", "ab&cd", "ab|cd", "ab>cd", "abc123", "user:pass", "dXNlcjpwYXNz", "2222", "ghp_tok", "pgpw"} {
+				if secret == "X" || secret == "PW" { // Короткие секреты проверяются по полному ожидаемому выводу.
+					continue
+				}
 				if tc.masked && strings.Contains(got, secret) {
 					t.Fatalf("secret %q leaked in %q", secret, got)
 				}
-			}
-			if strings.Contains(tc.command, "Authorization:") && !strings.Contains(got, "[REDACTED]'") {
-				t.Fatalf("authorization masking removed the shell quote: %q", got)
 			}
 		})
 	}
 	long, ok := parseSudoMessage("aisee : USER=root ; COMMAND=" + strings.Repeat("x", 700))
 	if !ok || len(long.Command) > 512 {
 		t.Fatalf("long command not bounded: %d", len(long.Command))
+	}
+
+	// Рост, а не часы: под -race и нагрузкой абсолютный предел ложно краснеет. Линейный проход даёт ~10×
+	// на десятикратный вход, квадратичный (маска до конца строки после каждого ` ; `) — ~100×.
+	fastest := func(n int) time.Duration {
+		command := strings.Repeat("mysql -pX ; ", n)
+		best := time.Duration(1<<63 - 1)
+		for range 3 {
+			started := time.Now()
+			_ = maskSudoSecrets(command)
+			best = min(best, time.Since(started))
+		}
+		return best
+	}
+	small, large := fastest(1_000), fastest(10_000)
+	if ratio := float64(large) / float64(max(small, time.Microsecond)); ratio > 30 {
+		t.Fatalf("masking grows superlinearly: 1,000 separated commands %s, 10,000 — %s (×%.0f, limit ×30)", small, large, ratio)
+	}
+}
+
+func TestIOReportCountsAllRootSessionCandidates(t *testing.T) {
+	a, out := testIOApp(t)
+	a.sudoJournalSource = func(context.Context, string, string, ...string) ([]journalRecord, error) {
+		return nil, nil
+	}
+	now := time.Now()
+	cases := []iowatch.Case{
+		{Start: now.Add(-2 * time.Hour), DurMS: 3000, Culprits: &iowatch.Culprit{Main: "session-c497.scope"}, Sudo: &iowatch.SudoInfo{Command: "matched"}},
+		{Start: now.Add(-time.Hour), DurMS: 4000, Culprits: &iowatch.Culprit{Main: "session-c498.scope"}},
+	}
+	path := filepath.Join(t.TempDir(), "cases.jsonl")
+	if err := iowatch.SaveCases(path, cases); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ioReport(context.Background(), path, false, now.Add(-24*time.Hour), now, 0, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "root session-c*: сопоставлено 1 из 2 случаев") {
+		t.Fatalf("root session summary did not count unmatched candidates: %s", out.String())
 	}
 }
 

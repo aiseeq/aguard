@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,12 +23,10 @@ import (
 var (
 	rootSessionRE        = regexp.MustCompile(`^/user\.slice/user-0\.slice/session-c([0-9]+)\.scope$`)
 	storedSessionRE      = regexp.MustCompile(`^session-c([0-9]+)\.scope$`)
-	secretOptionRE       = regexp.MustCompile(`(?i)(--(?:password|passphrase|token|access-token|api-key|secret)(?:=|\s+)|(?:password|passphrase|token|access[_-]?token|secret|api[_-]?key)=)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s;]+)`)
-	mysqlPasswordRE      = regexp.MustCompile(`(?i)(\s-p)([^\s;]+)`)
+	secretOptionRE       = regexp.MustCompile(`(?i)(--(?:password|passphrase|token|access-token|oauth2-bearer|api-key|secret)(?:=|\s+)|(?:password|passphrase|token|access[_-]?token|secret|api[_-]?key)=)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s;]+)`)
 	dockerPasswordRE     = regexp.MustCompile(`(?i)(\bdocker\s+login\b[^;]*?\s-p(?:\s+|=))("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s;]+)`)
 	curlUserPasswordRE   = regexp.MustCompile(`(?i)(\bcurl\b[^;]*?\s(?:-u\s*|--user(?:=|\s+)))("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s;]+)`)
-	shellCommandRE       = regexp.MustCompile(`(?i)(\b(?:bash|sh|zsh)\b[^;]*?\s-c\s+)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')`)
-	authorizationValueRE = regexp.MustCompile(`(?i)(authorization:\s*[a-z]+\s+|bearer\s+)(?:"([^"]*)"|'([^']*)'|([^\s;"']+))`)
+	authorizationValueRE = regexp.MustCompile(`(?i)(authorization:\s*[a-z]+\s+)(?:"([^"]*)"|'([^']*)'|([^\s;"']+))`)
 	apiKeyHeaderRE       = regexp.MustCompile(`(?i)((?:x-)?api-key:\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s;]+)`)
 	mysqlPwdEnvRE        = regexp.MustCompile(`(?i)(\bMYSQL_PWD=)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s;]+)`)
 	// urlPasswordRE — пароль в URL: scheme://user:pass@host; host:port без @ не трогает.
@@ -40,6 +39,7 @@ const (
 	sudoLiveWindow           = 24 * time.Hour
 	sudoNegativeCacheWindow  = 5 * time.Minute
 	sudoLogindAssociationGap = 5 * time.Second
+	sudoRedactedValue        = "[REDA" + "CTED]"
 )
 
 type sudoCacheEntry struct {
@@ -541,13 +541,11 @@ func parseSudoMessage(message string) (iowatch.SudoInfo, bool) {
 }
 
 func maskSudoSecrets(command string) string {
-	command = shellCommandRE.ReplaceAllStringFunc(command, func(value string) string {
-		parts := shellCommandRE.FindStringSubmatch(value)
-		quoted := parts[2]
-		quote := quoted[:1]
-		inner := quoted[1 : len(quoted)-1]
-		return parts[1] + quote + maskSudoSecrets(inner) + quote
-	})
+	command = maskSudoCommandArguments(command)
+	return maskSudoOtherSecrets(command)
+}
+
+func maskSudoOtherSecrets(command string) string {
 	command = authorizationValueRE.ReplaceAllStringFunc(command, func(value string) string {
 		parts := authorizationValueRE.FindStringSubmatch(value)
 		if parts[2] != "" || strings.Contains(value, `"`) {
@@ -558,25 +556,647 @@ func maskSudoSecrets(command string) string {
 		}
 		return parts[1] + "[REDACTED]"
 	})
-	command = apiKeyHeaderRE.ReplaceAllString(command, "$1[REDACTED]")
+	command = apiKeyHeaderRE.ReplaceAllStringFunc(command, func(value string) string {
+		parts := apiKeyHeaderRE.FindStringSubmatch(value)
+		secret := parts[2]
+		if q := matchingOuterQuote(secret); q != 0 {
+			return parts[1] + secret[:1] + "[REDACTED]" + secret[len(secret)-1:]
+		}
+		if secret[0] == '\'' || secret[0] == '"' {
+			suffix := ""
+			if len(secret) > 1 && (secret[len(secret)-1] == '\'' || secret[len(secret)-1] == '"') {
+				suffix = secret[len(secret)-1:]
+			}
+			return parts[1] + secret[:1] + "[REDACTED]" + suffix
+		}
+		if last := secret[len(secret)-1]; last == '\'' || last == '"' {
+			return parts[1] + "[REDACTED]" + string(last)
+		}
+		return parts[1] + "[REDACTED]"
+	})
 	command = mysqlPwdEnvRE.ReplaceAllString(command, "$1[REDACTED]")
 	command = urlPasswordRE.ReplaceAllString(command, "$1[REDACTED]$3")
 	command = dockerPasswordRE.ReplaceAllString(command, "$1[REDACTED]")
 	command = curlUserPasswordRE.ReplaceAllString(command, "$1[REDACTED]")
 	command = secretOptionRE.ReplaceAllString(command, "$1[REDACTED]")
-	if mysqlClient(command) {
-		command = mysqlPasswordRE.ReplaceAllString(command, "$1[REDACTED]")
-	}
 	return command
 }
 
-func mysqlClient(command string) bool {
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
+type sudoCommandToken struct {
+	start, end          int
+	text                string
+	redirection, target bool
+	sudoQuoted          bool
+}
+
+type sudoCommandSegment struct {
+	start, end int
+	tokens     []sudoCommandToken
+}
+
+type sudoEdit struct {
+	start, end int
+	text       string
+}
+
+func maskSudoCommandArguments(command string) string {
+	tokens := parseSudoArgv(command)
+	var edits []sudoEdit
+	if script, ok := sudoArgvShellScript(command, tokens); ok {
+		masked := maskSudoShellSecrets(script.text)
+		if masked != script.text {
+			edits = append(edits, sudoEdit{start: script.start, end: script.end, text: encodeSudoArgvToken(masked, script.sudoQuoted)})
+		}
+	} else {
+		edits = append(edits, maskSudoArgvCommands(tokens)...)
+	}
+	return applySudoEdits(command, edits)
+}
+
+func maskSudoArgvCommands(tokens []sudoCommandToken) []sudoEdit {
+	commandIndex := sudoCommandIndex(tokens)
+	if commandIndex < 0 || commandIndex >= len(tokens) {
+		return nil
+	}
+	var edits []sudoEdit
+	name := sudoExecutable(tokens[commandIndex].text)
+	if isMySQLCommand(name) {
+		edits = append(edits, maskSudoArgvMySQLArgs(tokens[commandIndex+1:])...)
+	}
+	if name == "htpasswd" {
+		edits = append(edits, maskSudoArgvHtpasswdArg(tokens, commandIndex)...)
+	}
+	return edits
+}
+
+func maskSudoArgvMySQLArgs(tokens []sudoCommandToken) []sudoEdit {
+	var edits []sudoEdit
+	for _, token := range tokens {
+		if maskMySQLPasswordToken(token.text) != token.text {
+			edits = append(edits, maskSudoArgvMySQLToken(token))
+		}
+	}
+	return edits
+}
+
+func maskSudoArgvHtpasswdArg(tokens []sudoCommandToken, commandIndex int) []sudoEdit {
+	if !hasHtpasswdBatchFlag(tokens[commandIndex+1:]) {
+		return nil
+	}
+	if last := len(tokens) - 1; last > commandIndex {
+		token := tokens[last]
+		masked := sudoRedactedValue
+		if token.sudoQuoted {
+			masked = encodeSudoArgvToken(masked, true)
+		}
+		return []sudoEdit{{start: token.start, end: token.end, text: masked}}
+	}
+	return nil
+}
+
+func maskSudoShellSecrets(command string) string {
+	command = maskSudoShellCommandArguments(command)
+	return maskSudoOtherSecrets(command)
+}
+
+func maskSudoShellCommandArguments(command string) string {
+	var edits []sudoEdit
+	for _, segment := range parseSudoCommandSegments(command) {
+		if script, ok := shellCommandScript(segment.tokens); ok {
+			inner := command[script.start:script.end]
+			masked := maskSudoShellSecrets(inner)
+			if masked != inner {
+				edits = append(edits, sudoEdit{start: script.start, end: script.end, text: encodeShellScript(masked, command[script.start-1:script.start])})
+			}
+			continue
+		}
+		commandIndex := sudoCommandIndex(segment.tokens)
+		if commandIndex < 0 || commandIndex >= len(segment.tokens) {
+			continue
+		}
+		name := sudoExecutable(segment.tokens[commandIndex].text)
+		if isMySQLCommand(name) {
+			for _, token := range segment.tokens[commandIndex+1:] {
+				if token.redirection || token.target {
+					continue
+				}
+				if masked := maskMySQLPasswordToken(token.text); masked != token.text {
+					edits = append(edits, sudoEdit{start: token.start, end: token.end, text: masked})
+				}
+			}
+		}
+		if name == "htpasswd" && hasHtpasswdBatchFlag(segment.tokens[commandIndex+1:]) {
+			for i := len(segment.tokens) - 1; i > commandIndex; i-- {
+				token := segment.tokens[i]
+				if token.redirection || token.target {
+					continue
+				}
+				masked := sudoRedactedValue
+				if q := matchingOuterQuote(token.text); q != 0 {
+					masked = string(q) + masked + string(q)
+				}
+				edits = append(edits, sudoEdit{start: token.start, end: token.end, text: masked})
+				break
+			}
+		}
+	}
+	return applySudoEdits(command, edits)
+}
+
+func applySudoEdits(command string, edits []sudoEdit) string {
+	if len(edits) == 0 {
+		return command
+	}
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
+	var out strings.Builder
+	out.Grow(len(command))
+	position := 0
+	for _, edit := range edits {
+		if edit.start < position || edit.start > len(command) || edit.end < edit.start || edit.end > len(command) {
+			continue
+		}
+		out.WriteString(command[position:edit.start])
+		out.WriteString(edit.text)
+		position = edit.end
+	}
+	out.WriteString(command[position:])
+	return out.String()
+}
+
+func parseSudoArgv(command string) []sudoCommandToken {
+	var tokens []sudoCommandToken
+	tokenStart := -1
+	quoted := false
+	inQuote := false
+	var value strings.Builder
+	finishToken := func(end int) {
+		if tokenStart < 0 {
+			return
+		}
+		tokens = append(tokens, sudoCommandToken{start: tokenStart, end: end, text: value.String(), sudoQuoted: quoted})
+		tokenStart = -1
+		quoted, inQuote = false, false
+		value.Reset()
+	}
+	for i := 0; i < len(command); {
+		ch := command[i]
+		if tokenStart < 0 && isSudoSpace(ch) {
+			i++
+			continue
+		}
+		if tokenStart < 0 {
+			tokenStart = i
+		}
+		if ch == '\\' && i+1 < len(command) && (command[i+1] == '\\' || command[i+1] == '\'') {
+			value.WriteByte(command[i+1])
+			i += 2
+			continue
+		}
+		if inQuote {
+			if ch == '\'' {
+				inQuote = false
+				i++
+				continue
+			}
+			value.WriteByte(ch)
+			i++
+			continue
+		}
+		if isSudoSpace(ch) {
+			finishToken(i)
+			i++
+			continue
+		}
+		if ch == '\'' {
+			quoted, inQuote = true, true
+			i++
+			continue
+		}
+		value.WriteByte(ch)
+		i++
+	}
+	finishToken(len(command))
+	return tokens
+}
+
+func encodeSudoArgvToken(value string, quoted bool) string {
+	if !quoted {
+		return value
+	}
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `'`, `\'`)
+	return "'" + value + "'"
+}
+
+func encodeShellScript(value, openingQuote string) string {
+	if openingQuote == "'" {
+		return strings.ReplaceAll(value, "'", `\'`)
+	}
+	return value
+}
+
+func sudoArgvShellScript(command string, tokens []sudoCommandToken) (sudoCommandToken, bool) {
+	commandIndex := sudoCommandIndex(tokens)
+	if commandIndex < 0 || commandIndex >= len(tokens) {
+		return sudoCommandToken{}, false
+	}
+	switch strings.ToLower(sudoExecutable(tokens[commandIndex].text)) {
+	case "sh", "bash", "dash", "zsh", "ksh":
+	default:
+		return sudoCommandToken{}, false
+	}
+	for i := commandIndex + 1; i < len(tokens); i++ {
+		option := tokens[i].text
+		if strings.HasPrefix(option, "--") {
+			if option == "--rcfile" || option == "--init-file" {
+				i++
+			}
+			continue
+		}
+		if len(option) < 2 || option[0] != '-' || !strings.Contains(option[1:], "c") {
+			continue
+		}
+		if i+1 < len(tokens) {
+			script := tokens[i+1]
+			if script.text == "--" && i+2 < len(tokens) {
+				script = tokens[i+2]
+			}
+			if !script.sudoQuoted && strings.HasPrefix(script.text, `"`) {
+				if quoted, ok := sudoDoubleQuotedScript(command, script); ok {
+					return quoted, true
+				}
+			}
+			return script, true
+		}
+		return sudoCommandToken{}, false
+	}
+	return sudoCommandToken{}, false
+}
+
+func sudoDoubleQuotedScript(command string, token sudoCommandToken) (sudoCommandToken, bool) {
+	end := token.start + 1
+	escaped := false
+	for end < len(command) {
+		ch := command[end]
+		if escaped {
+			escaped = false
+		} else if ch == '\\' {
+			escaped = true
+		} else if ch == '"' {
+			return sudoCommandToken{start: token.start + 1, end: end, text: command[token.start+1 : end]}, true
+		}
+		end++
+	}
+	return sudoCommandToken{}, false
+}
+
+func parseSudoCommandSegments(command string) []sudoCommandSegment {
+	var segments []sudoCommandSegment
+	segmentStart := 0
+	var tokens []sudoCommandToken
+	quote := byte(0)
+	escaped := false
+	redirectTarget := false
+	tokenStart := -1
+	finishToken := func(end int) {
+		if tokenStart < 0 {
+			return
+		}
+		tokens = append(tokens, sudoCommandToken{start: tokenStart, end: end, text: command[tokenStart:end], target: redirectTarget})
+		tokenStart = -1
+		redirectTarget = false
+	}
+	finishSegment := func(end int) {
+		finishToken(end)
+		segments = append(segments, sudoCommandSegment{start: segmentStart, end: end, tokens: tokens})
+		segmentStart, tokens = end, nil
+	}
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if quote == '\'' {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			if tokenStart < 0 {
+				tokenStart = i
+			}
+			continue
+		}
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' {
+			quote = ch
+			if tokenStart < 0 {
+				tokenStart = i
+			}
+			continue
+		}
+		if isSudoSpace(ch) {
+			finishToken(i)
+			continue
+		}
+		if ch == '<' || ch == '>' {
+			redirection, operatorEnd, hasFD := parseSudoRedirection(command, i, tokenStart)
+			if hasFD {
+				tokenStart = -1
+			} else {
+				finishToken(i)
+			}
+			tokens = append(tokens, redirection)
+			redirectTarget = true
+			i = operatorEnd - 1
+			continue
+		}
+		if separatorEnd := sudoSeparatorEnd(command, i); separatorEnd > i {
+			finishSegment(i)
+			i = separatorEnd - 1
+			segmentStart = separatorEnd
+			continue
+		}
+		if tokenStart < 0 {
+			tokenStart = i
+		}
+	}
+	finishSegment(len(command))
+	return segments
+}
+
+func parseSudoRedirection(command string, operatorStart, tokenStart int) (sudoCommandToken, int, bool) {
+	fdStart := operatorStart
+	hasFD := tokenStart >= 0 && allASCIIDigits(command[tokenStart:operatorStart])
+	if hasFD {
+		fdStart = tokenStart
+	}
+	operatorEnd := operatorStart + 1
+	if operatorEnd < len(command) && command[operatorEnd] == command[operatorStart] {
+		operatorEnd++
+	}
+	return sudoCommandToken{
+		start:       fdStart,
+		end:         operatorEnd,
+		text:        command[fdStart:operatorEnd],
+		redirection: true,
+	}, operatorEnd, hasFD
+}
+
+func sudoSeparatorEnd(command string, i int) int {
+	ch := command[i]
+	if ch == '#' && strings.HasPrefix(command[i:], "#012") {
+		return i + len("#012")
+	}
+	if ch != ';' && ch != '|' && ch != '&' {
+		return i
+	}
+	if i+1 < len(command) && command[i+1] == ch && (ch == '|' || ch == '&') {
+		return i + 2
+	}
+	return i + 1
+}
+
+func isSudoSpace(ch byte) bool {
+	return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'
+}
+
+func allASCIIDigits(value string) bool {
+	if value == "" {
 		return false
 	}
-	name := strings.ToLower(filepath.Base(strings.Trim(fields[0], `"'`)))
-	return strings.HasPrefix(name, "mysql") || strings.HasPrefix(name, "mariadb")
+	for i := range value {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func sudoExecutable(raw string) string {
+	return filepath.Base(strings.Trim(raw, `"'`))
+}
+
+func isMySQLCommand(name string) bool {
+	name = strings.ToLower(name)
+	if strings.HasPrefix(name, "mysql") {
+		if strings.HasPrefix(name, "mysql-") {
+			return true
+		}
+		for i := len("mysql"); i < len(name); i++ {
+			if !isASCIIWord(name[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return strings.HasPrefix(name, "mariadb")
+}
+
+func maskMySQLPasswordToken(token string) string {
+	if !strings.HasPrefix(token, "-p") || len(token) == len("-p") {
+		return token
+	}
+	secret := token[len("-p"):]
+	if q := matchingOuterQuote(secret); q != 0 {
+		secret = string(q) + sudoRedactedValue + string(q)
+	} else {
+		secret = sudoRedactedValue
+	}
+	return "-p" + secret
+}
+
+func maskSudoArgvMySQLToken(token sudoCommandToken) sudoEdit {
+	masked := maskMySQLPasswordToken(token.text)
+	return sudoEdit{start: token.start, end: token.end, text: encodeSudoArgvToken(masked, token.sudoQuoted)}
+}
+
+func isASCIIWord(ch byte) bool {
+	return ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '_'
+}
+
+func matchingOuterQuote(value string) byte {
+	if len(value) >= 2 && (value[0] == '\'' || value[0] == '"') && value[len(value)-1] == value[0] {
+		return value[0]
+	}
+	return 0
+}
+
+func hasHtpasswdBatchFlag(tokens []sudoCommandToken) bool {
+	for _, token := range tokens {
+		if !strings.HasPrefix(token.text, "-") || len(token.text) < 2 {
+			continue
+		}
+		cluster := token.text[1:]
+		lettersOnly := true
+		for _, r := range cluster {
+			if !(r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
+				lettersOnly = false
+				break
+			}
+		}
+		if lettersOnly && strings.Contains(cluster, "b") {
+			return true
+		}
+	}
+	return false
+}
+
+func shellCommandScript(tokens []sudoCommandToken) (sudoCommandToken, bool) {
+	commandIndex := sudoCommandIndex(tokens)
+	if commandIndex < 0 || commandIndex >= len(tokens) {
+		return sudoCommandToken{}, false
+	}
+	switch strings.ToLower(sudoExecutable(tokens[commandIndex].text)) {
+	case "sh", "bash", "dash", "zsh", "ksh":
+	default:
+		return sudoCommandToken{}, false
+	}
+	for i := commandIndex + 1; i < len(tokens); i++ {
+		if tokens[i].text == "--" {
+			continue
+		}
+		if strings.Contains(tokens[i].text, "c") && strings.HasPrefix(tokens[i].text, "-") {
+			if i+1 < len(tokens) {
+				script := tokens[i+1]
+				if q := matchingOuterQuote(script.text); q != 0 {
+					script.start++
+					script.end--
+				}
+				return script, true
+			}
+			return sudoCommandToken{}, false
+		}
+	}
+	return sudoCommandToken{}, false
+}
+
+func sudoCommandIndex(tokens []sudoCommandToken) int {
+	for i := 0; i < len(tokens); {
+		name := strings.ToLower(sudoExecutable(tokens[i].text))
+		switch name {
+		case "sudo":
+			i = sudoWrapperCommandIndex(tokens, i)
+		case "env":
+			i = envWrapperCommandIndex(tokens, i)
+		case "nice":
+			i = niceWrapperCommandIndex(tokens, i)
+		case "timeout":
+			i = timeoutWrapperCommandIndex(tokens, i)
+		case "exec":
+			i++
+		default:
+			return i
+		}
+		if i >= len(tokens) {
+			return -1
+		}
+	}
+	return -1
+}
+
+func sudoWrapperCommandIndex(tokens []sudoCommandToken, i int) int {
+	i++
+	for i < len(tokens) && strings.HasPrefix(tokens[i].text, "-") {
+		option := tokens[i].text
+		if option == "--" {
+			return i + 1
+		}
+		if sudoOptionTakesValue(option) && !strings.Contains(option, "=") {
+			i += 2
+		} else {
+			i++
+		}
+	}
+	return i
+}
+
+func envWrapperCommandIndex(tokens []sudoCommandToken, i int) int {
+	i++
+	for i < len(tokens) {
+		option := tokens[i].text
+		if option == "--" {
+			return i + 1
+		}
+		if strings.Contains(option, "=") && !strings.HasPrefix(option, "-") {
+			i++
+			continue
+		}
+		if !strings.HasPrefix(option, "-") {
+			return i
+		}
+		if option == "-u" || option == "--unset" || option == "-C" || option == "--chdir" || option == "-S" || option == "--split-string" {
+			i += 2
+		} else {
+			i++
+		}
+	}
+	return i
+}
+
+func niceWrapperCommandIndex(tokens []sudoCommandToken, i int) int {
+	i++
+	if i < len(tokens) && tokens[i].text == "-n" {
+		return i + 2
+	}
+	if i < len(tokens) && strings.HasPrefix(tokens[i].text, "-n") {
+		return i + 1
+	}
+	if i < len(tokens) && looksLikeNiceAdjustment(tokens[i].text) {
+		return i + 1
+	}
+	return i
+}
+
+func timeoutWrapperCommandIndex(tokens []sudoCommandToken, i int) int {
+	i++
+	for i < len(tokens) && strings.HasPrefix(tokens[i].text, "-") {
+		option := tokens[i].text
+		if option == "--" {
+			return i + 1
+		}
+		if option == "-k" || option == "-s" || option == "--kill-after" || option == "--signal" {
+			i += 2
+		} else {
+			i++
+		}
+	}
+	if i < len(tokens) {
+		i++ // duration
+	}
+	return i
+}
+
+func sudoOptionTakesValue(option string) bool {
+	switch option {
+	case "-u", "-g", "-h", "-p", "-C", "-R", "-T", "-r", "-t", "-D", "--user", "--group", "--host", "--prompt", "--close-from", "--chroot", "--command-timeout", "--role", "--type", "--chdir":
+		return true
+	default:
+		return false
+	}
+}
+
+func looksLikeNiceAdjustment(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := range value {
+		if i == 0 && (value[i] == '+' || value[i] == '-') {
+			continue
+		}
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func truncateSudo(value string, maxBytes int) string {
