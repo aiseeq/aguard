@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -86,7 +87,7 @@ func TestCeilingNoticePersistedBeforePropertyFailure(t *testing.T) {
 		},
 	}
 	for range 3 {
-		if err := a.ceilingRound(context.Background(), slice); err != nil {
+		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -135,11 +136,11 @@ func TestCeilingMissingAtClearedWhenScopeAppears(t *testing.T) {
 	}
 	a := &app{home: home, log: slog.New(slog.DiscardHandler), act: activity.New(filepath.Join(home, "act"), time.Now()),
 		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour)}
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	reviewCeilingScope(t, slice, unit, "oom_kill 0\n")
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := ceiling.Read(path)
@@ -176,7 +177,7 @@ func TestCeilingEventCountSendsWithoutJournalVictims(t *testing.T) {
 			return nil
 		},
 	}
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	state, err := ceiling.Update(path, func(state *ceiling.State) error {
@@ -186,7 +187,7 @@ func TestCeilingEventCountSendsWithoutJournalVictims(t *testing.T) {
 	if err != nil || state.OOMPendingAt.IsZero() {
 		t.Fatalf("set elapsed journal grace: %+v %v", state, err)
 	}
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 || victims != 0 {
@@ -218,7 +219,7 @@ func TestCeilingStateNotRewrittenWhenUnchanged(t *testing.T) {
 	}
 	a := &app{home: home, log: slog.New(slog.DiscardHandler), act: activity.New(filepath.Join(home, "act"), time.Now()),
 		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour)}
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.Stat(path)
@@ -226,7 +227,7 @@ func TestCeilingStateNotRewrittenWhenUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.Stat(path)
@@ -264,7 +265,7 @@ func TestCeilingRoundContinuesAfterScopeError(t *testing.T) {
 	ceilingSetProperty = func(unit string, n int64) error { set = append(set, unit); return nil }
 	t.Cleanup(func() { ceilingSetProperty = old })
 	a := &app{home: home, stateDir: filepath.Join(home, ".local", "state", "aguard"), cgroupDir: filepath.Join(home, "cg", "agents.slice"), log: slog.Default(), act: activity.New(filepath.Join(home, "activity"), time.Now())}
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(set) != 1 || set[0] != "agent-b-2.scope" {
@@ -379,7 +380,7 @@ func TestCeilingUnlimitedScopeIsNotManaged(t *testing.T) {
 	a := &app{home: home, procDir: procRoot, cgroupDir: filepath.Join(home, "cg"), out: &out,
 		log: slog.New(slog.DiscardHandler), act: activity.New(filepath.Join(home, "act"), time.Now()),
 		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour)}
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if set != 0 {
@@ -467,5 +468,167 @@ func TestCeilingCommandRaisesAndDefersLowering(t *testing.T) {
 	}
 	if got.Base != 50<<20 || got.By != "demo" || got.At.IsZero() {
 		t.Fatalf("updated ceiling state %+v", got)
+	}
+}
+
+func TestCeilingIterationReadsInputsOnce(t *testing.T) {
+	home := t.TempDir()
+	slice, unit := filepath.Join(home, "cg"), "agent-once-1.scope"
+	reviewCeilingScope(t, slice, unit, "oom_kill 0\n")
+	statePath := ceiling.StatePath(home, unit)
+	if err := ceiling.Write(statePath, ceiling.State{Unit: unit, Base: 1 << 30, By: "cl", OOMSeen: true}); err != nil {
+		t.Fatal(err)
+	}
+	oldDir, oldOpenEvents, oldReadEvents := ceilingReadDir, ceilingOpenEvents, ceilingReadEventValues
+	dirReads, stateReads, eventOpens, eventReads := 0, 0, 0, 0
+	ceilingReadDir = func(path string) ([]os.DirEntry, error) { dirReads++; return oldDir(path) }
+	ceilingOpenEvents = func(path string) (*os.File, error) { eventOpens++; return oldOpenEvents(path) }
+	ceilingReadEventValues = func(path string, reader io.Reader) (map[string]int64, error) {
+		eventReads++
+		return oldReadEvents(path, reader)
+	}
+	t.Cleanup(func() {
+		ceilingReadDir, ceilingOpenEvents, ceilingReadEventValues = oldDir, oldOpenEvents, oldReadEvents
+	})
+	t.Cleanup(ceiling.SetReadUnlockedObserver(func(path string) {
+		if path == statePath {
+			stateReads++
+		}
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cancel()
+	a := scenarioApp(home)
+	if err := a.ceilingIteration(ctx, context.Background(), slice, time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if dirReads != 1 || stateReads != 1 || eventOpens != 1 || eventReads != 1 {
+		t.Fatalf("reads per iteration: directory=%d state=%d memory.events opens=%d reads=%d", dirReads, stateReads, eventOpens, eventReads)
+	}
+}
+
+func TestCeilingOwnerUpdateDuringPass(t *testing.T) {
+	t.Run("final save merges owner and observer", func(t *testing.T) {
+		home := t.TempDir()
+		slice, unit := filepath.Join(home, "cg"), "agent-owner-1.scope"
+		reviewCeilingScope(t, slice, unit, "oom_kill 3\n")
+		root := filepath.Join(slice, unit)
+		if err := os.WriteFile(filepath.Join(root, "memory.max"), []byte("536870912\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		path := ceiling.StatePath(home, unit)
+		if err := ceiling.Write(path, ceiling.State{Unit: unit, Base: 1 << 30, By: "cl", OOMSeen: true, OOM: 3}); err != nil {
+			t.Fatal(err)
+		}
+		oldSet := ceilingSetProperty
+		ceilingSetProperty = func(string, int64) error {
+			_, err := ceiling.Update(path, func(state *ceiling.State) error {
+				state.Base, state.By = 2<<30, "owner"
+				return nil
+			})
+			return err
+		}
+		t.Cleanup(func() { ceilingSetProperty = oldSet })
+		a := scenarioApp(home)
+		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ceiling.Read(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Base != 2<<30 || got.By != "owner" || got.OOMNotified != 3 {
+			t.Fatalf("state after pass: Base=%d By=%q OOMNotified=%d", got.Base, got.By, got.OOMNotified)
+		}
+	})
+
+	t.Run("pending save returns fresh owner state", func(t *testing.T) {
+		home := t.TempDir()
+		slice, unit := filepath.Join(home, "cg"), "agent-owner-2.scope"
+		reviewCeilingScope(t, slice, unit, "oom_kill 4\n")
+		root := filepath.Join(slice, unit)
+		if err := os.WriteFile(filepath.Join(root, "memory.max"), []byte("536870912\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		path := ceiling.StatePath(home, unit)
+		if err := ceiling.Write(path, ceiling.State{Unit: unit, Base: 1 << 30, By: "cl", OOMSeen: true, OOM: 3, OOMNotified: 2}); err != nil {
+			t.Fatal(err)
+		}
+		oldOpen := ceilingOpenEvents
+		ceilingOpenEvents = func(file string) (*os.File, error) {
+			_, err := ceiling.Update(path, func(state *ceiling.State) error {
+				state.Base, state.By = 2<<30, "owner"
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+			return oldOpen(file)
+		}
+		t.Cleanup(func() { ceilingOpenEvents = oldOpen })
+		var setMax int64
+		oldSet := ceilingSetProperty
+		ceilingSetProperty = func(_ string, n int64) error { setMax = n; return nil }
+		t.Cleanup(func() { ceilingSetProperty = oldSet })
+		a := scenarioApp(home)
+		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
+			t.Fatal(err)
+		}
+		if setMax != ceiling.Target(2<<30, 0) {
+			t.Fatalf("set-property used stale Base: max=%d want=%d", setMax, ceiling.Target(2<<30, 0))
+		}
+	})
+
+	t.Run("OOM count change is persisted", func(t *testing.T) {
+		home := t.TempDir()
+		slice, unit := filepath.Join(home, "cg"), "agent-owner-3.scope"
+		reviewCeilingScope(t, slice, unit, "oom_kill 4\n")
+		path := ceiling.StatePath(home, unit)
+		if err := ceiling.Write(path, ceiling.State{Unit: unit, Base: 1 << 30, By: "cl", OOMSeen: true, OOM: 3, OOMNotified: 4}); err != nil {
+			t.Fatal(err)
+		}
+		a := scenarioApp(home)
+		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ceiling.Read(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.OOM != 4 {
+			t.Fatalf("OOM count = %d, want 4", got.OOM)
+		}
+	})
+}
+
+func BenchmarkCeilingIteration(b *testing.B) {
+	for _, count := range []int{1, 8} {
+		b.Run(strconv.Itoa(count)+"_scope", func(b *testing.B) {
+			home := b.TempDir()
+			slice := filepath.Join(home, "cg")
+			for i := range count {
+				unit := "agent-bench-" + strconv.Itoa(i+1) + ".scope"
+				root := filepath.Join(slice, unit)
+				if err := os.MkdirAll(root, 0700); err != nil {
+					b.Fatal(err)
+				}
+				for name, value := range map[string]string{"memory.stat": "file 0\nshmem 0\n", "memory.current": "0\n", "memory.max": "1073741824\n", "memory.events": "oom_kill 0\n", "cgroup.procs": ""} {
+					if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+						b.Fatal(err)
+					}
+				}
+				if err := ceiling.Write(ceiling.StatePath(home, unit), ceiling.State{Unit: unit, Base: 1 << 30, By: "cl", OOMSeen: true}); err != nil {
+					b.Fatal(err)
+				}
+			}
+			a := scenarioApp(home)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

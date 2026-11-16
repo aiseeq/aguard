@@ -67,7 +67,7 @@ func TestQuietCeilingLiveSessionLetterGoesThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 { // первый проход ставит событие в ожидание, второй шлёт
-		if err := a.ceilingRound(context.Background(), slice); err != nil {
+		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -31,6 +31,9 @@ type ceilingState = ceiling.State
 
 var oomMemcgRE = regexp.MustCompile(`oom_memcg=([^ ,]+)`)
 var oomVictimRE = regexp.MustCompile(`Killed process ([0-9]+) \(([^)]+)\).*anon-rss:\s*([0-9]+)kB`)
+var ceilingReadDir = os.ReadDir
+var ceilingOpenEvents = os.Open
+var ceilingReadEventValues = readCeilingValuesFrom
 
 type oomVictim struct {
 	PID  int
@@ -49,6 +52,11 @@ func (e *ceilingOpError) Unwrap() error { return e.err }
 type ceilingSeedRetry struct {
 	Attempts int
 	Next     time.Time
+}
+
+type ceilingObserveResult struct {
+	persisted bool
+	err       error
 }
 
 const ceilingPIDRetention = 30 * time.Second
@@ -289,7 +297,19 @@ func readCeilingValues(path string) (map[string]int64, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	v, err := ceiling.Values(string(b))
+	return parseCeilingValues(path, string(b))
+}
+
+func readCeilingValuesFrom(path string, reader io.Reader) (map[string]int64, error) {
+	b, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return parseCeilingValues(path, string(b))
+}
+
+func parseCeilingValues(path, raw string) (map[string]int64, error) {
+	v, err := ceiling.Values(raw)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
@@ -325,27 +345,29 @@ func (a *app) ceilingLoop(ctx context.Context) {
 				cfgValid = true
 			}
 		}
+		pause := 200 * time.Millisecond
 		if cfgValid {
-			if err := a.ceilingRound(ctx, cfg.Memory.Slice); err != nil && ctx.Err() == nil {
-				a.log.Error("aguard ceiling: проход", "err", err)
-				a.note("ceiling", activity.KindPassFailed, "", "", 0, "")
+			pause = cfg.Ceiling.Interval.D()
+			if pause <= 0 {
+				pause = 200 * time.Millisecond
 			}
 		}
 		var due bool
 		due, nextNote = ceilingPassNext(now, nextNote)
-		if due {
-			a.note("ceiling", activity.KindPass, "", "", 0, "")
-		}
-		pause := 200 * time.Millisecond
 		if cfgValid {
-			pause = cfg.Ceiling.Interval.D()
-		}
-		if pause <= 0 {
-			pause = 200 * time.Millisecond
-		}
-		if cfgValid {
-			a.waitCeiling(ctx, pause, cfg.Memory.Slice)
+			err := a.ceilingIteration(ctx, ctx, cfg.Memory.Slice, pause, func() {
+				if due {
+					a.note("ceiling", activity.KindPass, "", "", 0, "")
+				}
+			})
+			if err != nil && ctx.Err() == nil {
+				a.log.Error("aguard ceiling: проход", "err", err)
+				a.note("ceiling", activity.KindPassFailed, "", "", 0, "")
+			}
 		} else {
+			if due {
+				a.note("ceiling", activity.KindPass, "", "", 0, "")
+			}
 			waitCeilingContext(ctx, pause)
 		}
 		if ctx.Err() != nil {
@@ -354,15 +376,25 @@ func (a *app) ceilingLoop(ctx context.Context) {
 	}
 }
 
-func (a *app) ceilingRound(ctx context.Context, slice string) error {
+func (a *app) ceilingIteration(waitCtx, roundCtx context.Context, slice string, pause time.Duration, afterRound func()) error {
+	watches, err := a.ceilingRoundWithWatches(roundCtx, slice)
+	if afterRound != nil {
+		afterRound()
+	}
+	a.waitCeiling(waitCtx, pause, watches)
+	return err
+}
+
+func (a *app) ceilingRoundWithWatches(ctx context.Context, slice string) ([]*os.File, error) {
 	dir := filepath.Dir(a.ceilingStatePath("x"))
-	entries, err := os.ReadDir(dir)
+	entries, err := ceilingReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read ceiling states %s: %w", dir, err)
+		return nil, fmt.Errorf("read ceiling states %s: %w", dir, err)
 	}
+	var watches []*os.File
 	alive, aliveErr := a.ceilingSessions(time.Now())
 	if aliveErr != nil {
 		a.ceilingFailure("registry_read_failed", "", aliveErr)
@@ -373,7 +405,7 @@ func (a *app) ceilingRound(ctx context.Context, slice string) error {
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return watches, ctx.Err()
 		default:
 		}
 		path := filepath.Join(dir, entry.Name())
@@ -390,7 +422,7 @@ func (a *app) ceilingRound(ctx context.Context, slice string) error {
 			a.ceilingFailure("read_failed", st.Unit, e)
 			continue
 		}
-		if e = a.ceilingScope(ctx, path, root, &st, alive, aliveErr); e != nil {
+		if e = a.ceilingScope(ctx, path, root, &st, alive, aliveErr, &watches); e != nil {
 			kind := "read_failed"
 			var op *ceilingOpError
 			if errors.As(e, &op) {
@@ -399,7 +431,7 @@ func (a *app) ceilingRound(ctx context.Context, slice string) error {
 			a.ceilingFailure(kind, st.Unit, e)
 		}
 	}
-	return nil
+	return watches, nil
 }
 
 func clearCeilingMissing(path string, st *ceiling.State) error {
@@ -414,10 +446,11 @@ func clearCeilingMissing(path string, st *ceiling.State) error {
 	return err
 }
 
-func (a *app) ceilingScope(ctx context.Context, statePath, root string, st *ceiling.State, alive map[string]session.Info, aliveErr error) error {
+func (a *app) ceilingScope(ctx context.Context, statePath, root string, st *ceiling.State, alive map[string]session.Info, aliveErr error, watches *[]*os.File) error {
 	if err := clearCeilingMissing(statePath, st); err != nil {
 		return &ceilingOpError{kind: "state_write_failed", err: err}
 	}
+	persisted := *st
 	name, _, ok := proc.ScopeName(st.Unit)
 	if ok && aliveErr == nil {
 		if info, exists := alive[name]; exists {
@@ -439,8 +472,12 @@ func (a *app) ceilingScope(ctx context.Context, statePath, root string, st *ceil
 	if maxNow == ceiling.Unlimited {
 		return nil
 	}
-	if err := a.ceilingObserveOOM(ctx, statePath, root, st, maxNow, stat["shmem"], alive, aliveErr); err != nil {
-		return err
+	observed := a.ceilingObserveOOM(ctx, statePath, root, st, maxNow, stat["shmem"], alive, aliveErr, watches)
+	if observed.err != nil {
+		return observed.err
+	}
+	if observed.persisted {
+		persisted = *st
 	}
 	want := ceiling.Target(st.Base, stat["shmem"])
 	nextMax := maxNow
@@ -459,6 +496,9 @@ func (a *app) ceilingScope(ctx context.Context, statePath, root string, st *ceil
 	if a.ceilingUnpersisted[st.Unit] {
 		return nil
 	}
+	if ceiling.SameObserved(persisted, *st) {
+		return nil
+	}
 	updated, err := ceiling.SaveObserved(statePath, *st)
 	if err != nil {
 		return &ceilingOpError{kind: "state_write_failed", err: err}
@@ -467,20 +507,29 @@ func (a *app) ceilingScope(ctx context.Context, statePath, root string, st *ceil
 	return nil
 }
 
-func (a *app) ceilingObserveOOM(ctx context.Context, statePath, root string, st *ceiling.State, maxNow, shmem int64, alive map[string]session.Info, aliveErr error) error {
-	events, err := readCeilingValues(filepath.Join(root, "memory.events"))
+func (a *app) ceilingObserveOOM(ctx context.Context, statePath, root string, st *ceiling.State, maxNow, shmem int64, alive map[string]session.Info, aliveErr error, watches *[]*os.File) ceilingObserveResult {
+	path := filepath.Join(root, "memory.events")
+	f, err := ceilingOpenEvents(path)
 	if err != nil {
-		return err
+		return ceilingObserveResult{err: err}
 	}
+	events, err := ceilingReadEventValues(path, f)
+	if err != nil {
+		_ = f.Close()
+		return ceilingObserveResult{err: err}
+	}
+	*watches = append(*watches, f)
 	currentPIDs, err := scopePIDs(root)
 	if err != nil {
-		return err
+		return ceilingObserveResult{err: err}
 	}
 	if a.ceilingPIDs == nil {
 		a.ceilingPIDs = make(map[string]map[int]time.Time)
 	}
 	pids := a.ceilingRememberPIDs(st.Unit, currentPIDs, time.Now())
-	return a.ceilingOOMEvents(ctx, statePath, st, events["oom_kill"], maxNow, shmem, pids, alive, aliveErr)
+	var persisted bool
+	err = a.ceilingOOMEvents(ctx, statePath, st, events["oom_kill"], maxNow, shmem, pids, alive, aliveErr, &persisted)
+	return ceilingObserveResult{persisted: persisted, err: err}
 }
 
 func (a *app) ceilingRememberPIDs(unit string, current []int, now time.Time) map[int]bool {
@@ -507,7 +556,7 @@ func (a *app) ceilingRememberPIDs(unit string, current []int, now time.Time) map
 	return set
 }
 
-func (a *app) ceilingOOMEvents(ctx context.Context, statePath string, st *ceiling.State, eventCount, maxNow, shmem int64, pids map[int]bool, alive map[string]session.Info, aliveErr error) error {
+func (a *app) ceilingOOMEvents(ctx context.Context, statePath string, st *ceiling.State, eventCount, maxNow, shmem int64, pids map[int]bool, alive map[string]session.Info, aliveErr error, persisted *bool) error {
 	if !st.OOMSeen {
 		seeded, err := a.ceilingSeedOOM(ctx, st, eventCount, pids)
 		if err != nil {
@@ -538,6 +587,7 @@ func (a *app) ceilingOOMEvents(ctx context.Context, statePath string, st *ceilin
 			return &ceilingOpError{kind: "state_write_failed", err: err}
 		}
 		*st = updated
+		*persisted = true
 		return nil
 	}
 	if st.OOMAttempts > 0 && time.Since(st.OOMAttemptAt) < time.Second {
@@ -551,7 +601,11 @@ func (a *app) ceilingOOMEvents(ctx context.Context, statePath string, st *ceilin
 	if int64(len(victims)) < delta && time.Since(st.OOMPendingAt) < 2*time.Second {
 		return nil
 	}
-	return a.ceilingDeliverOOM(statePath, st, victims, cursor, eventCount, delta, maxNow, shmem, alive, aliveErr)
+	err := a.ceilingDeliverOOM(statePath, st, victims, cursor, eventCount, delta, maxNow, shmem, alive, aliveErr)
+	if err == nil {
+		*persisted = true
+	}
+	return err
 }
 
 func (a *app) ceilingSeedOOM(ctx context.Context, st *ceiling.State, eventCount int64, pids map[int]bool) (bool, error) {
@@ -824,65 +878,33 @@ func (a *app) ceilingFailure(kind, unit string, err error) {
 	a.note("ceiling", kind, unit, "", 1, "error")
 }
 
-func (a *app) waitCeiling(ctx context.Context, pause time.Duration, slice string) {
-	entries, err := os.ReadDir(filepath.Dir(a.ceilingStatePath("x")))
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			a.ceilingFailure("read_failed", "", err)
-		}
-		waitCeilingContext(ctx, pause)
-		return
-	}
-	var files []*os.File
-	var polls []unix.PollFd
+func (a *app) waitCeiling(ctx context.Context, pause time.Duration, watches []*os.File) {
 	defer func() {
-		for _, f := range files {
+		for _, f := range watches {
 			_ = f.Close()
 		}
 	}()
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		st, e := ceiling.Read(filepath.Join(filepath.Dir(a.ceilingStatePath("x")), entry.Name()))
-		if e != nil {
-			a.ceilingFailure("read_failed", entry.Name(), e)
-			continue
-		}
-		f, e := os.Open(filepath.Join(slice, st.Unit, "memory.events"))
-		if e != nil {
-			if !errors.Is(e, os.ErrNotExist) {
-				a.ceilingFailure("poll_failed", st.Unit, e)
-			}
-			continue
-		}
-		if _, e = io.Copy(io.Discard, f); e != nil {
-			a.ceilingFailure("poll_failed", st.Unit, e)
-			_ = f.Close()
-			continue
-		}
-		if _, e = f.Seek(0, 0); e != nil {
-			a.ceilingFailure("poll_failed", st.Unit, e)
-			_ = f.Close()
-			continue
-		}
-		files = append(files, f)
-		polls = append(polls, unix.PollFd{Fd: int32(f.Fd()), Events: unix.POLLPRI})
+	if pause <= 0 || ctx.Err() != nil {
+		return
 	}
-	if len(polls) == 0 {
+	if len(watches) == 0 {
 		waitCeilingContext(ctx, pause)
 		return
 	}
+	polls := make([]unix.PollFd, 0, len(watches))
+	for _, f := range watches {
+		polls = append(polls, unix.PollFd{Fd: int32(f.Fd()), Events: unix.POLLPRI})
+	}
 	ms := max(int(math.Ceil(float64(pause)/float64(time.Millisecond))), 1)
 	for ctx.Err() == nil {
-		_, e := unix.Poll(polls, ms)
-		if e == unix.EINTR {
+		_, err := unix.Poll(polls, ms)
+		if err == unix.EINTR {
 			continue
 		}
-		if e != nil {
-			a.ceilingFailure("poll_failed", "", e)
+		if err != nil {
+			a.ceilingFailure("poll_failed", "", err)
 		}
-		break
+		return
 	}
 }
 func waitCeilingContext(ctx context.Context, d time.Duration) {
