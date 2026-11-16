@@ -502,8 +502,81 @@ func TestCeilingIterationReadsInputsOnce(t *testing.T) {
 	if err := a.ceilingIteration(ctx, context.Background(), slice, time.Second, nil); err != nil {
 		t.Fatal(err)
 	}
-	if dirReads != 1 || stateReads != 1 || eventOpens != 1 || eventReads != 1 {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, time.Millisecond, nil); err != nil {
+		t.Fatal(err)
+	}
+	if dirReads != 2 || stateReads != 2 || eventOpens != 2 || eventReads != 2 {
 		t.Fatalf("reads per iteration: directory=%d state=%d memory.events opens=%d reads=%d", dirReads, stateReads, eventOpens, eventReads)
+	}
+}
+
+func TestCeilingPassFailureRecordedBeforeWait(t *testing.T) {
+	home := t.TempDir()
+	oldReadDir := ceilingReadDir
+	ceilingReadDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("read failed") }
+	t.Cleanup(func() { ceilingReadDir = oldReadDir })
+	a := scenarioApp(home)
+	ctx, cancel := context.WithCancel(context.Background())
+	timer := time.AfterFunc(100*time.Millisecond, cancel)
+	t.Cleanup(func() { timer.Stop(); cancel() })
+	if err := a.ceilingIteration(ctx, context.Background(), filepath.Join(home, "cg"), time.Minute, nil); err == nil {
+		t.Fatal("expected pass error")
+	}
+	if err := a.act.Flush(time.Now(), activityKeep); err != nil {
+		t.Fatal(err)
+	}
+	var failed bool
+	if _, err := activity.NewStore(filepath.Join(home, "act")).Read(time.Time{}, func(r *activity.Record) {
+		if r.Watcher == "ceiling" && r.Kind == activity.KindPassFailed {
+			failed = true
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !failed {
+		t.Fatal("KindPassFailed missing after cancellation during the wait")
+	}
+}
+
+func TestCeilingCanceledPassDoesNotLogFailure(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "act"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	oldReadDir := ceilingReadDir
+	ctx, cancel := context.WithCancel(context.Background())
+	readStarted := false
+	ceilingReadDir = func(string) ([]os.DirEntry, error) {
+		readStarted = true
+		cancel()
+		return nil, context.Canceled
+	}
+	t.Cleanup(func() { ceilingReadDir = oldReadDir; cancel() })
+	a := scenarioApp(home)
+	var logs bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logs, nil))
+	if err := a.ceilingIteration(ctx, ctx, filepath.Join(home, "cg"), 0, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("pass error = %v, want context.Canceled", err)
+	}
+	if !readStarted || !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("pass did not cancel while reading: read=%v ctx=%v", readStarted, ctx.Err())
+	}
+	if strings.Contains(logs.String(), "level=ERROR") {
+		t.Fatalf("canceled ceiling pass logged an error: %s", logs.String())
+	}
+	if err := a.act.Flush(time.Now(), activityKeep); err != nil {
+		t.Fatal(err)
+	}
+	var failed bool
+	if _, err := activity.NewStore(filepath.Join(home, "act")).Read(time.Time{}, func(r *activity.Record) {
+		if r.Watcher == "ceiling" && r.Kind == activity.KindPassFailed {
+			failed = true
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if failed {
+		t.Fatal("canceled ceiling pass recorded KindPassFailed")
 	}
 }
 
