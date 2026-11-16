@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -990,6 +991,161 @@ func TestIOReportCountsAllRootSessionCandidates(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "root session-c*: сопоставлено 1 из 2 случаев") {
 		t.Fatalf("root session summary did not count unmatched candidates: %s", out.String())
+	}
+	if strings.Contains(out.String(), "не сопоставлено из-за ошибки журнала") {
+		t.Fatalf("journal error summary printed without errors: %s", out.String())
+	}
+}
+
+func TestIOReportSeparatesJournalErrorsFromUnmatchedSessions(t *testing.T) {
+	a, out := testIOApp(t)
+	calls := 0
+	a.sudoJournalSource = func(context.Context, string, string, ...string) ([]journalRecord, error) {
+		calls++
+		switch calls {
+		case 1:
+			return nil, errors.New("journalctl: context deadline exceeded\nextra detail")
+		case 2:
+			return nil, errors.New("second session error")
+		default:
+			return nil, nil
+		}
+	}
+	now := time.Now()
+	cases := []iowatch.Case{
+		{Start: now.Add(-2 * time.Hour), DurMS: 3000, Culprits: &iowatch.Culprit{Main: "session-c497.scope", Foreign: iowatch.Ranked{Name: "session-c499.scope"}}},
+		{Start: now.Add(-time.Hour), DurMS: 4000, Culprits: &iowatch.Culprit{Main: "session-c498.scope"}},
+	}
+	path := filepath.Join(t.TempDir(), "cases.jsonl")
+	if err := iowatch.SaveCases(path, cases); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ioReport(context.Background(), path, false, now.Add(-24*time.Hour), now, 0, "", false); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "root session-c*: сопоставлено 0 из 2 случаев") {
+		t.Fatalf("unexpected match summary: %s", got)
+	}
+	if !strings.Contains(got, "не сопоставлено из-за ошибки журнала: 1 (первая ошибка: session-c497: journalctl: context deadline exceeded; extra detail)") {
+		t.Fatalf("journal error was not counted separately: %s", got)
+	}
+	if strings.Contains(got, "second session error") || strings.Contains(got, "\nextra detail") {
+		t.Fatalf("summary did not keep the first error on one line: %s", got)
+	}
+}
+
+func TestIOReportAndDaemonUseDifferentSudoJournalTimeouts(t *testing.T) {
+	a, _ := testIOApp(t)
+	stage := "report"
+	deadlines := map[string][]time.Duration{"report": {}, "daemon": {}}
+	a.sudoJournalSource = func(ctx context.Context, _, _ string, _ ...string) ([]journalRecord, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("sudo journal context has no deadline")
+		}
+		deadlines[stage] = append(deadlines[stage], time.Until(deadline))
+		return nil, nil
+	}
+	now := time.Now()
+	path := filepath.Join(t.TempDir(), "cases.jsonl")
+	if err := iowatch.SaveCases(path, []iowatch.Case{{
+		Start: now.Add(-time.Hour), DurMS: 3000, Culprits: &iowatch.Culprit{Main: "session-c497.scope"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ioReport(context.Background(), path, false, now.Add(-24*time.Hour), now, 0, "", false); err != nil {
+		t.Fatal(err)
+	}
+	stage = "daemon"
+	c := iowatch.Case{Start: now.Add(-time.Hour), Culprits: &iowatch.Culprit{Main: "session-c498.scope"}}
+	if err := a.sudoInfo(context.Background(), &c, newSudoLookupCache(), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(deadlines["report"]) == 0 || len(deadlines["daemon"]) == 0 {
+		t.Fatalf("no journal deadline captured: %+v", deadlines)
+	}
+	for _, remaining := range deadlines["report"] {
+		if remaining <= sudoJournalTimeout {
+			t.Fatalf("report journal deadline %s is not longer than daemon timeout %s", remaining, sudoJournalTimeout)
+		}
+	}
+	for _, remaining := range deadlines["daemon"] {
+		if remaining <= 0 || remaining > sudoJournalTimeout {
+			t.Fatalf("daemon journal deadline %s, want >0 and <=%s", remaining, sudoJournalTimeout)
+		}
+	}
+}
+
+func TestReadSudoJournalCancellationIncludesTimeout(t *testing.T) {
+	a := &app{}
+	entered := make(chan struct{})
+	a.sudoJournalSource = func(ctx context.Context, _, _ string, _ ...string) ([]journalRecord, error) {
+		close(entered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := a.readSudoJournal(ctx, 15*time.Second, "since", "until", "_COMM=sudo")
+		errCh <- err
+	}()
+	<-entered
+	cancel()
+	err := <-errCh
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "journalctl: прерван:") || strings.Contains(err.Error(), "таймаут") {
+		t.Fatalf("canceled journal search error=%v, want interrupted label wrapping context cancellation", err)
+	}
+}
+
+func TestReadJournalDeadlineReportsTimeoutAndStopsProcess(t *testing.T) {
+	journalDir := t.TempDir()
+	journalctl := filepath.Join(journalDir, "journalctl")
+	if err := os.WriteFile(journalctl, []byte("#!/bin/sh\nexec /bin/sleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", journalDir)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := readJournal(ctx, 200*time.Millisecond, "since", "until", "_COMM=sudo")
+	elapsed := time.Since(started)
+	if err == nil || !strings.Contains(err.Error(), "journalctl: таймаут 200ms:") {
+		t.Fatalf("readJournal error=%v, want timeout label", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("readJournal error=%v, want context deadline exceeded", err)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("readJournal took %s, want under 2s", elapsed)
+	}
+}
+
+func TestIOReportDoesNotCountJournalErrorWhenForeignSudoMatched(t *testing.T) {
+	a, out := testIOApp(t)
+	a.sudoJournalSource = func(context.Context, string, string, ...string) ([]journalRecord, error) {
+		return nil, errors.New("main session journal failed")
+	}
+	now := time.Now()
+	cases := []iowatch.Case{{
+		Start: now.Add(-time.Hour), DurMS: 3000,
+		Culprits:    &iowatch.Culprit{Main: "session-c497.scope"},
+		ForeignSudo: &iowatch.SudoInfo{Command: "matched foreign sudo"},
+	}}
+	path := filepath.Join(t.TempDir(), "cases.jsonl")
+	if err := iowatch.SaveCases(path, cases); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ioReport(context.Background(), path, false, now.Add(-24*time.Hour), now, 0, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "root session-c*: сопоставлено 1 из 1 случаев") {
+		t.Fatalf("expected partial attribution to count as matched: %s", out.String())
+	}
+	if strings.Contains(out.String(), "не сопоставлено из-за ошибки журнала") {
+		t.Fatalf("partially matched case counted as journal error: %s", out.String())
 	}
 }
 
