@@ -711,3 +711,72 @@ func TestByUnitNewNames(t *testing.T) {
 		}
 	}
 }
+
+func TestByDirLatestCleanAndMissing(t *testing.T) {
+	state := t.TempDir()
+	project := filepath.Join(t.TempDir(), "project")
+	now := time.Now()
+	writeJob := func(ago time.Duration, suffix string, created time.Time, dir string) string {
+		t.Helper()
+		id := now.Add(-ago).Format("0102-1504") + "-" + suffix
+		body := fmt.Sprintf(`{"id":%q,"dir":%q,"master":%q,"created":%q}`, id, dir, suffix+"-master", created.Format(time.RFC3339Nano))
+		write(t, filepath.Join(state, id, "job.json"), body)
+		return id
+	}
+	writeJob(2*time.Hour, "older", now.Add(-2*time.Hour), project+string(os.PathSeparator))
+	newestID := writeJob(time.Hour, "newer", now.Add(-time.Hour), project+string(os.PathSeparator))
+	removedID := now.Add(-3*time.Hour).Format("0102-1504") + "-removed"
+	if err := os.MkdirAll(filepath.Join(state, removedID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	jobs := &Jobs{Dir: state}
+	for _, dir := range []string{project, project + string(os.PathSeparator)} {
+		got, err := jobs.ByDir(dir)
+		if err != nil || got == nil || got.ID != newestID {
+			t.Errorf("ByDir(%q) = %+v, %v; хотим %s", dir, got, err, newestID)
+		}
+	}
+	if got, err := jobs.ByDir(filepath.Join(project, "absent")); err != nil || got != nil {
+		t.Errorf("ByDir для отсутствующего задания = %+v, %v", got, err)
+	}
+}
+
+func TestByDirReturnsReadErrorOnlyOnce(t *testing.T) {
+	state := t.TempDir()
+	now := time.Now()
+	project := filepath.Join(t.TempDir(), "project")
+	id := now.Add(-time.Hour).Format("0102-1504") + "-broken"
+	write(t, filepath.Join(state, id, "job.json"), "{")
+	jobs := &Jobs{Dir: state}
+	if _, err := jobs.ByDir(project); err == nil {
+		t.Fatal("первый поиск не вернул ошибку повреждённого job.json")
+	}
+	if _, err := jobs.ByDir(project); err != nil {
+		t.Fatalf("повторный поиск повторил ошибку: %v", err)
+	}
+}
+
+func TestByDirSkipsOldFolders(t *testing.T) {
+	state := t.TempDir()
+	project := filepath.Join(t.TempDir(), "project")
+	id := time.Now().Add(-8*24*time.Hour).Format("0102-1504") + "-old"
+	write(t, filepath.Join(state, id, "job.json"), "{")
+	if got, err := (&Jobs{Dir: state}).ByDir(project); err != nil || got != nil {
+		t.Fatalf("старое задание попало в поиск: %+v, %v", got, err)
+	}
+}
+
+func TestRecentJobDirWindowAndYearBoundary(t *testing.T) {
+	now := time.Date(2026, time.January, 2, 12, 0, 0, 0, time.Local)
+	for name, want := range map[string]bool{
+		time.Date(2025, time.December, 26, 13, 0, 0, 0, time.Local).Format("0102-1504") + "-inside":  true,
+		time.Date(2025, time.December, 26, 11, 0, 0, 0, time.Local).Format("0102-1504") + "-outside": false,
+		"1231-2300-year-boundary":                          true,
+		now.Add(time.Hour).Format("0102-1504") + "-future": false,
+	} {
+		if got := recentJobDir(name, now); got != want {
+			t.Errorf("recentJobDir(%q) = %v, хотим %v", name, got, want)
+		}
+	}
+}

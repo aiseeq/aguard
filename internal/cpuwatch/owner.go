@@ -60,11 +60,13 @@ type JobOwner struct {
 
 // Jobs — задания worker по папке состояния; читаются по мере надобности.
 type Jobs struct {
-	Dir   string
-	Units []string        // папки cgroup, где systemd держит unit бойцов (app.slice и agents.slice user@): живой unit — папка в одной из них
-	byID  map[string]*Job // nil — задания нет
-	all   []*Job          // живые задания папки, прочитанные ByTree
-	read  bool
+	Dir     string
+	Units   []string        // папки cgroup, где systemd держит unit бойцов (app.slice и agents.slice user@): живой unit — папка в одной из них
+	byID    map[string]*Job // nil — задания нет
+	all     []*Job          // живые задания папки, прочитанные ByTree
+	read    bool
+	byDir   map[string]*Job
+	dirRead bool
 }
 
 func (j *Jobs) get(id string) (*Job, error) {
@@ -84,6 +86,68 @@ func (j *Jobs) get(id string) (*Job, error) {
 
 // ByID — задание по id (имя его папки, env WORKER_JOB бойца); нет — nil.
 func (j *Jobs) ByID(id string) (*Job, error) { return j.get(id) }
+
+// ByDir находит живые и завершённые задания с точным dir и берёт самое новое.
+func (j *Jobs) ByDir(dir string) (*Job, error) {
+	var scanErr error
+	if !j.dirRead {
+		j.dirRead = true
+		j.byDir = map[string]*Job{}
+		ents, err := os.ReadDir(j.Dir)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			scanErr = fmt.Errorf("задания worker: %w", err)
+		}
+		now := time.Now()
+		for _, e := range ents {
+			if !recentJobDir(e.Name(), now) || !e.IsDir() {
+				continue
+			}
+			v, err := j.get(e.Name())
+			if err != nil {
+				scanErr = errors.Join(scanErr, err)
+				continue
+			}
+			if v != nil {
+				d := filepath.Clean(v.Dir)
+				if prev := j.byDir[d]; prev == nil || v.Created.After(prev.Created) {
+					j.byDir[d] = v
+				}
+			}
+		}
+	}
+	return j.byDir[filepath.Clean(dir)], scanErr
+}
+
+// recentJobDir распознаёт префикс MMDD-HHMM- и оставляет задания последних семи суток.
+// Для даты без года берётся ближайшее прошедшее в локальном времени вхождение.
+func recentJobDir(name string, now time.Time) bool {
+	if len(name) < 10 || name[4] != '-' || name[9] != '-' {
+		return false
+	}
+	for _, i := range []int{0, 1, 2, 3, 5, 6, 7, 8} {
+		if name[i] < '0' || name[i] > '9' {
+			return false
+		}
+	}
+	month := int(name[0]-'0')*10 + int(name[1]-'0')
+	day := int(name[2]-'0')*10 + int(name[3]-'0')
+	hour := int(name[5]-'0')*10 + int(name[6]-'0')
+	minute := int(name[7]-'0')*10 + int(name[8]-'0')
+	if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 {
+		return false
+	}
+	var created time.Time
+	for _, year := range []int{now.Year(), now.Year() - 1} {
+		candidate := time.Date(year, time.Month(month), day, hour, minute, 0, 0, now.Location())
+		if int(candidate.Month()) != month || candidate.Day() != day {
+			continue
+		}
+		if !candidate.After(now) && candidate.After(created) {
+			created = candidate
+		}
+	}
+	return !created.IsZero() && now.Sub(created) <= 7*24*time.Hour
+}
 
 // readJob — задание из job.json; файла нет (папка не задания или задание убрано) — nil.
 func readJob(path string) (*Job, error) {
