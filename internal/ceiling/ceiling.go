@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -93,6 +94,47 @@ type State struct {
 	ClaudePID       int       `json:"claude_pid,omitempty"`
 }
 
+// SameObserved reports whether the observer-managed fields in two states match.
+func SameObserved(a, b State) bool {
+	return reflect.DeepEqual(observedState(a), observedState(b))
+}
+
+func observedState(state State) State {
+	var observed State
+	copyObserved(&observed, state)
+	return observed
+}
+
+func copyObserved(current *State, observed State) {
+	current.OOMSeen = observed.OOMSeen
+	current.OOM = observed.OOM
+	current.OOMNotified = observed.OOMNotified
+	current.MissingAt = observed.MissingAt
+	current.MissingCheckAt = observed.MissingCheckAt
+	current.MissingAttempts = observed.MissingAttempts
+	current.OOMCursor = observed.OOMCursor
+	current.OOMPendingAt = observed.OOMPendingAt
+	current.OOMPendingCount = observed.OOMPendingCount
+	current.OOMAttemptAt = observed.OOMAttemptAt
+	current.OOMAttempts = observed.OOMAttempts
+}
+
+var readUnlockedObserverMu sync.RWMutex
+var readUnlockedObserver func(string)
+
+// SetReadUnlockedObserver installs a callback for state JSON reads and returns a restore function.
+func SetReadUnlockedObserver(observer func(string)) func() {
+	readUnlockedObserverMu.Lock()
+	previous := readUnlockedObserver
+	readUnlockedObserver = observer
+	readUnlockedObserverMu.Unlock()
+	return func() {
+		readUnlockedObserverMu.Lock()
+		readUnlockedObserver = previous
+		readUnlockedObserverMu.Unlock()
+	}
+}
+
 func StatePath(home, unit string) string {
 	return filepath.Join(home, ".local", "state", "aguard", "ceiling", unit+".json")
 }
@@ -153,22 +195,18 @@ func Update(path string, change func(*State) error) (state State, result error) 
 // SaveObserved обновляет поля наблюдателя, сохраняя base и другие поля владельца scope.
 func SaveObserved(path string, observed State) (State, error) {
 	return Update(path, func(current *State) error {
-		current.OOMSeen = observed.OOMSeen
-		current.OOM = observed.OOM
-		current.OOMNotified = observed.OOMNotified
-		current.MissingAt = observed.MissingAt
-		current.MissingCheckAt = observed.MissingCheckAt
-		current.MissingAttempts = observed.MissingAttempts
-		current.OOMCursor = observed.OOMCursor
-		current.OOMPendingAt = observed.OOMPendingAt
-		current.OOMPendingCount = observed.OOMPendingCount
-		current.OOMAttemptAt = observed.OOMAttemptAt
-		current.OOMAttempts = observed.OOMAttempts
+		copyObserved(current, observed)
 		return nil
 	})
 }
 
 func readUnlocked(path string) (State, error) {
+	readUnlockedObserverMu.RLock()
+	observer := readUnlockedObserver
+	readUnlockedObserverMu.RUnlock()
+	if observer != nil {
+		observer(path)
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return State{}, fmt.Errorf("read ceiling state %s: %w", path, err)

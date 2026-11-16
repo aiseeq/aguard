@@ -55,7 +55,7 @@ func TestCeilingSetFailureNoDuplicateNotice(t *testing.T) {
 		return nil
 	}
 	for range 3 {
-		if err := a.ceilingRound(context.Background(), slice); err != nil {
+		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -79,11 +79,11 @@ func TestCeilingMissingAtClearedOnReturn(t *testing.T) {
 	t.Cleanup(func() { ceilingSetProperty = old })
 	a := scenarioApp(home)
 	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) { return nil, time.Time{}, nil }
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	scenarioScope(t, slice, unit, "oom_kill 0\n")
-	if err := a.ceilingRound(context.Background(), slice); err != nil {
+	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	st, err := ceiling.Read(path)
@@ -193,7 +193,7 @@ func TestCeilingStateNotRewrittenWhenCurrentMoves(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(slice, unit, "memory.current"), []byte(strings.Repeat("1", i+1)+"\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if err := a.ceilingRound(context.Background(), slice); err != nil {
+		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 		fi, _ := os.Stat(path)
@@ -252,7 +252,7 @@ func TestCeilingPIDHistoryBoundedAndCleared(t *testing.T) {
 	a := scenarioApp(home)
 	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) { return nil, time.Time{}, nil }
 	for range 1000 {
-		if err := a.ceilingRound(context.Background(), slice); err != nil {
+		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -293,7 +293,7 @@ func TestCeilingSeedJournalRetriesAreRateLimited(t *testing.T) {
 		return nil, time.Time{}, errors.New("journal unavailable")
 	}
 	for range 100 {
-		if err := a.ceilingRound(context.Background(), slice); err != nil {
+		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
