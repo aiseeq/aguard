@@ -54,15 +54,6 @@ func (row MachineSecondFileRow) MachineSecond() MachineSecond {
 	return second
 }
 
-// MachineSecondFileRows преобразует секунды в общий JSON-формат файла и ответа сокета.
-func MachineSecondFileRows(seconds []MachineSecond) []MachineSecondFileRow {
-	rows := make([]MachineSecondFileRow, len(seconds))
-	for i := range seconds {
-		rows[i] = MachineSecondFileRowOf(seconds[i])
-	}
-	return rows
-}
-
 // SaveCases пишет случаи в path целиком (через path.part и переименование).
 func SaveCases(path string, cases []Case) error { return saveLines(path, whatCases, cases) }
 

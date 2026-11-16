@@ -355,15 +355,11 @@ func (a *app) ceilingLoop(ctx context.Context) {
 		var due bool
 		due, nextNote = ceilingPassNext(now, nextNote)
 		if cfgValid {
-			err := a.ceilingIteration(ctx, ctx, cfg.Memory.Slice, pause, func() {
+			_ = a.ceilingIteration(ctx, ctx, cfg.Memory.Slice, pause, func() { //nolint:ignored-error // Ошибка обработана внутри ceilingIteration.
 				if due {
 					a.note("ceiling", activity.KindPass, "", "", 0, "")
 				}
 			})
-			if err != nil && ctx.Err() == nil {
-				a.log.Error("aguard ceiling: проход", "err", err)
-				a.note("ceiling", activity.KindPassFailed, "", "", 0, "")
-			}
 		} else {
 			if due {
 				a.note("ceiling", activity.KindPass, "", "", 0, "")
@@ -380,6 +376,10 @@ func (a *app) ceilingIteration(waitCtx, roundCtx context.Context, slice string, 
 	watches, err := a.ceilingRoundWithWatches(roundCtx, slice)
 	if afterRound != nil {
 		afterRound()
+	}
+	if err != nil && waitCtx.Err() == nil {
+		a.log.Error("aguard ceiling: проход", "err", err)
+		a.note("ceiling", activity.KindPassFailed, "", "", 0, "")
 	}
 	a.waitCeiling(waitCtx, pause, watches)
 	return err

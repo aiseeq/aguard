@@ -59,7 +59,7 @@ func (s *ioService) answer(line []byte) any {
 		if err != nil {
 			return fail(err)
 		}
-		return iowatch.Answer{V: iowatch.ProtoVersion, Series: iowatch.MachineSecondFileRows(rows.Seconds())}
+		return iowatch.Answer{V: iowatch.ProtoVersion, Series: rows.FileRows()}
 	case iowatch.QueryCases:
 		type casesCover struct {
 			cases []iowatch.Case

@@ -291,5 +291,14 @@ func (rows SeriesRows) Seconds() []MachineSecond {
 	return out
 }
 
+// FileRows converts copied series rows directly to the shared JSON format without an intermediate seconds slice.
+func (rows SeriesRows) FileRows() []MachineSecondFileRow {
+	out := make([]MachineSecondFileRow, len(rows))
+	for i := range rows {
+		out[i] = MachineSecondFileRowOf(rows[i].second())
+	}
+	return out
+}
+
 // Keep — срок ряда.
 func (s *Series) Keep() time.Duration { return s.keep }

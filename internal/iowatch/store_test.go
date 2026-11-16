@@ -2,6 +2,7 @@ package iowatch
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,44 @@ import (
 	"testing"
 	"time"
 )
+
+func BenchmarkSeriesResponse93600(b *testing.B) {
+	const count = 93_600
+	series := NewSeries(26 * time.Hour)
+	base := time.Unix(1_800_000_000, 0)
+	for i := range count {
+		series.Add(MachineSecond{At: base.Add(time.Duration(i) * time.Second), IOFullMS: int64(i % 1000),
+			ReadB: int64(i) * 4096, WriteB: int64(i) * 2048, MemAvail: 8 << 30,
+			GraftSliceMem: int64(i%10000) << 10, GraftSliceMemKnown: true})
+	}
+	rows := series.Rows(base)
+	legacy := func() []MachineSecondFileRow {
+		seconds := rows.Seconds()
+		out := make([]MachineSecondFileRow, len(seconds))
+		for i := range seconds {
+			out[i] = MachineSecondFileRowOf(seconds[i])
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		rows func() []MachineSecondFileRow
+	}{
+		{name: "before", rows: legacy},
+		{name: "after", rows: func() []MachineSecondFileRow { return rows.FileRows() }},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(count))
+			b.ResetTimer()
+			for b.Loop() {
+				if _, err := json.Marshal(Answer{V: ProtoVersion, Series: tc.rows()}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
 
 func BenchmarkSeriesSaveLoad93600(b *testing.B) {
 	const count = 93_600
