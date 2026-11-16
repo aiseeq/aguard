@@ -3,7 +3,7 @@ package cpuwatch
 import (
 	"os/exec"
 	"path/filepath"
-	"slices"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -28,11 +28,16 @@ func TestRemoteScript(t *testing.T) {
 	p := filepath.Join(root, "p")
 	write(t, filepath.Join(p, "stat"), "cpu  1 2 3\ncpu0 1 2 3\ncpu1 1 2 3\nprocs_running 3\n")
 	write(t, filepath.Join(p, "loadavg"), "2.50 2.25 0.75 9/700 4242\n")
+	write(t, filepath.Join(p, "uptime"), "7200.00 100.00\n")
+	stat := "R 1 2 3 4 5 6 7 8 9 10 1200 300 15 16 17 18 19 20 1000"
+	write(t, filepath.Join(p, "10", "stat"), "10 (go x) "+stat+"\n")
 	write(t, filepath.Join(p, "10", "task", "1001", "stat"), "1001 (go x) R 1 2 3")
 	write(t, filepath.Join(p, "10", "task", "1002", "stat"), "1002 (go x) S 1 2 3")
 	write(t, filepath.Join(p, "10", "comm"), "go\tx\n")
 	write(t, filepath.Join(p, "10", "cgroup"), "1:name=systemd:/old\n0::"+userSlice+"/app.slice/farm-x.0123456789abcdef.scope\n")
 	write(t, filepath.Join(p, "10", "environ"), "A=1\x00CLAUDE_PID=77\x00SSH_CONNECTION=10.0.0.1 40000 10.0.0.2 22\x00")
+	write(t, filepath.Join(p, "10", "io"), "rchar: 100\nwchar: 200\n")
+	write(t, filepath.Join(p, "10", "cmdline"), strings.Repeat("x", 350)+"\x00"+strings.Repeat("y", 100))
 	write(t, filepath.Join(p, "11", "task", "1101", "stat"), "1101 (idle) S 1 2 3")
 	write(t, filepath.Join(p, "11", "comm"), "idle\n")
 
@@ -40,9 +45,10 @@ func TestRemoteScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []Task{{Pid: 10, N: 1, Comm: "go x", Cgroup: userSlice + "/app.slice/farm-x.0123456789abcdef.scope", Claude: 77,
-		SSH: "10.0.0.1 40000 10.0.0.2 22"}}
-	if !slices.Equal(tasks, want) {
+	want := Task{Pid: 10, N: 1, Comm: "go x", Cgroup: userSlice + "/app.slice/farm-x.0123456789abcdef.scope", Claude: 77,
+		SSH: "10.0.0.1 40000 10.0.0.2 22", Remote: &RemoteStats{Start: 1000, CPU: 15, Age: 7190 * time.Second,
+			Rchar: 100, Wchar: 200, IOKnown: true, Cmdline: strings.Repeat("x", 300)}}
+	if len(tasks) != 1 || !reflect.DeepEqual(tasks[0], want) {
 		t.Errorf("готовые потоки:\n got %+v\nwant %+v", tasks, want)
 	}
 

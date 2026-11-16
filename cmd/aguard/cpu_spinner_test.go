@@ -340,6 +340,67 @@ func TestCpuDryShowsSpinnerFromFirstPass(t *testing.T) {
 	}
 }
 
+func TestRemoteSpinnerFixtureEndToEnd(t *testing.T) {
+	cfg := cpuwatch.Default("")
+	now := time.Date(2026, 11, 12, 5, 0, 0, 0, time.UTC)
+	raw, err := os.ReadFile(filepath.Join("../../internal/cpuwatch/testdata", "remote-spinner.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := cpuwatch.ParseRemote(raw, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := cpuwatch.RemoteProcesses(tasks, now)
+	resolver := &cpuwatch.Resolver{}
+	owner := resolver.RemoteOwner
+	var w spinnerWatch
+	got, err := w.findProcesses(now, "", ps, owner, &cfg, true)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("fixture remote candidates: %+v, %v", got, err)
+	}
+	letter := cpuwatch.MasterMessage("pc", &cpuwatch.Verdict{Spinners: got}, &cpuwatch.Master{Name: "llmark-master"}, now, true)
+	if !strings.Contains(letter, "Долгий процесс без заметного ввода-вывода на pc: pid 3329590") {
+		t.Fatalf("PC letter omits long process: %s", letter)
+	}
+}
+
+func TestCpuDryShowsRemoteSpinnerFromFixture(t *testing.T) {
+	var logs strings.Builder
+	a := cpuApp(t, &logs)
+	raw, err := os.ReadFile(filepath.Join("../../internal/cpuwatch/testdata", "remote-spinner.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	localRoot, pcRoot := t.TempDir(), filepath.Join(t.TempDir(), "pc-proc")
+	cpuWrite(t, filepath.Join(localRoot, "stat"), "cpu 1 2 3 4\ncpu0 1 2 3 4\nprocs_running 0\nbtime 1760000000\n")
+	cpuWrite(t, filepath.Join(localRoot, "loadavg"), "0.00 0.00 0.00 0/1 1\n")
+	local := &cpuHost{root: localRoot, win: cpuwatch.Host{Name: cpuwatch.HostLocal}}
+	pc := &cpuHost{ssh: "pc", root: pcRoot, win: cpuwatch.Host{Name: "pc"}}
+	a.cpu = map[string]*cpuHost{"": local, "pc": pc}
+	a.cpuRemoteRead = func(_ context.Context, h *cpuHost, _ bool) ([]cpuwatch.Task, error) {
+		tasks, err := cpuwatch.ParseRemote(raw, h.root)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(h.root, "loadavg"), []byte("1000.00 1000.00 1000.00 3/700 4242\n"), 0600); err != nil {
+			return nil, err
+		}
+		return tasks, nil
+	}
+	a.strayRead = func(context.Context, *cpuHost) ([]byte, error) { return []byte("##procs\n##strays\n##end\n"), nil }
+	out := &bytes.Buffer{}
+	a.out = out
+	cfg := cpuwatch.Default(a.home)
+	cfg.Hosts, cfg.Lead, cfg.Notify = []string{"pc"}, "lead", 0.01
+	if err := a.cpuDry(context.Background(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Долгий процесс без заметного ввода-вывода на pc: pid 3329590") {
+		t.Fatalf("cpuDry omitted PC spinner from fixture: %s", out.String())
+	}
+}
+
 // Необычная ошибка io (битый файл) — в предупреждение, а не молча: обычные — только Gone, EACCES, переиспользованный pid.
 func TestSpinnerMalformedIOIsReportedWithoutStoppingScan(t *testing.T) {
 	cfg := cpuwatch.Default("")

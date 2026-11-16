@@ -43,6 +43,14 @@ type cpuHost struct {
 	spinner     spinnerWatch
 }
 
+func (h *cpuHost) findSpinners(now time.Time, s *cpuwatch.Sample, owner func(*cpuwatch.Task) cpuwatch.Owner, cfg *cpuwatch.Config) ([]cpuwatch.Spinner, error) {
+	if h.ssh == "" {
+		return h.spinner.find(now, h.root, s.Processes, owner, cfg)
+	}
+	ps := cpuwatch.RemoteProcesses(s.Tasks, now)
+	return h.spinner.findProcesses(now, "", ps, owner, cfg, true)
+}
+
 type spinnerRecord struct {
 	at  time.Time
 	cpu float64
@@ -67,6 +75,10 @@ func (a *app) cpuDetailBuffer() *cpuDetailBuffer {
 type spinnerWatch map[string]spinnerRecord
 
 func (w *spinnerWatch) find(now time.Time, root string, ps []cpuwatch.Process, owner func(*cpuwatch.Task) cpuwatch.Owner, cfg *cpuwatch.Config) ([]cpuwatch.Spinner, error) {
+	return w.findProcesses(now, root, ps, owner, cfg, false)
+}
+
+func (w *spinnerWatch) findProcesses(now time.Time, root string, ps []cpuwatch.Process, owner func(*cpuwatch.Task) cpuwatch.Owner, cfg *cpuwatch.Config, remote bool) ([]cpuwatch.Spinner, error) {
 	if *w == nil {
 		*w = spinnerWatch{}
 	}
@@ -77,35 +89,16 @@ func (w *spinnerWatch) find(now time.Time, root string, ps []cpuwatch.Process, o
 		p := ps[i]
 		key := fmt.Sprintf("%d:%d", p.Pid, p.Start)
 		seen[key] = true
-		r, known := (*w)[key]
-		rate := 0.0
-		if known {
-			dt := now.Sub(r.at).Seconds()
-			if dt > 0 && dt <= 2*cfg.Interval.D().Seconds() {
-				rate = cpuwatch.CPUGrowth(r.cpu, p.CPU, true) / dt
-			} else if p.Age > 0 {
-				rate = p.CPU / p.Age.Seconds()
-			}
-		} else if p.Age > 0 {
-			rate = p.CPU / p.Age.Seconds()
-		}
+		rate := spinnerCPURate(now, p, (*w)[key], cfg)
 		(*w)[key] = spinnerRecord{at: now, cpu: p.CPU}
-		if p.Age < cfg.SpinnerAfter.D() || rate < cfg.SpinnerCPU {
-			continue
-		}
-		if err := cpuwatch.ReadProcessIO(root, &p); err != nil {
+		ok, err := spinnerProcessDetails(root, &p, rate, cfg, remote)
+		if err != nil {
 			if !cpuwatch.IsTransientProcessError(err) {
 				errs = append(errs, fmt.Errorf("pid %d: %w", p.Pid, err))
 			}
 			continue
 		}
-		if !p.IOKnown || p.Rchar+p.Wchar >= cfg.SpinnerIO {
-			continue
-		}
-		if err := cpuwatch.ReadProcessOwner(root, &p); err != nil {
-			if !cpuwatch.IsTransientProcessError(err) {
-				errs = append(errs, fmt.Errorf("pid %d: %w", p.Pid, err))
-			}
+		if !ok {
 			continue
 		}
 		o := owner(&p.Task)
@@ -123,6 +116,36 @@ func (w *spinnerWatch) find(now time.Time, root string, ps []cpuwatch.Process, o
 		}
 	}
 	return out, errors.Join(errs...)
+}
+
+func spinnerCPURate(now time.Time, p cpuwatch.Process, old spinnerRecord, cfg *cpuwatch.Config) float64 {
+	dt := now.Sub(old.at).Seconds()
+	if !old.at.IsZero() && dt > 0 && dt <= 2*cfg.Interval.D().Seconds() {
+		return cpuwatch.CPUGrowth(old.cpu, p.CPU, true) / dt
+	}
+	if p.Age > 0 {
+		return p.CPU / p.Age.Seconds()
+	}
+	return 0
+}
+
+func spinnerProcessDetails(root string, p *cpuwatch.Process, rate float64, cfg *cpuwatch.Config, remote bool) (bool, error) {
+	if remote {
+		return cpuwatch.SpinnerQualifies(p.Age, rate, p.IOKnown, p.Rchar, p.Wchar, cfg), nil
+	}
+	if p.Age < cfg.SpinnerAfter.D() || rate < cfg.SpinnerCPU {
+		return false, nil
+	}
+	if err := cpuwatch.ReadProcessIO(root, p); err != nil {
+		return false, err
+	}
+	if !cpuwatch.SpinnerQualifies(p.Age, rate, p.IOKnown, p.Rchar, p.Wchar, cfg) {
+		return false, nil
+	}
+	if err := cpuwatch.ReadProcessOwner(root, p); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (a *app) cpuCmd(ctx context.Context, args []string) error {
@@ -185,7 +208,7 @@ func (a *app) cpuSample(ctx context.Context, h *cpuHost, now time.Time, all bool
 	s := &cpuwatch.Sample{At: now}
 	var err error
 	if h.ssh != "" {
-		if _, err = a.cpuRemote(ctx, h, false); err != nil {
+		if _, err = a.remoteTasks(ctx, h, false); err != nil {
 			return nil, err
 		}
 	}
@@ -196,7 +219,7 @@ func (a *app) cpuSample(ctx context.Context, h *cpuHost, now time.Time, all bool
 		return s, nil
 	}
 	if h.ssh != "" {
-		if s.Tasks, err = a.cpuRemote(ctx, h, true); err != nil {
+		if s.Tasks, err = a.remoteTasks(ctx, h, true); err != nil {
 			return nil, err
 		}
 	} else if s.Tasks, err = cpuwatch.ReadTasks(h.root); err != nil {
@@ -214,6 +237,13 @@ func (a *app) cpuSample(ctx context.Context, h *cpuHost, now time.Time, all bool
 		}
 	}
 	return s, nil
+}
+
+func (a *app) remoteTasks(ctx context.Context, h *cpuHost, tasks bool) ([]cpuwatch.Task, error) {
+	if a.cpuRemoteRead != nil {
+		return a.cpuRemoteRead(ctx, h, tasks)
+	}
+	return a.cpuRemote(ctx, h, tasks)
 }
 
 // cpuRemote — замер по ssh: файлы load average — в h.root, с tasks — и готовые потоки в ответ. Соединение одно на
@@ -297,12 +327,9 @@ func (a *app) cpuRound(ctx context.Context, cfg *cpuwatch.Config) error {
 			}
 		}
 		v := h.win.Judge(s, owner)
-		if h.ssh == "" {
-			var e error
-			v.Spinners, e = h.spinner.find(now, h.root, s.Processes, owner, cfg)
-			if e != nil {
-				a.warn("cpu", "часть кандидатов долгой загрузки не прочиталась", "err", e)
-			}
+		v.Spinners, err = h.findSpinners(now, s, owner, cfg)
+		if err != nil {
+			a.warn("cpu", "часть кандидатов долгой загрузки не прочиталась", "err", err)
 		}
 		a.cpuAct(cfg, &h.win, &v, now)
 		if err := saveCPUState(h.state, &h.win); err != nil {
@@ -444,13 +471,9 @@ func (a *app) cpuDry(ctx context.Context, cfg *cpuwatch.Config) error {
 		if h.ssh != "" {
 			owner = r.RemoteOwner
 		}
-		var spinners []cpuwatch.Spinner
-		if h.ssh == "" {
-			var e error
-			spinners, e = h.spinner.find(now, h.root, s.Processes, owner, cfg)
-			if e != nil {
-				a.warn("cpu", "часть кандидатов долгой загрузки не прочиталась", "err", e)
-			}
+		spinners, e := h.findSpinners(now, s, owner, cfg)
+		if e != nil {
+			a.warn("cpu", "часть кандидатов долгой загрузки не прочиталась", "err", e)
 		}
 		fmt.Fprintf(a.out, "%s: load average за минуту %.2f, готовых сейчас %d при %d потоках, перегружена: %v\n",
 			h.win.Name, s.Load.Avg1, s.Runnable, s.Threads, s.Over())

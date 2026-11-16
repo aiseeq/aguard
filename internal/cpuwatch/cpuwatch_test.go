@@ -76,14 +76,14 @@ func TestReadTasks(t *testing.T) {
 
 func TestParseRemote(t *testing.T) {
 	raw := "##stat\ncpu  1\ncpu0 1\ncpu1 1\nprocs_running 9\n##loadavg\n2.50 2.25 0.75 9/700 4242\n##tasks\n" +
-		"4\t200\tcompile\t" + userSlice + "/app.slice/farm-x.0123456789abcdef.scope\t\t\n" +
-		"1\t100\tsh\t/user.slice/user-1000.slice/session-9.scope\t\t10.0.0.1 40000 10.0.0.2 22\n##end\n"
+		"4\t200\tcompile\t" + userSlice + "/app.slice/farm-x.0123456789abcdef.scope\t\t\t2000\t3\t600\t10\t20\tcompile -j\n" +
+		"1\t100\tsh\t/user.slice/user-1000.slice/session-9.scope\t\t10.0.0.1 40000 10.0.0.2 22\t1000\t2\t120\t\t\t\n##end\n"
 	root := t.TempDir()
 	tasks, err := ParseRemote([]byte(raw), root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 2 || tasks[0].Pid != 100 || tasks[0].SSH != "10.0.0.1 40000 10.0.0.2 22" || tasks[1].N != 4 || tasks[1].Comm != "compile" {
+	if len(tasks) != 2 || tasks[0].Pid != 100 || tasks[0].SSH != "10.0.0.1 40000 10.0.0.2 22" || tasks[1].N != 4 || tasks[1].Comm != "compile" || tasks[1].Remote.Age != 10*time.Minute || !tasks[1].Remote.IOKnown {
 		t.Errorf("задачи: %+v", tasks)
 	}
 	var s Sample
@@ -100,7 +100,7 @@ func TestParseRemote(t *testing.T) {
 	for _, bad := range []string{
 		strings.Replace(raw, "##end\n", "", 1),
 		strings.Replace(raw, "##loadavg\n", "", 1),
-		strings.Replace(raw, "\t\t\n", "\n", 1),
+		strings.Replace(raw, "1000\t2\t120\t\t\t", "1000\t2\t120", 1),
 	} {
 		if _, err := ParseRemote([]byte(bad), t.TempDir()); err == nil {
 			t.Errorf("оборванный вывод принят: %q", bad)

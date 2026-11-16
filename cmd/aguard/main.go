@@ -109,9 +109,10 @@ type app struct {
 	workerJobsDir        string
 	workerUnitsDir       string
 	log                  *slog.Logger
-	out                  io.Writer           // вывод команд для человека и агента (dry-run, report)
-	act                  *activity.Recorder  // учёт срабатываний; только у демона, у команд nil
-	cpu                  map[string]*cpuHost // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
+	out                  io.Writer                                                      // вывод команд для человека и агента (dry-run, report)
+	act                  *activity.Recorder                                             // учёт срабатываний; только у демона, у команд nil
+	cpu                  map[string]*cpuHost                                            // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
+	cpuRemoteRead        func(context.Context, *cpuHost, bool) ([]cpuwatch.Task, error) // тестовый источник готового SSH-ответа
 	cpuDetails           *cpuDetailBuffer
 	strayRead            strayReader                             // замер процессов без родителя; подменяется в тестах
 	trackFetch           func() (trackfd.Pair, error)            // пара дескрипторов слежения; подменяется в тестах

@@ -128,6 +128,11 @@ type Spinner struct {
 	Rchar, Wchar int64
 }
 
+// SpinnerQualifies — общий порог для локальных и удалённых процессов.
+func SpinnerQualifies(age time.Duration, cpuRate float64, ioKnown bool, rchar, wchar int64, cfg *Config) bool {
+	return age >= cfg.SpinnerAfter.D() && cpuRate >= cfg.SpinnerCPU && ioKnown && rchar+wchar < cfg.SpinnerIO
+}
+
 // Verdict — перегрузка машины на момент замера по минутному load average; runnable — снимок для разбора владельцев.
 type Verdict struct {
 	Over        bool          // перегружена в этот замер
@@ -346,7 +351,11 @@ func MasterMessage(host string, v *Verdict, m *Master, now time.Time, first bool
 			fmt.Fprintf(&b, "\n… ещё %d %s", n, russianCount(n, "долгий процесс", "долгих процесса", "долгих процессов"))
 			break
 		}
-		fmt.Fprintf(&b, "\nДолгий процесс без заметного ввода-вывода: pid %d, работает %d мин (с %s), команда `%s`, rchar %s, wchar %s.", s.Pid, int(s.Age.Minutes()), s.StartedAt.Format("15:04"), CleanCmd(s.Cmd), humanBytes(s.Rchar), humanBytes(s.Wchar))
+		machine := ""
+		if host != HostLocal {
+			machine = " на " + host
+		}
+		fmt.Fprintf(&b, "\nДолгий процесс без заметного ввода-вывода%s: pid %d, работает %d мин (с %s), команда `%s`, rchar %s, wchar %s.", machine, s.Pid, int(s.Age.Minutes()), s.StartedAt.Format("15:04"), CleanCmd(s.Cmd), humanBytes(s.Rchar), humanBytes(s.Wchar))
 	}
 	return b.String()
 }

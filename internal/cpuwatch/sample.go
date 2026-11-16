@@ -38,6 +38,32 @@ type Task struct {
 	Cgroup string // путь cgroup v2
 	Claude int    // CLAUDE_PID из окружения: сессия Claude Code, под которой он запущен
 	SSH    string // SSH_CONNECTION из окружения: «адрес порт адрес порт» клиента и сервера
+	Remote *RemoteStats
+}
+
+// RemoteStats — лёгкие метрики процесса PC, добавляемые только к уже попавшим в снимок задачам.
+type RemoteStats struct {
+	Start        int64
+	CPU          float64
+	Age          time.Duration
+	Rchar, Wchar int64
+	IOKnown      bool
+	Cmdline      string
+}
+
+// RemoteProcesses converts parsed PC task rows to the same process shape used by the local spinner search.
+func RemoteProcesses(tasks []Task, now time.Time) []Process {
+	ps := make([]Process, 0, len(tasks))
+	for i := range tasks {
+		t := &tasks[i]
+		if t.Remote == nil {
+			continue
+		}
+		r := t.Remote
+		ps = append(ps, Process{Task: *t, Start: r.Start, CPU: r.CPU, Age: r.Age, StartedAt: now.Add(-r.Age),
+			Rchar: r.Rchar, Wchar: r.Wchar, IOKnown: r.IOKnown, Cmdline: r.Cmdline})
+	}
+	return ps
 }
 
 // Process — лёгкий снимок живого процесса для поиска долгих занятых процессов.
@@ -386,10 +412,12 @@ func claudePid(s string) (int, error) {
 var remoteFiles = []string{"stat", "loadavg"}
 
 // RemoteScript — замер чужой машины одним вызовом ssh: файлы ReadLoad разделами «##<файл>», а с аргументом tasks
-// (`sh -s tasks`) — ещё и готовые потоки построчно (число потоков, pid, comm, cgroup, CLAUDE_PID, SSH_CONNECTION
-// через табуляцию). Разбирает ParseRemote.
+// (`sh -s tasks`) — ещё и готовые потоки и метрики процесса построчно. Аргументы ограничены 300 байтами.
+// Разбирает ParseRemote.
 const RemoteScript = `for f in stat loadavg; do echo "##$f"; cat /proc/$f; done
 echo '##tasks'
+[ "$1" = tasks ] && hz=$(getconf CLK_TCK 2>/dev/null) && [ -n "$hz" ] || hz=100
+[ "$1" = tasks ] && up=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
 [ "$1" = tasks ] && grep -l ') R ' /proc/[0-9]*/task/[0-9]*/stat 2>/dev/null | cut -d/ -f3 | sort | uniq -c | while read -r n p; do
 	c=$(tr '\t\n' '  ' </proc/$p/comm 2>/dev/null) || continue
 	c=${c% }
@@ -397,7 +425,15 @@ echo '##tasks'
 	e=$(tr '\0' '\n' </proc/$p/environ 2>/dev/null)
 	cl=$(printf '%s\n' "$e" | sed -n 's/^CLAUDE_PID=//p')
 	ss=$(printf '%s\n' "$e" | sed -n 's/^SSH_CONNECTION=//p')
-	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$p" "$c" "$g" "$cl" "$ss"
+	st=$(cat /proc/$p/stat 2>/dev/null) || continue
+	x=${st##*) }
+	set -- $x
+	ut=${12}; sy=${13}; start=${20}
+	age=$(awk -v u="$up" -v s="$start" -v h="$hz" 'BEGIN {printf "%.3f", u-s/h}')
+	cpu=$(awk -v u="$ut" -v s="$sy" -v h="$hz" 'BEGIN {printf "%.3f", (u+s)/h}')
+	r=; w=; io=$(cat /proc/$p/io 2>/dev/null) && { r=$(printf '%s\n' "$io" | sed -n 's/^rchar:[[:space:]]*//p'); w=$(printf '%s\n' "$io" | sed -n 's/^wchar:[[:space:]]*//p'); }
+	cmd=$(head -c 300 /proc/$p/cmdline 2>/dev/null | tr '\000\t\n' '   ')
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$p" "$c" "$g" "$cl" "$ss" "$start" "$cpu" "$age" "$r" "$w" "$cmd"
 done
 echo '##end'
 `
@@ -439,24 +475,54 @@ func ParseRemote(raw []byte, root string) ([]Task, error) {
 		if l == "" {
 			continue
 		}
-		f := strings.Split(l, "\t")
-		if len(f) != 6 {
-			return nil, fmt.Errorf("замер: строка %q", l)
-		}
-		var t Task
-		var err error
-		if t.N, err = strconv.Atoi(f[0]); err != nil {
-			return nil, fmt.Errorf("замер: %q: %w", l, err)
-		}
-		if t.Pid, err = strconv.Atoi(f[1]); err != nil {
-			return nil, fmt.Errorf("замер: %q: %w", l, err)
-		}
-		t.Comm, t.Cgroup, t.SSH = f[2], f[3], f[5]
-		if t.Claude, err = claudePid(f[4]); err != nil {
-			return nil, fmt.Errorf("замер: %q: %w", l, err)
+		t, err := parseRemoteTask(l)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, t)
 	}
 	slices.SortFunc(out, func(a, b Task) int { return a.Pid - b.Pid })
 	return out, nil
+}
+
+func parseRemoteTask(line string) (Task, error) {
+	f := strings.Split(line, "\t")
+	if len(f) != 12 {
+		return Task{}, fmt.Errorf("замер: строка %q", line)
+	}
+	var t Task
+	var err error
+	if t.N, err = strconv.Atoi(f[0]); err != nil {
+		return Task{}, fmt.Errorf("замер: %q: %w", line, err)
+	}
+	if t.Pid, err = strconv.Atoi(f[1]); err != nil {
+		return Task{}, fmt.Errorf("замер: %q: %w", line, err)
+	}
+	t.Comm, t.Cgroup, t.SSH = f[2], f[3], f[5]
+	if t.Claude, err = claudePid(f[4]); err != nil {
+		return Task{}, fmt.Errorf("замер: %q: %w", line, err)
+	}
+	var start int64
+	var cpu, age float64
+	if start, err = strconv.ParseInt(f[6], 10, 64); err != nil {
+		return Task{}, fmt.Errorf("замер: %q: %w", line, err)
+	}
+	if cpu, err = strconv.ParseFloat(f[7], 64); err != nil {
+		return Task{}, fmt.Errorf("замер: %q: %w", line, err)
+	}
+	if age, err = strconv.ParseFloat(f[8], 64); err != nil {
+		return Task{}, fmt.Errorf("замер: %q: %w", line, err)
+	}
+	r := &RemoteStats{Start: start, CPU: cpu, Age: time.Duration(age * float64(time.Second)), Cmdline: f[11]}
+	if f[9] != "" && f[10] != "" {
+		if r.Rchar, err = strconv.ParseInt(f[9], 10, 64); err != nil {
+			return Task{}, fmt.Errorf("замер: %q: %w", line, err)
+		}
+		if r.Wchar, err = strconv.ParseInt(f[10], 10, 64); err != nil {
+			return Task{}, fmt.Errorf("замер: %q: %w", line, err)
+		}
+		r.IOKnown = true
+	}
+	t.Remote = r
+	return t, nil
 }
