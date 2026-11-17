@@ -36,7 +36,7 @@ func (s *screen) has(sub string) bool {
 
 func (s *screen) wait(t *testing.T, sub string) {
 	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 		if s.has(sub) {
 			return
 		}

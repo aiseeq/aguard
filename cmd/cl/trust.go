@@ -21,6 +21,9 @@ import (
 // trustSelectWait — сколько ждать подтверждения выбора «Yes»; переменная, чтобы тесты могли задать короткий срок.
 var trustSelectWait = 10 * time.Second
 
+// trustRetryPause — задержка перед повторным Down после явной подсказки Claude Code.
+var trustRetryPause = time.Second
+
 const (
 	trustScanMax        = 64 << 10 // Широкие терминалы могут вывести несколько окон до баннера REPL.
 	trustSettle         = 500 * time.Millisecond
@@ -588,7 +591,7 @@ func (c *console) confirmTrust(win trustWindow, w *trustWatch) {
 				c.say(cllog.TrustNotSelected(dir, trustSelectWait))
 				return
 			}
-			retry := time.NewTimer(time.Second)
+			retry := time.NewTimer(trustRetryPause)
 			select {
 			case <-retry.C:
 			case <-deadline.C:

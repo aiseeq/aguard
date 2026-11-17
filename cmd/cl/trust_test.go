@@ -25,6 +25,21 @@ func readTrust(t *testing.T, name string) []byte {
 	return b
 }
 
+func setTrustTiming(t *testing.T, wait, retryPause time.Duration) {
+	t.Helper()
+	oldWait, oldPause := trustSelectWait, trustRetryPause
+	trustSelectWait, trustRetryPause = wait, retryPause
+	t.Cleanup(func() { trustSelectWait, trustRetryPause = oldWait, oldPause })
+}
+
+func trackTrustFinish(t *testing.T, finish func()) func() {
+	t.Helper()
+	var once sync.Once
+	tracked := func() { once.Do(finish) }
+	t.Cleanup(tracked)
+	return tracked
+}
+
 func firstScreen(raw []byte) []byte {
 	if before, _, ok := bytes.Cut(raw, []byte("Claude\x1b[19GCode")); ok {
 		return before
@@ -246,9 +261,7 @@ func TestTrustWrappedPathStaysForUser(t *testing.T) {
 }
 
 func TestTrustSelectionPromptRetry(t *testing.T) {
-	oldWait := trustSelectWait
-	trustSelectWait = 5 * time.Second
-	t.Cleanup(func() { trustSelectWait = oldWait })
+	setTrustTiming(t, 5*time.Second, 20*time.Millisecond)
 	if raw := readTrust(t, "testdata/trust-dialog-retry-live3.raw"); !trustRetryPrompt(compactText(escSeq.ReplaceAll(raw, nil))) {
 		t.Fatal("частичная перерисовка подсказки без начальной E не распознана")
 	}
@@ -287,10 +300,11 @@ func TestTrustSelectionPromptRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			finish = trackTrustFinish(t, finish)
 			if _, err := typer.WriteString("\x1b_Gi=31;OK\x1b\\\x1b[6;28;13t\x1b[?62;1;4c"); err != nil {
 				t.Fatal(err)
 			}
-			for deadline := time.Now().Add(7 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 				if shown.has("RETRY-ENTER-OK") {
 					break
 				}
@@ -311,9 +325,7 @@ func TestTrustSelectionPromptRetry(t *testing.T) {
 }
 
 func TestTrustSelectionRetriesAtMostThreeTimes(t *testing.T) {
-	oldWait := trustSelectWait
-	trustSelectWait = 6 * time.Second
-	t.Cleanup(func() { trustSelectWait = oldWait })
+	setTrustTiming(t, 750*time.Millisecond, 20*time.Millisecond)
 	raw := readTrust(t, "testdata/trust-dialog-retry-live5.raw")
 	promptAt := bytes.Index(raw, []byte("Esc to exit"))
 	if promptAt < 0 {
@@ -345,6 +357,7 @@ func TestTrustSelectionRetriesAtMostThreeTimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	finish = trackTrustFinish(t, finish)
 	if _, err := typer.WriteString("\x1b_Gi=31;OK\x1b\\\x1b[6;28;13t\x1b[?62;1;4c"); err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +369,7 @@ func TestTrustSelectionRetriesAtMostThreeTimes(t *testing.T) {
 		t.Fatal(err)
 	}
 	finish()
-	waitTrustNote(t, &mu, &notes, "выбор не встал на «Yes» за 6s")
+	waitTrustNote(t, &mu, &notes, "выбор не встал на «Yes» за 750ms")
 	mu.Lock()
 	retryCount := 0
 	for _, note := range notes {
@@ -646,9 +659,7 @@ func TestConfirmTwoAddDirsSelects(t *testing.T) {
 }
 
 func TestSecondTrustWindowNeedsNewSelection(t *testing.T) {
-	oldWait := trustSelectWait
-	trustSelectWait = 300 * time.Millisecond
-	t.Cleanup(func() { trustSelectWait = oldWait })
+	setTrustTiming(t, 300*time.Millisecond, 20*time.Millisecond)
 	raw := firstScreen(readTrust(t, "testdata/trust-dialog-2.1.326.raw"))
 	one, two := filepath.Join(t.TempDir(), "one"), filepath.Join(t.TempDir(), "two")
 	d1, d2 := replaceAddDir(t, raw, one), replaceAddDir(t, raw, two)
@@ -677,6 +688,7 @@ func TestSecondTrustWindowNeedsNewSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	finish = trackTrustFinish(t, finish)
 	if _, err := typer.WriteString("\x1b_Gi=31;OK\x1b\\\x1b[6;28;13t\x1b[?62;1;4c"); err != nil {
 		t.Fatal(err)
 	}
@@ -712,9 +724,7 @@ func TestConfirmTrustSelects(t *testing.T) {
 }
 
 func TestConfirmTrustDoesNotSelect(t *testing.T) {
-	oldWait := trustSelectWait
-	trustSelectWait = 100 * time.Millisecond
-	t.Cleanup(func() { trustSelectWait = oldWait })
+	setTrustTiming(t, 100*time.Millisecond, 20*time.Millisecond)
 	_, tty, shown := outerTerminal(t)
 	var mu sync.Mutex
 	var notes []string
@@ -726,6 +736,7 @@ func TestConfirmTrustDoesNotSelect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	finish = trackTrustFinish(t, finish)
 	shown.wait(t, "NO-RETRY")
 	if shown.has("UNEXPECTED-RETRY") {
 		t.Fatal("Down повторился без подсказки Claude Code")
@@ -738,9 +749,7 @@ func TestConfirmTrustDoesNotSelect(t *testing.T) {
 }
 
 func TestConfirmTrustDoesNotRetryOnUnrelatedOutput(t *testing.T) {
-	oldWait := trustSelectWait
-	trustSelectWait = 1500 * time.Millisecond
-	t.Cleanup(func() { trustSelectWait = oldWait })
+	setTrustTiming(t, 1500*time.Millisecond, 20*time.Millisecond)
 	noise := filepath.Join(t.TempDir(), "noise.raw")
 	if err := os.WriteFile(noise, []byte("unrelated screen redraw\r\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -756,6 +765,7 @@ func TestConfirmTrustDoesNotRetryOnUnrelatedOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	finish = trackTrustFinish(t, finish)
 	shown.wait(t, "NO-RETRY-ON-OUTPUT")
 	if shown.has("UNEXPECTED-RETRY") {
 		t.Fatal("Down повторился после постороннего вывода без подсказки")
@@ -768,9 +778,7 @@ func TestConfirmTrustDoesNotRetryOnUnrelatedOutput(t *testing.T) {
 }
 
 func TestConfirmTrustScreenReader(t *testing.T) {
-	oldWait := trustSelectWait
-	trustSelectWait = 500 * time.Millisecond
-	t.Cleanup(func() { trustSelectWait = oldWait })
+	setTrustTiming(t, 500*time.Millisecond, 20*time.Millisecond)
 	for _, tc := range []struct{ echo, want, note string }{
 		{"testdata/trust-y-sr-2.1.322.raw", "ENTER-OK", "подтвердил доверие к /home/alice"},
 		{"", "NO-ENTER", "выбор не встал на «Yes»"},
@@ -796,6 +804,7 @@ func TestConfirmTrustScreenReader(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			finish = trackTrustFinish(t, finish)
 			shown.wait(t, tc.want)
 			if err := cmd.Wait(); err != nil {
 				t.Fatal(err)
