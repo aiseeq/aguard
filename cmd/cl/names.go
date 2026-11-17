@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // subcommands — подкоманды claude (claude --help, 2.1.302): им флаги сессии не нужны.
@@ -48,6 +49,26 @@ func addDirFlags(home string) []string {
 		}
 	}
 	return flags
+}
+
+// hasUserAddDirArg — user-supplied --add-dir can be variadic or visually lossy, so any occurrence disables auto-confirm.
+func hasUserAddDirArg(args []string) bool {
+	for _, arg := range args {
+		if arg == "--add-dir" || strings.HasPrefix(arg, "--add-dir=") {
+			return true
+		}
+	}
+	return false
+}
+
+func addDirsFromFlags(flags []string, home string) []string {
+	var dirs []string
+	for _, flag := range flags {
+		if value, ok := strings.CutPrefix(flag, "--add-dir="); ok && value != "" {
+			dirs = append(dirs, cleanTrustDir(value, home))
+		}
+	}
+	return dirs
 }
 
 // sessionFlags — флаги каждого запуска сессии, первого и после перезапуска на новую версию.

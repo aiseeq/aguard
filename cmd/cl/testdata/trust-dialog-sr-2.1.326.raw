@@ -1,0 +1,42 @@
+[Screen Reader Mode: on via env]
+7[r8[?25h[?2004h[?2031h[?1004h[<u[>5u[>4;2m[>0q[?u]7501;?[c[?2026$p[cPermission Required: Accessing workspace:
+/var/tmp/w-641e27c69d/cltrust-probe/sr-p
+Quick safety check: Is this a project you created or one you trust? (Like your
+own code, a well-known open source project, or work from your team). If not,
+take a moment to review what's in this folder first.
+Claude Code'll be able to read, edit, and execute files here.
+Security guide
+y. Yes, I trust this folder
+n. No, exit
+Enter y/n:
+Enter to confirm · Esc to cancel[12G[1A(B[?2004h[<u[>5u[>4;2m[11G y[13G[>4m[<u[?1004l[?2031l[?2004l[1B[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G[1G[?2004h[?2031h[?1004h[<u[>5u[>4;2m[>0q[c[?2026$p[cPermission Required: Adding a new directory:
+/var/tmp/w-641e27c69d/cltrust-probe/sr-other
+This session hasn't worked here before. Is this a directory you created or one
+you trust?
+Claude Code'll be able to read, edit, and execute files here. Its skills,
+commands, and agents load and can run commands, and so can the git settings of
+its repository. Your answer holds for this session. Starting Claude Code in this
+ directory and trusting it there lasts, and covers its whole repository or
+everything below it.
+Security guide
+y. Yes, add it
+n. No, exit
+Enter y/n:
+Enter to confirm · Esc to cancel[12G[1A(B[?2004h[<u[>5u[>4;2m[11G y[13G[>4m[<u[?1004l[?2031l[?2004l[1B[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G[1G[?2004h[?2031h[?1004h[<u[>5u[>4;2m]0;✳ Claude CodeClaude Code v2.1.326
+Opus 5.5 with high effort · Claude Ultra
+/var/tmp/w-641e27c69d/cltrust-probe/sr-p
+auto mode on
+effort: high · /effort
+$[2G[2A[13G (shift+tab to cycle)[2G[2B[>0q[c[?2026$p[c[2K[1A[2K[1A[2K[G SR-P  · Opus 5.5·high · gmail.com ▓▓▓▓▓▓▓▓░░ 176%
+auto mode on (shift+tab to cycle)
+effort: high · /effort
+$[2G[2K[1A[2K[1A[2K[GPress Ctrl-C again to exit
+effort: high · /effort
+$[2G[2K[1A[2K[1A[2K[Gauto mode on (shift+tab to cycle)
+effort: high · /effort
+$[2G[2K[1A[2K[1A[2K[1A[2K[Gyou: /exit
+Bunning…
+ SR-P  · Opus 5.5·high · gmail.com ▓▓▓▓▓▓▓▓░░ 176%
+auto mode on
+effort: high · /effort
+$[2G[?1006l[?1003l[?1002l[?1000l[?1004l[>4m[<u[?2031l[?2004l(B[?1016l[?1006l[?1003l[?1002l[?1000l[?7h[?25h7[r8]0;]133;A;redraw=0]133;C]133;D

@@ -1,0 +1,25 @@
+claude --add-dir /home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/foreign '/home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/.cache/worktrees '
+[?2004hbash-5.3$ claude --add-dir /home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/foreign '/home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/.cache/worktrees '
+[?2004l7[r8[?25h[?25l[?2004h[?2031h[?1004h[<u[>5u[>4;2m
+[38;5;220m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[39m
+[2G[38;5;220m[1mAdding[9Ga[11Gnew[15Gdirectory:[22m[39m
+
+[2G[1m/home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/foreign[22m
+
+[2GThis[7Gsession[15Ghasn't[22Gworked[29Ghere[34Gbefore.[42GIs[45Gthis[50Ga[52Gdirectory[62Gyou[66Gcreated[74Gor[77Gone[81Gyou[85Gtrust?
+
+[2GClaude[9GCode'll[17Gbe[20Gable[25Gto[28Gread,[34Gedit,[40Gand[44Gexecute[52Gfiles[58Ghere.[64GIts[68Gskills,[76Gcommands,[86Gand[90Gagents[97Gload[102Gand[106Gcan[110Grun[114Gcommands,[124Gand[128Gso[131Gcan[135Gthe
+[2Ggit[6Gsettings[15Gof[18Gits[22Grepository.[34GYour[39Ganswer[46Gholds[52Gfor[56Gthis[61Gsession.[70GStarting[79GClaude[86GCode[91Gin[94Gthis[99Gdirectory[109Gand[113Gtrusting[122Git[125Gthere[131Glasts,
+[2Gand[6Gcovers[13Gits[17Gwhole[23Grepository[34Gor[37Geverything[48Gbelow[54Git.
+
+[2G]8;id=zaxmda;https://code.claude.com/docs/en/security[38;5;246mSecurity guide[39m]8;;
+
+[4G[38;5;246mNo,[8Gexit[39m
+[4G[38;5;246mYes,[9Gadd[13Git[39m
+
+[2G[38;5;246mEnter[8Gto[11Gconfirm[19G·[21GEsc[25Gto[28Gcancel[39m
+[>0q[?u]7501;?[c[?2026$p[c[1C[4A[38;5;153m❯[4GNo, exit[3C[1B[39mYes, add it
+
+
+[1C[4A(B[?2004h[<u[>5u[>4;2m[?1006l[?1003l[?1002l[?1000l[1D[4B[?1004l[>4m[<u[?2031l[?2004l(B[?1016l[?1006l[?1003l[?1002l[?1000l[?7h[?25h7[r8]0;To go on without it, start again with the same flags but without --add-dir /home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/foreign. Add --resume to pick up an earlier conversation.
+[?2004hbash-5.3$ 

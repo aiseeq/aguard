@@ -116,9 +116,49 @@ func TrustConfirmed(dir string) string {
 	return fmt.Sprintf(trustDone+"%s: Claude Code не сохраняет доверие к домашней папке", dir)
 }
 
+// TrustAddedDir — cl подтвердил папку, которую сам передал через --add-dir.
+func TrustAddedDir(dir string) string {
+	return fmt.Sprintf(trustDone+"%s: папка передана cl через --add-dir", dir)
+}
+
+// TrustForeignDir — окно добавления папки, которой нет среди аргументов --add-dir cl.
+func TrustForeignDir(dir string) string {
+	return fmt.Sprintf(trustLeft+"%s: папки нет среди --add-dir cl, оставляю окно пользователю", dir)
+}
+
+// TrustUserAddDir — аргумент пользователя отключает автоматическое подтверждение окон добавления каталогов.
+func TrustUserAddDir() string {
+	return "в аргументах есть пользовательский --add-dir, окна добавления папок оставляю пользователю"
+}
+
+// TrustAmbiguousDir — путь в окне нельзя однозначно восстановить, поэтому cl оставляет его пользователю.
+func TrustAmbiguousDir(dir string) string {
+	return fmt.Sprintf(trustLeft+"%s: путь неоднозначен, оставляю окно пользователю", dir)
+}
+
+// TrustWrappedDir — путь перенесён на несколько строк, поэтому cl оставляет окно пользователю.
+func TrustWrappedDir(dir string) string {
+	return fmt.Sprintf(trustLeft+"%s: путь перенесён на строки, оставляю окно пользователю", dir)
+}
+
+// TrustPathResolveFailed — путь окна не удалось проверить на симлинки.
+func TrustPathResolveFailed(dir string, err error) string {
+	return fmt.Sprintf(trustLeft+"%s: не удалось разрешить симлинки: %v", dir, err)
+}
+
+// TrustScanLimit — ограниченный просмотр вывода закончился до баннера REPL.
+func TrustScanLimit(bytes int) string {
+	return fmt.Sprintf("окно доверия: поиск остановлен после %d КБ вывода Claude Code до REPL", bytes>>10)
+}
+
 // TrustNotSelected — после стрелки вниз вывод не подтвердил выбор «Yes», поэтому Enter не нажат.
 func TrustNotSelected(dir string, wait time.Duration) string {
 	return fmt.Sprintf(trustLeft+"%s: выбор не встал на «Yes» за %v, Enter не нажат", dir, wait)
+}
+
+// TrustSelectionRetry — Claude Code показал подсказку после Down; cl повторяет его после паузы.
+func TrustSelectionRetry(dir string, attempt int) string {
+	return fmt.Sprintf(trustLeft+"%s: повтор Down %d/3 по подсказке Claude Code", dir, attempt)
 }
 
 // TrustEvent — окно доверия при подъёме сессии (подтверждённое cl или оставшееся) и более поздний подъём той же

@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/cllog"
 	"github.com/aiseeq/akit/proc"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
@@ -118,9 +119,9 @@ func (c *console) resize() {
 }
 
 // start запускает cmd под новым pty и переводит терминал cl в сырой режим. Вернувшаяся функция ждёт остаток вывода,
-// закрывает pty и возвращает терминал — звать после выхода claude. trustDir не пусто — окно доверия к этой папке
-// cl подтверждает сам (trust.go).
-func (c *console) start(cmd *exec.Cmd, trustDir string) (func(), error) {
+// закрывает pty и возвращает терминал — звать после выхода claude. home — домашняя папка для окна workspace; addDirs
+// — только собственные --add-dir cl. Один watcher распознаёт оба вида окон на первом экране (trust.go).
+func (c *console) start(cmd *exec.Cmd, home string, blockAddDir bool, addDirs ...string) (func(), error) {
 	size, err := pty.GetsizeFull(c.in)
 	if err != nil {
 		return nil, fmt.Errorf("размер окна: %w", err)
@@ -130,17 +131,45 @@ func (c *console) start(cmd *exec.Cmd, trustDir string) (func(), error) {
 		return nil, fmt.Errorf("pty: %w", err)
 	}
 	c.drafted.Store(false) // новый claude — поле пусто
-	var watch io.Writer
-	if trustDir != "" {
-		trust := newTrustWatch(trustDir, nil)
-		trust.found = func() { c.confirmTrust(trustDir, trust) }
-		watch = trust
-	}
+	c.noteUserAddDir(blockAddDir)
+	var trust *trustWatch
+	trust = newTrustWatchWithCallbacks(home, addDirs, func(win trustWindow) { c.handleTrustWindow(win, trust) }, trustWatchCallbacks{
+		pathError:   func(dir string, err error) { c.say(cllog.TrustPathResolveFailed(dir, err)) },
+		scanLimit:   func(limit int) { c.say(cllog.TrustScanLimit(limit)) },
+		blockAddDir: blockAddDir,
+	})
+	var watch io.Writer = trust
 	finish, err := c.attach(master, watch)
 	if err != nil { // без сырого режима ввод шёл бы строками с эхом — claude не запускать
+		trust.close()
 		return nil, errors.Join(err, stopChild(cmd), master.Close())
 	}
-	return finish, nil
+	return func() { finish(); trust.close() }, nil
+}
+
+func (c *console) noteUserAddDir(block bool) {
+	if block {
+		c.say(cllog.TrustUserAddDir())
+	}
+}
+
+func (c *console) handleTrustWindow(win trustWindow, w *trustWatch) {
+	if win.blocked {
+		return
+	}
+	if win.ambiguous {
+		if win.wrapped {
+			c.say(cllog.TrustWrappedDir(win.dir))
+			return
+		}
+		c.say(cllog.TrustAmbiguousDir(win.dir))
+		return
+	}
+	if win.key == "foreign" {
+		c.say(cllog.TrustForeignDir(win.dir))
+		return
+	}
+	c.confirmTrust(win, w)
 }
 
 // attach — терминал cl в сыром режиме, ввод человека — в master, вывод claude из него — в терминал cl: для только что
