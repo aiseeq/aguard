@@ -1,0 +1,5 @@
+2026-11-17T11:57:02+01:00 machine-master pid=1218560 2.1.325→2.1.326 act: перезапускаю: простаивает, ничего не идёт
+2026-11-17T11:57:02+01:00 machine-master pid=1218560: SIGTERM, поднимаю --resume 4975aedd-ccde-4657-97aa-8b43333e2f96 на 2.1.326
+2026-11-17T11:57:05+01:00 machine-master pid=1218551: подтвердил доверие к /home/aisee/.cache/worktrees: папка передана cl через --add-dir
+2026-11-17T11:57:06+01:00 machine-master pid=1218551: подтвердил доверие к /home/aisee/.cache/claude-tmp: папка передана cl через --add-dir
+2026-11-17T11:58:03+01:00 machine-master pid=1432494 2.1.326→2.1.326 act: версия свежая

@@ -177,13 +177,15 @@ type TrustEvent struct {
 // в 09:34:38). «нет записи→нет записи» — реестр не прочитан, подъёмом не считается; строки «pid=N: …» (SIGTERM, переход
 // в новый бинарник) пишет cl, а не поднявшийся claude.
 var reUp = regexp.MustCompile(`^(.+?) pid=\d+ [0-9—][^ ]*→`)
+var reRestart = regexp.MustCompile(`^(.+?) pid=\d+: SIGTERM, поднимаю `)
 
 // TrustEvents находит окна доверия; более поздняя строка решения о той же сессии (reUp) — она поднялась.
 func TrustEvents(r io.Reader) ([]TrustEvent, int, error) {
 	type entry struct {
-		at    time.Time
-		text  string
-		trust string // имя сессии, если строка — окно доверия
+		at       time.Time
+		text     string
+		trust    string // имя сессии, если строка — окно доверия
+		trustDir string
 	}
 	var lines []entry
 	var events []TrustEvent
@@ -212,6 +214,12 @@ func TrustEvents(r io.Reader) ([]TrustEvent, int, error) {
 		if dir == "" {
 			continue
 		}
+		if left {
+			_, detail, _ := strings.Cut(rest, ": ")
+			if strings.HasPrefix(detail, "повтор Down ") {
+				continue
+			}
+		}
 		pid := 0
 		if n, p, ok := strings.Cut(name, " pid="); ok {
 			if pid, err = strconv.Atoi(p); err != nil {
@@ -221,17 +229,22 @@ func TrustEvents(r io.Reader) ([]TrustEvent, int, error) {
 			name = n
 		}
 		lines[len(lines)-1].trust = name
+		lines[len(lines)-1].trustDir = dir
 		at = append(at, len(lines)-1)
 		events = append(events, TrustEvent{At: when, Name: name, Dir: dir, Confirmed: confirmed, PID: pid})
 	}
 	if err := sc.Err(); err != nil {
 		return nil, bad, fmt.Errorf("журнал cl: %w", err)
 	}
-	// подъём — до следующего окна той же сессии: строка решения после него — уже о следующем подъёме (28.10 проба:
-	// окно 10:04:35 без подъёма, окно 10:36:10, строка решения 10:37:08)
+	// Окна разных папок одной сессии относятся к одному подъёму. Повтор окна той же папки начинает новый подъём
+	// (28.10 проба: окно 10:04:35 без подъёма, затем окно 10:36:10 и решение 10:37:08). SIGTERM тоже начинает
+	// новый подъём и оставляет предыдущее окно неподнятым.
 	for i := range events {
 		for _, line := range lines[at[i]+1:] {
-			if line.trust == events[i].Name {
+			if line.trust == events[i].Name && line.trustDir == events[i].Dir {
+				break
+			}
+			if m := reRestart.FindStringSubmatch(line.text); m != nil && m[1] == events[i].Name {
 				break
 			}
 			if m := reUp.FindStringSubmatch(line.text); m != nil && m[1] == events[i].Name {
