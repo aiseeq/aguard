@@ -57,12 +57,13 @@ type Trace struct {
 	Cleanup  string `json:"cleanup,omitempty"`
 	// Lifetime — числом наносекунд, как time.Duration: у policy.Duration нет MarshalText, JSON писал число и не читал
 	// его обратно (проход падал с 26.10 15:00 CET).
-	Lifetime time.Duration `json:"lifetime,omitempty"`
-	Bytes    int64         `json:"bytes"`
-	Copies   int64         `json:"copies,omitempty"` // из них копии транскриптов
-	Born     time.Time     `json:"born,omitzero"`
-	Changed  time.Time     `json:"changed,omitzero"`
-	Outlived bool          `json:"outlived,omitempty"` // старше срока уборки хозяина: уборка не сработала
+	Lifetime     time.Duration `json:"lifetime,omitempty"`
+	Bytes        int64         `json:"bytes"`
+	EncodedBytes int64         `json:"encoded_bytes,omitempty"` // часть размера с FIEMAP_EXTENT_ENCODED
+	Copies       int64         `json:"copies,omitempty"`        // из них копии транскриптов
+	Born         time.Time     `json:"born,omitzero"`
+	Changed      time.Time     `json:"changed,omitzero"`
+	Outlived     bool          `json:"outlived,omitempty"` // старше срока уборки хозяина: уборка не сработала
 }
 
 // Creator — создатель записи по слежению.
@@ -112,7 +113,7 @@ func (c *Config) FindTraces(now time.Time, list []string, usage map[string]Usage
 	var out []Trace
 	for _, path := range list {
 		u := usage[path]
-		t := Trace{Path: path, Bytes: u.Bytes, Copies: u.Copies, Changed: u.Changed}
+		t := Trace{Path: path, Bytes: u.Bytes, EncodedBytes: u.EncodedBytes, Copies: u.Copies, Changed: u.Changed}
 		if cr, ok := f.Created[path]; ok {
 			t.Producer, t.Command, t.Born = cr.Session, cr.Command, cr.Born
 		}
@@ -200,16 +201,18 @@ func (c *Config) classTrace(t *Trace, now time.Time) bool {
 
 // Finding — находка о работе по классу следов одного хозяина.
 type Finding struct {
-	Class, Owner, Why, Kind string
-	Count, Outlived         int
-	Bytes, OutlivedBytes    int64
-	Copies                  int64
-	New                     int   // следов, появившихся за сутки
-	NewBytes                int64 // их место
-	NewSpan                 time.Duration
-	Producers               []Count // кто оставил, больше всего — первым
-	Cleanup                 string
-	Lifetime                time.Duration
+	Class, Owner, Why, Kind            string
+	Count, Outlived                    int
+	Bytes, OutlivedBytes               int64
+	EncodedBytes, OutlivedEncodedBytes int64
+	Copies                             int64
+	New                                int   // следов, появившихся за сутки
+	NewBytes                           int64 // их место
+	NewEncodedBytes                    int64 // часть NewBytes с FIEMAP_EXTENT_ENCODED
+	NewSpan                            time.Duration
+	Producers                          []Count // кто оставил, больше всего — первым
+	Cleanup                            string
+	Lifetime                           time.Duration
 }
 
 // Count — имя и число.
@@ -235,14 +238,17 @@ func (c *Config) Findings(now time.Time, traces []Trace) []Finding {
 		}
 		g.Count++
 		g.Bytes += t.Bytes
+		g.EncodedBytes += t.EncodedBytes
 		g.Copies += t.Copies
 		if t.Outlived {
 			g.Outlived++
 			g.OutlivedBytes += t.Bytes
+			g.OutlivedEncodedBytes += t.EncodedBytes
 		}
 		if !t.Born.IsZero() && now.Sub(t.Born) <= 24*time.Hour {
 			g.New++
 			g.NewBytes += t.Bytes
+			g.NewEncodedBytes += t.EncodedBytes
 			g.NewSpan = max(g.NewSpan, now.Sub(t.Born))
 		}
 		producers[k][cmp.Or(t.Producer, "неизвестно")]++
@@ -265,12 +271,12 @@ func (c *Config) Findings(now time.Time, traces []Trace) []Finding {
 // Text — находка словами: что накопилось, кто оставил, работает ли уборка хозяина.
 func (g *Finding) Text(home string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s (%s): %d, %s", short(g.Class, home), g.Kind, g.Count, policy.HumanBytes(g.Bytes))
+	fmt.Fprintf(&b, "%s (%s): %d, %s", short(g.Class, home), g.Kind, g.Count, FormatBytes(g.Bytes, g.EncodedBytes))
 	if g.Copies > 0 {
 		fmt.Fprintf(&b, ", из них копии транскриптов %s", policy.HumanBytes(g.Copies))
 	}
 	if g.New > 0 && g.NewSpan >= time.Hour {
-		fmt.Fprintf(&b, "; за сутки новых %d, %s, %.1f ГБ/ч", g.New, policy.HumanBytes(g.NewBytes),
+		fmt.Fprintf(&b, "; за сутки новых %d, %s, %.1f ГБ/ч", g.New, FormatBytes(g.NewBytes, g.NewEncodedBytes),
 			float64(g.NewBytes)/float64(1<<30)/g.NewSpan.Hours())
 	}
 	b.WriteString("; кто оставил: ")
@@ -287,7 +293,8 @@ func (g *Finding) Text(home string) string {
 	case g.Cleanup == "":
 		b.WriteString("; своей уборки нет")
 	case g.Outlived > 0:
-		fmt.Fprintf(&b, "; уборка «%s» не сработала: %d старше срока, %s", g.Cleanup, g.Outlived, policy.HumanBytes(g.OutlivedBytes))
+		fmt.Fprintf(&b, "; уборка «%s» не сработала: %d старше срока, %s", g.Cleanup, g.Outlived,
+			FormatBytes(g.OutlivedBytes, g.OutlivedEncodedBytes))
 	default:
 		fmt.Fprintf(&b, "; уборка: %s", g.Cleanup)
 	}

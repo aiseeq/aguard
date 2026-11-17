@@ -44,6 +44,30 @@ func TestFastLetterOwnerAndEarlyRepeat(t *testing.T) {
 	}
 }
 
+func TestFastLetterEncodedBytes(t *testing.T) {
+	c := routeConfig()
+	at := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		encoded int64
+		marked  bool
+	}{{0, false}, {1, true}} {
+		r := fastRec("/home/u/.cache/x", "owner", 2<<30, 1<<30, 200<<30, at)
+		r.EncodedBytes = tc.encoded
+		letters := (&State{}).FastLetters(&c, at, []Record{r}, allAlive)
+		if len(letters) != 1 {
+			t.Fatalf("letters = %+v", letters)
+		}
+		text := letters[0].Text(&c, "/home/u")
+		want := "теперь 2.0 ГБ"
+		if tc.marked {
+			want += " (без учёта сжатия)"
+		}
+		if !strings.Contains(text, want) {
+			t.Errorf("fast letter(encoded=%d) = %q", tc.encoded, text)
+		}
+	}
+}
+
 // Пауза пары и её снятие раньше срока — по границам: удвоение роста, ещё fast свободного, fast_every.
 func TestFastDueBoundaries(t *testing.T) {
 	c := routeConfig()

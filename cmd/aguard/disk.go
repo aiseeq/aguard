@@ -408,10 +408,10 @@ func (a *app) diskRetro(ctx context.Context, cfg *config.Config, days int) error
 		if err != nil { // нечитаемое в записи: прикидка по прочитанному
 			a.warn("disk", "retro: не прочиталось "+e, "err", err)
 		}
-		for day, n := range byDay {
-			if !day.Before(from) && n >= int64(cfg.Disk.Grow) {
+		for day, u := range byDay {
+			if !day.Before(from) && u.Bytes >= int64(cfg.Disk.Grow) {
 				owner, why := owners.Of(e)
-				fmt.Fprintf(&b, "%s\t%s\t%s (%s)\t%s\n", day.Format(time.DateOnly), policy.HumanBytes(n), owner, why, e)
+				fmt.Fprintf(&b, "%s\t%s\t%s (%s)\t%s\n", day.Format(time.DateOnly), disk.FormatBytes(u.Bytes, u.EncodedBytes), owner, why, e)
 			}
 		}
 	}
@@ -439,17 +439,20 @@ func (a *app) diskDry(ctx context.Context, cfg *config.Config) error {
 		u := usage[e]
 		owner, why := owners.Of(e)
 		row := struct {
-			Path    string    `json:"path"`
-			Size    string    `json:"size"`
-			Bytes   int64     `json:"bytes"`
-			Blocks  string    `json:"du"`
-			Files   int64     `json:"files"`
-			Changed time.Time `json:"changed"`
-			Unread  int       `json:"unread,omitempty"`
-			Err     string    `json:"err,omitempty"`
-			Owner   string    `json:"owner"`
-			Why     string    `json:"why"`
-		}{e, policy.HumanBytes(u.Bytes), u.Bytes, policy.HumanBytes(u.Blocks), u.Files, u.Changed, u.Unread, errText(u.Err), owner, why}
+			Path         string    `json:"path"`
+			Size         string    `json:"size"`
+			Bytes        int64     `json:"bytes"`
+			EncodedBytes int64     `json:"encoded_bytes,omitempty"`
+			Blocks       string    `json:"du"`
+			Files        int64     `json:"files"`
+			Changed      time.Time `json:"changed"`
+			Unread       int       `json:"unread,omitempty"`
+			Err          string    `json:"err,omitempty"`
+			Owner        string    `json:"owner"`
+			Why          string    `json:"why"`
+		}{Path: e, Size: disk.FormatBytes(u.Bytes, u.EncodedBytes), Bytes: u.Bytes, EncodedBytes: u.EncodedBytes,
+			Blocks: policy.HumanBytes(u.Blocks), Files: u.Files, Changed: u.Changed, Unread: u.Unread,
+			Err: errText(u.Err), Owner: owner, Why: why}
 		if err := enc.Encode(&row); err != nil {
 			return fmt.Errorf("вывод: %w", err)
 		}
@@ -595,7 +598,8 @@ func (a *app) diskTracesNow(ctx context.Context, cfg *config.Config, all bool) e
 		sort.Slice(traces, func(i, j int) bool { return traces[i].Bytes > traces[j].Bytes })
 		for i := range traces {
 			t := &traces[i]
-			r := disk.Record{Kind: disk.KindTrace, At: now, Free: free, Path: t.Path, Bytes: t.Bytes, Since: t.Born, Owner: t.Owner,
+			r := disk.Record{Kind: disk.KindTrace, At: now, Free: free, Path: t.Path, Bytes: t.Bytes, EncodedBytes: t.EncodedBytes,
+				Since: t.Born, Owner: t.Owner,
 				Why: t.Why, Admin: owners.AdminOf(t.Owner), Trace: t}
 			b.WriteString(r.Line(a.home))
 			b.WriteByte('\n')

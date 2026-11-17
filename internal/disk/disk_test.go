@@ -1,12 +1,14 @@
 package disk
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -182,6 +184,85 @@ func TestStateSaveLoad(t *testing.T) {
 	}
 }
 
+func TestStateEncodedBytesRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	at := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	s := &State{
+		Sizes:  map[string][]Point{"/a": {{At: at, Bytes: 500, EncodedBytes: 410}}},
+		Told:   map[string]time.Time{},
+		Traces: map[string]Trace{"/t": {Path: "/t", Bytes: 300, EncodedBytes: 210}},
+	}
+	if err := s.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := back.Sizes["/a"][0].EncodedBytes; got != 410 {
+		t.Errorf("Point.EncodedBytes = %d, want 410", got)
+	}
+	if got := back.Traces["/t"].EncodedBytes; got != 210 {
+		t.Errorf("Trace.EncodedBytes = %d, want 210", got)
+	}
+	rec := Record{At: at, Kind: KindStale, Path: "/a", Bytes: 500, EncodedBytes: 410}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recordBack Record
+	if err := json.Unmarshal(b, &recordBack); err != nil {
+		t.Fatal(err)
+	}
+	if recordBack.EncodedBytes != 410 {
+		t.Errorf("Record.EncodedBytes = %d, want 410", recordBack.EncodedBytes)
+	}
+	store := NewStore(filepath.Join(t.TempDir(), "records"))
+	if err := store.Append([]Record{rec}); err != nil {
+		t.Fatal(err)
+	}
+	var records []Record
+	bad, err := store.Read(at.Add(-time.Second), func(r *Record) { records = append(records, *r) })
+	if err != nil || bad != 0 || len(records) != 1 || records[0].EncodedBytes != 410 {
+		t.Fatalf("journal round trip: records=%+v bad=%d err=%v", records, bad, err)
+	}
+}
+
+func TestStateLegacyWithoutEncodedBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	old := `{"sizes":{"/a":[{"at":"2026-11-16T12:00:00Z","bytes":500}]},"traces":{"/t":{"path":"/t","bytes":300}}}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Sizes["/a"][0].EncodedBytes != 0 || back.Traces["/t"].EncodedBytes != 0 {
+		t.Fatalf("legacy fields should default to zero: %+v", back)
+	}
+	var rec Record
+	if err := json.Unmarshal([]byte(`{"kind":"stale","bytes":500}`), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.EncodedBytes != 0 {
+		t.Errorf("legacy Record.EncodedBytes = %d, want zero", rec.EncodedBytes)
+	}
+}
+
+func TestWhatEncodedBytes(t *testing.T) {
+	for _, tc := range []struct {
+		encoded int64
+		marked  bool
+	}{{0, false}, {1, true}} {
+		r := Record{Kind: KindStale, Path: "/cache/x", Bytes: 2 << 30, EncodedBytes: tc.encoded}
+		got := r.What("/home/u")
+		if strings.Contains(got, "без учёта сжатия") != tc.marked {
+			t.Errorf("What(encoded=%d) = %q", tc.encoded, got)
+		}
+	}
+}
+
 func TestOwners(t *testing.T) {
 	home := t.TempDir()
 	repo := filepath.Join(home, "git/sc2go")
@@ -224,9 +305,97 @@ func TestOwners(t *testing.T) {
 
 func TestSpanBytes(t *testing.T) {
 	// одна копия экстента дважды, часть сжатого экстента с тем же адресом, перекрытие и отдельный экстент
-	s := []span{{100, 50}, {100, 50}, {100, 20}, {140, 30}, {500, 10}}
+	s := []span{{at: 100, n: 50}, {at: 100, n: 50}, {at: 100, n: 20}, {at: 140, n: 30}, {at: 500, n: 10}}
 	if got := spanBytes(s); got != 80 {
 		t.Errorf("spanBytes = %d, want 80", got)
+	}
+}
+
+func TestEncodedExtentFlag(t *testing.T) {
+	if !encodedExtent(extentEncoded) {
+		t.Fatal("FIEMAP_EXTENT_ENCODED was not recognized")
+	}
+	if encodedExtent(extentShared | extentLast) {
+		t.Fatal("ordinary shared extent was marked encoded")
+	}
+}
+
+func TestCompressedExtentMarked(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", home)
+	dir := t.TempDir()
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs(dir, &fs); err != nil {
+		t.Fatal(err)
+	}
+	if uint64(fs.Type) != 0x9123683E { // BTRFS_SUPER_MAGIC
+		t.Skipf("$HOME не на btrfs (временная папка %s, тип ФС %#x)", dir, fs.Type)
+	}
+	compressed := filepath.Join(dir, "compressed")
+	if err := os.WriteFile(compressed, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("chattr", "+c", compressed).Run(); err != nil {
+		if propertyErr := exec.Command("btrfs", "property", "set", compressed, "compression", "zstd").Run(); propertyErr != nil {
+			t.Fatalf("не удалось включить сжатие: chattr: %v; btrfs property: %v", err, propertyErr)
+		}
+	}
+	data := bytes.Repeat([]byte("aguard-compressible-data-"), 1<<18)
+	if err := os.WriteFile(compressed, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(compressed, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	syscall.Sync()
+
+	ordinary := filepath.Join(dir, "ordinary")
+	random := make([]byte, 1<<20)
+	if _, err := rand.Read(random); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ordinary, random, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{{compressed, true}, {ordinary, false}} {
+		u := measure(t.Context(), tc.path, map[inode]bool{}, new(fiemapBuf), true, 0, nil)
+		if u.Err != nil {
+			t.Fatalf("measure %s: %v", tc.path, u.Err)
+		}
+		if got := u.EncodedBytes > 0; got != tc.want {
+			t.Errorf("%s EncodedBytes=%d, want encoded=%t", tc.path, u.EncodedBytes, tc.want)
+		}
+		if tc.want {
+			state := State{Sizes: map[string][]Point{}}
+			cfg := Default()
+			state.entry(&cfg, time.Now(), tc.path, u, false, func(Record, time.Duration) {})
+			points := state.Sizes[tc.path]
+			if len(points) != 1 || points[0].EncodedBytes != u.EncodedBytes {
+				t.Errorf("state point=%+v, want encoded bytes %d", points, u.EncodedBytes)
+			}
+		}
+	}
+}
+
+func TestFormatBytes(t *testing.T) {
+	if got := FormatBytes(2<<30, 1<<30); !strings.Contains(got, "без учёта сжатия") {
+		t.Errorf("compressed size %q has no marker", got)
+	}
+	if got := FormatBytes(2<<30, 0); strings.Contains(got, "без учёта сжатия") {
+		t.Errorf("ordinary size %q has an unexpected marker", got)
 	}
 }
 
@@ -309,7 +478,7 @@ func TestMeasureFiemapMin(t *testing.T) {
 		}
 		var sum int64
 		for _, n := range days {
-			sum += n
+			sum += n.Bytes
 		}
 		return sum
 	}
@@ -352,7 +521,7 @@ func TestByDayHardlinks(t *testing.T) {
 	}
 	var got int64
 	for _, n := range byDay {
-		got += n
+		got += n.Bytes
 	}
 	if got != want {
 		t.Errorf("ByDay насчитал %d байт, ожидалось по двум inode %d", got, want)
