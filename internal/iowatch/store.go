@@ -360,7 +360,7 @@ func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary 
 	acc := newCulpritAcc()
 	for i := range cases {
 		c := &cases[i]
-		if c.Start.Before(since) || !c.Start.Before(until) {
+		if !InWindow(c.Start, since, until) {
 			continue
 		}
 		if s.notFreeze(c, quiet, capped, waiting) {
@@ -425,6 +425,11 @@ func Summarize(cases []Case, since, until time.Time, min time.Duration) Summary 
 	sort.SliceStable(s.Cases, func(i, j int) bool { return s.Cases[i].DurMS > s.Cases[j].DurMS })
 	s.Culprits = acc.result()
 	return s
+}
+
+// InWindow reports whether an event at at belongs to the half-open report window [since, until).
+func InWindow(at, since, until time.Time) bool {
+	return !at.Before(since) && at.Before(until)
 }
 
 // notFreeze — тихий случай, ожидание под потолком или локальное ожидание cgroup: учтён отдельно, во фризы не идёт.
