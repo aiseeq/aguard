@@ -142,6 +142,10 @@
 - 28.10 00:16 CET: `aguard.service` обновлена, `cpu` — load average за минуту и готовые задачи в момент замера, письма после 10 минут подряд (d5817d5).
 - 28.10 03:03 CET: `aguard.service` обновлена через `graft install` (81bf25c): aguard и cl ставит шаг graft `{install}`, `deploy/install.sh` убран; tmpguard-track — `graft install-track` (sudo), не переставлялся.
 
+## Замер самого демона
+- Ловушка: ptrace к демону (`strace -p`, `gdb -p`, `perf` с присоединением, в том числе через `sudo`) отбивает agent-signal-guard, и машине уходит авария. Повторялось 14.11 и 16.11 (тикет ptrace-repeat-1116).
+- Без ptrace: чтение и запись — `/proc/<MainPID>/io` с сэмплером и строки «итог запуска» в журнале; чей путь чтения — `bpftrace` по `block_bio_queue` со стеками (sudo, 01.11, тикет self-io-reads); стек ядра — `/proc/<pid>/task/*/stack`; CPU — `cpu.stat` cgroup службы; профиль Go — тестом или бенчмарком в дереве, не на живом демоне.
+
 ## Порядок работ
 1. procguard и tmpguard под одной крышей, один конфиг.
 2. Решение о перезапуске из cl (cl спрашивает aguard).
