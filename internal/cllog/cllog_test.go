@@ -212,3 +212,11 @@ func TestTrustEventsSelectionRetryIsNotEvent(t *testing.T) {
 		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
 	}
 }
+
+func TestTrustEventsBadPIDCountsAndSkipsWindow(t *testing.T) {
+	log := "2026-10-28T10:00:00+01:00 m pid=x: " + TrustConfirmed("/a") + "\n"
+	events, bad, err := TrustEvents(strings.NewReader(log))
+	if err != nil || bad != 1 || len(events) != 0 {
+		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
+	}
+}

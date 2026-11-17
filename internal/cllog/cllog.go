@@ -179,15 +179,64 @@ type TrustEvent struct {
 var reUp = regexp.MustCompile(`^(.+?) pid=\d+ [0-9—][^ ]*→`)
 var reRestart = regexp.MustCompile(`^(.+?) pid=\d+: SIGTERM, поднимаю `)
 
+// trustLine — строка журнала cl; trust и trustDir заданы, если строка — окно доверия.
+type trustLine struct {
+	at       time.Time
+	text     string
+	trust    string
+	trustDir string
+}
+
+// parseTrustWindow разбирает текст строки как окно доверия: ok — окно; ошибка — строка окна с битым pid.
+// Строка «повтор Down» — не окно: за ней идёт итог той же папки.
+func parseTrustWindow(text string) (TrustEvent, bool, error) {
+	var ev TrustEvent
+	name, body, found := strings.Cut(text, ": ")
+	rest, left := strings.CutPrefix(body, trustLeft)
+	done, confirmed := strings.CutPrefix(body, trustDone)
+	if !found || !left && !confirmed {
+		return ev, false, nil
+	}
+	if confirmed {
+		rest = done
+	}
+	dir, detail, _ := strings.Cut(rest, ": ")
+	if dir == "" || left && strings.HasPrefix(detail, "повтор Down ") {
+		return ev, false, nil
+	}
+	pid := 0
+	if n, p, cut := strings.Cut(name, " pid="); cut {
+		var err error
+		if pid, err = strconv.Atoi(p); err != nil {
+			return ev, false, fmt.Errorf("окно доверия %q: pid: %w", text, err)
+		}
+		name = n
+	}
+	return TrustEvent{Name: name, Dir: dir, Confirmed: confirmed, PID: pid}, true, nil
+}
+
+// trustRecovered — время строки решения о той же сессии после окна, или ноль. Окна разных папок одной сессии
+// относятся к одному подъёму. Повтор окна той же папки начинает новый подъём (28.10 проба: окно 10:04:35 без
+// подъёма, затем окно 10:36:10 и решение 10:37:08). SIGTERM тоже начинает новый подъём и оставляет предыдущее
+// окно неподнятым.
+func trustRecovered(after []trustLine, ev TrustEvent) time.Time {
+	for _, line := range after {
+		if line.trust == ev.Name && line.trustDir == ev.Dir {
+			break
+		}
+		if m := reRestart.FindStringSubmatch(line.text); m != nil && m[1] == ev.Name {
+			break
+		}
+		if m := reUp.FindStringSubmatch(line.text); m != nil && m[1] == ev.Name {
+			return line.at
+		}
+	}
+	return time.Time{}
+}
+
 // TrustEvents находит окна доверия; более поздняя строка решения о той же сессии (reUp) — она поднялась.
 func TrustEvents(r io.Reader) ([]TrustEvent, int, error) {
-	type entry struct {
-		at       time.Time
-		text     string
-		trust    string // имя сессии, если строка — окно доверия
-		trustDir string
-	}
-	var lines []entry
+	var lines []trustLine
 	var events []TrustEvent
 	var at []int // строка каждого события в lines
 	bad := 0
@@ -200,58 +249,26 @@ func TrustEvents(r io.Reader) ([]TrustEvent, int, error) {
 			bad++
 			continue
 		}
-		lines = append(lines, entry{at: when, text: text})
-		name, body, ok := strings.Cut(text, ": ")
-		rest, left := strings.CutPrefix(body, trustLeft)
-		done, confirmed := strings.CutPrefix(body, trustDone)
-		if !ok || !left && !confirmed {
+		lines = append(lines, trustLine{at: when, text: text})
+		ev, isWindow, err := parseTrustWindow(text)
+		if err != nil {
+			bad++
 			continue
 		}
-		if confirmed {
-			rest = done
-		}
-		dir, _, _ := strings.Cut(rest, ": ")
-		if dir == "" {
+		if !isWindow {
 			continue
 		}
-		if left {
-			_, detail, _ := strings.Cut(rest, ": ")
-			if strings.HasPrefix(detail, "повтор Down ") {
-				continue
-			}
-		}
-		pid := 0
-		if n, p, ok := strings.Cut(name, " pid="); ok {
-			if pid, err = strconv.Atoi(p); err != nil {
-				bad++
-				continue
-			}
-			name = n
-		}
-		lines[len(lines)-1].trust = name
-		lines[len(lines)-1].trustDir = dir
+		ev.At = when
+		lines[len(lines)-1].trust = ev.Name
+		lines[len(lines)-1].trustDir = ev.Dir
 		at = append(at, len(lines)-1)
-		events = append(events, TrustEvent{At: when, Name: name, Dir: dir, Confirmed: confirmed, PID: pid})
+		events = append(events, ev)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, bad, fmt.Errorf("журнал cl: %w", err)
 	}
-	// Окна разных папок одной сессии относятся к одному подъёму. Повтор окна той же папки начинает новый подъём
-	// (28.10 проба: окно 10:04:35 без подъёма, затем окно 10:36:10 и решение 10:37:08). SIGTERM тоже начинает
-	// новый подъём и оставляет предыдущее окно неподнятым.
 	for i := range events {
-		for _, line := range lines[at[i]+1:] {
-			if line.trust == events[i].Name && line.trustDir == events[i].Dir {
-				break
-			}
-			if m := reRestart.FindStringSubmatch(line.text); m != nil && m[1] == events[i].Name {
-				break
-			}
-			if m := reUp.FindStringSubmatch(line.text); m != nil && m[1] == events[i].Name {
-				events[i].Recovered = line.at
-				break
-			}
-		}
+		events[i].Recovered = trustRecovered(lines[at[i]+1:], events[i])
 	}
 	return events, bad, nil
 }
