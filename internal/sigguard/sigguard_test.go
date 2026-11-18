@@ -121,6 +121,9 @@ func TestEmailAllowedKonsoleSelfMove(t *testing.T) {
 		"убит":               func(x *Deny) { x.Killed = true },
 		"другой arg":         func(x *Deny) { x.Arg = "2" },
 		"другой вид":         func(x *Deny) { x.Kind = "ptrace" },
+		"не main.scope":      func(x *Deny) { x.TargetUnit = "xmain.scope" },
+		"вкладка без .scope": func(x *Deny) { x.TargetUnit = "tab(1)" },
+		"не вкладка konsole": func(x *Deny) { x.TargetUnit = "tabby.scope" },
 	} {
 		x := d
 		change(&x)
