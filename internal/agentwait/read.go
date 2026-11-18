@@ -366,7 +366,7 @@ func (p *Pass) workerSources(st *State) ([]Source, map[string]bool, []error, err
 			errs = append(errs, err)
 			if known {
 				committed[name] = old
-				out = append(out, p.materializeWorkerSources(name, old.Sources)...)
+				out = append(out, sourcesFromCache(p.Workers, name, old.Sources)...)
 			} else {
 				untrackedError = true
 			}
@@ -424,12 +424,12 @@ func (p *Pass) workerTaskSources(name string, task *workerTask) ([]Source, bool,
 		}
 	}
 	if task.Done && !changed {
-		return p.materializeWorkerSources(name, task.Sources), true, nil
+		return sourcesFromCache(p.Workers, name, task.Sources), true, nil
 	}
 	if changed || !task.Done {
 		return p.refreshWorkerSources(name, task)
 	}
-	return p.materializeWorkerSources(name, task.Sources), false, nil
+	return sourcesFromCache(p.Workers, name, task.Sources), false, nil
 }
 
 func (p *Pass) readWorkerStatus(name, path string, info os.FileInfo, task *workerTask) error {
@@ -464,10 +464,6 @@ func (p *Pass) refreshWorkerSources(name string, task *workerTask) ([]Source, bo
 	}
 	task.Sources = cache
 	return sourcesFromCache(p.Workers, name, cache), false, nil
-}
-
-func (p *Pass) materializeWorkerSources(name string, sources []workerTranscript) []Source {
-	return sourcesFromCache(p.Workers, name, sources)
 }
 
 func sourcesFromCache(root, task string, sources []workerTranscript) []Source {
