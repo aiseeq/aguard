@@ -35,13 +35,15 @@ func ioCaseLine(c *iowatch.Case) string {
 	if c.Sudo == nil || c.ForeignSudo == nil || c.Sudo.Session == "" || c.Sudo.Session != c.ForeignSudo.Session {
 		line += sudoAttribution(c.ForeignSudo, "чужая")
 	}
-	if c.Capped {
+	if c.Culprits != nil && len(c.Culprits.CappedIdle) > 0 {
 		who := make([]string, 0, len(c.Culprits.CappedIdle))
 		for _, g := range c.Culprits.CappedIdle {
 			who = append(who, fmt.Sprintf("%s %d мс", g.Name, g.Value))
 		}
-		line += fmt.Sprintf("; ожидание под потолком io.max (%s), не фриз: вне потолка простой до %d мс",
-			strings.Join(who, ", "), c.OutsideIdleMS)
+		line += fmt.Sprintf("; ожидание под потолком io.max (%s); вне потолка простой до %d мс", strings.Join(who, ", "), c.OutsideIdleMS)
+		if c.Capped {
+			line += ", не фриз машины"
+		}
 	}
 	return line
 }
@@ -145,6 +147,13 @@ func writeIOCase(w io.Writer, c *iowatch.Case, names int) {
 			"порождает их запись процессов ниже)\n", megabytes(k.DeviceWrite), megabytes(k.KernelWrite))
 	}
 	top := func(list []iowatch.Ranked) []iowatch.Ranked { return list[:min(names, len(list))] }
+	if len(k.CappedIdle) > 0 {
+		fmt.Fprintln(w, "ожидание под потолком — за случай; соседи — целые детальные записи, пересекающие случай:")
+		writeIOTop(w, "ожидание ограниченных cgroup", top(k.CappedIdle), ioMillis)
+		writeIOTop(w, "простой вне потолка", top(k.OutsideIdle), ioMillis)
+		writeIOTop(w, "majflt вне потолка", top(k.OutsideMajflt), ioMajflt)
+		writeIOTop(w, "своп in вне потолка", top(k.OutsideSwapIn), ioPages)
+	}
 	writeProcessIOTop(w, "запись процессов (данные и метаданные)", top(k.ProcWrite), ioBytes, k.ProcessDetails)
 	writeProcessIOTop(w, "чтение процессов", top(k.ProcRead), ioBytes, k.ProcessDetails)
 	writeIOTop(w, "своп процессов", top(k.ProcMajflt), ioMajflt)

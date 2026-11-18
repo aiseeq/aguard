@@ -117,6 +117,139 @@ func capCase(base time.Time, n int, step func(i int, s *Step)) []Step {
 	return out
 }
 
+func TestCappedWaitDMNeighbors(t *testing.T) {
+	limit, err := parseIOMax([]byte("252:0 rbps=62914560 wbps=max riops=max wiops=max\n"), []string{"259:0", "252:0"})
+	if err != nil || limit.RBps != 62914560 {
+		t.Fatalf("dm io.max: %+v %v", limit, err)
+	}
+	limit.Path = "/agents.slice/reader.service"
+	start := time.Date(2026, 11, 18, 9, 45, 0, 0, time.Local)
+	for _, tc := range []struct {
+		name       string
+		neighborUS int64
+		want       bool
+	}{{"малый простой соседей", 8000, true}, {"заметный простой соседей", 300000, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var details []Step
+			for i := 1; i <= 40; i++ {
+				details = append(details, Step{At: start.Add(time.Duration(i) * time.Second), Cgroups: []Cgroup{
+					{Path: limit.Path, Cap: limit, ReadBytes: limit.RBps, IOFullUS: 800000},
+					{Path: "/session.slice/browser.service", IOFullUS: tc.neighborUS, Majflt: 2, SwapIn: 3},
+				}})
+			}
+			v := cappedWait(details, start, start.Add(40*time.Second), time.Second, 40000, 1000)
+			if v.Capped != tc.want {
+				t.Fatalf("verdict: %+v; want capped=%v", v, tc.want)
+			}
+			if len(v.OutsideMajflt) != 1 || v.OutsideMajflt[0].Value != 80 || len(v.OutsideSwapIn) != 1 || v.OutsideSwapIn[0].Value != 120 {
+				t.Fatalf("вред соседям: %+v", v)
+			}
+		})
+	}
+}
+
+func TestCappedWaitPhysicalDevice(t *testing.T) {
+	limit, err := parseIOMax([]byte("259:0 rbps=41943040 wbps=max riops=max wiops=max\n"), []string{"259:0", "252:0"})
+	if err != nil || limit.RBps != 41943040 {
+		t.Fatalf("physical io.max: %+v %v", limit, err)
+	}
+	limit.Path = "/app.slice/run-p2286216-i278909101.scope"
+	start := time.Now()
+	var details []Step
+	for i := 1; i <= 40; i++ {
+		details = append(details, Step{At: start.Add(time.Duration(i) * time.Second), Cgroups: []Cgroup{
+			{Path: limit.Path, Cap: limit, ReadBytes: limit.RBps, IOFullUS: 800000},
+			{Path: "/session.slice/browser.service", IOFullUS: 8000},
+		}})
+	}
+	if v := cappedWait(details, start, start.Add(40*time.Second), time.Second, 40000, 1000); !v.Capped {
+		t.Fatalf("physical device: %+v", v)
+	}
+}
+
+func TestCappedNeighborThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		duration, outside int64
+		want              bool
+	}{
+		{1000, 199, true}, {1000, 200, false},
+		{5000, 499, true}, {5000, 500, false},
+		{40000, 999, true}, {40000, 1000, false},
+	} {
+		a := newCapAcc()
+		a.add([]capPart{{name: "limited", idleUS: 10_000_000, capped: true}, {name: "neighbor", idleUS: tc.outside * 1000}}, 1, 1)
+		if got := a.verdict(tc.duration, 0).Capped; got != tc.want {
+			t.Errorf("duration %d, outside %d: capped %v, want %v", tc.duration, tc.outside, got, tc.want)
+		}
+	}
+}
+
+func TestCappedNeighborFaultsWithoutIdle(t *testing.T) {
+	start := time.Now()
+	limit := Cap{Path: "/reader.service", RBps: 30_000_000}
+	for _, tc := range []struct {
+		name     string
+		neighbor Cgroup
+	}{
+		{"без лимита", Cgroup{Path: "/neighbor.service", Majflt: 4096}},
+		{"лимит без упора", Cgroup{Path: "/neighbor.service", Cap: Cap{Path: "/neighbor.service", RBps: 30_000_000}, Majflt: 4096}},
+		{"swapin", Cgroup{Path: "/neighbor.service", SwapIn: 4096}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			details := []Step{{At: start.Add(time.Second), Cgroups: []Cgroup{
+				{Path: limit.Path, Cap: limit, ReadBytes: 30_000_000, IOFullUS: 700_000}, tc.neighbor,
+			}}}
+			v := cappedWait(details, start, start.Add(time.Second), time.Second, 1000, 0)
+			if v.Capped || tc.neighbor.Majflt > 0 && (len(v.OutsideMajflt) != 1 || v.OutsideMajflt[0].Value != 4096) || tc.neighbor.SwapIn > 0 && (len(v.OutsideSwapIn) != 1 || v.OutsideSwapIn[0].Value != 4096) {
+				t.Fatalf("вред соседу без простоя: %+v", v)
+			}
+		})
+	}
+}
+
+func TestCappedFaultsOfLimitedReaderAreNotNeighborHarm(t *testing.T) {
+	start := time.Now()
+	limit := Cap{Path: "/reader.service", RBps: 30_000_000}
+	details := []Step{{At: start.Add(time.Second), Cgroups: []Cgroup{
+		{Path: limit.Path, Cap: limit, ReadBytes: 30_000_000, IOFullUS: 700_000, Majflt: 9000, SwapIn: 9000},
+		{Path: "/neighbor.service", Majflt: 3, SwapIn: 4},
+	}}}
+	v := cappedWait(details, start, start.Add(time.Second), time.Second, 1000, 0)
+	if !v.Capped || len(v.OutsideMajflt) != 1 || v.OutsideMajflt[0].Value != 3 || len(v.OutsideSwapIn) != 1 || v.OutsideSwapIn[0].Value != 4 {
+		t.Fatalf("счётчики ограниченного не вред соседям: %+v", v)
+	}
+}
+
+func TestCappedNeighborFaultThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		majflt, swapin int64
+		want           bool
+	}{{4095, 0, true}, {4096, 0, false}, {0, 4095, true}, {0, 4096, false}} {
+		a := newCapAcc()
+		a.add([]capPart{{name: "reader", idleUS: 700000, capped: true},
+			{name: "a", majflt: tc.majflt / 2, swapin: tc.swapin / 2},
+			{name: "b", majflt: tc.majflt - tc.majflt/2, swapin: tc.swapin - tc.swapin/2}}, 1, 1)
+		if got := a.verdict(1000, 0).Capped; got != tc.want {
+			t.Errorf("majflt %d swapin %d: capped %v", tc.majflt, tc.swapin, got)
+		}
+	}
+}
+
+// Без упора в потолок своп соседей — не NeighborHarm: признак только отделяет вред соседям от ожидания ограниченного.
+// Swapin владельца потолка (в упоре) — его собственный, не вред соседям.
+func TestCappedNeighborHarmNeedsCap(t *testing.T) {
+	a := newCapAcc()
+	a.add([]capPart{{name: "a", idleUS: 700000, majflt: 5000, swapin: 5000}}, 1, 1)
+	if v := a.verdict(1000, 0); v.NeighborHarm || v.Capped {
+		t.Fatalf("без потолка: %+v", v)
+	}
+	b := newCapAcc()
+	b.add([]capPart{{name: "reader", idleUS: 700000, swapin: 9000, capped: true}, {name: "n", swapin: 4}}, 1, 1)
+	if v := b.verdict(1000, 0); v.NeighborHarm || !v.Capped {
+		t.Fatalf("своп ограниченного: %+v", v)
+	}
+}
+
 func TestCappedWaitScenarios(t *testing.T) {
 	base := time.Date(2026, 11, 8, 13, 12, 52, 0, time.Local)
 	end := base.Add(12600 * time.Millisecond)
@@ -143,14 +276,14 @@ func TestCappedWaitScenarios(t *testing.T) {
 			t.Fatalf("в потолок не упирались — простой машины: %v %d", capped, outside)
 		}
 	})
-	t.Run("вне потолка ждали", func(t *testing.T) {
+	t.Run("небольшой простой вне потолка", func(t *testing.T) {
 		details := capCase(base, 13, func(i int, s *Step) {
 			if i == 5 {
 				s.Cgroups[1].IOFullUS = 250_000
 			}
 		})
-		if capped, outside, _ := cw(details, base, end, time.Second, dur, busy); capped || outside != 274 {
-			t.Fatalf("lead ждал 250 мс: %v %d", capped, outside)
+		if capped, outside, _ := cw(details, base, end, time.Second, dur, busy); !capped || outside != 274 {
+			t.Fatalf("274 мс из 12,6 с ниже нового порога: %v %d", capped, outside)
 		}
 	})
 	t.Run("последняя секунда чтения без упора (проба 08.11 13:43:06)", func(t *testing.T) {
@@ -202,7 +335,7 @@ func TestRecorderCappedCaseAndSummary(t *testing.T) {
 			d := Step{At: at}
 			if i >= 10 && i <= 40 {
 				d.Cgroups = []Cgroup{{Path: probe.Path, ReadBytes: 30_000_000, IOFullUS: 700_000, Cap: probe},
-					{Path: "/agents.slice/agent-lead-1.scope", IOFullUS: 3000}}
+					{Path: "/agents.slice/agent-lead-1.scope", IOFullUS: 3000, Majflt: 2, SwapIn: 3}}
 			}
 			r.Detail(d)
 		}
@@ -212,9 +345,38 @@ func TestRecorderCappedCaseAndSummary(t *testing.T) {
 	if len(got) != 1 || !got[0].Capped || got[0].OutsideIdleMS != 12 || got[0].Culprits == nil || len(got[0].Culprits.CappedIdle) != 1 {
 		t.Fatalf("случай под потолком: %+v", got)
 	}
+	k := got[0].Culprits
+	if len(k.OutsideIdle) != 1 || k.OutsideIdle[0].Value != 12 || len(k.OutsideMajflt) != 1 || k.OutsideMajflt[0].Value != 8 || len(k.OutsideSwapIn) != 1 || k.OutsideSwapIn[0].Value != 12 {
+		t.Fatalf("вред соседу в сохранённом случае: %+v", k)
+	}
 	s := Summarize(got, base, base.Add(time.Hour), 500*time.Millisecond)
 	if s.Total != 0 || s.Capped != 1 || s.CappedIdleMS != got[0].IdleMS || len(s.CappedWho) != 1 || s.CappedWho[0].Name != "run-p1-i2.scope" || len(s.Cases) != 0 {
 		t.Fatalf("сводка: %+v", s)
+	}
+}
+
+func TestRecorderNeighborHarmRemainsFreeze(t *testing.T) {
+	r := NewRecorder(Default())
+	start := time.Now()
+	limit := Cap{Path: "/reader.service", RBps: 30_000_000}
+	r.Detail(Step{At: start.Add(time.Second), Cgroups: []Cgroup{
+		{Path: limit.Path, Cap: limit, ReadBytes: 30_000_000, IOFullUS: 900_000},
+		{Path: "/neighbor.service", Majflt: 4096},
+	}})
+	c := Case{Start: start, End: start.Add(time.Second), DurMS: 1000, IdleMS: 900, ReadB: 64 << 20}
+	r.finish(&c)
+	if !c.NeighborHarm || c.Capped || c.Quiet || c.Waiting || c.Culprits == nil || len(c.Culprits.OutsideMajflt) != 1 {
+		t.Fatalf("вред соседу должен остаться фризом: %+v", c)
+	}
+	if s := Summarize([]Case{c}, start, start.Add(time.Hour), 0); s.Total != 1 {
+		t.Fatalf("фриз потерян в сводке: %+v", s)
+	}
+	// Обмен случая с диском меньше порога тихости — тихий и при вреде соседям: их счётчики — по целым записям шире
+	// случая, а 4096 подкачанных страниц (16 МиБ) внутри случая без обмена с диском не бывают.
+	q := Case{Start: start, End: start.Add(time.Second), DurMS: 1000, IdleMS: 900}
+	r.finish(&q)
+	if !q.NeighborHarm || !q.Quiet {
+		t.Fatalf("тихость по обмену случая: %+v", q)
 	}
 }
 

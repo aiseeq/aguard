@@ -586,6 +586,24 @@ func TestIOStepNotesPassEveryMinute(t *testing.T) {
 	}
 }
 
+func TestIOCaseSeparatesCappedAndNeighbors(t *testing.T) {
+	c := alertCase(time.Now(), 40000)
+	c.OutsideIdleMS = 700
+	c.Culprits.CappedIdle = []iowatch.Ranked{{Name: "reader.service", Value: 32000}}
+	c.Culprits.OutsideIdle = []iowatch.Ranked{{Name: "browser.service", Value: 700}}
+	c.Culprits.OutsideMajflt = []iowatch.Ranked{{Name: "browser.service", Value: 12}}
+	c.Culprits.OutsideSwapIn = []iowatch.Ranked{{Name: "browser.service", Value: 30}}
+	text, _ := ioAlertText([]iowatch.Case{c}, time.Second)
+	if strings.Contains(text, "не фриз машины") {
+		t.Fatalf("фриз ошибочно назван не фризом: %s", text)
+	}
+	for _, want := range []string{"reader.service", "browser.service", "простой вне потолка", "majflt вне потолка", "своп in вне потолка"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("в письме нет %q: %s", want, text)
+		}
+	}
+}
+
 func TestIOCaseIncludesProcessCommand(t *testing.T) {
 	c := alertCase(time.Date(2026, 10, 31, 12, 0, 0, 0, time.Local), 7400)
 	c.Culprits.ProcWrite = []iowatch.Ranked{{Name: "dd(10)", Value: 40}, {Name: "cp(12)", Value: 30}, {Name: "rg(13)", Value: 20}, {Name: "tar(14)", Value: 10}}

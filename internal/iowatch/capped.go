@@ -139,22 +139,35 @@ const (
 	// capRateShare — доля предела, с которой cgroup под потолком упирается в него: проба 08.11 шла 76 МиБ/с при
 	// 80M (99,6 %) и 28–30 МиБ/с при 30M (98–105 %). Ниже — потолок не держит, и простой не его.
 	capRateShare = 0.8
-	// capOutsideMS — простой любой cgroup вне потолка за случай меньше: остальные не ждали (13:12:52 — до 51 мс).
-	capOutsideMS = 200
+	// 08.11 13:12:52 под 30M соседи ждали до 51 мс. 18.11 09:45:38: 252 мс из 36,7 с
+	// без GUI-среза; 09:46:16: 3170 мс из 92,6 с и D-срез renderer. 10% ограничены
+	// 200 мс снизу и 1000 мс сверху: примеры ограничивают верхнюю границу, сам выбор
+	// 10% для коротких случаев — эвристика без доказанного GUI-порога; PSI суммирует ожидание.
+	capOutsideMinMS   = 200
+	capOutsideMaxMS   = 1000
+	capOutsidePercent = 10
+	// 4096 majflt или страниц swapin (16 МиБ при 4 КиБ) за все cgroup вне упора: 09:47:51 в
+	// контекстном окне PostgreSQL swapin 9463, машинные majflt/swapin 9963/14904;
+	// при D-срезе 09:46:16 — 22364/38491. Без GUI-среза 09:41:03 под потолком —
+	// 106/69 машины, но 09:41:29 — 3350/4175: GUI и машинные счётчики не отделяют
+	// ограниченного от соседей, поэтому 4096 — осторожный порог, не доказанный GUI.
+	capOutsideFaults = 4096
 )
 
 // capPart — простой листа или потолка в одной детальной записи: cgroup вне потолка (по имени) или потолок (по
 // имени его cgroup) с пометкой, упирались ли в него за запись.
 type capPart struct {
-	name   string
-	idleUS int64
-	capped bool
+	name           string
+	idleUS         int64
+	majflt, swapin int64
+	capped         bool
 }
 
 // capOwner — листья под одним потолком в записи.
 type capOwner struct {
 	cap                        Cap
 	rd, wr, rios, wios, idleUS int64
+	majflt, swapin             int64
 }
 
 // capParts сводит запись за interval в простой по потолкам и вне их, дописывая в dst. Упор — по сумме листьев
@@ -166,8 +179,8 @@ func capParts(d *Step, interval time.Duration, dst []capPart, owners []capOwner)
 	for j := range d.Cgroups {
 		g := &d.Cgroups[j]
 		if !g.Cap.limited() {
-			if g.IOFullUS > 0 {
-				dst = append(dst, capPart{name: CgroupName(g.Path), idleUS: g.IOFullUS})
+			if g.IOFullUS > 0 || g.Majflt > 0 || g.SwapIn > 0 {
+				dst = append(dst, capPart{name: CgroupName(g.Path), idleUS: g.IOFullUS, majflt: g.Majflt, swapin: g.SwapIn})
 			}
 			continue
 		}
@@ -182,15 +195,17 @@ func capParts(d *Step, interval time.Duration, dst []capPart, owners []capOwner)
 		o.rios += g.ReadOps
 		o.wios += g.WriteOps
 		o.idleUS += g.IOFullUS
+		o.majflt += g.Majflt
+		o.swapin += g.SwapIn
 	}
 	sec := interval.Seconds()
 	atCap := func(sum, limit int64) bool { return limit > 0 && float64(sum)/sec >= capRateShare*float64(limit) }
 	for k := range owners {
 		o, c := &owners[k], owners[k].cap
-		if o.idleUS == 0 {
+		if o.idleUS == 0 && o.majflt == 0 && o.swapin == 0 {
 			continue
 		}
-		dst = append(dst, capPart{name: CgroupName(c.Path), idleUS: o.idleUS,
+		dst = append(dst, capPart{name: CgroupName(c.Path), idleUS: o.idleUS, majflt: o.majflt, swapin: o.swapin,
 			capped: atCap(o.rd, c.RBps) || atCap(o.wr, c.WBps) || atCap(o.rios, c.RIOps) || atCap(o.wios, c.WIOps)})
 	}
 	return dst, owners
@@ -200,9 +215,12 @@ func capParts(d *Step, interval time.Duration, dst []capPart, owners []capOwner)
 type capAcc struct {
 	totalUS, cappedUS float64
 	outside, byName   map[string]float64
+	majflt, swapin    map[string]int64
 }
 
-func newCapAcc() capAcc { return capAcc{outside: map[string]float64{}, byName: map[string]float64{}} }
+func newCapAcc() capAcc {
+	return capAcc{outside: map[string]float64{}, byName: map[string]float64{}, majflt: map[string]int64{}, swapin: map[string]int64{}}
+}
 
 // add — простой записи: под потолком — с весом capped, вне потолка — с весом outside.
 func (a *capAcc) add(parts []capPart, capped, outside float64) {
@@ -217,23 +235,29 @@ func (a *capAcc) add(parts []capPart, capped, outside float64) {
 		v := float64(p.idleUS) * outside
 		a.totalUS += v
 		a.outside[p.name] += v
+		a.majflt[p.name] += p.majflt
+		a.swapin[p.name] += p.swapin
 	}
 }
 
 // capVerdict — признание окна: ожидание под потолком (Capped), наибольший простой cgroup вне потолка и простой
 // упиравшихся в потолки, мс; Who — простой по потолкам.
 type capVerdict struct {
-	Capped              bool
-	OutsideMS, CappedMS int64
-	Who                 []Ranked
+	Capped                                   bool
+	NeighborHarm                             bool
+	OutsideMS, CappedMS                      int64
+	Who                                      []Ranked
+	OutsideWho, OutsideMajflt, OutsideSwapIn []Ranked
 }
 
 // verdict — под потолком: упиравшиеся в потолки дали больше половины простоя листьев, ни одна cgroup вне них не
-// ждала capOutsideMS, диск занят меньше половины окна длиной durMS.
+// ждала порог (10% окна, от 200 до 1000 мс), события соседей ниже порога, диск занят меньше половины окна.
 func (a *capAcc) verdict(durMS, busyMS int64) capVerdict {
 	var v capVerdict
-	for _, us := range a.outside {
+	outside := make(map[string]int64, len(a.outside))
+	for name, us := range a.outside {
 		v.OutsideMS = max(v.OutsideMS, int64(us)/1000)
+		outside[name] = int64(us) / 1000
 	}
 	who := make(map[string]int64, len(a.byName))
 	for name, us := range a.byName {
@@ -241,7 +265,18 @@ func (a *capAcc) verdict(durMS, busyMS int64) capVerdict {
 	}
 	v.CappedMS = int64(a.cappedUS) / 1000
 	v.Who = Rank(who, caseTop)
-	v.Capped = a.cappedUS > 0 && 2*a.cappedUS > a.totalUS && v.OutsideMS < capOutsideMS && 2*busyMS < durMS
+	v.OutsideWho, v.OutsideMajflt, v.OutsideSwapIn = Rank(outside, caseTop), Rank(a.majflt, caseTop), Rank(a.swapin, caseTop)
+	var majflt, swapin int64
+	for _, count := range a.majflt {
+		majflt += count
+	}
+	for _, count := range a.swapin {
+		swapin += count
+	}
+	v.NeighborHarm = a.cappedUS > 0 && (majflt >= capOutsideFaults || swapin >= capOutsideFaults)
+	threshold := max(int64(capOutsideMinMS), min(int64(capOutsideMaxMS), durMS*capOutsidePercent/100))
+	v.Capped = a.cappedUS > 0 && 2*a.cappedUS > a.totalUS && v.OutsideMS < threshold &&
+		!v.NeighborHarm && 2*busyMS < durMS
 	return v
 }
 

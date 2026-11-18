@@ -42,6 +42,7 @@ type Case struct {
 	// В письма и в счёт фризов не идёт.
 	Capped        bool  `json:"capped,omitempty"`
 	OutsideIdleMS int64 `json:"outside_idle_ms,omitempty"`
+	NeighborHarm  bool  `json:"neighbor_harm,omitempty"` // при упоре: вне него majflt или swapin достигли порога
 	// Waiting — диск занят малую долю случая, а cgroup провела в PSI full io не менее 60% окна деталей.
 	// Это локальное ожидание cgroup, не фриз машины.
 	Waiting     bool      `json:"waiting,omitempty"`
@@ -85,8 +86,11 @@ type Culprit struct {
 	CgroupWrite    []Ranked                  `json:"cgroup_write,omitempty"`
 	CgroupRead     []Ranked                  `json:"cgroup_read,omitempty"`
 	CgroupSwapIn   []Ranked                  `json:"cgroup_swapin,omitempty"`
-	CgroupIdle     []Ranked                  `json:"cgroup_idle,omitempty"` // мс PSI full io
-	CappedIdle     []Ranked                  `json:"capped_idle,omitempty"` // мс PSI full io под потолками, в которые упирались
+	CgroupIdle     []Ranked                  `json:"cgroup_idle,omitempty"`    // мс PSI full io
+	CappedIdle     []Ranked                  `json:"capped_idle,omitempty"`    // мс PSI full io под потолками, в которые упирались
+	OutsideIdle    []Ranked                  `json:"outside_idle,omitempty"`   // целые пересекающие случай записи, мс
+	OutsideMajflt  []Ranked                  `json:"outside_majflt,omitempty"` // majflt cgroup вне упора, те же записи
+	OutsideSwapIn  []Ranked                  `json:"outside_swapin,omitempty"` // страницы, те же записи
 	// CgroupDirty — запись процессов cgroup (write_bytes, данные и метаданные): кто порождает запись.
 	CgroupDirty []Ranked `json:"cgroup_dirty,omitempty"`
 	// CgroupOwn — запись процессов для каждой своей (Readable) cgroup из CgroupWrite: io.stat намного больше своей —
@@ -428,6 +432,8 @@ func (r *Recorder) finish(c *Case) {
 	}
 	v := cappedWaitFirstInterval(details, c.Start, c.End, firstInterval, c.DurMS, c.BusyMS)
 	c.Capped, c.OutsideIdleMS, c.Culprits.CappedIdle = v.Capped, v.OutsideMS, v.Who
+	c.Culprits.OutsideIdle, c.Culprits.OutsideMajflt, c.Culprits.OutsideSwapIn = v.OutsideWho, v.OutsideMajflt, v.OutsideSwapIn
+	c.NeighborHarm = v.NeighborHarm // тихость (обмен случая с диском) не трогает: счётчики соседей — по целым записям шире случая
 	for i := range details {
 		c.Culprits.CleanerMS += details[i].CleanerMS
 	}
@@ -460,7 +466,7 @@ func resolveCaseMain(c *Case, sum *Culprits) {
 		// Старые строки журнала не хранят окно деталей; восстановим номинальные 5 с контекста и хвоста.
 		windowMS = c.DurMS + 5_000 + 5_000 + 300 + 200
 	}
-	if !c.Quiet && !c.Capped && c.DurMS > 0 && c.BusyMS*100 < c.DurMS*waitDiskBusyPercent &&
+	if !c.Quiet && !c.Capped && !c.NeighborHarm && c.DurMS > 0 && c.BusyMS*100 < c.DurMS*waitDiskBusyPercent &&
 		c.MemFullMS*100 < c.DurMS*waitMemoryFullPercent {
 		if waiting := Rank(sum.CgroupIdle, 1); len(waiting) > 0 && waiting[0].Value*100 >= windowMS*waitIdleWindowPercent {
 			main = sum.cgroupPath(waiting[0].Name)
