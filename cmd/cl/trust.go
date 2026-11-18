@@ -186,23 +186,7 @@ func (w *trustWatch) Write(p []byte) (int, error) {
 	}
 	if w.selecting && w.selectionEvent != nil {
 		w.selectBuf = append(w.selectBuf, p...)
-		var event trustSelectionEvent
-		compact := compactText(escSeq.ReplaceAll(w.selectBuf, nil))
-		if w.checkingEnter {
-			if trustWindowHeading(compact) && !bytes.Contains(compact, w.selectedDir) {
-				event = trustSelectionGone
-			} else if !trustWindowHeading(compact) && trustNoFocus(compact) {
-				event = trustSelectionFocus
-			} else if trustRetryPrompt(compact) {
-				event = trustSelectionPrompt
-			}
-		} else if w.selectedNeedle == nil && trustNoFocusForDir(compact, w.selectedDir) {
-			event = trustSelectionFocus
-		} else if readerEcho.Match(w.selectBuf) || (len(w.selectedNeedle) > 0 && bytes.Contains(compact, w.selectedNeedle)) || bytes.Contains(w.selectBuf, []byte("\x1b[1B❯")) {
-			event = trustSelectionRedrawn
-		} else if trustRetryPrompt(compact) {
-			event = trustSelectionPrompt
-		}
+		event := w.classifySelection()
 		if event != 0 {
 			w.selecting = false
 			w.selectionEvent <- event
@@ -231,6 +215,39 @@ func (w *trustWatch) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+// classifySelection — что значит вывод, накопленный с последнего нажатия: проверка Enter (окно ушло, снова «❯ No»,
+// подсказка), ожидание фокуса или выбор «Yes» после Down. 0 — ещё ничего. Звать под selectMu.
+func (w *trustWatch) classifySelection() trustSelectionEvent {
+	compact := compactText(escSeq.ReplaceAll(w.selectBuf, nil))
+	switch {
+	case w.checkingEnter:
+		return enterEvent(compact, w.selectedDir)
+	case w.selectedNeedle == nil && trustNoFocusForDir(compact, w.selectedDir):
+		return trustSelectionFocus
+	case readerEcho.Match(w.selectBuf) || (len(w.selectedNeedle) > 0 && bytes.Contains(compact, w.selectedNeedle)) ||
+		bytes.Contains(w.selectBuf, []byte("\x1b[1B❯")):
+		return trustSelectionRedrawn
+	case trustRetryPrompt(compact):
+		return trustSelectionPrompt
+	}
+	return 0
+}
+
+// enterEvent — вывод после Enter: заголовок другого окна — окно ушло; «❯ No» без нового заголовка или подсказка —
+// Enter не принят; прочее (кадр REPL с курсором поля ввода) — не событие.
+func enterEvent(compact, dir []byte) trustSelectionEvent {
+	heading := trustWindowHeading(compact)
+	switch {
+	case heading && !bytes.Contains(compact, dir):
+		return trustSelectionGone
+	case !heading && trustNoFocus(compact):
+		return trustSelectionFocus
+	case trustRetryPrompt(compact):
+		return trustSelectionPrompt
+	}
+	return 0
 }
 
 func trustNoFocus(compact []byte) bool {
@@ -658,49 +675,55 @@ func (c *console) confirmTrust(win trustWindow, w *trustWatch) {
 			return
 		}
 
-		time.Sleep(typePause)
-		event = c.armTrustSelection(w, nil, false, true, compactText([]byte(dir)))
-		if err := c.write("\r"); err != nil {
-			w.stopSelecting(event)
-			c.say(cllog.TrustWriteFailed(dir, err))
-			return
-		}
-		enterTimer := time.NewTimer(trustEnterWait)
-		select {
-		case result := <-event:
-			enterTimer.Stop()
-			w.stopSelecting(event)
-			if result == trustSelectionGone {
-				if win.key == "add-dir" {
-					c.say(cllog.TrustAddedDir(dir))
-				} else {
-					c.say(cllog.TrustConfirmed(dir))
-				}
-				return
-			}
+		switch c.enterTrust(win, w, deadline) {
+		case enterRetry:
 			if !c.retryTrustSelection(dir, w, deadline, &retries) {
 				return
 			}
-			continue
-		case <-enterTimer.C:
-			w.stopSelecting(event)
-		case <-deadline.C:
-			enterTimer.Stop()
-			w.stopSelecting(event)
-			c.say(cllog.TrustNotSelected(dir, trustSelectWait))
-			return
-		case <-w.stop:
-			enterTimer.Stop()
-			w.stopSelecting(event)
+		case enterDone:
 			return
 		}
-		if win.key == "add-dir" {
-			c.say(cllog.TrustAddedDir(dir))
-		} else {
-			c.say(cllog.TrustConfirmed(dir))
-		}
-		return
 	}
+}
+
+type enterResult uint8
+
+const (
+	enterDone  enterResult = iota // окно ушло (строка в журнале) или ждать дальше нечего (строка о сбое)
+	enterRetry                    // Enter не принят: снова Down
+)
+
+// enterTrust — Enter на выбранном «Yes» и проверка, что окно ушло: заголовок другого окна или тишина trustEnterWait
+// без «❯ No» и подсказки — «подтвердил»; выход claude (stop) — без строки: принятие не доказано.
+func (c *console) enterTrust(win trustWindow, w *trustWatch, deadline *time.Timer) enterResult {
+	time.Sleep(typePause)
+	event := c.armTrustSelection(w, nil, false, true, compactText([]byte(win.dir)))
+	if err := c.write("\r"); err != nil {
+		w.stopSelecting(event)
+		c.say(cllog.TrustWriteFailed(win.dir, err))
+		return enterDone
+	}
+	enterTimer := time.NewTimer(trustEnterWait)
+	defer enterTimer.Stop()
+	defer w.stopSelecting(event)
+	select {
+	case result := <-event:
+		if result != trustSelectionGone {
+			return enterRetry
+		}
+	case <-enterTimer.C:
+	case <-deadline.C:
+		c.say(cllog.TrustNotSelected(win.dir, trustSelectWait))
+		return enterDone
+	case <-w.stop:
+		return enterDone
+	}
+	if win.key == "add-dir" {
+		c.say(cllog.TrustAddedDir(win.dir))
+	} else {
+		c.say(cllog.TrustConfirmed(win.dir))
+	}
+	return enterDone
 }
 
 func (c *console) armTrustSelection(w *trustWatch, needle []byte, seed, checkingEnter bool, dir []byte) chan trustSelectionEvent {
