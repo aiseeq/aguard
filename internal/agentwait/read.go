@@ -12,6 +12,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -27,6 +28,24 @@ type Source struct {
 	Path, Key, Runner, Session, Agent, Project string
 	size                                       int64
 	mtime                                      time.Time
+}
+
+type workerCache struct {
+	RootMod int64                  `json:"root_mod"`
+	Tasks   map[string]*workerTask `json:"tasks,omitempty"`
+}
+
+type workerTask struct {
+	StatusMod  int64              `json:"status_mod,omitempty"`
+	StatusSize int64              `json:"status_size,omitempty"`
+	Done       bool               `json:"done,omitempty"`
+	Sources    []workerTranscript `json:"sources,omitempty"`
+}
+
+type workerTranscript struct {
+	Key   string `json:"key"`
+	Size  int64  `json:"size"`
+	Mtime int64  `json:"mtime"`
 }
 
 // List — транскрипты Claude в projects (<проект>/<сессия>.jsonl, <проект>/<сессия>/subagents/agent-<id>.jsonl) и
@@ -65,10 +84,14 @@ func List(projects, workers string) ([]Source, error) {
 	codex := func(s *Source, parts []string) {
 		s.Project, s.Session = parts[0], strings.TrimSuffix(strings.TrimPrefix(parts[len(parts)-1], "rollout-"), ".jsonl")
 	}
-	return out, errors.Join(
+	errs := []error{
 		add(projects, "*/*.jsonl", RunnerClaude, claude),
 		add(projects, "*/*/subagents/agent-*.jsonl", RunnerClaude, claude),
-		add(workers, "*/codex/sessions/*/*/*/rollout-*.jsonl", RunnerCodex, codex))
+	}
+	if workers != "" {
+		errs = append(errs, add(workers, "*/codex/sessions/*/*/*/rollout-*.jsonl", RunnerCodex, codex))
+	}
+	return out, errors.Join(errs...)
 }
 
 // File — что известно о транскрипте между проходами.
@@ -125,8 +148,10 @@ func (f *File) UnmarshalJSON(data []byte) error {
 
 // State — смещения по транскриптам. Started — первый проход был: новые файлы читаются с начала.
 type State struct {
-	Started bool             `json:"started"`
-	Files   map[string]*File `json:"files"`
+	Started      bool             `json:"started"`
+	Files        map[string]*File `json:"files"`
+	Workers      workerCache      `json:"workers,omitzero"`
+	workersDirty bool             `json:"-"`
 }
 
 // LoadState — состояние из файла; нет файла — пустое (первый проход).
@@ -142,12 +167,33 @@ func LoadState(path string) (*State, error) {
 	if st.Files == nil {
 		st.Files = map[string]*File{}
 	}
+	cacheBytes, err := statefile.Load(workerCachePath(path))
+	if err == nil {
+		if err := json.Unmarshal(cacheBytes, &st.Workers); err != nil {
+			return nil, fmt.Errorf("кеш транскриптов worker: %w", err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("кеш транскриптов worker: %w", err)
+	}
 	return st, nil
 }
 
 // Save пишет состояние атомарно.
 func (st *State) Save(path string) error {
-	b, err := json.Marshal(st)
+	if st.workersDirty {
+		cache, err := json.Marshal(st.Workers)
+		if err != nil {
+			return fmt.Errorf("кеш транскриптов worker: %w", err)
+		}
+		if err := statefile.Save(workerCachePath(path), cache); err != nil {
+			return fmt.Errorf("кеш транскриптов worker: %w", err)
+		}
+		st.workersDirty = false
+	}
+	b, err := json.Marshal(struct {
+		Started bool             `json:"started"`
+		Files   map[string]*File `json:"files"`
+	}{st.Started, st.Files})
 	if err != nil {
 		return fmt.Errorf("смещения ожиданий: %w", err)
 	}
@@ -156,6 +202,8 @@ func (st *State) Save(path string) error {
 	}
 	return nil
 }
+
+func workerCachePath(path string) string { return strings.TrimSuffix(path, ".json") + ".workers.json" }
 
 // Pass — проход по транскриптам.
 type Pass struct {
@@ -166,41 +214,36 @@ type Pass struct {
 	Budget  int64
 	MaxOpen time.Duration
 	// Name — имя сессии Claude по её папке (names.For); пусто — без имени.
-	Name     func(cwd string) string
-	openFile func(string) (io.ReaderAt, io.Closer, error)
+	Name       func(cwd string) string
+	openFile   func(string) (io.ReaderAt, io.Closer, error)
+	listWorker func(root, task string) ([]Source, error)
 }
 
 // Run читает дописанное и отдаёт законченные ожидания. Сначала файлы с меньшим непрочитанным: хвосты живых
 // сессий не ждут, пока дочитается неделя старых. Ошибки отдельных файлов возвращаются вместе с ожиданиями;
 // смещение такого файла не двигается.
 func (p *Pass) Run(st *State, now time.Time) ([]Wait, error) {
-	files, err := List(p.Projects, p.Workers)
+	files, err := List(p.Projects, "")
 	if err != nil {
 		return nil, err
 	}
-	seen := map[string]bool{}
-	for _, f := range files {
-		seen[f.Key] = true
-		if st.Files[f.Key] == nil {
-			s := &File{}
-			if !st.Started && now.Sub(f.mtime) > p.Backfill {
-				s.Offset = f.size
-			}
-			st.Files[f.Key] = s
-		}
+	workerFiles, skipWorkers, workerErrs, err := p.workerSources(st)
+	if err != nil {
+		return nil, err
 	}
-	st.Started = true
-	for k := range st.Files {
-		if !seen[k] {
-			delete(st.Files, k)
-		}
-	}
-	unread := func(f Source) int64 { return max(f.size-st.Files[f.Key].Offset, 0) }
-	slices.SortStableFunc(files, func(a, b Source) int { return cmp.Compare(unread(a), unread(b)) })
+	files = append(files, workerFiles...)
+	files = prepareFiles(st, files, now, p.Backfill)
 	var out []Wait
-	var errs []error
+	errs := workerErrs
 	var used int64
 	for _, f := range files {
+		if skipWorkers[f.Key] {
+			s := st.Files[f.Key]
+			if s.Offset >= f.size && !s.PendingBad {
+				out = append(out, p.expireWorker(f, s, now)...)
+				continue
+			}
+		}
 		s := st.Files[f.Key]
 		badSnapshot := s.PendingBad
 		if badSnapshot {
@@ -232,6 +275,241 @@ func (p *Pass) Run(st *State, now time.Time) ([]Wait, error) {
 		errs = append(errs, err)
 	}
 	return out, errors.Join(errs...)
+}
+
+func prepareFiles(st *State, files []Source, now time.Time, backfill time.Duration) []Source {
+	seen := map[string]bool{}
+	for _, f := range files {
+		seen[f.Key] = true
+		if st.Files[f.Key] == nil {
+			s := &File{}
+			if !st.Started && now.Sub(f.mtime) > backfill {
+				s.Offset = f.size
+			}
+			st.Files[f.Key] = s
+		}
+	}
+	st.Started = true
+	for k := range st.Files {
+		if !seen[k] {
+			delete(st.Files, k)
+		}
+	}
+	unread := func(f Source) int64 { return max(f.size-st.Files[f.Key].Offset, 0) }
+	slices.SortStableFunc(files, func(a, b Source) int { return cmp.Compare(unread(a), unread(b)) })
+	return files
+}
+
+func (p *Pass) expireWorker(f Source, s *File, now time.Time) []Wait {
+	expired, ok := p.expired(s.Pending, now)
+	if !ok {
+		return nil
+	}
+	out := make([]Wait, 0, len(expired))
+	for i := range expired {
+		out = append(out, f.wait(&expired[i], f.Project))
+	}
+	s.Pending, s.Seen, s.Line, s.PendingAt, s.OpenAt = nil, nil, 0, 0, nil
+	return out
+}
+
+// workerSources caches each task's transcript list. A completed task is re-listed only after
+// status.json changes; failed task refreshes leave that task's prior cache intact.
+func (p *Pass) workerSources(st *State) ([]Source, map[string]bool, []error, error) {
+	cache := &st.Workers
+	root, err := os.Stat(p.Workers)
+	if errors.Is(err, fs.ErrNotExist) {
+		if len(cache.Tasks) > 0 || cache.RootMod != 0 {
+			cache.Tasks, cache.RootMod = map[string]*workerTask{}, 0
+			st.workersDirty = true
+		}
+		return nil, nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("каталог worker: %w", err)
+	}
+	rootMod := root.ModTime().UnixNano()
+	rootChanged := rootMod != cache.RootMod
+	tasks := cache.Tasks
+	if tasks == nil {
+		tasks = map[string]*workerTask{}
+	}
+	if rootChanged {
+		entries, err := os.ReadDir(p.Workers)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("каталог worker: %w", err)
+		}
+		next := make(map[string]*workerTask, len(entries))
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			next[e.Name()] = cache.Tasks[e.Name()]
+		}
+		tasks = next
+	}
+	var out []Source
+	skip := map[string]bool{}
+	var errs []error
+	committed := make(map[string]*workerTask, len(tasks))
+	untrackedError := false
+	for _, name := range slices.Sorted(maps.Keys(tasks)) {
+		old := tasks[name]
+		known := old != nil
+		if !known {
+			old = &workerTask{}
+		}
+		candidate := *old
+		candidate.Sources = slices.Clone(old.Sources)
+		sources, skipTask, err := p.workerTaskSources(name, &candidate)
+		if err != nil {
+			errs = append(errs, err)
+			if known {
+				committed[name] = old
+				out = append(out, p.materializeWorkerSources(name, old.Sources)...)
+			} else {
+				untrackedError = true
+			}
+			continue
+		}
+		committed[name] = &candidate
+		if !reflect.DeepEqual(old, &candidate) {
+			st.workersDirty = true
+		}
+		out = append(out, sources...)
+		if skipTask {
+			for _, source := range sources {
+				skip[source.Key] = true
+			}
+		}
+	}
+	if !sameTaskKeys(cache.Tasks, committed) {
+		st.workersDirty = true
+	}
+	cache.Tasks = committed
+	if rootChanged && !untrackedError {
+		cache.RootMod = rootMod
+		st.workersDirty = true
+	}
+	return out, skip, errs, nil
+}
+
+func sameTaskKeys(a, b map[string]*workerTask) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key := range a {
+		if b[key] == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (p *Pass) workerTaskSources(name string, task *workerTask) ([]Source, bool, error) {
+	statusPath := filepath.Join(p.Workers, name, "status.json")
+	info, err := os.Stat(statusPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		task.Done = false
+		task.StatusMod, task.StatusSize = 0, 0
+		return p.refreshWorkerSources(name, task)
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("статус worker %s: %w", name, err)
+	}
+	changed := task.StatusMod != info.ModTime().UnixNano() || task.StatusSize != info.Size()
+	if changed {
+		if err := p.readWorkerStatus(name, statusPath, info, task); err != nil {
+			return nil, false, err
+		}
+	}
+	if task.Done && !changed {
+		return p.materializeWorkerSources(name, task.Sources), true, nil
+	}
+	if changed || !task.Done {
+		return p.refreshWorkerSources(name, task)
+	}
+	return p.materializeWorkerSources(name, task.Sources), false, nil
+}
+
+func (p *Pass) readWorkerStatus(name, path string, info os.FileInfo, task *workerTask) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("статус worker %s: %w", name, err)
+	}
+	var status struct {
+		Phase string `json:"phase"`
+	}
+	if json.Unmarshal(b, &status) != nil {
+		status.Phase = ""
+	}
+	task.Done = status.Phase == "готово"
+	task.StatusMod, task.StatusSize = info.ModTime().UnixNano(), info.Size()
+	task.Sources = nil
+	return nil
+}
+
+func (p *Pass) refreshWorkerSources(name string, task *workerTask) ([]Source, bool, error) {
+	list := p.listWorker
+	if list == nil {
+		list = listWorkerTask
+	}
+	sources, err := list(p.Workers, name)
+	if err != nil {
+		return nil, false, fmt.Errorf("список транскриптов worker %s: %w", name, err)
+	}
+	cache := make([]workerTranscript, 0, len(sources))
+	for _, source := range sources {
+		cache = append(cache, workerTranscript{Key: source.Key, Size: source.size, Mtime: source.mtime.UnixNano()})
+	}
+	task.Sources = cache
+	return sourcesFromCache(p.Workers, name, cache), false, nil
+}
+
+func (p *Pass) materializeWorkerSources(name string, sources []workerTranscript) []Source {
+	return sourcesFromCache(p.Workers, name, sources)
+}
+
+func sourcesFromCache(root, task string, sources []workerTranscript) []Source {
+	out := make([]Source, 0, len(sources))
+	for _, cached := range sources {
+		rel := strings.TrimPrefix(cached.Key, RunnerCodex+"/")
+		if rel == cached.Key {
+			continue
+		}
+		base := filepath.Base(rel)
+		out = append(out, Source{
+			Path: filepath.Join(root, filepath.FromSlash(rel)), Key: cached.Key, Runner: RunnerCodex,
+			Project: task, Session: strings.TrimSuffix(strings.TrimPrefix(base, "rollout-"), ".jsonl"),
+			size: cached.Size, mtime: time.Unix(0, cached.Mtime),
+		})
+	}
+	return out
+}
+
+func listWorkerTask(root, task string) ([]Source, error) {
+	base := filepath.Join(root, task)
+	paths, err := filepath.Glob(filepath.Join(base, "codex", "sessions", "*", "*", "*", "rollout-*.jsonl"))
+	if err != nil {
+		return nil, fmt.Errorf("список транскриптов worker %s: %w", task, err)
+	}
+	out := make([]Source, 0, len(paths))
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("транскрипт %s: %w", path, err)
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil, fmt.Errorf("путь транскрипта %s: %w", path, err)
+		}
+		out = append(out, Source{Path: path, Key: RunnerCodex + "/" + rel, Runner: RunnerCodex, Project: task,
+			Session: strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "rollout-"), ".jsonl"), size: info.Size(), mtime: info.ModTime()})
+	}
+	return out, nil
 }
 
 func recoverSnapshot(f Source, s *File) error {
