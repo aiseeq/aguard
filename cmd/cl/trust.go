@@ -20,6 +20,8 @@ import (
 
 // trustSelectWait — сколько ждать подтверждения выбора «Yes»; переменная, чтобы тесты могли задать короткий срок.
 var trustSelectWait = 10 * time.Second
+var trustFocusWait = 3 * time.Second
+var trustEnterWait = time.Second
 
 // trustRetryPause — задержка перед повторным Down после явной подсказки Claude Code.
 var trustRetryPause = time.Second
@@ -59,7 +61,10 @@ type trustWatchCallbacks struct {
 type trustWatch struct {
 	selectMu       sync.Mutex
 	selectBuf      []byte
+	recentBuf      []byte
 	selecting      bool
+	checkingEnter  bool
+	selectedDir    []byte
 	selectionEvent chan trustSelectionEvent // отдельное ожидание для каждого нажатия
 	selectedNeedle []byte
 	buf            []byte
@@ -82,6 +87,8 @@ type trustSelectionEvent uint8
 const (
 	trustSelectionRedrawn trustSelectionEvent = iota + 1
 	trustSelectionPrompt
+	trustSelectionFocus
+	trustSelectionGone
 )
 
 func newTrustWatch(home string, addDirs []string, onWindow func(trustWindow)) *trustWatch {
@@ -173,11 +180,25 @@ func firstTrustPathError(report []trustPathError) trustPathError {
 // Write наблюдает только за начальным экраном; вывод Claude Code напрямую проходит в терминал cl.
 func (w *trustWatch) Write(p []byte) (int, error) {
 	w.selectMu.Lock()
+	w.recentBuf = append(w.recentBuf, p...)
+	if len(w.recentBuf) > trustScanMax {
+		w.recentBuf = append(w.recentBuf[:0], w.recentBuf[len(w.recentBuf)-trustScanMax:]...)
+	}
 	if w.selecting && w.selectionEvent != nil {
 		w.selectBuf = append(w.selectBuf, p...)
 		var event trustSelectionEvent
 		compact := compactText(escSeq.ReplaceAll(w.selectBuf, nil))
-		if readerEcho.Match(w.selectBuf) || bytes.Contains(compact, w.selectedNeedle) || bytes.Contains(w.selectBuf, []byte("\x1b[1B❯")) {
+		if w.checkingEnter {
+			if trustWindowHeading(compact) && !bytes.Contains(compact, w.selectedDir) {
+				event = trustSelectionGone
+			} else if !trustWindowHeading(compact) && trustNoFocus(compact) {
+				event = trustSelectionFocus
+			} else if trustRetryPrompt(compact) {
+				event = trustSelectionPrompt
+			}
+		} else if w.selectedNeedle == nil && trustNoFocusForDir(compact, w.selectedDir) {
+			event = trustSelectionFocus
+		} else if readerEcho.Match(w.selectBuf) || (len(w.selectedNeedle) > 0 && bytes.Contains(compact, w.selectedNeedle)) || bytes.Contains(w.selectBuf, []byte("\x1b[1B❯")) {
 			event = trustSelectionRedrawn
 		} else if trustRetryPrompt(compact) {
 			event = trustSelectionPrompt
@@ -210,6 +231,42 @@ func (w *trustWatch) Write(p []byte) (int, error) {
 		}
 	}
 	return len(p), nil
+}
+
+func trustNoFocus(compact []byte) bool {
+	focus := bytes.LastIndex(compact, compactText([]byte("❯No,exit")))
+	if focus < 0 {
+		return false
+	}
+	latestHeading := -1
+	for _, heading := range [][]byte{
+		compactText([]byte("Adding a new directory:")),
+		compactText([]byte("Quick safety check:")),
+		compactText([]byte("Accessing workspace:")),
+	} {
+		if at := bytes.LastIndex(compact, heading); at > latestHeading {
+			latestHeading = at
+		}
+	}
+	return latestHeading < 0 || focus > latestHeading
+}
+
+func trustNoFocusForDir(compact, dir []byte) bool {
+	focus := bytes.LastIndex(compact, compactText([]byte("❯No,exit")))
+	if focus < 0 {
+		return false
+	}
+	if len(dir) == 0 {
+		return trustNoFocus(compact)
+	}
+	path := bytes.LastIndex(compact, dir)
+	return path >= 0 && focus > path
+}
+
+func trustWindowHeading(compact []byte) bool {
+	return bytes.Contains(compact, compactText([]byte("Adding a new directory:"))) ||
+		bytes.Contains(compact, compactText([]byte("Quick safety check:"))) ||
+		bytes.Contains(compact, compactText([]byte("Accessing workspace:")))
 }
 
 func (w *trustWatch) queueWindows(windows []trustWindow) {
@@ -566,13 +623,15 @@ func (c *console) confirmTrust(win trustWindow, w *trustWatch) {
 		key = "y"
 	}
 	for retries := 0; ; {
-		event := make(chan trustSelectionEvent, 1)
-		w.selectMu.Lock()
-		w.selectionEvent = event
-		w.selectBuf = nil
-		w.selecting = true
-		w.selectedNeedle = compactText([]byte("❯" + win.yes))
-		w.selectMu.Unlock()
+		if !win.reader {
+			c.waitTrustFocus(w, dir)
+			select {
+			case <-w.stop:
+				return
+			default:
+			}
+		}
+		event := c.armTrustSelection(w, compactText([]byte("❯"+win.yes)), false, false, nil)
 		if err := c.write(key); err != nil {
 			w.stopSelecting(event)
 			c.say(cllog.TrustWriteFailed(dir, err))
@@ -584,25 +643,12 @@ func (c *console) confirmTrust(win trustWindow, w *trustWatch) {
 		select {
 		case result := <-event:
 			w.stopSelecting(event)
-			if result == trustSelectionRedrawn {
-				goto selected
+			if result != trustSelectionRedrawn {
+				if !c.retryTrustSelection(dir, w, deadline, &retries) {
+					return
+				}
+				continue
 			}
-			if retries >= 3 {
-				c.say(cllog.TrustNotSelected(dir, trustSelectWait))
-				return
-			}
-			retry := time.NewTimer(trustRetryPause)
-			select {
-			case <-retry.C:
-			case <-deadline.C:
-				retry.Stop()
-				c.say(cllog.TrustNotSelected(dir, trustSelectWait))
-				return
-			case <-w.stop:
-				retry.Stop()
-				return
-			}
-			retries++
 		case <-deadline.C:
 			w.stopSelecting(event)
 			c.say(cllog.TrustNotSelected(dir, trustSelectWait))
@@ -611,17 +657,111 @@ func (c *console) confirmTrust(win trustWindow, w *trustWatch) {
 			w.stopSelecting(event)
 			return
 		}
-	}
 
-selected:
-	time.Sleep(typePause)
-	if err := c.write("\r"); err != nil {
-		c.say(cllog.TrustWriteFailed(dir, err))
+		time.Sleep(typePause)
+		event = c.armTrustSelection(w, nil, false, true, compactText([]byte(dir)))
+		if err := c.write("\r"); err != nil {
+			w.stopSelecting(event)
+			c.say(cllog.TrustWriteFailed(dir, err))
+			return
+		}
+		enterTimer := time.NewTimer(trustEnterWait)
+		select {
+		case result := <-event:
+			enterTimer.Stop()
+			w.stopSelecting(event)
+			if result == trustSelectionGone {
+				if win.key == "add-dir" {
+					c.say(cllog.TrustAddedDir(dir))
+				} else {
+					c.say(cllog.TrustConfirmed(dir))
+				}
+				return
+			}
+			if !c.retryTrustSelection(dir, w, deadline, &retries) {
+				return
+			}
+			continue
+		case <-enterTimer.C:
+			w.stopSelecting(event)
+		case <-deadline.C:
+			enterTimer.Stop()
+			w.stopSelecting(event)
+			c.say(cllog.TrustNotSelected(dir, trustSelectWait))
+			return
+		case <-w.stop:
+			enterTimer.Stop()
+			w.stopSelecting(event)
+			return
+		}
+		if win.key == "add-dir" {
+			c.say(cllog.TrustAddedDir(dir))
+		} else {
+			c.say(cllog.TrustConfirmed(dir))
+		}
 		return
 	}
-	if win.key == "add-dir" {
-		c.say(cllog.TrustAddedDir(dir))
-	} else {
-		c.say(cllog.TrustConfirmed(dir))
+}
+
+func (c *console) armTrustSelection(w *trustWatch, needle []byte, seed, checkingEnter bool, dir []byte) chan trustSelectionEvent {
+	event := make(chan trustSelectionEvent, 1)
+	w.selectMu.Lock()
+	w.selectionEvent = event
+	w.selectBuf = nil
+	if seed {
+		w.selectBuf = append(w.selectBuf, w.recentBuf...)
+	}
+	w.selecting = true
+	w.checkingEnter = checkingEnter
+	w.selectedDir = dir
+	w.selectedNeedle = needle
+	w.selectMu.Unlock()
+	return event
+}
+
+func (c *console) waitTrustFocus(w *trustWatch, dir string) bool {
+	w.selectMu.Lock()
+	focused := trustNoFocusForDir(compactText(escSeq.ReplaceAll(w.recentBuf, nil)), compactText([]byte(dir)))
+	w.selectMu.Unlock()
+	if focused {
+		return true
+	}
+	focusTimer := time.NewTimer(trustFocusWait)
+	defer focusTimer.Stop()
+	for {
+		event := c.armTrustSelection(w, nil, true, false, compactText([]byte(dir)))
+		select {
+		case result := <-event:
+			w.stopSelecting(event)
+			if result == trustSelectionFocus {
+				return true
+			}
+		case <-focusTimer.C:
+			w.stopSelecting(event)
+			return false
+		case <-w.stop:
+			w.stopSelecting(event)
+			return false
+		}
+	}
+}
+
+func (c *console) retryTrustSelection(dir string, w *trustWatch, deadline *time.Timer, retries *int) bool {
+	if *retries >= 3 {
+		c.say(cllog.TrustNotSelected(dir, trustSelectWait))
+		return false
+	}
+	retry := time.NewTimer(trustRetryPause)
+	select {
+	case <-retry.C:
+		*retries++
+		return true
+	case <-deadline.C:
+		retry.Stop()
+		c.say(cllog.TrustNotSelected(dir, trustSelectWait))
+		return false
+	case <-w.stop:
+		retry.Stop()
+		return false
 	}
 }

@@ -27,9 +27,11 @@ func readTrust(t *testing.T, name string) []byte {
 
 func setTrustTiming(t *testing.T, wait, retryPause time.Duration) {
 	t.Helper()
-	oldWait, oldPause := trustSelectWait, trustRetryPause
-	trustSelectWait, trustRetryPause = wait, retryPause
-	t.Cleanup(func() { trustSelectWait, trustRetryPause = oldWait, oldPause })
+	oldWait, oldPause, oldFocusWait, oldEnterWait := trustSelectWait, trustRetryPause, trustFocusWait, trustEnterWait
+	trustSelectWait, trustRetryPause, trustFocusWait, trustEnterWait = wait, retryPause, retryPause, retryPause
+	t.Cleanup(func() {
+		trustSelectWait, trustRetryPause, trustFocusWait, trustEnterWait = oldWait, oldPause, oldFocusWait, oldEnterWait
+	})
 }
 
 func trackTrustFinish(t *testing.T, finish func()) func() {
@@ -294,7 +296,7 @@ func TestTrustSelectionPromptRetry(t *testing.T) {
 			var notes []string
 			c := openConsole(tty, tty, func(s string) { mu.Lock(); notes = append(notes, s); mu.Unlock() })
 			cmd := exec.Command("sh", "-c",
-				`stty raw -echo; cat "$0"; dd bs=1 count=32 of=/dev/null 2>/dev/null; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo FIRST-DOWN-$k; exit 0; }; cat "$1"; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo RETRY-DOWN-$k; exit 0; }; cat "$2"; v=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$v" = 0d ] && echo RETRY-ENTER-OK`,
+				`stty raw -echo; cat "$0"; dd bs=1 count=32 of=/dev/null 2>/dev/null; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo FIRST-DOWN-$k; exit 0; }; cat "$1"; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo RETRY-DOWN-$k; exit 0; }; cat "$2"; v=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$v" = 0d ] && sleep 0.05 && echo RETRY-ENTER-OK`,
 				dialogFile, promptFile, selectedFile)
 			finish, err := c.start(cmd, "", false, dir)
 			if err != nil {
@@ -589,6 +591,7 @@ func TestUserAddDirBlocksRecordedWindows(t *testing.T) {
 }
 
 func TestConfirmAddDirSelects(t *testing.T) {
+	setTrustTiming(t, 2*time.Second, 20*time.Millisecond)
 	raw := firstScreen(readTrust(t, "testdata/trust-dialog-2.1.326.raw"))
 	dir := filepath.Join(t.TempDir(), "shared")
 	raw = replaceAddDir(t, raw, dir)
@@ -605,7 +608,7 @@ func TestConfirmAddDirSelects(t *testing.T) {
 	var notes []string
 	c := openConsole(tty, tty, func(s string) { mu.Lock(); notes = append(notes, s); mu.Unlock() })
 	cmd := exec.Command("sh", "-c",
-		`stty raw -echo; cat "$0"; dd bs=1 count=32 of=/dev/null 2>/dev/null; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo "BAD-KEY-$k"; exit 0; }; cat "$1"; v=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$v" = 0d ] && echo ENTER-OK`, recorded, selected)
+		`stty raw -echo; cat "$0"; dd bs=1 count=32 of=/dev/null 2>/dev/null; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo "BAD-KEY-$k"; exit 0; }; cat "$1"; v=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$v" = 0d ] && sleep 0.05 && echo ENTER-OK`, recorded, selected)
 	finish, err := c.start(cmd, "", false, dir)
 	if err != nil {
 		t.Fatal(err)
@@ -622,6 +625,7 @@ func TestConfirmAddDirSelects(t *testing.T) {
 }
 
 func TestConfirmTwoAddDirsSelects(t *testing.T) {
+	setTrustTiming(t, 2*time.Second, 20*time.Millisecond)
 	raw := firstScreen(readTrust(t, "testdata/trust-dialog-2.1.326.raw"))
 	one, two := filepath.Join(t.TempDir(), "shared-one"), filepath.Join(t.TempDir(), "shared-two")
 	first, second := replaceAddDir(t, raw, one), replaceAddDir(t, raw, two)
@@ -640,7 +644,7 @@ func TestConfirmTwoAddDirsSelects(t *testing.T) {
 	var notes []string
 	c := openConsole(tty, tty, func(s string) { mu.Lock(); notes = append(notes, s); mu.Unlock() })
 	cmd := exec.Command("sh", "-c",
-		`stty raw -echo; cat "$0"; dd bs=1 count=32 of=/dev/null 2>/dev/null; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo "BAD-DOWN-$k"; exit 0; }; cat "$2"; v=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$v" = 0d ] || { echo "BAD-ENTER-$v"; exit 0; }; cat "$1"; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo "BAD-DOWN-$k"; exit 0; }; cat "$2"; v=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$v" = 0d ] || { echo "BAD-ENTER-$v"; exit 0; }; echo TWO-ENTER-OK`,
+		`stty raw -echo; cat "$0"; dd bs=1 count=32 of=/dev/null 2>/dev/null; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo "BAD-DOWN-$k"; exit 0; }; cat "$2"; v=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$v" = 0d ] || { echo "BAD-ENTER-$v"; exit 0; }; cat "$1"; k=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$k" = 1b5b42 ] || { echo "BAD-DOWN-$k"; exit 0; }; cat "$2"; v=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'); [ "$v" = 0d ] || { echo "BAD-ENTER-$v"; exit 0; }; sleep 0.05; echo TWO-ENTER-OK`,
 		firstFile, secondFile, selected)
 	finish, err := c.start(cmd, "", false, one, two)
 	if err != nil {
@@ -704,12 +708,13 @@ func TestSecondTrustWindowNeedsNewSelection(t *testing.T) {
 }
 
 func TestConfirmTrustSelects(t *testing.T) {
+	setTrustTiming(t, 2*time.Second, 20*time.Millisecond)
 	_, tty, shown := outerTerminal(t)
 	var mu sync.Mutex
 	var notes []string
 	c := openConsole(tty, tty, func(s string) { mu.Lock(); notes = append(notes, s); mu.Unlock() })
 	cmd := exec.Command("sh", "-c",
-		`stty raw -echo; cat "$0"; dd bs=1 count=3 of=/dev/null 2>/dev/null; cat "$1"; y=$(dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' '); [ "$y" = 13 ] && echo ENTER-OK`,
+		`stty raw -echo; cat "$0"; dd bs=1 count=3 of=/dev/null 2>/dev/null; cat "$1"; y=$(dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' '); [ "$y" = 13 ] && sleep 0.05 && echo ENTER-OK`,
 		"testdata/trust-dialog-2.1.316.raw", "testdata/trust-down-2.1.316.raw")
 	finish, err := c.start(cmd, "/home/alice", false)
 	if err != nil {
