@@ -143,3 +143,92 @@ func countNotes(notes []string, want string) int {
 	}
 	return n
 }
+
+// После принятого Enter на последнем окне claude рисует баннер и историю беседы (--resume); текст окна в истории
+// («❯ No, exit», подсказка, та же папка) — не окно: cl не шлёт клавиш в беседу и пишет «подтвердил».
+func TestTrustEnterIgnoresReplHistory(t *testing.T) {
+	for name, history := range map[string]string{
+		"focus": "● Экран вкладки: выбрано «❯ No, exit», окно висит.",
+		"hint":  "● Окно «Adding a new directory: %s», внизу «Esc to exit · To add it, press ↓ to Yes, then Enter»",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "shared")
+			frame, focus, selected, _ := trustFiles(t, dir)
+			repl := filepath.Join(t.TempDir(), "repl.raw")
+			body := "\x1b[2J\x1b[H Claude Code v2.1.327\r\n\r\n" + strings.ReplaceAll(history, "%s", dir) + "\r\n\x1b[1B❯ \r\n"
+			if err := os.WriteFile(repl, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			shown, notes := runTrustScript(t, dir,
+				`cat "$0" "$1"; key 32 2 >/dev/null; k=$(key 3 5); [ "$k" = 1b5b42 ] || { echo "DONE-NO-DOWN-$k"; exit 0; }; `+
+					`cat "$2"; v=$(key 1 5); [ "$v" = 0d ] || { echo "DONE-NO-ENTER-$v"; exit 0; }; `+
+					`cat "$3"; k=$(key 1 2); [ -z "$k" ] && echo DONE-OK || echo DONE-EXTRA-KEY-$k`,
+				frame, focus, selected, repl)
+			if !shown.has("DONE-OK") {
+				t.Fatalf("после закрытия окна cl отправил клавишу в беседу: %q", shown.text())
+			}
+			if n := countNotes(notes, "подтвердил доверие к "+dir); n != 1 {
+				t.Fatalf("строк о подтверждении %d, нужна одна: %q", n, notes)
+			}
+		})
+	}
+}
+
+// Второе окно (сбой chooks был на втором): фокус первого окна в выводе не разрешает Down во второе, пока у второго
+// не встал свой «❯ No».
+func TestTrustSecondWindowWaitsForItsFocus(t *testing.T) {
+	old := trustEnterWait
+	trustEnterWait = 20 * time.Millisecond
+	t.Cleanup(func() { trustEnterWait = old })
+	one, two := filepath.Join(t.TempDir(), "one"), filepath.Join(t.TempDir(), "two")
+	frame1, focus, selected, _ := trustFiles(t, one)
+	frame2 := filepath.Join(t.TempDir(), "frame2.raw")
+	if err := os.WriteFile(frame2, replaceAddDir(t, readTrust(t, trustFrame327), two), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	typer, tty, shown := outerTerminal(t)
+	var mu sync.Mutex
+	var notes []string
+	c := openConsole(tty, tty, func(s string) { mu.Lock(); notes = append(notes, s); mu.Unlock() })
+	cmd := exec.Command("sh", "-c", "stty raw -echo; "+readKey+
+		`cat "$0" "$1"; key 32 2 >/dev/null; k=$(key 3 5); [ "$k" = 1b5b42 ] || { echo "DONE-NO-DOWN-$k"; exit 0; }; `+
+		`cat "$2"; v=$(key 1 5); [ "$v" = 0d ] || { echo "DONE-NO-ENTER-$v"; exit 0; }; `+
+		`cat "$3"; k=$(key 3 1.5); [ -z "$k" ] || { echo "DONE-EARLY-$k"; exit 0; }; `+
+		`cat "$1"; k=$(key 3 5); [ "$k" = 1b5b42 ] || { echo "DONE-NO-DOWN2-$k"; exit 0; }; `+
+		`cat "$2"; v=$(key 1 5); [ "$v" = 0d ] || { echo "DONE-NO-ENTER2-$v"; exit 0; }; sleep 0.3; echo DONE-OK`,
+		frame1, focus, selected, frame2)
+	finish, err := c.start(cmd, "", false, one, two)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish = trackTrustFinish(t, finish)
+	if _, err := typer.WriteString("\x1b_Gi=31;OK\x1b\\\x1b[6;28;13t\x1b[?62;1;4c"); err != nil {
+		t.Fatal(err)
+	}
+	shown.wait(t, "DONE-")
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	finish()
+	if !shown.has("DONE-OK") {
+		t.Fatalf("Down во второе окно ушёл до его фокуса или не ушёл: %q", shown.text())
+	}
+	waitTrustNote(t, &mu, &notes, "подтвердил доверие к "+one)
+	waitTrustNote(t, &mu, &notes, "подтвердил доверие к "+two)
+}
+
+// claude вышел сразу после Enter — принятие не доказано: строки «подтвердил» нет.
+func TestTrustNoConfirmWhenClaudeExitsAfterEnter(t *testing.T) {
+	old := trustEnterWait
+	trustEnterWait = 3 * time.Second
+	t.Cleanup(func() { trustEnterWait = old })
+	dir := filepath.Join(t.TempDir(), "shared")
+	frame, focus, selected, _ := trustFiles(t, dir)
+	_, notes := runTrustScript(t, dir,
+		`cat "$0" "$1"; key 32 2 >/dev/null; k=$(key 3 5); [ "$k" = 1b5b42 ] || { echo "DONE-NO-DOWN-$k"; exit 0; }; `+
+			`cat "$2"; v=$(key 1 5); echo "DONE-EXIT-$v"`,
+		frame, focus, selected)
+	if hasNote(notes, "подтвердил доверие к "+dir) {
+		t.Fatalf("claude вышел после Enter, а в журнале «подтвердил»: %q", notes)
+	}
+}

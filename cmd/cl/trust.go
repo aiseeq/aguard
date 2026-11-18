@@ -235,9 +235,13 @@ func (w *trustWatch) classifySelection() trustSelectionEvent {
 	return 0
 }
 
-// enterEvent — вывод после Enter: заголовок другого окна — окно ушло; «❯ No» без нового заголовка или подсказка —
+// enterEvent — вывод после Enter: баннер REPL или заголовок другого окна — окно ушло; «❯ No» без нового заголовка или подсказка —
 // Enter не принят; прочее (кадр REPL с курсором поля ввода) — не событие.
 func enterEvent(compact, dir []byte) trustSelectionEvent {
+	// баннер REPL — окна позади; ниже него история беседы (--resume), где текст окна — не окно
+	if bytes.Contains(bytes.ToLower(compact), []byte("claudecodev")) {
+		return trustSelectionGone
+	}
 	heading := trustWindowHeading(compact)
 	switch {
 	case heading && !bytes.Contains(compact, dir):
