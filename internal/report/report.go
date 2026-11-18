@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -131,10 +132,196 @@ func Print(w io.Writer, d Data) error {
 	err := matrix(w, d.Closed)
 	fmt.Fprintln(w, "\n2. Живые записи: наибольший размер × возраст сейчас.")
 	err = errors.Join(err, matrix(w, d.Live))
-	fmt.Fprintln(w, "\n3. По классам создателей (жизнь — медиана и 90-й процентиль закрытых; мера — ГБ·мин).")
+	fmt.Fprintln(w, "\n3. Мелочь числом: живые записи меньше 1 МиБ, по шаблону имени (топ 10).")
+	err = errors.Join(err, printLitter(w, d.Live))
+	fmt.Fprintln(w, "\n4. По классам создателей (жизнь — медиана и 90-й процентиль закрытых; мера — ГБ·мин).")
 	err = errors.Join(err, byClass(w, d))
-	fmt.Fprintln(w, "\n4. Создатели с наибольшей мерой (закрытые + живые), топ 15.")
+	fmt.Fprintln(w, "\n5. Создатели с наибольшей мерой (закрытые + живые), топ 15.")
 	return errors.Join(err, topCreators(w, append(append([]Rec{}, d.Closed...), d.Live...)))
+}
+
+const litterMaxBytes = 1 << 20
+
+// NoticeablePatternCount — 2 тыс.: в живом снимке шумные серии worker-тестов
+// дают около 1 тыс. на шаблон, glint — 3 976, а Chrome — десятки тысяч.
+const NoticeablePatternCount = 2000
+
+type LitterGroup struct {
+	Name         string
+	Count        int
+	Bytes        int64
+	P50          time.Duration
+	OlderThanDay int
+	Classes      map[policy.Class]int
+	ages         []time.Duration
+}
+
+// NameMask схлопывает уникальные шестисимвольные хвосты и нумерованные имена.
+func NameMask(name string) string {
+	base := filepath.Base(name)
+	if start, ok := randomSuffixStart(base); ok {
+		return base[:start] + "XXXXXX"
+	}
+	i := len(base)
+	for i > 0 && base[i-1] >= '0' && base[i-1] <= '9' {
+		i--
+	}
+	if i < len(base) {
+		return base[:i] + "N"
+	}
+	return base
+}
+
+func randomSuffixStart(base string) (int, bool) {
+	const knownPrefix = "scoped_dir"
+	if strings.HasPrefix(base, knownPrefix) && randomToken(base[len(knownPrefix):]) {
+		return len(knownPrefix), true
+	}
+	sep := strings.LastIndexAny(base, ".-_")
+	if sep < 0 || sep == len(base)-1 {
+		return 0, false
+	}
+	tail := base[sep+1:]
+	if !randomToken(tail) {
+		return 0, false
+	}
+	// glint-cmd-testN is a known numeric naming scheme; its short tail can
+	// otherwise look like a six-character random token (test10).
+	if base[sep] != '.' && numberedTestTail(tail) {
+		return 0, false
+	}
+	// Lowercase words after dots are usually extensions or socket names
+	// (.config, .socket), while numeric or mixed-case dot tails are random.
+	if base[sep] == '.' && lowercaseWord(tail) {
+		return 0, false
+	}
+	return sep + 1, true
+}
+
+func randomToken(s string) bool {
+	if len(s) < 6 {
+		return false
+	}
+	letter := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			letter = true
+			continue
+		}
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return letter
+}
+
+func lowercaseWord(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 'a' || s[i] > 'z' {
+			return false
+		}
+	}
+	return true
+}
+
+func numberedTestTail(s string) bool {
+	if !strings.HasPrefix(s, "test") {
+		return false
+	}
+	digits := s[len("test"):]
+	if digits == "" {
+		return false
+	}
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// LitterSummary считает маленькие живые записи по родительскому каталогу и маске.
+func LitterSummary(recs []Rec) []LitterGroup {
+	groups := make(map[string]*LitterGroup)
+	for _, rec := range recs {
+		if rec.Bytes >= litterMaxBytes {
+			continue
+		}
+		name := NameMask(filepath.Base(rec.Path))
+		key := filepath.Dir(rec.Path) + string(filepath.Separator) + name
+		g := groups[key]
+		if g == nil {
+			g = &LitterGroup{Name: key, Classes: make(map[policy.Class]int)}
+			groups[key] = g
+		}
+		g.Count++
+		g.Bytes += rec.Bytes
+		g.ages = append(g.ages, rec.Life)
+		g.Classes[rec.Class]++
+		if rec.Life > 24*time.Hour {
+			g.OlderThanDay++
+		}
+	}
+	out := make([]LitterGroup, 0, len(groups))
+	for _, g := range groups {
+		slices.Sort(g.ages)
+		g.P50 = g.ages[(len(g.ages)-1)/2]
+		out = append(out, *g)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func printLitter(w io.Writer, recs []Rec) error {
+	groups := LitterSummary(recs)
+	if len(groups) == 0 {
+		_, err := fmt.Fprintln(w, "   нет")
+		return err
+	}
+	limit := min(len(groups), 10)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "шаблон\tчисло\tвозраст p50\tстарше 1 сут\tразмер\tкласс создателя")
+	for _, g := range groups[:limit] {
+		classes := make([]string, 0, len(policy.Classes))
+		for _, class := range policy.Classes {
+			if count := g.Classes[class]; count > 0 {
+				classes = append(classes, fmt.Sprintf("%s %d", class, count))
+			}
+		}
+		name := g.Name
+		if g.Count >= NoticeablePatternCount {
+			name += " (заметно)"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%d\t%s\t%s\n", name, g.Count, policy.HumanAge(g.P50),
+			g.OlderThanDay, policy.HumanBytes(g.Bytes), strings.Join(classes, ", "))
+	}
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("отчёт мелких записей: %w", err)
+	}
+	if len(groups) > limit && groups[limit].Count == groups[limit-1].Count {
+		tieEnd := limit
+		for tieEnd < len(groups) && groups[tieEnd].Count == groups[limit-1].Count {
+			tieEnd++
+		}
+		fmt.Fprintf(w, "   ещё на границе топ-10 (%d записей, шаблонов %d):", groups[limit-1].Count, tieEnd-limit)
+		for _, g := range groups[limit:min(tieEnd, limit+10)] {
+			fmt.Fprintf(w, " %s", g.Name)
+		}
+		if tieEnd > limit+10 {
+			fmt.Fprintf(w, " и ещё %d", tieEnd-limit-10)
+		}
+		fmt.Fprintln(w)
+	}
+	return nil
 }
 
 func matrix(w io.Writer, recs []Rec) error {

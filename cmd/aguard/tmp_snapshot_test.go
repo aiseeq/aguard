@@ -15,6 +15,7 @@ import (
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/aguard/internal/report"
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
 )
@@ -52,6 +53,21 @@ func TestTmpWorkerJobOwnerAndLiveUnit(t *testing.T) {
 	live.jobs = &cpuwatch.Jobs{Dir: root, Units: []string{units}}
 	if jobInfo, ok, err := live.WorkerByUnit("worker-J.service"); err != nil || ok || jobInfo.Master != "" {
 		t.Fatalf("задание без заказчика: %+v, %v, %v", jobInfo, ok, err)
+	}
+}
+
+func TestTmpLitterLogStats(t *testing.T) {
+	recs := []report.Rec{
+		{Path: "/tmp/claude-tmp/com.google.Chrome.IeF6Cl", Bytes: 0, Life: 48 * time.Hour},
+		{Path: "/tmp/claude-tmp/com.google.Chrome.EWtYC1", Bytes: 10, Life: 12 * time.Hour},
+		{Path: "/tmp/claude-tmp/worker-tests-123", Bytes: 0, Life: 36 * time.Hour},
+		{Path: "/tmp/claude-tmp/worker-tests-123456", Bytes: 0, Life: 24 * time.Hour},
+		{Path: "/tmp/claude-tmp/large-123", Bytes: 1 << 20, Life: 72 * time.Hour},
+	}
+	got := tmpLitterLogText(recs)
+	want := "малых живых записей старше суток 2, шаблон /tmp/claude-tmp/com.google.Chrome.XXXXXX (2)"
+	if got != want {
+		t.Fatalf("litter log text = %q, want %q", got, want)
 	}
 }
 
@@ -102,6 +118,7 @@ func TestTmpRoundResolvesWorkerJobForRouting(t *testing.T) {
 	snapshot, err := json.Marshal(record.State{Updated: now, Entries: []record.Entry{
 		{Path: "/tmp/w-J-go", UID: os.Getuid(), Born: now.Add(-10 * time.Minute), Bytes: 1 << 30, Owner: owner},
 		{Path: "/tmp/w-K-go", UID: os.Getuid(), Born: now.Add(-10 * time.Minute), Bytes: 1 << 30, Owner: brokenOwner},
+		{Path: "/tmp/worker-tests-123", UID: os.Getuid(), Born: now.Add(-26 * time.Hour), Bytes: 0},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -128,6 +145,9 @@ func TestTmpRoundResolvesWorkerJobForRouting(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "часть заданий worker не прочиталась") {
 		t.Fatalf("ошибка job.json не записана в журнал: %s", log.String())
+	}
+	if !strings.Contains(log.String(), "малых живых записей старше суток 1, шаблон /tmp/worker-tests-N (1)") {
+		t.Fatalf("tmpRound не записал актуальные возраст и полный шаблон: %s", log.String())
 	}
 	a.out = &bytes.Buffer{}
 	if err := a.tmpSendTest(&cfg, "alpha-master", true); err != nil {

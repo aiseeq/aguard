@@ -450,8 +450,14 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 	a.markTmpHolders("/proc", groups)
 	sums, deferred := cfg.Plan(now, groups, live, st, factor)
 	st.Forget(items)
-	a.log.Info(fmt.Sprintf("aguard tmp %s: %s, сводок %d (записей %d), отложено записей %d",
-		cfg.Mode, policy.OverText(items, groups, factor), len(sums), policy.Count(sums), policy.Count(deferred)))
+	litter := make([]report.Rec, 0, len(items))
+	for i := range items {
+		it := &items[i]
+		litter = append(litter, report.Rec{Path: it.Entry.Path, Class: it.Class, Life: now.Sub(it.Entry.Born),
+			MaxBytes: it.Entry.MaxBytes, Bytes: it.Entry.Bytes, Live: true})
+	}
+	a.log.Info(fmt.Sprintf("aguard tmp %s: %s, сводок %d (записей %d), отложено записей %d, %s",
+		cfg.Mode, policy.OverText(items, groups, factor), len(sums), policy.Count(sums), policy.Count(deferred), tmpLitterLogText(litter)))
 
 	if dry {
 		a.printDry(cfg, groups, sums, deferred, now)
@@ -488,6 +494,19 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 	}
 	a.caches(cfg, items, false)
 	return a.saveUserState(st)
+}
+
+func tmpLitterLogText(recs []report.Rec) string {
+	groups := report.LitterSummary(recs)
+	older := 0
+	for _, group := range groups {
+		older += group.OlderThanDay
+	}
+	pattern, count := "нет", 0
+	if len(groups) > 0 {
+		pattern, count = groups[0].Name, groups[0].Count
+	}
+	return fmt.Sprintf("малых живых записей старше суток %d, шаблон %s (%d)", older, pattern, count)
 }
 
 func restoreTmpAlerts(st *policy.UserState, lines []policy.Line, prev map[string]*policy.AlertState) {
@@ -626,7 +645,7 @@ func (a *app) tmpReport(cfg *policy.Config, since time.Duration) error {
 	}
 	groups := cfg.Over(now, items, factor)
 	a.markTmpHolders("/proc", groups)
-	fmt.Fprintf(a.out, "\n5. Сейчас (режим %s): %s.\n", cfg.Mode, policy.OverText(items, groups, factor))
+	fmt.Fprintf(a.out, "\n6. Сейчас (режим %s): %s.\n", cfg.Mode, policy.OverText(items, groups, factor))
 	for gi := range groups {
 		for ii := range groups[gi].Items {
 			it := &groups[gi].Items[ii]
