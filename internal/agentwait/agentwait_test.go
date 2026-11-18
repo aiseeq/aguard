@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/akit/transcript"
+	"github.com/aiseeq/akit/transcript/waits"
 )
 
 var stamp = time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
@@ -684,6 +687,314 @@ func TestRunBackfill(t *testing.T) {
 		if f.Runner == RunnerCodex && (f.Project != "1027-fix" || f.Session != "2026-10-27T10-00-00-abc") {
 			t.Errorf("codex: %+v", f)
 		}
+	}
+}
+
+func TestWorkerCacheFindsNewTasksContinueAndTail(t *testing.T) {
+	projects, workers := t.TempDir(), t.TempDir()
+	writeTask := func(task, phase, session string) string {
+		base := filepath.Join(workers, task)
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(base, "status.json"), fmt.Appendf(nil, `{"phase":%q}`, phase), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(base, "codex", "sessions", "2026", "11", "18", "rollout-"+session+".jsonl")
+		appendLines(t, path, `{"timestamp":"2026-11-18T10:00:00Z","type":"session_meta","payload":{"id":"`+session+`"}}`)
+		return path
+	}
+	p := &Pass{Projects: projects, Workers: workers, Budget: 1 << 20, MaxOpen: 6 * time.Hour}
+	st := &State{Files: map[string]*File{}}
+	writeTask("new-task", "готово", "first")
+	if _, err := p.Run(st, stamp); err != nil {
+		t.Fatal(err)
+	}
+	key := "codex/new-task/codex/sessions/2026/11/18/rollout-first.jsonl"
+	if st.Files[key] == nil || st.Files[key].Offset == 0 {
+		t.Fatalf("новая задача не считана: %+v", st.Files[key])
+	}
+	info, err := os.Stat(filepath.Join(workers, "new-task", "codex", "sessions", "2026", "11", "18", "rollout-first.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := st.Workers.Tasks["new-task"].Sources[0]
+	if cached.Size != info.Size() || cached.Mtime != info.ModTime().UnixNano() {
+		t.Fatalf("size/mtime не сохранены: %+v, info=%+v", cached, info)
+	}
+	stateJSON, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stateJSON), workers) {
+		t.Fatal("абсолютный путь транскрипта дублируется в worker-кеше")
+	}
+	var resumed State
+	if err := json.Unmarshal(stateJSON, &resumed); err != nil {
+		t.Fatal(err)
+	}
+	st = &resumed
+	cached = st.Workers.Tasks["new-task"].Sources[0]
+	if cached.Size != info.Size() || cached.Mtime != info.ModTime().UnixNano() {
+		t.Fatalf("JSON round-trip потерял size/mtime: %+v", cached)
+	}
+	opened := 0
+	listed := 0
+	p.openFile = func(path string) (io.ReaderAt, io.Closer, error) {
+		opened++
+		f, err := os.Open(path)
+		return f, f, err
+	}
+	p.listWorker = func(root, task string) ([]Source, error) {
+		listed++
+		return listWorkerTask(root, task)
+	}
+	if _, err := p.Run(st, stamp.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if opened != 0 || listed != 0 {
+		t.Fatalf("готовая задача обойдена: transcript-открытий %d, списков каталогов %d", opened, listed)
+	}
+	if st.Files[key] == nil || st.Files[key].Offset == 0 {
+		t.Fatalf("неперечисленный кэшем offset удалён: %+v", st.Files[key])
+	}
+
+	// worker continue оставляет задачу готовой, но меняет status.json и добавляет новый rollout.
+	writeTask("new-task", "готово", "continued")
+	status := filepath.Join(workers, "new-task", "status.json")
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(status, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(st, stamp.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if listed == 0 {
+		t.Fatal("continue не вызвал повторное перечисление rollout")
+	}
+	continuedKey := "codex/new-task/codex/sessions/2026/11/18/rollout-continued.jsonl"
+	if st.Files[continuedKey] == nil || st.Files[continuedKey].Offset == 0 {
+		t.Fatalf("continue не найден: %+v", st.Files)
+	}
+
+	// Новая задача после построения кэша находится по mtime каталога worker.
+	live := writeTask("another-task", "работает", "live")
+	if _, err := p.Run(st, stamp.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	liveKey := "codex/another-task/codex/sessions/2026/11/18/rollout-live.jsonl"
+	before := st.Files[liveKey].Offset
+	appendLines(t, live, `{"timestamp":"2026-11-18T10:01:00Z","type":"session_meta","payload":{"id":"live"}}`)
+	if _, err := p.Run(st, stamp.Add(4*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if st.Files[liveKey].Offset <= before {
+		t.Fatalf("дописанный хвост не прочитан: до %d после %d", before, st.Files[liveKey].Offset)
+	}
+}
+
+func TestWorkerCacheExpiresSkippedDoneTask(t *testing.T) {
+	projects, workers := t.TempDir(), t.TempDir()
+	path := filepath.Join(workers, "done", "codex", "sessions", "2026", "11", "18", "rollout-open.jsonl")
+	appendLines(t, path, `{"timestamp":"2026-10-27T10:00:00Z","type":"session_meta","payload":{"id":"open"}}`)
+	if err := os.WriteFile(filepath.Join(workers, "done", "status.json"), []byte(`{"phase":"готово"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := &Pass{Projects: projects, Workers: workers, Budget: 1 << 20, MaxOpen: time.Hour}
+	st := &State{Started: true, Files: map[string]*File{}}
+	if _, err := p.Run(st, stamp); err != nil {
+		t.Fatal(err)
+	}
+	key := "codex/done/codex/sessions/2026/11/18/rollout-open.jsonl"
+	r := waits.New()
+	r.Add(transcript.Event{Role: transcript.Cmd, Who: "Bash", Text: "sleep 30", CallID: "wait", Time: stamp,
+		Raw: []byte(`{"command":"sleep 30"}`), Line: 1})
+	st.Files[key].Pending = r
+	got, err := p.Run(st, stamp.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Outcome != "none" {
+		t.Fatalf("ожидание завершённой пропущенной задачи не истекло: %+v", got)
+	}
+}
+
+func TestWorkerCacheSidecarNotWrittenWhenClean(t *testing.T) {
+	projects, workers := t.TempDir(), t.TempDir()
+	rvTask(t, workers, "done", "готово", "s", 1)
+	offsets := filepath.Join(t.TempDir(), "offsets.json")
+	p := &Pass{Projects: projects, Workers: workers, Budget: 1 << 20}
+	st := &State{Files: map[string]*File{}}
+	if _, err := p.Run(st, stamp); err != nil {
+		t.Fatal(err)
+	}
+	st.workersDirty = true
+	if err := st.Save(offsets); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := workerCachePath(offsets)
+	cacheBefore, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offsetBytes, err := os.ReadFile(offsets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(offsetBytes), `"workers"`) {
+		t.Fatal("offsets.json содержит worker-кеш")
+	}
+	loaded, err := LoadState(offsets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(loaded, stamp.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.workersDirty {
+		t.Fatal("неизменившийся кеш отмечен грязным")
+	}
+	if err := loaded.Save(offsets); err != nil {
+		t.Fatal(err)
+	}
+	cacheAfter, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cacheAfter.Size() != cacheBefore.Size() || !cacheAfter.ModTime().Equal(cacheBefore.ModTime()) {
+		t.Fatalf("sidecar переписан без изменений: before=%v after=%v", cacheBefore, cacheAfter)
+	}
+}
+
+func TestWorkerCachePendingBadDoesNotSkipDoneTask(t *testing.T) {
+	projects, workers := t.TempDir(), t.TempDir()
+	rvTask(t, workers, "done", "готово", "s", 1)
+	p := &Pass{Projects: projects, Workers: workers, Budget: 1 << 20, MaxOpen: time.Hour}
+	st := &State{Started: true, Files: map[string]*File{}}
+	if _, err := p.Run(st, stamp); err != nil {
+		t.Fatal(err)
+	}
+	key := "codex/done/codex/sessions/2026/11/18/rollout-s.jsonl"
+	st.Files[key].PendingBad = true
+	opened := 0
+	p.openFile = func(path string) (io.ReaderAt, io.Closer, error) {
+		opened++
+		f, err := os.Open(path)
+		return f, f, err
+	}
+	_, _ = p.Run(st, stamp.Add(time.Minute))
+	if opened == 0 {
+		t.Fatal("готовая задача с PendingBad пропущена без чтения")
+	}
+}
+
+func TestWorkerCacheStatusErrorKeepsKnownSources(t *testing.T) {
+	projects, workers := t.TempDir(), t.TempDir()
+	path := rvTask(t, workers, "known", "готово", "s", 1)
+	p := &Pass{Projects: projects, Workers: workers, Budget: 1 << 20, MaxOpen: time.Hour}
+	st := &State{Started: true, Files: map[string]*File{}}
+	if _, err := p.Run(st, stamp); err != nil {
+		t.Fatal(err)
+	}
+	key := "codex/known/codex/sessions/2026/11/18/rollout-s.jsonl"
+	oldOffset := st.Files[key].Offset
+	status := filepath.Join(workers, "known", "status.json")
+	if err := os.Remove(status); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(status, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := p.Run(st, stamp.Add(time.Minute))
+	if err == nil {
+		t.Fatal("ожидалась ошибка чтения status.json-каталога")
+	}
+	if got := st.Files[key]; got == nil || got.Offset < oldOffset {
+		t.Fatalf("ошибка статуса удалила или откатила прежний файл: before=%d after=%+v", oldOffset, got)
+	}
+	if len(st.Workers.Tasks["known"].Sources) != 1 {
+		t.Fatalf("прежний список транскриптов потерян: %+v", st.Workers.Tasks["known"])
+	}
+	_ = path
+}
+
+func TestWorkerCacheRootModRetriesNewTaskAfterStatusError(t *testing.T) {
+	projects, workers := t.TempDir(), t.TempDir()
+	p := &Pass{Projects: projects, Workers: workers, Budget: 1 << 20}
+	st := &State{Started: true, Files: map[string]*File{}}
+	if _, err := p.Run(st, stamp); err != nil {
+		t.Fatal(err)
+	}
+	oldRootMod := st.Workers.RootMod
+	base := filepath.Join(workers, "transient")
+	if err := os.MkdirAll(filepath.Join(base, "codex", "sessions", "2026", "11", "18"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	appendLines(t, filepath.Join(base, "codex", "sessions", "2026", "11", "18", "rollout-s.jsonl"),
+		`{"timestamp":"2026-11-18T10:00:00Z","type":"session_meta","payload":{"id":"s"}}`)
+	if err := os.Mkdir(filepath.Join(base, "status.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(st, stamp.Add(time.Minute)); err == nil {
+		t.Fatal("ошибка статуса новой задачи не возвращена")
+	}
+	if st.Workers.RootMod != oldRootMod {
+		t.Fatalf("RootMod сдвинулся при ошибке новой задачи: before=%d after=%d", oldRootMod, st.Workers.RootMod)
+	}
+	if err := os.Remove(filepath.Join(base, "status.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "status.json"), []byte(`{"phase":"работает"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(st, stamp.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	key := "codex/transient/codex/sessions/2026/11/18/rollout-s.jsonl"
+	if st.Files[key] == nil || st.Files[key].Offset == 0 {
+		t.Fatalf("новая задача после временной ошибки не найдена: %+v", st.Files)
+	}
+}
+
+func TestWorkerCacheStatusChangeMarksCacheDirtyAndPersists(t *testing.T) {
+	projects, workers := t.TempDir(), t.TempDir()
+	status := filepath.Join(workers, "done", "status.json")
+	rvTask(t, workers, "done", "готово", "s", 1)
+	offsets := filepath.Join(t.TempDir(), "offsets.json")
+	p := &Pass{Projects: projects, Workers: workers, Budget: 1 << 20}
+	st := &State{Started: true, Files: map[string]*File{}}
+	if _, err := p.Run(st, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save(offsets); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(offsets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(status, []byte(`{"phase":"работает"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(status, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Run(st, stamp.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if !st.workersDirty {
+		t.Fatal("изменившаяся задача не пометила worker-кеш как изменённый")
+	}
+	if err := st.Save(offsets); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadState(offsets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workers.Tasks["done"].Done {
+		t.Fatal("LoadState не увидел сохранённое изменение статуса задачи")
 	}
 }
 
