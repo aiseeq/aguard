@@ -156,15 +156,16 @@ type State struct {
 
 // ReadState читает снимок; отсутствующий файл — пустой снимок без ошибки.
 func ReadState(path string) (*State, error) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return &State{}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("снимок: %w", err)
 	}
-	var s State
-	if err := json.Unmarshal(b, &s); err != nil {
+	defer f.Close()
+	s, err := decodeState(f)
+	if err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	// мера сводки — размер × возраст: без born возраст неизвестен, запись исключается на месте
