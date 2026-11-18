@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aiseeq/aguard/internal/agentwait/waits"
 	"github.com/aiseeq/akit/transcript"
+	"github.com/aiseeq/akit/transcript/waits"
 
 	"github.com/aiseeq/aguard/internal/statefile"
 )
