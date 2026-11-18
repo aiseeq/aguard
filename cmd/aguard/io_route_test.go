@@ -61,6 +61,10 @@ func TestIOTicketerNewNoteAndNext(t *testing.T) {
 		if strings.Contains(tc.name, "закрыт") && !strings.Contains(string(b), "Прежний тикет класса: io-freeze-go-2") {
 			t.Fatalf("%s: нет ссылки на прежний:\n%s", tc.name, b)
 		}
+		// Приёмка без окна наблюдения (пользователь 18.11, tl 17c958f7:893): закрыть сразу после проверенной правки.
+		if strings.Contains(tc.want, "|new ") && (!strings.Contains(string(b), "тикет закрывается сразу") || strings.Contains(string(b), "неделю после правки")) {
+			t.Fatalf("%s: приёмка с окном наблюдения:\n%s", tc.name, b)
+		}
 	}
 }
 

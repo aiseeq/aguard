@@ -305,6 +305,10 @@ func (b *TicketBatch) Title() string {
 	return "Следы работы на диске (aguard disk)"
 }
 
+// RepeatOpensNew — конец приёмки тикетов наблюдателей: тикет закрывается сразу после проверенной правки, без окна
+// наблюдения; повтор класса после закрытия даёт новый тикет со ссылкой на закрытый (пользователь 18.11, tl 17c958f7:893).
+const RepeatOpensNew = "правка проверена замером — тикет закрывается сразу. Повтор класса после закрытия aguard заводит новый тикет со ссылкой на этот."
+
 // Text — текст нового тикета: что за класс, все находки (путь, размер, с какого времени), приёмка.
 func (b *TicketBatch) Text(home, prev, redirect string) string {
 	var s strings.Builder
@@ -321,7 +325,7 @@ func (b *TicketBatch) Text(home, prev, redirect string) string {
 		fmt.Fprintf(&s, "- %s\n", b.Recs[i].What(home))
 	}
 	s.WriteString("\nПодробнее: aguard disk report -since 168h.\n")
-	s.WriteString("\n## Приёмка\nКаждая находка разобрана: убрана, нужна (с доводом в журнале) или уборка хозяина исправлена; `aguard disk report -since 168h` после правки — без новых находок этого класса у хозяина.\n")
+	s.WriteString("\n## Приёмка\nКаждая находка разобрана: убрана, нужна (с доводом в журнале) или уборка хозяина исправлена; " + RepeatOpensNew + "\n")
 	return s.String()
 }
 

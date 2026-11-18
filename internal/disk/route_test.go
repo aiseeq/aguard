@@ -414,3 +414,18 @@ func TestFastToldEpisode(t *testing.T) {
 		t.Fatalf("запись уменьшилась — рост эпизода %d, ждали прежний %d", shrunk.Grown, second.Grown)
 	}
 }
+
+// Приёмка тикета находок — без окна наблюдения (пользователь 18.11, tl 17c958f7:893): закрыть сразу после проверенной
+// правки, повтор класса — новый тикет со ссылкой на закрытый.
+func TestTicketTextClosesOnFix(t *testing.T) {
+	b := &TicketBatch{Class: TicketStale, Owner: "life-master"}
+	text := b.Text("/home/u", "disk-stale-life-2", "")
+	for _, want := range []string{"Прежний тикет класса: disk-stale-life-2 (закрыт)", "тикет закрывается сразу", "новый тикет со ссылкой на этот"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("нет %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "после правки — без новых находок") {
+		t.Fatalf("приёмка с окном наблюдения:\n%s", text)
+	}
+}

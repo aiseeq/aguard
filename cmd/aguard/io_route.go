@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
+	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/iowatch"
@@ -262,9 +263,12 @@ func ioTicketText(job ioTicketJob, prev, redirect string) string {
 	b.WriteString("\nСлучаи:\n")
 	writeRouteCases(&b, job.cases)
 	fmt.Fprintf(&b, "\nПодробнее: aguard io report -since %s (виновники, процессы, cwd).\n", ioReportSince(job.cases[0].Start, time.Now()))
-	b.WriteString("\n## Приёмка\nПричина найдена и убрана (или принята с доводом в журнале); `aguard io report -since 168h` неделю после правки — без случаев от 2 с этого класса у хозяина.\n")
+	b.WriteString("\n## Приёмка\n" + closeOnFixAcceptance + "\n")
 	return b.String()
 }
+
+// closeOnFixAcceptance — приёмка тикета io: без недели наблюдения, повтор — новым тикетом.
+const closeOnFixAcceptance = "Причина найдена и убрана (или принята с доводом в журнале); " + disk.RepeatOpensNew
 
 func ioTicketNote(job ioTicketJob) string {
 	var b strings.Builder
