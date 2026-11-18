@@ -96,3 +96,36 @@ func TestParseQuoteInsideValue(t *testing.T) {
 		t.Fatalf("Parse = %#v, %v", d, ok)
 	}
 }
+
+// Отказ 18.11 04:33:10: konsole лида переносит себя в main.scope своего app-scope — письма нет; другой comm, чужой
+// target_unit или убитый процесс — письмо, как было.
+func TestEmailAllowedKonsoleSelfMove(t *testing.T) {
+	line := `deny kind=cgroup_write arg=1 count=1 first=04:33:10.559 last=04:33:10.559 span_ms=0 unit="agent-lead-1338656-r2.scope" root=1795258 pid=889742 comm="konsole" ppid=3431 pcomm="systemd" euid=1000 target=0 target_comm="" target_unit="main.scope" targets=1 killed=0 mode=enforce`
+	d, ok := Parse(line)
+	if !ok {
+		t.Fatal("строка отказа не разобрана")
+	}
+	if EmailAllowed(d) {
+		t.Fatalf("konsole → main.scope: письма быть не должно: %+v", d)
+	}
+	for _, unit := range []string{"tab(454375).scope", "tab-1.scope"} { // вкладки konsole в cgroup — tab(PID).scope
+		tab := d
+		tab.TargetUnit = unit
+		if EmailAllowed(tab) {
+			t.Fatalf("konsole → %s: письма быть не должно", unit)
+		}
+	}
+	for name, change := range map[string]func(*Deny){
+		"другой comm":        func(x *Deny) { x.Comm = "bash" },
+		"target_unit агента": func(x *Deny) { x.TargetUnit = "agent-aguard-master-1.scope" },
+		"убит":               func(x *Deny) { x.Killed = true },
+		"другой arg":         func(x *Deny) { x.Arg = "2" },
+		"другой вид":         func(x *Deny) { x.Kind = "ptrace" },
+	} {
+		x := d
+		change(&x)
+		if !EmailAllowed(x) {
+			t.Errorf("%s: письмо должно быть: %+v", name, x)
+		}
+	}
+}

@@ -21,7 +21,16 @@ type Deny struct {
 
 // EmailAllowed сообщает, нужно ли отправлять письмо по отказу.
 func EmailAllowed(d Deny) bool {
-	return d.Kind != "cgroup_ctl" || d.Killed
+	return (d.Kind != "cgroup_ctl" || d.Killed) && !konsoleSelfMove(d)
+}
+
+// konsoleSelfMove — konsole, запущенная агентом, переносит себя в main.scope или tab-*.scope своего app-scope: страж
+// отказывает (по file_open не видно, чей PID пишут), konsole остаётся в корне своего scope — вреда нет, письмо — шум
+// (тикет aguard-konsole-self-move-noise, отказ 18.11 04:33:10).
+func konsoleSelfMove(d Deny) bool {
+	tab := strings.HasPrefix(d.TargetUnit, "tab-") || strings.HasPrefix(d.TargetUnit, "tab(") // вкладки konsole — tab(PID).scope
+	scope := d.TargetUnit == "main.scope" || (tab && strings.HasSuffix(d.TargetUnit, ".scope"))
+	return d.Kind == "cgroup_write" && d.Arg == "1" && d.Comm == "konsole" && scope && !d.Killed
 }
 
 // Parse принимает только строки deny и would-deny с полями key=value.
