@@ -67,11 +67,14 @@ func TestNameMask(t *testing.T) {
 		"TestBriefCheckRealSignalShapeExitsWithSignalCode123": "TestBriefCheckRealSignalShapeExitsWithSignalCodeN",
 		"playwright_chromiumdev_profile-px227k":               "playwright_chromiumdev_profile-XXXXXX",
 		"playwright-artifacts-bbxAYL":                         "playwright-artifacts-XXXXXX",
+		"prefix_Abc123":                                       "prefix_XXXXXX",
 		"tmp.16dwd8ZG6q":                                      "tmp.XXXXXX",
 		"scoped_dirIfVyVd":                                    "scoped_dirXXXXXX",
 		"name.123456":                                         "name.N",
 		".config":                                             ".config",
 		"svc.socket":                                          "svc.socket",
+		"prefix-Abc12":                                        "prefix-AbcN",
+		"prefix-Abc!12":                                       "prefix-Abc!N",
 		"prefixABcDEF":                                        "prefixABcDEF",
 	}
 	for name, want := range tests {

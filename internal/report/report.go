@@ -185,13 +185,13 @@ func randomSuffixStart(base string) (int, bool) {
 	if !randomToken(tail) {
 		return 0, false
 	}
-	// glint-cmd-testN is a known numeric naming scheme; its short tail can
-	// otherwise look like a six-character random token (test10).
+	// glint-cmd-testN — известная схема нумерации; короткий хвост иначе
+	// может выглядеть как случайный шестисимвольный токен (test10).
 	if base[sep] != '.' && numberedTestTail(tail) {
 		return 0, false
 	}
-	// Lowercase words after dots are usually extensions or socket names
-	// (.config, .socket), while numeric or mixed-case dot tails are random.
+	// Слова в нижнем регистре после точки обычно являются расширениями
+	// или именами сокетов (.config, .socket); числовые и смешанные хвосты случайны.
 	if base[sep] == '.' && lowercaseWord(tail) {
 		return 0, false
 	}
