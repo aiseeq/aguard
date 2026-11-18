@@ -92,11 +92,12 @@ done <<<"$journal"
 
 current=''
 if [[ $state == active ]]; then
- if [[ $measure == rss ]]; then
+ # Пик памяти живого запуска — только в окне, которое кончается сейчас: у прошлых суток (--until) его VmHWM нет.
+ if [[ $measure == rss ]] && awk -v e="$end" -v n="$now" 'BEGIN{exit !(e >= n-300)}'; then
   if [[ -n ${AGUARD_PERF_STATUS:-} ]]; then status=$(cat "$AGUARD_PERF_STATUS") || { echo "unit-day: cannot read status fixture" >&2; exit 1; }
   else status=$(cat "/proc/$main_pid/status") || { echo "unit-day: cannot read process status" >&2; exit 1; }; fi
   current=$(awk -F: '$1=="VmHWM"{print $2+0}' <<<"$status")
- else
+ elif [[ $measure != rss ]]; then
   if [[ -n ${AGUARD_PERF_IOSTAT:-} ]]; then iostat=$(cat "$AGUARD_PERF_IOSTAT") || { echo "unit-day: cannot read io.stat fixture" >&2; exit 1; }
   else iostat=$(cat "/sys/fs/cgroup${control_group}/io.stat") || { echo "unit-day: cannot read cgroup io.stat" >&2; exit 1; }; fi
   counters=$(awk '{r=-1;w=-1;for(i=2;i<=NF;i++){split($i,a,"=");if(a[1]=="rbytes")r=a[2];if(a[1]=="wbytes")w=a[2]}if(r>mr)mr=r;if(w>mw)mw=w}END{if(mr>=0&&mw>=0)print mr,mw}' <<<"$iostat")

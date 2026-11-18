@@ -143,6 +143,21 @@ func TestUnitDayRSSIncludesEndedAndCurrentPeak(t *testing.T) {
 	}
 }
 
+// Прошлые сутки (--until на двое суток раньше часов) при идущем запуске: его VmHWM — пик за всё время запуска, а не за те
+// сутки, — в окно не идёт; иначе все прошлые дни показывали пик нынешнего (18.11: 867 МиБ во всех семи сутках).
+func TestUnitDayRSSPastWindowIgnoresCurrentPeak(t *testing.T) {
+	env := map[string]string{
+		"AGUARD_PERF_JOURNAL": fixture("unit-summary.log"),
+		"AGUARD_PERF_SHOW":    fixture("systemctl-day-active.txt"),
+		"AGUARD_PERF_NOW":     "2000172800",
+		"AGUARD_PERF_STATUS":  fixture("status-current.txt"),
+	}
+	out, code := runScript(t, "unit-day.sh", env, "rss", "--until", "@"+endpoint)
+	if code != 0 || strings.TrimSpace(out) != "200" {
+		t.Fatalf("got (%q, %d), want (200, 0)", out, code)
+	}
+}
+
 // Без идущего запуска пик — по итогам кончившихся; метка journalctl short-unix дробная, а [[ -gt ]] берёт только целые
 // (0c5d84e): без отсечения дробной части записи молча выпадали.
 func TestUnitDayRSSEndedRunsOnlyFractionalStamps(t *testing.T) {
