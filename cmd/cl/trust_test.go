@@ -803,7 +803,7 @@ func TestConfirmTrustScreenReader(t *testing.T) {
 			var notes []string
 			c := openConsole(tty, tty, func(s string) { mu.Lock(); notes = append(notes, s); mu.Unlock() })
 			cmd := exec.Command("sh", "-c",
-				`stty raw -echo; cat "$0"; k=$(dd bs=1 count=1 2>/dev/null); [ "$k" = y ] || { echo KEY-$k; exit 0; }; cat "$1"; v=$(timeout --foreground 2 dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' '); [ "$v" = 13 ] && echo ENTER-OK || echo NO-ENTER`,
+				`stty raw -echo; cat "$0"; k=$(dd bs=1 count=1 2>/dev/null); [ "$k" = y ] || { echo KEY-$k; exit 0; }; cat "$1"; v=$(timeout --foreground 2 dd bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' '); [ "$v" = 13 ] && { echo ENTER-OK; sleep 0.3; } || echo NO-ENTER`,
 				"testdata/trust-dialog-sr-2.1.322.raw", echo)
 			finish, err := c.start(cmd, "/home/alice", false)
 			if err != nil {
