@@ -5,7 +5,11 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 )
+
+// adminFreshActorNote — даёт живому автору время продолжить работу над только что открытым тикетом.
+const adminFreshActorNote = 30 * time.Minute
 
 func frozen(v View, dir string) bool {
 	if v.Frozen == nil {
@@ -24,8 +28,10 @@ func (s *State) adminWakeNotices(ts []Ticket, v View, notices []Notice) []Notice
 		ts = append(slices.Clone(ts), v.Projects()...)
 	}
 	projects := map[string]Ticket{}
+	byKey := map[string]Ticket{}
 	for i := range ts {
 		t := ts[i]
+		byKey[t.Key] = t
 		if t.Dir != "" {
 			projects[t.Dir] = t
 		}
@@ -44,7 +50,7 @@ func (s *State) adminWakeNotices(ts []Ticket, v View, notices []Notice) []Notice
 		if masterAlive || !s.adminMayOffer(p, v, busy) {
 			continue
 		}
-		if n, ok := s.adminOffer(p, v); ok {
+		if n, ok := s.adminOffer(p, v, byKey); ok {
 			out = append(out, n)
 			busy[p.Admin] = true
 		}
@@ -67,7 +73,7 @@ func (s *State) adminMayOffer(p Ticket, v View, busy map[string]bool) bool {
 }
 
 // adminOffer решает по первому тикету проекта: предложить его админу или промолчать.
-func (s *State) adminOffer(p Ticket, v View) (Notice, bool) {
+func (s *State) adminOffer(p Ticket, v View, byKey map[string]Ticket) (Notice, bool) {
 	first, found, err := v.AdminNext(p.Admin, p.Dir)
 	if err != nil { // причину как предупреждение уже записал источник; отметку не трогаем
 		v.Log.Debug("aguard queue: проект без предложения", "dir", p.Dir, "err", err)
@@ -77,8 +83,17 @@ func (s *State) adminOffer(p Ticket, v View) (Notice, bool) {
 		delete(s.ProjectWakes, p.Dir)
 		return Notice{}, false
 	}
+	if listed, ok := byKey[first.Key]; ok {
+		first.ActorNotes = listed.ActorNotes
+	}
 	if first.Status == "в работе" && !strings.EqualFold(first.Executor, p.Admin) {
 		return Notice{}, false
+	}
+	// Свежая запись живого автора означает, что он ещё занимается постановкой; предлагать тикет админу рано.
+	for actor, at := range first.ActorNotes {
+		if !strings.EqualFold(actor, p.Admin) && alive(v, actor) && noteWithin(at, v.Now, adminFreshActorNote) {
+			return Notice{}, false
+		}
 	}
 	if restingDir(p.Dir, v) && NormPrio(first.Prio) != "CRIT" {
 		return Notice{}, false

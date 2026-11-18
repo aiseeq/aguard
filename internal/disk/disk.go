@@ -236,14 +236,15 @@ func (c *Config) Entries() ([]string, error) {
 // раз, жёсткие ссылки — один раз за обход), место по st_blocks, как у du (Blocks), файлы, последнее изменение (ctime:
 // его не скрыть копированием с сохранением mtime). Unread — сколько папок и файлов не прочиталось, Err — первые из них.
 type Usage struct {
-	Bytes   int64
-	Blocks  int64
-	Files   int64
-	Changed time.Time
-	Unread  int
-	Err     error
-	Copies  int64 // копии транскриптов Claude Code (copyName) по st_blocks
-	Fiemaps int64 // файлов, измеренных по экстентам
+	Bytes        int64
+	EncodedBytes int64 // часть Bytes с FIEMAP_EXTENT_ENCODED, до сжатия
+	Blocks       int64
+	Files        int64
+	Changed      time.Time
+	Unread       int
+	Err          error
+	Copies       int64 // копии транскриптов Claude Code (copyName) по st_blocks
+	Fiemaps      int64 // файлов, измеренных по экстентам
 }
 
 type inode struct{ dev, ino uint64 }
@@ -317,6 +318,7 @@ type fileSpace struct {
 	buf     *fiemapBuf
 	shared  []span
 	fiemaps int64
+	encoded int64
 }
 
 func (f *fileSpace) add(p string, d fs.DirEntry, st *syscall.Stat_t) (int64, error) {
@@ -324,7 +326,7 @@ func (f *fileSpace) add(p string, d fs.DirEntry, st *syscall.Stat_t) (int64, err
 		return st.Blocks * 512, nil
 	}
 	f.fiemaps++
-	own, more, err := extents(p, f.buf, f.shared)
+	own, encoded, more, err := extents(p, f.buf, f.shared)
 	if errors.Is(err, errNoFiemap) {
 		f.exact = false
 		return st.Blocks * 512, nil
@@ -333,6 +335,7 @@ func (f *fileSpace) add(p string, d fs.DirEntry, st *syscall.Stat_t) (int64, err
 		return st.Blocks * 512, err
 	}
 	f.shared = more
+	f.encoded += encoded
 	return own, nil
 }
 
@@ -363,6 +366,7 @@ func measure(ctx context.Context, path string, seen map[inode]bool, buf *fiemapB
 		return err
 	})
 	u.Bytes += spanBytes(space.shared)
+	u.EncodedBytes = space.encoded + encodedSpanBytes(space.shared)
 	u.Fiemaps = space.fiemaps
 	return u
 }
@@ -378,8 +382,8 @@ func Free(path string) (int64, error) {
 
 // ByDay — место записи по местным дням последнего изменения файлов (ctime; ключ — полночь дня): прикидка роста
 // задним числом. Видит только то, что лежит сейчас, и относит файл ко дню его последнего изменения.
-func ByDay(ctx context.Context, path string, exact bool, fiemapMin int64) (map[time.Time]int64, error) {
-	out := map[time.Time]int64{}
+func ByDay(ctx context.Context, path string, exact bool, fiemapMin int64) (map[time.Time]Usage, error) {
+	out := map[time.Time]Usage{}
 	days := map[time.Time]*fileSpace{}
 	seen := map[inode]bool{}
 	buf := new(fiemapBuf)
@@ -395,11 +399,17 @@ func ByDay(ctx context.Context, path string, exact bool, fiemapMin int64) (map[t
 			days[day] = f
 		}
 		n, err := f.add(p, d, st)
-		out[day] += n
+		v := out[day]
+		v.Bytes += n
+		v.EncodedBytes = f.encoded
+		out[day] = v
 		return err
 	})
 	for day, f := range days {
-		out[day] += spanBytes(f.shared)
+		v := out[day]
+		v.Bytes += spanBytes(f.shared)
+		v.EncodedBytes += encodedSpanBytes(f.shared)
+		out[day] = v
 	}
 	return out, err
 }

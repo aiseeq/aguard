@@ -104,6 +104,24 @@ func TestFindings(t *testing.T) {
 	}
 }
 
+func TestFindingAndTraceEncodedBytes(t *testing.T) {
+	for _, tc := range []struct {
+		encoded int64
+		marked  bool
+	}{{0, false}, {1, true}} {
+		g := Finding{Class: "/cache", Kind: "неудача", Count: 1, Bytes: 2 << 30, EncodedBytes: tc.encoded,
+			Producers: []Count{{Name: "worker", N: 1}}}
+		if got := g.Text("/home/u"); strings.Contains(got, "без учёта сжатия") != tc.marked {
+			t.Errorf("Finding.Text(encoded=%d) = %q", tc.encoded, got)
+		}
+		tr := &Trace{Path: "/cache/x", Kind: "неудача", Bytes: 2 << 30, EncodedBytes: tc.encoded}
+		r := Record{Kind: KindTrace, Path: tr.Path, Bytes: tr.Bytes, EncodedBytes: tr.EncodedBytes, Trace: tr}
+		if got := r.What("/home/u"); strings.Contains(got, "без учёта сжатия") != tc.marked {
+			t.Errorf("trace What(encoded=%d) = %q", tc.encoded, got)
+		}
+	}
+}
+
 func TestAccount(t *testing.T) {
 	c := traceConfig(t, "/home/u")
 	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)

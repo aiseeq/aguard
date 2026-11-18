@@ -100,6 +100,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 		}
 	}()
 	keep, argsProblem := restartArgs(userArgs)
+	userAddDir := hasUserAddDirArg(userArgs)
 	args := append(append([]string{}, pre...), userArgs...)
 	first, stale := 0, ""
 	switch {
@@ -121,7 +122,7 @@ func (l launcher) supervise(pre, userArgs []string) int {
 				l.journalUpgradeFail(err, "выход")
 			}
 		} else {
-			proc, finish, err = l.start(n, args)
+			proc, finish, err = l.start(n, args, userAddDir)
 		}
 		if err != nil {
 			fail(err)
@@ -424,7 +425,7 @@ func whyText(event, version string, at time.Time) string {
 }
 
 // start — запуск n claude с аргументами args в своём scope.
-func (l launcher) start(n int, args []string) (*os.Process, func(), error) {
+func (l launcher) start(n int, args []string, userAddDir bool) (*os.Process, func(), error) {
 	unit := strconv.Itoa(os.Getpid())
 	if n > 0 {
 		unit += "-r" + strconv.Itoa(n)
@@ -438,7 +439,7 @@ func (l launcher) start(n int, args []string) (*os.Process, func(), error) {
 	})
 	cmd := exec.Command(l.systemdRun, argv[1:]...)
 	cmd.Env = env
-	finish, err := l.launch(cmd)
+	finish, err := l.launch(cmd, userAddDir)
 	if err != nil {
 		return nil, nil, fmt.Errorf("запуск claude: %w", err)
 	}
@@ -451,9 +452,9 @@ func (l launcher) start(n int, args []string) (*os.Process, func(), error) {
 }
 
 // launch запускает claude: под pty cl или прямо на терминале cl. finish — после выхода claude.
-func (l launcher) launch(cmd *exec.Cmd) (finish func(), err error) {
+func (l launcher) launch(cmd *exec.Cmd, userAddDir bool) (finish func(), err error) {
 	if l.console != nil {
-		return l.console.start(cmd, l.trustDir())
+		return l.console.start(cmd, l.trustDir(), userAddDir, addDirsFromFlags(addDirFlags(l.home), l.home)...)
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return func() {}, cmd.Start()

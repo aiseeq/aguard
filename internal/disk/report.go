@@ -10,6 +10,15 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 )
 
+// FormatBytes formats a disk entry size and marks FIEMAP lengths reported before compression.
+func FormatBytes(bytes, encodedBytes int64) string {
+	size := policy.HumanBytes(bytes)
+	if encodedBytes > 0 {
+		return size + " (без учёта сжатия)"
+	}
+	return size
+}
+
 // Line — строка сигнала: что хозяин получил бы. home сворачивается в ~.
 func (r *Record) Line(home string) string {
 	at := r.At.Local().Format("02.01 15:04")
@@ -25,17 +34,17 @@ func (r *Record) What(home string) string {
 	path := short(r.Path, home)
 	switch r.Kind {
 	case KindGrew:
-		return fmt.Sprintf("%s выросла на %s с %s, теперь %s", path, policy.HumanBytes(r.Delta),
-			r.Since.Local().Format("02.01 15:04"), policy.HumanBytes(r.Bytes))
+		return fmt.Sprintf("%s выросла на %s с %s, теперь %s", path, FormatBytes(r.Delta, r.EncodedBytes),
+			r.Since.Local().Format("02.01 15:04"), FormatBytes(r.Bytes, r.EncodedBytes))
 	case KindStale:
-		return fmt.Sprintf("%s (%s) не менялась с %s — остаток временного?", path, policy.HumanBytes(r.Bytes),
+		return fmt.Sprintf("%s (%s) не менялась с %s — остаток временного?", path, FormatBytes(r.Bytes, r.EncodedBytes),
 			r.Since.Local().Format("02.01 15:04"))
 	case KindFast:
 		if path == "" {
 			return fmt.Sprintf("свободное место убыло на %s с %s, ни одна запись так не выросла", policy.HumanBytes(r.Delta),
 				r.Since.Local().Format("15:04"))
 		}
-		return fmt.Sprintf("%s выросла на %s с %s — место тает быстро", path, policy.HumanBytes(r.Delta),
+		return fmt.Sprintf("%s выросла на %s с %s — место тает быстро", path, FormatBytes(r.Delta, r.EncodedBytes),
 			r.Since.Local().Format("15:04"))
 	case KindTrace, KindTraceGone:
 		return traceLine(r, path)
@@ -52,7 +61,7 @@ func traceLine(r *Record, path string) string {
 		return path
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %s, %s", t.Kind, path, policy.HumanBytes(t.Bytes))
+	fmt.Fprintf(&b, "%s: %s, %s", t.Kind, path, FormatBytes(t.Bytes, t.EncodedBytes))
 	if t.Copies > 0 {
 		fmt.Fprintf(&b, " (копии транскриптов %s)", policy.HumanBytes(t.Copies))
 	}

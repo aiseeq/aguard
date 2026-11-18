@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/aiseeq/aguard/internal/procscan"
 	"github.com/aiseeq/akit/proc"
 )
 
@@ -614,26 +615,13 @@ func socketOwner(procRoot string, port int) (int, error) {
 
 // holdsSocket — среди открытых файлов процесса (папка fd) есть сокет из inodes. Процесс ушёл — нет.
 func holdsSocket(fdDir string, inodes map[string]bool) (bool, error) {
-	fds, err := os.ReadDir(fdDir)
-	if proc.Gone(err) || errors.Is(err, fs.ErrPermission) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("открытые файлы: %w", err)
-	}
-	for _, fd := range fds {
-		l, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-		if proc.Gone(err) {
-			continue // закрылся во время чтения
+	found := false
+	err := procscan.ReadFDLinks(fdDir, func(link string) {
+		if inodes[link] {
+			found = true
 		}
-		if err != nil {
-			return false, fmt.Errorf("открытый файл: %w", err)
-		}
-		if inodes[l] {
-			return true, nil
-		}
-	}
-	return false, nil
+	})
+	return found, err
 }
 
 // localPortInodes — inode сокетов из /proc/net/tcp{,6} с локальным портом port; файла нет (нет IPv6) — пусто.

@@ -43,10 +43,11 @@ const (
 
 // Record — запись журнала: сигнал, который получил бы хозяин.
 type Record struct {
-	At    time.Time `json:"at"`
-	Kind  string    `json:"kind"`
-	Path  string    `json:"path"`            // пусто у fast, когда рост не нашёлся ни в одной записи
-	Bytes int64     `json:"bytes,omitempty"` // размер записи
+	At           time.Time `json:"at"`
+	Kind         string    `json:"kind"`
+	Path         string    `json:"path"`                    // пусто у fast, когда рост не нашёлся ни в одной записи
+	Bytes        int64     `json:"bytes,omitempty"`         // размер записи
+	EncodedBytes int64     `json:"encoded_bytes,omitempty"` // часть размера с FIEMAP_EXTENT_ENCODED
 	// Delta — рост: за сутки (grew), с прошлого обхода (fast); у fast без записи — убыль свободного места.
 	Delta int64 `json:"delta,omitempty"`
 	// Since — от какого замера рост (grew, fast) или последнее изменение (stale).
@@ -61,8 +62,9 @@ type Record struct {
 
 // Point — замер.
 type Point struct {
-	At    time.Time `json:"at"`
-	Bytes int64     `json:"bytes"`
+	At           time.Time `json:"at"`
+	Bytes        int64     `json:"bytes"`
+	EncodedBytes int64     `json:"encoded_bytes,omitempty"`
 }
 
 // State — между проходами: замеры записей за сутки, свободное место за окно, когда сигнал уже записан.
@@ -146,19 +148,20 @@ func (t FreeTold) Mark(to string, now time.Time, sent bool) {
 // LowFreeMessage — письмо о свободном месте: сколько, порог и самые большие записи по последнему обходу.
 func (s *State) LowFreeMessage(c *Config, free int64, home string) string {
 	type big struct {
-		path  string
-		bytes int64
+		path, size string
+		bytes      int64
 	}
 	var top []big
 	for path, pts := range s.Sizes {
 		if len(pts) > 0 {
-			top = append(top, big{path, pts[len(pts)-1].Bytes})
+			p := pts[len(pts)-1]
+			top = append(top, big{path: path, size: FormatBytes(p.Bytes, p.EncodedBytes), bytes: p.Bytes})
 		}
 	}
 	slices.SortFunc(top, func(a, b big) int { return cmp.Compare(b.bytes, a.bytes) })
 	parts := make([]string, 0, 3)
 	for _, b := range top[:min(3, len(top))] {
-		parts = append(parts, short(b.path, home)+" "+policy.HumanBytes(b.bytes))
+		parts = append(parts, short(b.path, home)+" "+b.size)
 	}
 	biggest := "обхода записей ещё не было"
 	if len(parts) > 0 {
@@ -511,17 +514,20 @@ func (s *State) entry(c *Config, now time.Time, path string, u Usage, fast bool,
 	if fast && len(pts) > 0 {
 		if prev := pts[len(pts)-1]; u.Bytes-prev.Bytes >= int64(c.Fast)/2 {
 			grewFast = true
-			tell(Record{Kind: KindFast, Path: path, Bytes: u.Bytes, Delta: u.Bytes - prev.Bytes, Since: prev.At}, c.FastWindow.D())
+			tell(Record{Kind: KindFast, Path: path, Bytes: u.Bytes, EncodedBytes: max(u.EncodedBytes, prev.EncodedBytes),
+				Delta: u.Bytes - prev.Bytes, Since: prev.At}, c.FastWindow.D())
 		}
 	}
 	if len(pts) > 0 { // база — из прошлых замеров, до текущего: при обходе раз в сутки прошлый старше 24 часов
 		if base := baseline(pts, now); u.Bytes-base.Bytes >= int64(c.Grow) {
-			tell(Record{Kind: KindGrew, Path: path, Bytes: u.Bytes, Delta: u.Bytes - base.Bytes, Since: base.At}, repeatDaily)
+			tell(Record{Kind: KindGrew, Path: path, Bytes: u.Bytes, EncodedBytes: max(u.EncodedBytes, base.EncodedBytes),
+				Delta: u.Bytes - base.Bytes, Since: base.At}, repeatDaily)
 		}
 	}
-	s.Sizes[path] = append(slices.DeleteFunc(pts, func(p Point) bool { return now.Sub(p.At) > history }), Point{At: now, Bytes: u.Bytes})
+	s.Sizes[path] = append(slices.DeleteFunc(pts, func(p Point) bool { return now.Sub(p.At) > history }),
+		Point{At: now, Bytes: u.Bytes, EncodedBytes: u.EncodedBytes})
 	if u.Bytes >= int64(c.StaleMin) && !u.Changed.IsZero() && now.Sub(u.Changed) >= c.Stale.D() && !c.IsLasting(path) {
-		tell(Record{Kind: KindStale, Path: path, Bytes: u.Bytes, Since: u.Changed}, repeatDaily)
+		tell(Record{Kind: KindStale, Path: path, Bytes: u.Bytes, EncodedBytes: u.EncodedBytes, Since: u.Changed}, repeatDaily)
 	}
 	return grewFast
 }
@@ -543,7 +549,8 @@ func (s *State) Account(c *Config, now time.Time, traces []Trace, free int64, ho
 		t := traces[i]
 		seen[t.Path] = true
 		if _, ok := s.Traces[t.Path]; !ok {
-			out = append(out, rec(Record{Kind: KindTrace, Path: t.Path, Bytes: t.Bytes, Since: t.Born, Owner: t.Owner, Why: t.Why, Trace: &t}))
+			out = append(out, rec(Record{Kind: KindTrace, Path: t.Path, Bytes: t.Bytes, EncodedBytes: t.EncodedBytes,
+				Since: t.Born, Owner: t.Owner, Why: t.Why, Trace: &t}))
 		}
 		s.Traces[t.Path] = t
 	}
@@ -554,7 +561,8 @@ func (s *State) Account(c *Config, now time.Time, traces []Trace, free int64, ho
 		t := s.Traces[path]
 		delete(s.Traces, path)
 		if !exists(path) { // путь на месте, но уже не след (сессия ожила, ветка в работе) — не уборка
-			out = append(out, rec(Record{Kind: KindTraceGone, Path: path, Bytes: t.Bytes, Since: t.Born, Owner: t.Owner, Why: t.Why, Trace: &t}))
+			out = append(out, rec(Record{Kind: KindTraceGone, Path: path, Bytes: t.Bytes, EncodedBytes: t.EncodedBytes,
+				Since: t.Born, Owner: t.Owner, Why: t.Why, Trace: &t}))
 		}
 	}
 	findings := c.Findings(now, traces)
@@ -565,7 +573,8 @@ func (s *State) Account(c *Config, now time.Time, traces []Trace, free int64, ho
 			continue
 		}
 		s.Told[key] = now
-		out = append(out, rec(Record{Kind: KindFinding, Path: g.Class, Bytes: g.Bytes, Owner: g.Owner, Why: g.Why, Text: g.Text(home)}))
+		out = append(out, rec(Record{Kind: KindFinding, Path: g.Class, Bytes: g.Bytes, EncodedBytes: g.EncodedBytes,
+			Owner: g.Owner, Why: g.Why, Text: g.Text(home)}))
 	}
 	return out
 }

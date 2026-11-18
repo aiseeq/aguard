@@ -25,6 +25,7 @@ import (
 	"golang.org/x/sys/unix"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/akit/proc"
 )
 
@@ -2448,6 +2449,10 @@ func removeSliceFiles(dir, id string) error {
 }
 
 func ReadReport(dir string, since time.Time) (Document, error) {
+	return readReport(dir, since, nil)
+}
+
+func readReport(dir string, since time.Time, until *time.Time) (Document, error) {
 	d := Document{Version: 1, Slices: []Slice{}, Sleeps: []SleepStat{}}
 	whole, wholeFound, err := readSingleFileDocument(filepath.Join(dir, "slices.json"))
 	if err != nil {
@@ -2489,21 +2494,26 @@ func ReadReport(dir string, since time.Time) (Document, error) {
 		deduped = append(deduped, *item)
 	}
 	d.Slices = deduped
-	if err := filterReportSlices(&d, dir, since); err != nil {
+	if err := filterReportSlices(&d, dir, since, until); err != nil {
 		return Document{}, err
 	}
-	d.Sleeps, err = readSleepReport(dir, since)
+	d.Sleeps, err = readSleepReport(dir, since, until)
 	if err != nil {
 		return Document{}, err
 	}
 	return d, nil
 }
 
-func filterReportSlices(d *Document, dir string, since time.Time) error {
+// ReadReportWindow returns interface slices whose start falls in [since, until).
+func ReadReportWindow(dir string, since, until time.Time) (Document, error) {
+	return readReport(dir, since, &until)
+}
+
+func filterReportSlices(d *Document, dir string, since time.Time, until *time.Time) error {
 	out := d.Slices[:0]
 	for i := range d.Slices {
 		s := &d.Slices[i]
-		if !s.End.After(since) {
+		if !s.End.After(since) || (until != nil && !iowatch.InWindow(s.Start, since, *until)) {
 			continue
 		}
 		out = append(out, *s)
@@ -2533,7 +2543,7 @@ func attachSliceJournals(d *Document, dir string) error {
 	return nil
 }
 
-func readSleepReport(dir string, since time.Time) ([]SleepStat, error) {
+func readSleepReport(dir string, since time.Time, until *time.Time) ([]SleepStat, error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return []SleepStat{}, nil
@@ -2542,6 +2552,12 @@ func readSleepReport(dir string, since time.Time) ([]SleepStat, error) {
 		return nil, fmt.Errorf("прочитать каталог статистики сна: %w", err)
 	}
 	stats := map[string]SleepStat{}
+	throughDate := ""
+	if until != nil {
+		throughDate = until.Add(-time.Nanosecond).In(time.Local).Format("2006-01-02")
+	}
+	// Даты в sleeps-*.json — местные (watch.go: at.Format), окно сравнивается в том же поясе.
+	sinceDate := since.In(time.Local).Format("2006-01-02")
 	for _, ent := range entries {
 		n := ent.Name()
 		if !strings.HasPrefix(n, "sleeps-") || !strings.HasSuffix(n, ".json") {
@@ -2556,7 +2572,7 @@ func readSleepReport(dir string, since time.Time) ([]SleepStat, error) {
 			return nil, fmt.Errorf("разобрать %s: %w", n, e)
 		}
 		for _, st := range day {
-			if st.Date >= since.Format("2006-01-02") {
+			if st.Date >= sinceDate && (throughDate == "" || st.Date <= throughDate) {
 				key := st.Date + "\x00" + st.Target + "\x00" + st.Wchan
 				prev := stats[key]
 				if st.LongestMS > prev.LongestMS {

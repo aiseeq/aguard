@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/worktree"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -34,7 +36,7 @@ func WorktreeRepos(list []string) (map[string][]string, error) {
 		if isScratchpad(p) {
 			continue
 		}
-		repo, err := worktreeRepo(p)
+		repo, err := worktree.Repo(p)
 		if err != nil {
 			errs = append(errs, err)
 			continue

@@ -1,7 +1,9 @@
 package night
 
 import (
+	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,5 +123,47 @@ func TestCheckTrust(t *testing.T) {
 				t.Fatalf("сигналы %+v, ждали %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCheckTrustMessageDependsOnConfirmation(t *testing.T) {
+	event := cllog.TrustEvent{At: local(0, 38), Name: "lead", Dir: "/home/u"}
+	cfg := testConfig()
+	for _, tc := range []struct {
+		name         string
+		confirmed    bool
+		want, absent string
+	}{
+		{"неподтверждённое окно", false, "стоит на окне доверия", "cl подтвердил"},
+		{"подтверждённое окно", true, "cl подтвердил его в", "стоит на окне доверия"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := event
+			e.Confirmed = tc.confirmed
+			signals := Check(local(0, 44), cfg, Facts{DreamMarker: true, DigestText: "2026-10-28", TrustEvents: []cllog.TrustEvent{e}})
+			if len(signals) != 1 || !strings.Contains(signals[0].Text, tc.want) || strings.Contains(signals[0].Text, tc.absent) {
+				t.Fatalf("сигналы=%+v, ожидали %q без %q", signals, tc.want, tc.absent)
+			}
+		})
+	}
+}
+
+func TestMachineMasterTrustEventsFromNovember17Log(t *testing.T) {
+	log, err := os.ReadFile("../cllog/testdata/machine-master-2026-11-17.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, bad, err := cllog.TrustEvents(strings.NewReader(string(log)))
+	if err != nil || bad != 0 {
+		t.Fatalf("bad=%d err=%v", bad, err)
+	}
+	cfg := testConfig()
+	cfg.DreamBy, cfg.DigestBy = "23:59", "23:59"
+	now := time.Date(2026, 11, 17, 12, 2, 31, 0, time.FixedZone("CET", 3600))
+	signals := Check(now, cfg, Facts{DreamMarker: true, DigestText: "2026-11-17", TrustEvents: events})
+	for _, signal := range signals {
+		if strings.HasPrefix(signal.Key, "trust:machine-master:") {
+			t.Fatalf("ложный сигнал trust по machine-master: %+v", signal)
+		}
 	}
 }

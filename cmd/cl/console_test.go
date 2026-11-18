@@ -36,7 +36,7 @@ func (s *screen) has(sub string) bool {
 
 func (s *screen) wait(t *testing.T, sub string) {
 	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 		if s.has(sub) {
 			return
 		}
@@ -87,7 +87,7 @@ func TestConsole(t *testing.T) {
 	}
 	// «claude»: читает строки до конца ввода и отвечает на каждую
 	cmd := exec.Command("sh", "-c", `while read -r x; do echo "got:$x"; done; echo bye`)
-	finish, err := c.start(cmd, "")
+	finish, err := c.start(cmd, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

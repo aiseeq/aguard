@@ -145,10 +145,14 @@ func (l *FastLetter) Text(c *Config, home string) string {
 		grown = append(grown, r)
 	}
 	if len(grown) > 0 {
-		fmt.Fprintf(&b, "\nЗаписи %s выросли с прошлого обхода на %s (%d):", l.Owner, policy.HumanBytes(sum), len(grown))
+		var encoded int64
 		for _, r := range grown {
-			fmt.Fprintf(&b, "\n- %s: +%s с %s, теперь %s", short(r.Path, home), policy.HumanBytes(r.Delta),
-				r.Since.Local().Format("15:04"), policy.HumanBytes(r.Bytes))
+			encoded += r.EncodedBytes
+		}
+		fmt.Fprintf(&b, "\nЗаписи %s выросли с прошлого обхода на %s (%d):", l.Owner, FormatBytes(sum, encoded), len(grown))
+		for _, r := range grown {
+			fmt.Fprintf(&b, "\n- %s: +%s с %s, теперь %s", short(r.Path, home), FormatBytes(r.Delta, r.EncodedBytes),
+				r.Since.Local().Format("15:04"), FormatBytes(r.Bytes, r.EncodedBytes))
 		}
 	}
 	fmt.Fprintf(&b, "\nО той же записи — не чаще %s, раньше — если её рост удвоится или место убудет ещё на %s.",

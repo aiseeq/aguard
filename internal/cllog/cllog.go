@@ -116,9 +116,49 @@ func TrustConfirmed(dir string) string {
 	return fmt.Sprintf(trustDone+"%s: Claude Code не сохраняет доверие к домашней папке", dir)
 }
 
+// TrustAddedDir — cl подтвердил папку, которую сам передал через --add-dir.
+func TrustAddedDir(dir string) string {
+	return fmt.Sprintf(trustDone+"%s: папка передана cl через --add-dir", dir)
+}
+
+// TrustForeignDir — окно добавления папки, которой нет среди аргументов --add-dir cl.
+func TrustForeignDir(dir string) string {
+	return fmt.Sprintf(trustLeft+"%s: папки нет среди --add-dir cl, оставляю окно пользователю", dir)
+}
+
+// TrustUserAddDir — аргумент пользователя отключает автоматическое подтверждение окон добавления каталогов.
+func TrustUserAddDir() string {
+	return "в аргументах есть пользовательский --add-dir, окна добавления папок оставляю пользователю"
+}
+
+// TrustAmbiguousDir — путь в окне нельзя однозначно восстановить, поэтому cl оставляет его пользователю.
+func TrustAmbiguousDir(dir string) string {
+	return fmt.Sprintf(trustLeft+"%s: путь неоднозначен, оставляю окно пользователю", dir)
+}
+
+// TrustWrappedDir — путь перенесён на несколько строк, поэтому cl оставляет окно пользователю.
+func TrustWrappedDir(dir string) string {
+	return fmt.Sprintf(trustLeft+"%s: путь перенесён на строки, оставляю окно пользователю", dir)
+}
+
+// TrustPathResolveFailed — путь окна не удалось проверить на симлинки.
+func TrustPathResolveFailed(dir string, err error) string {
+	return fmt.Sprintf(trustLeft+"%s: не удалось разрешить симлинки: %v", dir, err)
+}
+
+// TrustScanLimit — ограниченный просмотр вывода закончился до баннера REPL.
+func TrustScanLimit(bytes int) string {
+	return fmt.Sprintf("окно доверия: поиск остановлен после %d КБ вывода Claude Code до REPL", bytes>>10)
+}
+
 // TrustNotSelected — после стрелки вниз вывод не подтвердил выбор «Yes», поэтому Enter не нажат.
 func TrustNotSelected(dir string, wait time.Duration) string {
 	return fmt.Sprintf(trustLeft+"%s: выбор не встал на «Yes» за %v, Enter не нажат", dir, wait)
+}
+
+// TrustSelectionRetry — Claude Code показал подсказку после Down; cl повторяет его после паузы.
+func TrustSelectionRetry(dir string, attempt int) string {
+	return fmt.Sprintf(trustLeft+"%s: повтор Down %d/3 по подсказке Claude Code", dir, attempt)
 }
 
 // TrustEvent — окно доверия при подъёме сессии (подтверждённое cl или оставшееся) и более поздний подъём той же
@@ -137,15 +177,66 @@ type TrustEvent struct {
 // в 09:34:38). «нет записи→нет записи» — реестр не прочитан, подъёмом не считается; строки «pid=N: …» (SIGTERM, переход
 // в новый бинарник) пишет cl, а не поднявшийся claude.
 var reUp = regexp.MustCompile(`^(.+?) pid=\d+ [0-9—][^ ]*→`)
+var reRestart = regexp.MustCompile(`^(.+?) pid=\d+: SIGTERM, поднимаю `)
+
+// trustLine — строка журнала cl; trust и trustDir заданы, если строка — окно доверия.
+type trustLine struct {
+	at       time.Time
+	text     string
+	trust    string
+	trustDir string
+}
+
+// parseTrustWindow разбирает текст строки как окно доверия: ok — окно; ошибка — строка окна с битым pid.
+// Строка «повтор Down» — не окно: за ней идёт итог той же папки.
+func parseTrustWindow(text string) (TrustEvent, bool, error) {
+	var ev TrustEvent
+	name, body, found := strings.Cut(text, ": ")
+	rest, left := strings.CutPrefix(body, trustLeft)
+	done, confirmed := strings.CutPrefix(body, trustDone)
+	if !found || !left && !confirmed {
+		return ev, false, nil
+	}
+	if confirmed {
+		rest = done
+	}
+	dir, detail, _ := strings.Cut(rest, ": ")
+	if dir == "" || left && strings.HasPrefix(detail, "повтор Down ") {
+		return ev, false, nil
+	}
+	pid := 0
+	if n, p, cut := strings.Cut(name, " pid="); cut {
+		var err error
+		if pid, err = strconv.Atoi(p); err != nil {
+			return ev, false, fmt.Errorf("окно доверия %q: pid: %w", text, err)
+		}
+		name = n
+	}
+	return TrustEvent{Name: name, Dir: dir, Confirmed: confirmed, PID: pid}, true, nil
+}
+
+// trustRecovered — время строки решения о той же сессии после окна, или ноль. Окна разных папок одной сессии
+// относятся к одному подъёму. Повтор окна той же папки начинает новый подъём (28.10 проба: окно 10:04:35 без
+// подъёма, затем окно 10:36:10 и решение 10:37:08). SIGTERM тоже начинает новый подъём и оставляет предыдущее
+// окно неподнятым.
+func trustRecovered(after []trustLine, ev TrustEvent) time.Time {
+	for _, line := range after {
+		if line.trust == ev.Name && line.trustDir == ev.Dir {
+			break
+		}
+		if m := reRestart.FindStringSubmatch(line.text); m != nil && m[1] == ev.Name {
+			break
+		}
+		if m := reUp.FindStringSubmatch(line.text); m != nil && m[1] == ev.Name {
+			return line.at
+		}
+	}
+	return time.Time{}
+}
 
 // TrustEvents находит окна доверия; более поздняя строка решения о той же сессии (reUp) — она поднялась.
 func TrustEvents(r io.Reader) ([]TrustEvent, int, error) {
-	type entry struct {
-		at    time.Time
-		text  string
-		trust string // имя сессии, если строка — окно доверия
-	}
-	var lines []entry
+	var lines []trustLine
 	var events []TrustEvent
 	var at []int // строка каждого события в lines
 	bad := 0
@@ -158,47 +249,26 @@ func TrustEvents(r io.Reader) ([]TrustEvent, int, error) {
 			bad++
 			continue
 		}
-		lines = append(lines, entry{at: when, text: text})
-		name, body, ok := strings.Cut(text, ": ")
-		rest, left := strings.CutPrefix(body, trustLeft)
-		done, confirmed := strings.CutPrefix(body, trustDone)
-		if !ok || !left && !confirmed {
+		lines = append(lines, trustLine{at: when, text: text})
+		ev, isWindow, err := parseTrustWindow(text)
+		if err != nil {
+			bad++
 			continue
 		}
-		if confirmed {
-			rest = done
-		}
-		dir, _, _ := strings.Cut(rest, ": ")
-		if dir == "" {
+		if !isWindow {
 			continue
 		}
-		pid := 0
-		if n, p, ok := strings.Cut(name, " pid="); ok {
-			if pid, err = strconv.Atoi(p); err != nil {
-				bad++
-				continue
-			}
-			name = n
-		}
-		lines[len(lines)-1].trust = name
+		ev.At = when
+		lines[len(lines)-1].trust = ev.Name
+		lines[len(lines)-1].trustDir = ev.Dir
 		at = append(at, len(lines)-1)
-		events = append(events, TrustEvent{At: when, Name: name, Dir: dir, Confirmed: confirmed, PID: pid})
+		events = append(events, ev)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, bad, fmt.Errorf("журнал cl: %w", err)
 	}
-	// подъём — до следующего окна той же сессии: строка решения после него — уже о следующем подъёме (28.10 проба:
-	// окно 10:04:35 без подъёма, окно 10:36:10, строка решения 10:37:08)
 	for i := range events {
-		for _, line := range lines[at[i]+1:] {
-			if line.trust == events[i].Name {
-				break
-			}
-			if m := reUp.FindStringSubmatch(line.text); m != nil && m[1] == events[i].Name {
-				events[i].Recovered = line.at
-				break
-			}
-		}
+		events[i].Recovered = trustRecovered(lines[at[i]+1:], events[i])
 	}
 	return events, bad, nil
 }

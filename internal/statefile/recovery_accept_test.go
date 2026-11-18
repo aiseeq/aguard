@@ -118,8 +118,7 @@ func TestBigIntegersExactAccept(t *testing.T) {
 	}
 }
 
-// Цена прохода: чтение и сохранение большого состояния с журналом не разбирают все записи целиком. Счёт — выделенные
-// байты, а не время: от нагрузки машины не зависят.
+// Цена прохода: чтение и сохранение большого состояния с журналом не разбирают все записи целиком.
 func TestCycleAllocationAccept(t *testing.T) {
 	testutil.SkipBudgetUnderRace(t)
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -147,27 +146,34 @@ func TestCycleAllocationAccept(t *testing.T) {
 		t.Fatal(err)
 	}
 	const cycles = 30
+	// Marshal использует sync.Pool, который GC может очищать: готовим состояния вне замера.
+	next := make([][]byte, cycles)
+	for c := range cycles {
+		for i := range 3 {
+			st.Files[keys[(c*7+i)%len(keys)]].Offset += 1000
+		}
+		next[c], err = json.Marshal(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	for c := range cycles {
 		if _, err := Load(path); err != nil {
 			t.Fatal(err)
 		}
-		for i := range 3 {
-			st.Files[keys[(c*7+i)%len(keys)]].Offset += 1000
-		}
-		next, err := json.Marshal(st)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := Save(path, next); err != nil {
+		if err := Save(path, next[c]); err != nil {
 			t.Fatal(err)
 		}
 	}
 	runtime.ReadMemStats(&after)
 	perCycle := (after.TotalAlloc - before.TotalAlloc) / cycles
-	// Состояние ~0,5 МБ. Сырые карты RawMessage на уровне files укладываются; разбор каждой записи в any — нет.
-	if limit := uint64(16 * len(b)); perCycle > limit {
+	t.Logf("bytes/cycle=%d state=%d", perCycle, len(b))
+	// 50 замеров: 6 468 058–6 468 614 байт/цикл при состоянии 583 914 байт.
+	// Запас ~4,7%; предел обнаруживает рост выделений на цикл примерно на 10%.
+	// Сырые карты RawMessage на уровне files укладываются; разбор каждой записи в any — нет.
+	if limit := uint64(116 * len(b) / 10); perCycle > limit {
 		t.Fatalf("выделено на цикл %d байт, предел %d (состояние %d)", perCycle, limit, len(b))
 	}
 }

@@ -22,6 +22,7 @@ const fsIocFiemap = 0xC020660B
 const (
 	extentLast     = 0x0001
 	extentDelalloc = 0x0004 // ещё не записан: места на диске нет, адреса нет
+	extentEncoded  = 0x0008 // сжатый экстент: длина FIEMAP до сжатия
 	extentInline   = 0x0200 // данные в метаданных
 	extentShared   = 0x2000 // экстент делят reflink-копии или снимки
 )
@@ -52,43 +53,56 @@ type fiemapBuf struct {
 	Extents [extentBatch]fiemapExtent
 }
 
+func encodedExtent(flags uint32) bool { return flags&extentEncoded != 0 }
+
 // span — общий экстент: адрес на диске и длина (у сжатого — длина до сжатия).
-type span struct{ at, n uint64 }
+type span struct {
+	at, n   uint64
+	encoded bool
+}
 
 // errNoFiemap — файловая система не отдаёт экстенты: место — по st_blocks.
 var errNoFiemap = errors.New("FIEMAP не поддержан")
 
 // extents — место файла: своё (экстенты без флага shared, их никто не делит) и общие экстенты, дописанные в shared.
-func extents(path string, buf *fiemapBuf, shared []span) (int64, []span, error) {
+func extents(path string, buf *fiemapBuf, shared []span) (int64, int64, []span, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return 0, shared, fmt.Errorf("экстенты: %w", err)
+		return 0, 0, shared, fmt.Errorf("экстенты: %w", err)
 	}
 	defer f.Close()
 	var own int64
+	var encoded int64
 	start := uint64(0)
 	for {
 		buf.Head = fiemapHead{Start: start, Length: ^uint64(0), Count: extentBatch}
 		if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), fsIocFiemap, uintptr(unsafe.Pointer(buf))); e != 0 {
 			if e == syscall.EOPNOTSUPP || e == syscall.ENOTTY {
-				return 0, shared, errNoFiemap
+				return 0, 0, shared, errNoFiemap
 			}
-			return 0, shared, fmt.Errorf("экстенты %s: %w", path, e)
+			return 0, 0, shared, fmt.Errorf("экстенты %s: %w", path, e)
 		}
 		n := int(buf.Head.Mapped)
 		for i := range n {
 			x := &buf.Extents[i]
+			isEncoded := encodedExtent(x.Flags)
 			switch {
 			case x.Flags&extentDelalloc != 0 || x.Flags&extentInline != 0 || x.Physical == 0:
 				own += int64(x.Length)
+				if isEncoded {
+					encoded += int64(x.Length)
+				}
 			case x.Flags&extentShared != 0:
-				shared = append(shared, span{x.Physical, x.Length})
+				shared = append(shared, span{at: x.Physical, n: x.Length, encoded: isEncoded})
 			default:
 				own += int64(x.Length)
+				if isEncoded {
+					encoded += int64(x.Length)
+				}
 			}
 		}
 		if n < extentBatch || buf.Extents[n-1].Flags&extentLast != 0 {
-			return own, shared, nil
+			return own, encoded, shared, nil
 		}
 		start = buf.Extents[n-1].Logical + buf.Extents[n-1].Length
 	}
@@ -110,4 +124,15 @@ func spanBytes(s []span) int64 {
 		}
 	}
 	return total
+}
+
+// encodedSpanBytes — доля объединённых общих экстентов, чья длина FIEMAP дана до сжатия.
+func encodedSpanBytes(s []span) int64 {
+	encoded := make([]span, 0, len(s))
+	for _, x := range s {
+		if x.encoded {
+			encoded = append(encoded, x)
+		}
+	}
+	return spanBytes(encoded)
 }

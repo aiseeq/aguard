@@ -109,6 +109,9 @@ type Item struct {
 	WorkerCwd    string
 	WorkerJobID  string
 	WorkerLive   bool
+	Busy         bool
+	BusyCommand  string
+	BusyPid      int
 }
 
 // GBMin — текущий размер записи, умноженный на её возраст.

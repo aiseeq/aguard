@@ -1,0 +1,19 @@
+claude '--add-dir=/home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/.cache/work trees'
+[?2004hbash-5.3$ claude '--add-dir=/home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/.cache/work trees'
+[?2004l[Screen Reader Mode: on via env]
+7[r8[?25h[?2004h[?2031h[?1004h[<u[>5u[>4;2m[>0q[?u]7501;?[c[?2026$p[cPermission Required: Adding a new directory:
+/home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/.cache/work
+trees
+This session hasn't worked here before. Is this a directory you created or
+one you trust?
+Claude Code'll be able to read, edit, and execute files here. Its skills,
+commands, and agents load and can run commands, and so can the git settings
+of its repository. Your answer holds for this session. Starting Claude Code
+in this directory and trusting it there lasts, and covers its whole
+repository or everything below it.
+Security guide
+y. Yes, add it
+n. No, exit
+Enter y/n:
+Enter to confirm · Esc to cancel[12G[1A(B[?2004h[<u[>5u[>4;2m[?1006l[?1003l[?1002l[?1000l[?1004l[>4m[<u[?2031l[?2004l(B[?1016l[?1006l[?1003l[?1002l[?1000l[?7h[?25h7[r8]0;To go on without it, start again with the same flags but without --add-dir /home/aisee/.cache/claude-tmp/aguard-briefs/rv-adddir.j926/h2/.cache/work trees. Add --resume to pick up an earlier conversation.
+[?2004hbash-5.3$ 

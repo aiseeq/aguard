@@ -27,7 +27,7 @@ type Entry struct {
 	Time       time.Time
 	Session    string // полный id
 	Name       string // имя сессии
-	Project    string // cwd сессии, ~ вместо домашней папки
+	Project    string // папка проекта по cwd (для worktree — репозиторий), ~ вместо домашней папки
 	Scope      string // global или папка проекта (~/git/x)
 	Kind       string
 	Words      string // слова для поиска через пробел, строчными

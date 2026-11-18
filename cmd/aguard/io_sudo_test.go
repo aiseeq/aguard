@@ -420,7 +420,7 @@ func TestClosedRootCaseDoesNotWaitForJournal(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		close(release)
 		t.Fatal("closed did not schedule sudo enrichment")
 	}
@@ -442,7 +442,7 @@ func TestClosedRootCasePersistsSudoBeforeRoutingOwner(t *testing.T) {
 	select {
 	case apply := <-service.extra:
 		apply()
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		t.Fatal("sudo attribution did not return to the case loop")
 	}
 	if service.cases[0].Sudo == nil || service.cases[0].Sudo.Owner != "machine-master" {
@@ -453,7 +453,7 @@ func TestClosedRootCasePersistsSudoBeforeRoutingOwner(t *testing.T) {
 		if job.owner != "machine-master" {
 			t.Fatalf("ticket routed to %q, want machine-master", job.owner)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		t.Fatal("closed root case did not route a ticket to its agent owner")
 	}
 }
@@ -515,7 +515,7 @@ func TestClosedCasesRouteWithoutWaitingForRootLookup(t *testing.T) {
 	service.closed(first)
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		close(release)
 		t.Fatal("root lookup did not start")
 	}
@@ -529,7 +529,7 @@ func TestClosedCasesRouteWithoutWaitingForRootLookup(t *testing.T) {
 	select {
 	case apply := <-service.extra:
 		apply()
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		t.Fatal("root lookup result did not return to case loop")
 	}
 	firstLine := firstAt.Format("02.01 15:04:05")
@@ -563,7 +563,7 @@ func TestProbeTrimKeepsRouting(t *testing.T) {
 	service.closed(first)
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		t.Fatal("root lookup did not start")
 	}
 	service.kept(time.Now())
@@ -576,7 +576,7 @@ func TestProbeTrimKeepsRouting(t *testing.T) {
 	select {
 	case apply := <-service.extra:
 		apply()
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		t.Fatal("pending sudo lookup did not return")
 	}
 	if !strings.Contains(logs.String(), "session-c497.scope") {
@@ -646,7 +646,7 @@ func TestTrimDuringSudoLookupDoesNotAttachToDifferentCase(t *testing.T) {
 	service.closed(first)
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		t.Fatal("sudo search did not start")
 	}
 	service.kept(time.Now())
@@ -656,7 +656,7 @@ func TestTrimDuringSudoLookupDoesNotAttachToDifferentCase(t *testing.T) {
 	select {
 	case apply := <-service.extra:
 		apply()
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		t.Fatal("sudo result did not return after trim")
 	}
 	if len(service.cases) != 1 || service.cases[0].Culprits.Main != "other.service" || service.cases[0].Sudo != nil {
@@ -691,7 +691,7 @@ func TestTrimmedRootCaseStillLogsAndRoutesAfterSudoLookup(t *testing.T) {
 	service.closed(root)
 	select {
 	case <-started:
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		t.Fatal("sudo search did not start")
 	}
 	service.kept(time.Now().Add(400 * 24 * time.Hour))
@@ -703,7 +703,7 @@ func TestTrimmedRootCaseStillLogsAndRoutesAfterSudoLookup(t *testing.T) {
 	select {
 	case apply := <-service.extra:
 		apply()
-	case <-time.After(time.Second):
+	case <-time.After(ioSudoTestWait):
 		t.Fatal("sudo result did not return after trim")
 	}
 	service.letters.Wait()
@@ -1154,3 +1154,7 @@ func TestSudoSessionRootScopeDoesNotMatchUserSession(t *testing.T) {
 		t.Fatal("non-root session matched as root")
 	}
 }
+
+// ioSudoTestWait — срок ожидания события в тестах поиска sudo: событие обычно приходит сразу, срок ловит только
+// поломку; 1 с не хватало под нагрузкой машины (17.11 15:32, merge gate).
+const ioSudoTestWait = 30 * time.Second

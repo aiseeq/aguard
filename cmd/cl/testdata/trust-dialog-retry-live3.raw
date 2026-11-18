@@ -1,0 +1,40 @@
+env HOME='/var/tmp/w-641e27c69d/cl-adddir-trust-live4/home' PATH='/home/aisee/.local/bin:/home/aisee/bin:/usr/bin:/bin' '/var/tmp/w-641e27c69d/cl-adddir-trust-probe'
+]3008;start=5ce9c402-f456-46b4-9d03-e2a8ec864760;type=shell;machineid=4f10ded6cfea483bab1a7a685c7b5bf3;user=aisee;hostname=fedora;bootid=8ef9c8e2-da3a-4105-9157-d0979b13ae65;pid=979628;cwd=/var/tmp/w-641e27c69d/cl-adddir-trust-live4/p\[?2004h[01;32maisee@fedora[00m:[01;34m/var/tmp/w-641e27c69d/cl-adddir-trust-live4/p[00m$ env HOME='/var/tmp/w-641e27c69d/cl-adddir-trust-live4/home' PATH='/home/aisee/.local/bin:/home/aisee/bin:/usr/bin:/bin' '/var/tmp/w-641e27c69d/cl-adddir-trust-probe'
+[?2004l]3008;start=4b37e992-c32b-42a6-8e08-f1c4173c3e52;type=command;machineid=4f10ded6cfea483bab1a7a685c7b5bf3;user=aisee;hostname=fedora;bootid=8ef9c8e2-da3a-4105-9157-d0979b13ae65;pid=979628;cwd=/var/tmp/w-641e27c69d/cl-adddir-trust-live4/p\cl: нет файла /var/tmp/w-641e27c69d/cl-adddir-trust-live4/home/.config/systemd/user/agents.slice: вес CPU/IO будет 100, наравне с приложениями пользователя, вместо 40; установить: cp ~/git/aguard/cmd/cl/agents.slice ~/.config/systemd/user/ && systemctl --user daemon-reload
+7[r8[?25h[?25l[?2004h[?2031h[?1004h[<u[>5u[>4;2m
+────────────────────────────────────────────────────────────────────────────────
+[2GAdding[9Ga[11Gnew[15Gdirectory:
+[2G/var/tmp/w-641e27c69d/cl-adddir-trust-live4/home/.cache/worktrees
+[2GThis[7Gsession[15Ghasn't[22Gworked[29Ghere[34Gbefore.[42GIs[45Gthis[50Ga[52Gdirectory[62Gyou[66Gcreated[74Gor[77Gone
+[2Gyou[6Gtrust?
+[2GClaude[9GCode'll[17Gbe[20Gable[25Gto[28Gread,[34Gedit,[40Gand[44Gexecute[52Gfiles[58Ghere.[64GIts[68Gskills,
+[2Gcommands,[12Gand[16Gagents[23Gload[28Gand[32Gcan[36Grun[40Gcommands,[50Gand[54Gso[57Gcan[61Gthe[65Ggit[69Gsettings[78Gof
+[2Gits[6Grepository.[18GYour[23Ganswer[30Gholds[36Gfor[40Gthis[45Gsession.
+[2G]8;id=zaxmda;https://code.claude.com/docs/en/securitySecurity guide]8;;
+[4GNo,[8Gexit
+[4GYes,[9Gadd[13Git
+[2GEnter[8Gto[11Gconfirm[19G·[21GEsc[25Gto[28Gcancel
+[>0q[?u]7501;?[c[?2026$p[c[1C[3A❯
+
+
+[1C[3A[1D[3B[1C[3A [1C[1B❯
+
+[1C[2A[>4m[<u[?1004l[?2031l[?2004l[1D[2B[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[1A[2K[G[1A[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[1B[K[12A[?2004h[?2031h[?1004h[<u[>5u[>4;2m[?2026h
+────────────────────────────────────────────────────────────────────────────────
+[2GAdding[9Ga[11Gnew[15Gdirectory:
+[2G/var/tmp/w-641e27c69d/cl-adddir-trust-live4/home/.cache/claude-tmp
+[2GThis[7Gsession[15Ghasn't[22Gworked[29Ghere[34Gbefore.[42GIs[45Gthis[50Ga[52Gdirectory[62Gyou[66Gcreated[74Gor[77Gone
+[2Gyou[6Gtrust?
+[2GClaude[9GCode'll[17Gbe[20Gable[25Gto[28Gread,[34Gedit,[40Gand[44Gexecute[52Gfiles[58Ghere.[64GIts[68Gskills,
+[2Gcommands,[12Gand[16Gagents[23Gload[28Gand[32Gcan[36Grun[40Gcommands,[50Gand[54Gso[57Gcan[61Gthe[65Ggit[69Gsettings[78Gof
+[2Gits[6Grepository.[18GYour[23Ganswer[30Gholds[36Gfor[40Gthis[45Gsession.
+[2G]8;id=zaxmda;https://code.claude.com/docs/en/securitySecurity guide]8;;
+[4GNo,[8Gexit
+[4GYes,[9Gadd[13Git
+[2GEnter[8Gto[11Gconfirm[19G·[21GEsc[25Gto[28Gcancel
+[?2026l[>0q[c[?2026$p[c[2C[1Asc to exit · To[19Gadd it, press ↓[35Gto[38GYes,[43Gthen[48GEnter
+[1C[3A❯
+
+
+[1C[3A(B[?2004h[<u[>5u[>4;2m[?1006l[?1003l[?1002l[?1000l[1D[3B[?1004l[>4m[<u[?2031l[?2004l(B[?1016l[?1006l[?1003l[?1002l[?1000l[?7h[?25h7[r8]0;To go on without it, start again with the same flags but without --add-dir /var/tmp/w-641e27c69d/cl-adddir-trust-live4/home/.cache/claude-tmp. Add --resume to pick up an earlier conversation.
+]3008;end=4b37e992-c32b-42a6-8e08-f1c4173c3e52;exit=failure;status=1\]3008;start=5ce9c402-f456-46b4-9d03-e2a8ec864760;type=shell;machineid=4f10ded6cfea483bab1a7a685c7b5bf3;user=aisee;hostname=fedora;bootid=8ef9c8e2-da3a-4105-9157-d0979b13ae65;pid=979628;cwd=/var/tmp/w-641e27c69d/cl-adddir-trust-live4/p\[?2004h[01;32maisee@fedora[00m:[01;34m/var/tmp/w-641e27c69d/cl-adddir-trust-live4/p[00m$ 

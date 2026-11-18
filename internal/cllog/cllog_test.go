@@ -118,3 +118,105 @@ func TestTrustEvents(t *testing.T) {
 		t.Errorf("неподтверждённое окно выбора: %+v", e)
 	}
 }
+
+func TestTrustEventsTwoWindowsFromRestartLog(t *testing.T) {
+	log, err := os.ReadFile("testdata/machine-master-2026-11-17.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, bad, err := TrustEvents(strings.NewReader(string(log)))
+	if err != nil || bad != 0 || len(events) != 2 {
+		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
+	}
+	for _, event := range events {
+		if event.Name != "machine-master" || event.Recovered.Format("15:04:05") != "11:58:03" {
+			t.Errorf("окно не связано с подъёмом 11:58:03: %+v", event)
+		}
+	}
+}
+
+func TestTrustEventsWindowsAcrossSIGTERM(t *testing.T) {
+	const log = `2026-10-28T10:04:35+01:00 p: подтвердил доверие к /home/alice: Claude Code не сохраняет доверие к домашней папке
+2026-10-28T10:04:36+01:00 p: подтвердил доверие к /home/other: папка передана cl через --add-dir
+2026-10-28T10:05:00+01:00 p pid=42: SIGTERM, поднимаю --resume session на 2.1.312
+2026-10-28T10:36:10+01:00 p: подтвердил доверие к /home/alice: Claude Code не сохраняет доверие к домашней папке
+2026-10-28T10:36:11+01:00 p: подтвердил доверие к /home/other: папка передана cl через --add-dir
+2026-10-28T10:37:08+01:00 p pid=43 2.1.311→2.1.312 act: версия свежая
+`
+	events, bad, err := TrustEvents(strings.NewReader(log))
+	if err != nil || bad != 0 || len(events) != 4 {
+		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
+	}
+	for _, event := range events[:2] {
+		if !event.Recovered.IsZero() {
+			t.Errorf("старый подъём ошибочно восстановлен: %+v", event)
+		}
+	}
+	for _, event := range events[2:] {
+		if event.Recovered.Format("15:04:05") != "10:37:08" {
+			t.Errorf("окно нового подъёма не восстановлено: %+v", event)
+		}
+	}
+}
+
+func TestTrustEventsSIGTERMEndsOnlyItsSessionLift(t *testing.T) {
+	const log = `2026-10-28T10:00:00+01:00 m: подтвердил доверие к /a: папка передана cl через --add-dir
+2026-10-28T10:01:00+01:00 m pid=42: SIGTERM, поднимаю --resume session на 2.1.312
+2026-10-28T10:02:00+01:00 m: подтвердил доверие к /b: папка передана cl через --add-dir
+2026-10-28T10:03:00+01:00 m pid=43 2.1.311→2.1.312 act: версия свежая
+`
+	events, bad, err := TrustEvents(strings.NewReader(log))
+	if err != nil || bad != 0 || len(events) != 2 {
+		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
+	}
+	if !events[0].Recovered.IsZero() || events[1].Recovered.IsZero() {
+		t.Errorf("SIGTERM не разделил подъёмы: %+v", events)
+	}
+}
+
+func TestTrustEventsSIGTERMFromOtherSessionDoesNotEndLift(t *testing.T) {
+	const log = `2026-10-28T10:00:00+01:00 m: подтвердил доверие к /a: папка передана cl через --add-dir
+2026-10-28T10:01:00+01:00 m-2 pid=42: SIGTERM, поднимаю --resume other на 2.1.312
+2026-10-28T10:03:00+01:00 m pid=43 2.1.311→2.1.312 act: версия свежая
+`
+	events, bad, err := TrustEvents(strings.NewReader(log))
+	if err != nil || bad != 0 || len(events) != 1 || events[0].Recovered.IsZero() {
+		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
+	}
+}
+
+func TestTrustEventsRepeatedDirOnlyEndsSameSessionLift(t *testing.T) {
+	const log = `2026-10-28T10:00:00+01:00 m: подтвердил доверие к /same: папка передана cl через --add-dir
+2026-10-28T10:00:01+01:00 n: подтвердил доверие к /same: папка передана cl через --add-dir
+2026-10-28T10:01:00+01:00 m pid=42 2.1.311→2.1.312 act: версия свежая
+2026-10-28T10:02:00+01:00 n pid=43 2.1.311→2.1.312 act: версия свежая
+`
+	events, bad, err := TrustEvents(strings.NewReader(log))
+	if err != nil || bad != 0 || len(events) != 2 {
+		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
+	}
+	for _, event := range events {
+		if event.Recovered.IsZero() {
+			t.Errorf("окно %s не поднялось: %+v", event.Name, event)
+		}
+	}
+}
+
+func TestTrustEventsSelectionRetryIsNotEvent(t *testing.T) {
+	log := "2026-10-28T10:00:00+01:00 m: " + TrustSelectionRetry("/a", 1) + `
+2026-10-28T10:00:01+01:00 m: подтвердил доверие к /a: папка передана cl через --add-dir
+2026-10-28T10:01:00+01:00 m pid=42 2.1.311→2.1.312 act: версия свежая
+`
+	events, bad, err := TrustEvents(strings.NewReader(log))
+	if err != nil || bad != 0 || len(events) != 1 || events[0].Dir != "/a" || !events[0].Confirmed || events[0].Recovered.IsZero() {
+		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
+	}
+}
+
+func TestTrustEventsBadPIDCountsAndSkipsWindow(t *testing.T) {
+	log := "2026-10-28T10:00:00+01:00 m pid=x: " + TrustConfirmed("/a") + "\n"
+	events, bad, err := TrustEvents(strings.NewReader(log))
+	if err != nil || bad != 1 || len(events) != 0 {
+		t.Fatalf("события=%+v bad=%d err=%v", events, bad, err)
+	}
+}

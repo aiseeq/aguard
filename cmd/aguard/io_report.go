@@ -266,7 +266,7 @@ func (a *app) ioReport(ctx context.Context, path string, live bool, since, until
 	if err != nil {
 		return err
 	}
-	sudoStats := a.ioReportSudoStats(ctx, got.cases)
+	sudoStats := a.ioReportSudoStats(ctx, got.cases, since, until)
 	sum := iowatch.Summarize(iowatch.FilterCases(got.cases, who), since, until, minDur)
 	cover := iowatch.Cover(got.cover, got.source, since, until, time.Now().Add(-cfg.CasesKeep.D()))
 	sum.Coverage = &cover
@@ -280,7 +280,7 @@ func (a *app) ioReport(ctx context.Context, path string, live bool, since, until
 	if sudoStats.journalErrorCases > 0 {
 		fmt.Fprintf(a.out, "не сопоставлено из-за ошибки журнала: %d (первая ошибка: %s)\n", sudoStats.journalErrorCases, sudoStats.firstJournalError)
 	}
-	gui, guiErr := guiwatch.ReadReport(a.dir("gui"), since)
+	gui, guiErr := guiwatch.ReadReportWindow(a.dir("gui"), since, until)
 	if guiErr != nil {
 		return fmt.Errorf("прочитать отчёт gui: %w", guiErr)
 	}
@@ -296,10 +296,13 @@ type ioReportSudoStats struct {
 	firstJournalError string
 }
 
-func (a *app) ioReportSudoStats(ctx context.Context, cases []iowatch.Case) ioReportSudoStats {
+func (a *app) ioReportSudoStats(ctx context.Context, cases []iowatch.Case, since, until time.Time) ioReportSudoStats {
 	stats := ioReportSudoStats{}
 	cache := newSudoLookupCache()
 	for i := range cases {
+		if !iowatch.InWindow(cases[i].Start, since, until) {
+			continue
+		}
 		c := &cases[i]
 		err := a.sudoInfoWithTimeout(ctx, c, cache, false, sudoReportJournalTimeout)
 		if err != nil {

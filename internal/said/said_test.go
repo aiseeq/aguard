@@ -130,6 +130,64 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestWorktreeProject(t *testing.T) {
+	c := Default()
+	home := t.TempDir()
+	repo := filepath.Join(home, "main-repo")
+	wt := filepath.Join(home, "worktree")
+	nested := filepath.Join(wt, "inside", "folder")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+filepath.Join(repo, ".git", "worktrees", "branch")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	foreignGitDir := filepath.Join(wt, "nested", ".git")
+	if err := os.MkdirAll(foreignGitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	brokenNested := filepath.Join(wt, "broken-nested")
+	if err := os.Mkdir(brokenNested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(brokenNested, ".git"), []byte("not a gitdir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(home, "broken")
+	if err := os.Mkdir(broken, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(broken, ".git"), []byte("not a gitdir"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := filepath.Join(home, "ordinary")
+	if err := os.Mkdir(ordinary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, cwd, want string }{
+		{"worktree root", wt, repo},
+		{"nested worktree folder", nested, repo},
+		{"nested git directory", filepath.Join(wt, "nested"), filepath.Join(wt, "nested")},
+		{"nested malformed git file", brokenNested, brokenNested},
+		{"ordinary folder", ordinary, ordinary},
+		{"broken git file", broken, broken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := tilde(tc.want, home)
+			p := &Pending{Event: Event{At: time.Now(), Text: "правило", Cwd: tc.cwd, Session: "0123456789ab", Name: "x", Line: 1}}
+			input := Input(p, home, nil)
+			if !strings.Contains(input, "папка "+want) {
+				t.Errorf("заголовок не содержит папку %q: %s", want, input)
+			}
+			_, entries := c.Classify(context.Background(), fake(`{"items":[{"kind":"rule","quote":"правило","scope":"project","words":"тест"}]}`, nil),
+				p, home, nil, time.Now())
+			if len(entries) != 1 || entries[0].Project != want {
+				t.Errorf("project: got %+v, want %q", entries, want)
+			}
+		})
+	}
+}
+
 func TestAppendRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "said.tsv")
 	at := time.Date(2026, 10, 26, 14, 1, 33, 0, time.FixedZone("CET", 3600))
