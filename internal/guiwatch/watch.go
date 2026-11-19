@@ -216,6 +216,12 @@ type Watcher struct {
 	dirtySlices               map[string]bool
 	storageLoaded             bool
 	lastMaxBytesCheck         time.Time
+	storageMu                 sync.Mutex
+	storedSizes               map[string]int64
+	storedSizeTotal           int64
+	lastStoredSizeScan        time.Time
+	fileInfo                  func(os.DirEntry) (os.FileInfo, error)
+	fileStat                  func(string) (os.FileInfo, error)
 	OnTargets                 func(string, []string)
 	targetSummary             string
 	targetIdentity            string
@@ -1356,6 +1362,12 @@ func (w *Watcher) queueJournal(id string, start, end time.Time) {
 				if removeErr := os.Remove(tmp); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 					fmt.Fprintf(os.Stderr, "gui journal temp cleanup error for %s: %v\n", id, removeErr)
 				}
+				w.forgetStoredPath(tmp)
+			} else {
+				w.forgetStoredPath(tmp)
+				if err := w.trackStoredPath(path); err != nil {
+					fmt.Fprintf(os.Stderr, "gui journal size tracking error for %s: %v\n", id, err)
+				}
 			}
 
 			w.journalMu.Lock()
@@ -1848,6 +1860,9 @@ func (w *Watcher) load() (retErr error) {
 	sort.Slice(w.document.Slices, func(i, j int) bool { return w.document.Slices[i].Start.Before(w.document.Slices[j].Start) })
 	w.baseSuppressed = w.document.Suppressed
 	w.storageLoaded = true
+	if err := w.refreshStoredSizes(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -2157,7 +2172,10 @@ func (w *Watcher) saveSuppressed() error {
 	delta := max(w.document.Suppressed-w.baseSuppressed, 0)
 	w.document.Suppressed = disk + delta
 	if delta > 0 {
-		return writeSuppressed(w.Dir, w.document.Suppressed)
+		if err := writeSuppressed(w.Dir, w.document.Suppressed); err != nil {
+			return err
+		}
+		return w.trackStoredPath(suppressedPath(w.Dir))
 	}
 	return nil
 }
@@ -2179,6 +2197,9 @@ func (w *Watcher) saveDirtySlices(wholeFileExists bool) error {
 			return err
 		}
 		if err := writeJSONAtomic(slicePath(w.Dir, item.ID), item); err != nil {
+			return err
+		}
+		if err := w.trackStoredPath(slicePath(w.Dir, item.ID)); err != nil {
 			return err
 		}
 	}
@@ -2241,6 +2262,9 @@ func (w *Watcher) saveSleeps() error {
 		if err = os.WriteFile(p, b, privateFileMode); err != nil {
 			return fmt.Errorf("сохранить статистику сна: %w", err)
 		}
+		if err := w.trackStoredPath(p); err != nil {
+			return err
+		}
 	}
 	entries, err := os.ReadDir(w.Dir)
 	if err != nil {
@@ -2255,6 +2279,7 @@ func (w *Watcher) saveSleeps() error {
 				if err := os.Remove(filepath.Join(w.Dir, n)); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return fmt.Errorf("удалить старую статистику сна: %w", err)
 				}
+				w.forgetStoredPath(filepath.Join(w.Dir, n))
 			}
 		}
 	}
@@ -2264,6 +2289,14 @@ func (w *Watcher) prune() error {
 	now := w.now()
 	if err := w.pruneByKeep(now); err != nil {
 		return err
+	}
+	w.storageMu.Lock()
+	needsScan := w.storedSizes == nil || w.lastStoredSizeScan.IsZero() || !now.Before(w.lastStoredSizeScan.Add(time.Hour))
+	w.storageMu.Unlock()
+	if needsScan {
+		if err := w.refreshStoredSizes(); err != nil {
+			return err
+		}
 	}
 	if !w.lastMaxBytesCheck.IsZero() && now.Before(w.lastMaxBytesCheck.Add(time.Minute)) {
 		return nil
@@ -2286,6 +2319,8 @@ func (w *Watcher) pruneByKeep(now time.Time) error {
 			if err := os.Remove(filepath.Join(w.Dir, "journal-"+item.ID+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("удалить journal среза %s: %w", item.ID, err)
 			}
+			w.forgetStoredPath(slicePath(w.Dir, item.ID))
+			w.forgetStoredPath(filepath.Join(w.Dir, "journal-"+item.ID+".json"))
 			delete(w.dirtySlices, item.ID)
 			continue
 		}
@@ -2297,24 +2332,38 @@ func (w *Watcher) pruneByKeep(now time.Time) error {
 }
 
 func (w *Watcher) pruneByMaxBytes() error {
-	size, files, err := w.storedFileSizes()
-	if err != nil {
+	w.storageMu.Lock()
+	needsScan := w.storedSizes == nil
+	w.storageMu.Unlock()
+	if needsScan {
+		if err := w.refreshStoredSizes(); err != nil {
+			return err
+		}
+	}
+	size, files := w.cachedStoredSizes()
+	if size <= w.Config.MaxBytes {
+		return nil
+	}
+	// Удаление допустимо только после сверки с диском: файлы мог изменить другой процесс.
+	if err := w.refreshStoredSizes(); err != nil {
 		return err
 	}
+	size, files = w.cachedStoredSizes()
 	return w.removeOldestUntilWithinLimit(size, files)
 }
 
-func (w *Watcher) storedFileSizes() (int64, map[string]int64, error) {
+func (w *Watcher) scanStoredFiles() (int64, map[string]int64, error) {
 	entries, err := os.ReadDir(w.Dir)
 	if err != nil {
 		return 0, nil, fmt.Errorf("прочитать каталог gui для очистки: %w", err)
 	}
 	size := int64(0)
+	all := make(map[string]int64)
 	for _, ent := range entries {
 		if ent.Name() == "slices.json" {
 			continue
 		}
-		info, err := ent.Info()
+		info, err := w.storedEntryInfo(ent)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -2323,15 +2372,15 @@ func (w *Watcher) storedFileSizes() (int64, map[string]int64, error) {
 		}
 		if info.Mode().IsRegular() {
 			size += info.Size()
+			all[filepath.Join(w.Dir, ent.Name())] = info.Size()
 		}
 	}
 	entries, err = os.ReadDir(filepath.Join(w.Dir, "slices"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return 0, nil, fmt.Errorf("прочитать каталог файлов срезов: %w", err)
 	}
-	files := make(map[string]int64, len(entries))
 	for _, ent := range entries {
-		info, err := ent.Info()
+		info, err := w.storedEntryInfo(ent)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -2339,22 +2388,98 @@ func (w *Watcher) storedFileSizes() (int64, map[string]int64, error) {
 			return 0, nil, fmt.Errorf("получить размер slices/%s: %w", ent.Name(), err)
 		}
 		if info.Mode().IsRegular() {
-			files[strings.TrimSuffix(ent.Name(), ".json")] = info.Size()
 			size += info.Size()
+			all[filepath.Join(w.Dir, "slices", ent.Name())] = info.Size()
 		}
 	}
-	return size, files, nil
+	return size, all, nil
+}
+
+func (w *Watcher) storedEntryInfo(ent os.DirEntry) (os.FileInfo, error) {
+	if w.fileInfo != nil {
+		return w.fileInfo(ent)
+	}
+	return ent.Info()
+}
+
+func (w *Watcher) cachedStoredSizes() (int64, map[string]int64) {
+	w.storageMu.Lock()
+	defer w.storageMu.Unlock()
+	files := make(map[string]int64)
+	for path, n := range w.storedSizes {
+		if id, ok := storedSliceID(w.Dir, path); ok {
+			files[id] = n
+		}
+	}
+	return w.storedSizeTotal, files
+}
+
+func storedSliceID(dir, path string) (string, bool) {
+	if !strings.HasPrefix(path, filepath.Join(dir, "slices")+string(os.PathSeparator)) || !strings.HasSuffix(path, ".json") {
+		return "", false
+	}
+	return strings.TrimSuffix(filepath.Base(path), ".json"), true
+}
+
+func (w *Watcher) refreshStoredSizes() error {
+	w.storageMu.Lock()
+	defer w.storageMu.Unlock()
+	total, files, err := w.scanStoredFiles()
+	if err != nil {
+		return err
+	}
+	w.storedSizes, w.storedSizeTotal, w.lastStoredSizeScan = files, total, w.now()
+	return nil
+}
+
+func (w *Watcher) trackStoredPath(path string) error {
+	stat := w.fileStat
+	if stat == nil {
+		stat = os.Stat
+	}
+	info, err := stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		w.forgetStoredPath(path)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("получить размер %s после записи: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	w.storageMu.Lock()
+	if w.storedSizes == nil {
+		w.storedSizes = make(map[string]int64)
+	}
+	if old, ok := w.storedSizes[path]; ok {
+		w.storedSizeTotal -= old
+	}
+	w.storedSizes[path] = info.Size()
+	w.storedSizeTotal += info.Size()
+	w.storageMu.Unlock()
+	return nil
+}
+
+func (w *Watcher) forgetStoredPath(path string) {
+	w.storageMu.Lock()
+	if old, ok := w.storedSizes[path]; ok {
+		w.storedSizeTotal -= old
+		delete(w.storedSizes, path)
+	}
+	w.storageMu.Unlock()
 }
 
 func (w *Watcher) removeOldestUntilWithinLimit(size int64, files map[string]int64) error {
-	if size <= w.Config.MaxBytes { // в пределах: файлы срезов не читаем (обход раз в минуту, история — мегабайты)
+	if size <= w.Config.MaxBytes { // в пределах: не читаем содержимое срезов; его читаем только при переполнении.
 		return nil
 	}
 	candidates, err := w.oldestSliceFiles(files)
 	if err != nil {
 		return err
 	}
-	for size > w.Config.MaxBytes && len(candidates) > 0 {
+	pruneTarget := w.Config.MaxBytes - w.Config.MaxBytes/10
+	for size > pruneTarget && len(candidates) > 0 {
 		item := candidates[0]
 		candidates = candidates[1:]
 		if n, ok := files[item.id]; ok {
@@ -2368,10 +2493,12 @@ func (w *Watcher) removeOldestUntilWithinLimit(size int64, files map[string]int6
 		if err := removeSliceFiles(w.Dir, item.id); err != nil {
 			return err
 		}
+		w.forgetStoredPath(slicePath(w.Dir, item.id))
 		delete(w.dirtySlices, item.id)
 		if err := os.Remove(journal); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("удалить journal %s: %w", journal, err)
 		}
+		w.forgetStoredPath(journal)
 		kept := w.document.Slices[:0]
 		for i := range w.document.Slices {
 			if w.document.Slices[i].ID != item.id {

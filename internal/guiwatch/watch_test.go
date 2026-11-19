@@ -89,6 +89,20 @@ func stubJournalctl(t *testing.T) {
 	t.Setenv("PATH", bin)
 }
 
+func storedFileSizesForTest(w *Watcher) (int64, map[string]int64, error) {
+	total, all, err := w.scanStoredFiles()
+	if err != nil {
+		return 0, nil, err
+	}
+	files := make(map[string]int64)
+	for path, size := range all {
+		if id, ok := storedSliceID(w.Dir, path); ok {
+			files[id] = size
+		}
+	}
+	return total, files, nil
+}
+
 func rewrite(t *testing.T, path, value string) {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0600)
@@ -821,7 +835,7 @@ func TestMaxBytesRemovesOldestSliceFromOtherWatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.document.Slices = append(first.document.Slices, second.document.Slices[0])
-	total, files, err := first.storedFileSizes()
+	total, files, err := storedFileSizesForTest(first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -830,7 +844,8 @@ func TestMaxBytesRemovesOldestSliceFromOtherWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first.Config.MaxBytes = total - oldSize - info.Size()
+	remaining := total - oldSize - info.Size()
+	first.Config.MaxBytes = (remaining*10 + 8) / 9
 	first.lastMaxBytesCheck = time.Time{}
 	if err := first.prune(); err != nil {
 		t.Fatal(err)
@@ -989,6 +1004,565 @@ func TestPruneChecksMaxBytesAtMostOncePerMinute(t *testing.T) {
 	}
 	if !w.lastMaxBytesCheck.Equal(now) {
 		t.Fatalf("max_bytes check not repeated after a minute: %s", w.lastMaxBytesCheck)
+	}
+}
+
+func TestPruneUsesCachedSizesAndScansAtMostHourly(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	w := New("/proc", dir, Default(), nil)
+	w.now = func() time.Time { return at }
+	write(t, filepath.Join(dir, "journal-one.json"), "journal")
+	write(t, slicePath(dir, "one"), `{}`)
+	infoCalls := 0
+	w.fileInfo = func(ent os.DirEntry) (os.FileInfo, error) {
+		infoCalls++
+		return ent.Info()
+	}
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	perScan := infoCalls
+	if perScan == 0 {
+		t.Fatal("initial prune did not scan files")
+	}
+	for minute := 1; minute < 60; minute++ {
+		w.now = func() time.Time { return at.Add(time.Duration(minute) * time.Minute) }
+		if err := w.prune(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if infoCalls != perScan {
+		t.Fatalf("Info calls before hourly scan=%d, want %d", infoCalls, perScan)
+	}
+	w.now = func() time.Time { return at.Add(time.Hour) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if infoCalls != perScan*2 {
+		t.Fatalf("Info calls in one hour=%d, want %d (two scans of %d entries)", infoCalls, perScan*2, perScan)
+	}
+}
+
+func TestPruneHourlyScanReconcilesExternalFileChanges(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	w := New("/proc", dir, Default(), nil)
+	w.now = func() time.Time { return at }
+	write(t, filepath.Join(dir, "journal-external.json"), strings.Repeat("a", 10))
+	write(t, slicePath(dir, "external"), strings.Repeat("b", 20))
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "journal-external.json")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, slicePath(dir, "external"), strings.Repeat("c", 35))
+	w.now = func() time.Time { return at.Add(time.Hour) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	total, _, err := storedFileSizesForTest(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.storageMu.Lock()
+	cached := w.storedSizeTotal
+	w.storageMu.Unlock()
+	if cached != total {
+		t.Fatalf("cached external size=%d, scanned size=%d", cached, total)
+	}
+	if _, ok := w.storedSizes[filepath.Join(dir, "journal-external.json")]; ok {
+		t.Fatal("externally removed journal remains in size cache")
+	}
+}
+
+func TestMaxBytesTracksNewSliceWrittenBeforePrune(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	w := New("/proc", dir, Default(), nil)
+	w.now = func() time.Time { return at }
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	w.document.Slices = []Slice{{ID: "oversized", Target: "v", Kind: "D", Start: at, End: at, Errors: []string{strings.Repeat("x", 500)}}}
+	w.Config.MaxBytes = 100
+	if err := w.save(); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 0 {
+		t.Fatalf("new oversized slice retained: %#v", w.document.Slices)
+	}
+	if _, err := os.Stat(slicePath(dir, "oversized")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized slice file exists: %v", err)
+	}
+}
+
+func TestMaxBytesRefreshesSizesBeforeDeletingSlice(t *testing.T) {
+	_, dir, _, at := fixture(t)
+	w := New("/proc", dir, Default(), nil)
+	w.now = func() time.Time { return at }
+	w.document.Slices = []Slice{{ID: "large", Target: "v", Kind: "D", Start: at, End: at}}
+	write(t, slicePath(dir, "large"), strings.Repeat("x", 500))
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	// Внешнее удаление после обхода не должно привести к удалению по завышенному счёту.
+	if err := os.Remove(slicePath(dir, "large")); err != nil {
+		t.Fatal(err)
+	}
+	w.Config.MaxBytes = 100
+	if err := w.pruneByMaxBytes(); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 1 {
+		t.Fatalf("slice pruned using stale size after external removal: %#v", w.document.Slices)
+	}
+}
+
+func pruneStorageFixture(t *testing.T, at time.Time) (*Watcher, Slice) {
+	t.Helper()
+	_, dir, _, _ := fixture(t)
+	if err := os.MkdirAll(filepath.Join(dir, "slices"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	w := New("/proc", dir, Default(), nil)
+	w.now = func() time.Time { return at }
+	item := Slice{ID: "candidate", Target: "v", Kind: "D", Start: at.Add(-time.Minute), End: at, Errors: []string{strings.Repeat("s", 200)}}
+	b, err := json.MarshalIndent(item, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, slicePath(dir, item.ID), string(b))
+	w.document.Slices = []Slice{item}
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	w.lastMaxBytesCheck = at
+	return w, item
+}
+
+func TestJournalOverwriteUpdatesSizeAndPrunes(t *testing.T) {
+	at := time.Now()
+	w, item := pruneStorageFixture(t, at)
+	journal := filepath.Join(w.Dir, "journal-"+item.ID+".json")
+	write(t, journal, "[]")
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	initial, _, _ := storedFileSizesForTest(w)
+	w.Config.MaxBytes = initial + 100
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "journalctl"), []byte("#!/bin/sh\nprintf '%0400d' 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	w.JournalDirError = "test fixture"
+	w.queueJournal(item.ID, at, at.Add(time.Second))
+	w.journalWG.Wait()
+	total, _, err := storedFileSizesForTest(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.storageMu.Lock()
+	cached := w.storedSizeTotal
+	w.storageMu.Unlock()
+	if cached != total || cached <= w.Config.MaxBytes {
+		t.Fatalf("overwritten journal cached size=%d, disk size=%d, cap=%d", cached, total, w.Config.MaxBytes)
+	}
+	w.now = func() time.Time { return at.Add(time.Minute) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 0 {
+		t.Fatalf("slice not pruned after journal overwrite grew beyond cap: %#v", w.document.Slices)
+	}
+}
+
+func TestGrowingTrackedFileReplacesOldSize(t *testing.T) {
+	at := time.Now()
+	w, _ := pruneStorageFixture(t, at)
+	path := filepath.Join(w.Dir, "other.log")
+	write(t, path, strings.Repeat("a", 10))
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	oldTotal := w.storedSizeTotal
+	write(t, path, strings.Repeat("b", 80))
+	if err := w.trackStoredPath(path); err != nil {
+		t.Fatal(err)
+	}
+	total, _, err := storedFileSizesForTest(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.storageMu.Lock()
+	cached := w.storedSizeTotal
+	w.storageMu.Unlock()
+	if cached != total || cached != oldTotal-10+80 {
+		t.Fatalf("replacement size cached=%d, disk=%d, want %d", cached, total, oldTotal-10+80)
+	}
+	w.Config.MaxBytes = total - 1
+	w.now = func() time.Time { return at.Add(time.Minute) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 0 {
+		t.Fatalf("slice not pruned after tracked file growth: %#v", w.document.Slices)
+	}
+}
+
+func TestSaveSleepsTracksGrowthAndPrunes(t *testing.T) {
+	at := time.Now()
+	w, _ := pruneStorageFixture(t, at)
+	date := at.Format("2006-01-02")
+	path := filepath.Join(w.Dir, "sleeps-"+date+".json")
+	write(t, path, "[]")
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	w.sleepStats["v|wchan"] = &SleepStat{Date: date, Target: "v", Wchan: strings.Repeat("sleep", 30)}
+	if err := w.saveSleeps(); err != nil {
+		t.Fatal(err)
+	}
+	total, _, err := storedFileSizesForTest(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.storageMu.Lock()
+	cached := w.storedSizeTotal
+	w.storageMu.Unlock()
+	if cached != total {
+		t.Fatalf("sleeps size cached=%d, disk=%d", cached, total)
+	}
+	w.Config.MaxBytes = total - 1
+	w.now = func() time.Time { return at.Add(time.Minute) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 0 {
+		t.Fatalf("slice not pruned after sleeps file growth: %#v", w.document.Slices)
+	}
+}
+
+func TestPruneForgetsRemovedSliceAndJournalSizes(t *testing.T) {
+	at := time.Now()
+	w, item := pruneStorageFixture(t, at)
+	journal := filepath.Join(w.Dir, "journal-"+item.ID+".json")
+	write(t, journal, strings.Repeat("j", 100))
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	w.Config.MaxBytes = w.storedSizeTotal - 1
+	w.now = func() time.Time { return at.Add(time.Minute) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	w.storageMu.Lock()
+	defer w.storageMu.Unlock()
+	for _, path := range []string{slicePath(w.Dir, item.ID), journal} {
+		if _, ok := w.storedSizes[path]; ok {
+			t.Errorf("removed path remains in size cache: %s", path)
+		}
+	}
+}
+
+func TestPruneByKeepForgetsRemovedSliceAndJournalSizes(t *testing.T) {
+	at := time.Now()
+	w, item := pruneStorageFixture(t, at)
+	item.End = at.Add(-w.Config.Keep.D() - time.Minute)
+	w.document.Slices[0] = item
+	write(t, slicePath(w.Dir, item.ID), "{}")
+	journal := filepath.Join(w.Dir, "journal-"+item.ID+".json")
+	write(t, journal, "[]")
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.pruneByKeep(at); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.document.Slices) != 0 {
+		t.Fatalf("expired slice retained: %#v", w.document.Slices)
+	}
+	w.storageMu.Lock()
+	defer w.storageMu.Unlock()
+	for _, path := range []string{slicePath(w.Dir, item.ID), journal} {
+		if _, ok := w.storedSizes[path]; ok {
+			t.Errorf("expired path remains in size cache: %s", path)
+		}
+	}
+}
+
+func TestStoredSizeScanIndexesTopLevelFiles(t *testing.T) {
+	at := time.Now()
+	w, _ := pruneStorageFixture(t, at)
+	path := filepath.Join(w.Dir, "state.log")
+	write(t, path, "old")
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := w.storedSizes[path]; !ok {
+		t.Fatalf("top-level regular file %s missing from stored-size map", path)
+	}
+	write(t, path, "longer replacement")
+	if err := w.trackStoredPath(path); err != nil {
+		t.Fatal(err)
+	}
+	total, _, err := storedFileSizesForTest(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached, _ := w.cachedStoredSizes()
+	if cached != total {
+		t.Fatalf("tracked replacement total=%d, scanned total=%d", cached, total)
+	}
+}
+
+func TestStoredSizeScanSkipsFileVanishedBeforeInfo(t *testing.T) {
+	at := time.Now()
+	w, item := pruneStorageFixture(t, at)
+	w.fileInfo = func(ent os.DirEntry) (os.FileInfo, error) {
+		if ent.Name() == item.ID+".json" {
+			return nil, os.ErrNotExist
+		}
+		return ent.Info()
+	}
+	total, files, err := storedFileSizesForTest(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(files) != 0 {
+		t.Fatalf("vanished file counted: total=%d files=%v", total, files)
+	}
+}
+
+func TestLoadInitializesStoredSizeCache(t *testing.T) {
+	at := time.Now()
+	w, _ := pruneStorageFixture(t, at)
+	infoCalls := 0
+	w.fileInfo = func(ent os.DirEntry) (os.FileInfo, error) {
+		infoCalls++
+		return ent.Info()
+	}
+	if err := w.load(); err != nil {
+		t.Fatal(err)
+	}
+	if infoCalls == 0 || w.storedSizes == nil || !w.lastStoredSizeScan.Equal(at) {
+		t.Fatalf("load did not prime stored sizes: infos=%d scan=%s map=%v", infoCalls, w.lastStoredSizeScan, w.storedSizes)
+	}
+}
+
+func TestTrackStoredPathIgnoresFileVanishingAfterWrite(t *testing.T) {
+	at := time.Now()
+	w, item := pruneStorageFixture(t, at)
+	path := slicePath(w.Dir, item.ID)
+	w.fileStat = func(got string) (os.FileInfo, error) {
+		if got == path {
+			_ = os.Remove(got)
+			return nil, os.ErrNotExist
+		}
+		return os.Stat(got)
+	}
+	write(t, path, "rewritten, then removed")
+	if err := w.trackStoredPath(path); err != nil {
+		t.Fatalf("vanished path tracking error: %v", err)
+	}
+	w.storageMu.Lock()
+	_, tracked := w.storedSizes[path]
+	w.storageMu.Unlock()
+	if tracked {
+		t.Fatalf("vanished path remains in size cache: %s", path)
+	}
+}
+
+func TestSaveAndWatchIgnoreFileVanishingAfterWrite(t *testing.T) {
+	t.Run("save", func(t *testing.T) {
+		at := time.Now()
+		w, item := pruneStorageFixture(t, at)
+		item.Errors = append(item.Errors, "save update")
+		w.document.Slices[0] = item
+		w.markSliceDirty(item.ID)
+		vanishOnStat := func(path string) (os.FileInfo, error) {
+			if path == slicePath(w.Dir, item.ID) {
+				_ = os.Remove(path)
+				return nil, os.ErrNotExist
+			}
+			return os.Stat(path)
+		}
+		w.fileStat = vanishOnStat
+		if err := w.save(); err != nil {
+			t.Fatalf("save failed after written file vanished: %v", err)
+		}
+		w.storageMu.Lock()
+		_, tracked := w.storedSizes[slicePath(w.Dir, item.ID)]
+		w.storageMu.Unlock()
+		if tracked {
+			t.Fatal("save retained the vanished path in its size cache")
+		}
+	})
+
+	t.Run("Watch", func(t *testing.T) {
+		at := time.Now()
+		w, item := pruneStorageFixture(t, at)
+		w.fileStat = func(path string) (os.FileInfo, error) {
+			if path == slicePath(w.Dir, item.ID) {
+				_ = os.Remove(path)
+				return nil, os.ErrNotExist
+			}
+			return os.Stat(path)
+		}
+		w.newTicker = func(time.Duration) watchTick {
+			item.Errors = append(item.Errors, "watch update")
+			w.document.Slices[0] = item
+			w.markSliceDirty(item.ID)
+			return watchTick{stop: func() {}}
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := w.Watch(ctx); err != nil {
+			t.Fatalf("Watch failed after written file vanished: %v", err)
+		}
+		w.storageMu.Lock()
+		_, tracked := w.storedSizes[slicePath(w.Dir, item.ID)]
+		w.storageMu.Unlock()
+		if tracked {
+			t.Fatal("Watch retained the vanished path in its size cache")
+		}
+	})
+}
+
+func TestPruneKeepsExpiredCleanupWhenHourlyScanFails(t *testing.T) {
+	at := time.Now()
+	w, expired := pruneStorageFixture(t, at)
+	expired.End = at.Add(-w.Config.Keep.D() - time.Minute)
+	w.document.Slices[0] = expired
+	write(t, slicePath(w.Dir, expired.ID), "{}")
+	write(t, slicePath(w.Dir, "unexpired"), "{}")
+	w.document.Slices = append(w.document.Slices, Slice{ID: "unexpired", Start: at, End: at})
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	w.fileInfo = func(ent os.DirEntry) (os.FileInfo, error) {
+		if ent.Name() == "unexpired.json" {
+			return nil, errors.New("injected Info failure")
+		}
+		return ent.Info()
+	}
+	w.now = func() time.Time { return at.Add(time.Hour) }
+	if err := w.prune(); err == nil {
+		t.Fatal("expected hourly scan error")
+	}
+	if len(w.document.Slices) != 1 || w.document.Slices[0].ID != "unexpired" {
+		t.Fatalf("expired slice was not removed before scan failure: %#v", w.document.Slices)
+	}
+	if _, err := os.Stat(slicePath(w.Dir, expired.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired file remains after scan error: %v", err)
+	}
+}
+
+func hysteresisFixture(t *testing.T, n int) (*Watcher, time.Time) {
+	t.Helper()
+	_, dir, _, at := fixture(t)
+	if err := os.MkdirAll(filepath.Join(dir, "slices"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	w := New("/proc", dir, Default(), nil)
+	w.now = func() time.Time { return at }
+	items := make([]Slice, 0, n+1)
+	tiny := Slice{ID: "tiny", Target: "v", Kind: "D", Start: at.Add(-time.Hour), End: at.Add(-time.Hour)}
+	items = append(items, tiny)
+	for i := range n {
+		items = append(items, Slice{ID: fmt.Sprintf("large-%03d", i), Target: "v", Kind: "D", Start: at.Add(time.Duration(i) * time.Minute), End: at.Add(time.Duration(i) * time.Minute), Errors: []string{strings.Repeat("x", 1000)}})
+	}
+	for _, item := range items {
+		b, err := json.MarshalIndent(item, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(t, slicePath(dir, item.ID), string(b))
+	}
+	w.document.Slices = items
+	if err := w.refreshStoredSizes(); err != nil {
+		t.Fatal(err)
+	}
+	w.lastMaxBytesCheck = at
+	return w, at
+}
+
+func TestMaxBytesPruneLeavesRoomBelowLimit(t *testing.T) {
+	w, at := hysteresisFixture(t, 40)
+	total, _, err := storedFileSizesForTest(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Config.MaxBytes = total - 1
+	infoCalls := 0
+	w.fileInfo = func(ent os.DirEntry) (os.FileInfo, error) {
+		infoCalls++
+		return ent.Info()
+	}
+	w.now = func() time.Time { return at.Add(time.Minute) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if w.storedSizeTotal > w.Config.MaxBytes-w.Config.MaxBytes/10 {
+		t.Fatalf("prune left %d bytes above hysteresis target %d", w.storedSizeTotal, w.Config.MaxBytes-w.Config.MaxBytes/10)
+	}
+	if w.storedSizeTotal <= w.Config.MaxBytes*80/100 {
+		t.Fatalf("fixture did not leave a near-limit history after prune: %d/%d", w.storedSizeTotal, w.Config.MaxBytes)
+	}
+	sizeAfterClean := w.storedSizeTotal
+	callsAfterPrune := infoCalls
+	remaining := len(w.document.Slices)
+	for i := range 5 {
+		id := fmt.Sprintf("recent-%02d", i)
+		item := Slice{ID: id, Target: "v", Kind: "D", Start: at.Add(time.Hour + time.Duration(i)*time.Minute), End: at.Add(time.Hour), Errors: []string{strings.Repeat("y", 300)}}
+		w.document.Slices = append(w.document.Slices, item)
+		w.markSliceDirty(id)
+		w.now = func() time.Time { return at.Add(time.Duration(i+2) * time.Minute) }
+		if err := w.save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(w.document.Slices) != remaining+5 {
+		t.Fatalf("slices removed before reaching cap: got %d want %d", len(w.document.Slices), remaining+5)
+	}
+	if growth := w.storedSizeTotal - sizeAfterClean; growth <= 0 || growth*10 >= w.Config.MaxBytes {
+		t.Fatalf("test growth %d must be positive and below 10%% of cap %d", growth, w.Config.MaxBytes)
+	}
+	if infoCalls != callsAfterPrune {
+		t.Fatalf("scan repeated after prune with reserve: before=%d after=%d", callsAfterPrune, infoCalls)
+	}
+}
+
+func TestMaxBytesMinuteCheckDoesNotScanBetween90And100Percent(t *testing.T) {
+	at := time.Now()
+	w, _ := pruneStorageFixture(t, at)
+	total, _, err := storedFileSizesForTest(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Config.MaxBytes = total + total/20
+	if total*100 < w.Config.MaxBytes*90 || total >= w.Config.MaxBytes {
+		t.Fatalf("fixture usage %d/%d is not between 90%% and 100%%", total, w.Config.MaxBytes)
+	}
+	infoCalls := 0
+	w.fileInfo = func(ent os.DirEntry) (os.FileInfo, error) {
+		infoCalls++
+		return ent.Info()
+	}
+	w.now = func() time.Time { return at.Add(time.Minute) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if infoCalls != 0 {
+		t.Fatalf("minute check scanned at %d/%d bytes (between 90%% and 100%%)", total, w.Config.MaxBytes)
+	}
+	if len(w.document.Slices) != 1 {
+		t.Fatalf("minute check deleted below-limit history: %d slices", len(w.document.Slices))
 	}
 }
 
