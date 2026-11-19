@@ -196,6 +196,9 @@ type TicketState struct {
 type TicketBatch struct {
 	Class, Owner string
 	Recs         []Record
+	// Settled — stale без изменений, разобранные в закрытом прежнем тикете (Fresh): в новом тикете отдельным списком,
+	// чтобы следующий повтор нашёл их и в нём, а не только в самом первом тикете класса.
+	Settled []Record
 }
 
 func ticketKey(class, owner string) string { return class + " " + owner }
@@ -324,6 +327,12 @@ func (b *TicketBatch) Text(home, prev, redirect string) string {
 	for i := range b.Recs {
 		fmt.Fprintf(&s, "- %s\n", b.Recs[i].What(home))
 	}
+	if len(b.Settled) > 0 {
+		fmt.Fprintf(&s, "\nБез изменений с закрытия %s — разобраны там, не находки (%d):\n", prev, len(b.Settled))
+		for i := range b.Settled {
+			fmt.Fprintf(&s, "- %s\n", b.Settled[i].What(home))
+		}
+	}
 	s.WriteString("\nПодробнее: aguard disk report -since 168h.\n")
 	s.WriteString("\n## Приёмка\nКаждая находка разобрана: убрана, нужна (с доводом в журнале) или уборка хозяина исправлена; " + RepeatOpensNew + "\n")
 	return s.String()
@@ -341,20 +350,21 @@ func (b *TicketBatch) Note(home string) string {
 	return s.String()
 }
 
-// Fresh — находки, ещё не разобранные в закрытом прежнем тикете класса (closed — время его закрытия, body — текст
-// с журналом): запись, названная в нём, без изменений после закрытия (Since раньше closed) — разобрана, у stale это
-// «оставляем» с доводом, и сутки спустя она не даёт нового тикета. Другая запись, изменение или рост после закрытия —
-// новые. dropped — пути отсеянных.
+// Fresh — находки, ещё не разобранные в закрытом прежнем тикете класса (closed — время его закрытия, body — текст до
+// строки закрытия): stale, названная в нём и не менявшаяся после закрытия (Since — последнее изменение — раньше
+// closed), разобрана — у stale это «оставляем» с доводом, и сутки спустя она не даёт нового тикета; она уходит в
+// Settled. Другая запись и изменение после закрытия — новые. grew и trace не отсеиваются: их Since — начало окна роста
+// и рождение следа, рост после закрытия по нему не отличить. dropped — пути отсеянных.
 func (b *TicketBatch) Fresh(home string, closed time.Time, body string) (TicketBatch, []string) {
 	out := TicketBatch{Class: b.Class, Owner: b.Owner}
 	var dropped []string
 	for i := range b.Recs {
 		r := &b.Recs[i]
 		path := short(r.Path, home)
-		// В тексте тикета и заметках после пробела путь кончается пробелом («- путь (…)», « путь выросла …») или
-		// запятой у следа («- путь, 3.0 ГБ»).
-		if path != "" && r.Since.Before(closed) && (strings.Contains(body, " "+path+" ") || strings.Contains(body, " "+path+",")) {
+		// Stale в тексте тикета и заметках — « путь (размер) не менялась с …» (Record.What).
+		if r.Kind == KindStale && path != "" && r.Since.Before(closed) && strings.Contains(body, " "+path+" (") {
 			dropped = append(dropped, path)
+			out.Settled = append(out.Settled, *r)
 			continue
 		}
 		out.Recs = append(out.Recs, *r)

@@ -140,9 +140,13 @@ func TestTicketClosedAt(t *testing.T) {
 	}
 	// Переоткрыт и снова закрыт — последняя строка закрытия; «отклонён» и «перенесён» — тоже закрытие.
 	p := write("a.md", "- 2026-11-18 10:00 готово — x\n- 2026-11-18 10:30 в работе — y\n- 2026-11-18 12:05 отклонён — z: дубль\n- 2026-11-18 13:00 note — z\n")
-	got, _, ok, err := ticketClosedAt(p)
+	got, body, ok, err := ticketClosedAt(p)
 	if want := time.Date(2026, 11, 18, 12, 5, 0, 0, time.Local); !ok || err != nil || !got.Equal(want) {
 		t.Errorf("закрытие %v %v %v, ждали %v", got, ok, err, want)
+	}
+	// Текст — до последней строки закрытия: поздняя заметка (13:00) в разборе не участвовала.
+	if want := "- 2026-11-18 10:00 готово — x\n- 2026-11-18 10:30 в работе — y\n"; body != want {
+		t.Errorf("текст до закрытия %q, ждали %q", body, want)
 	}
 	if _, _, ok, err := ticketClosedAt(write("b.md", "- 2026-11-18 10:00 открыт — x\n- 2026-11-18 10:01 note — x: готово\n")); ok || err != nil {
 		t.Errorf("без строки закрытия — нет времени и ошибки: %v %v", ok, err)
