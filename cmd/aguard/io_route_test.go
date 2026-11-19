@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/activity"
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/iowatch"
@@ -72,16 +75,8 @@ func TestIOTicketerNewNoteAndNext(t *testing.T) {
 // закрытия прежнего тикета, разобран в нём — нового тикета нет; начавшийся после — новый тикет только с ним.
 // Время закрытия — из журнала, не из поздней заметки.
 func TestIOTicketerOldSeriesAfterClose(t *testing.T) {
-	a, _ := testIOApp(t)
-	proj := filepath.Join(a.home, "git", "dream")
-	if err := os.MkdirAll(filepath.Join(proj, "docs", "tasks"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	journal := "# x\n\nСтатус: готово\n\n## Журнал\n- 2026-11-18 10:09 открыт — aguard\n- 2026-11-18 11:00 note — aguard: 10:39\n" +
 		"- 2026-11-18 11:21 готово — lead: правка\n- 2026-11-18 11:40 note — lead: поздняя заметка\n"
-	if err := os.WriteFile(filepath.Join(proj, "docs", "tasks", "rg-2.md"), []byte(journal), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	at := func(hm string) time.Time {
 		tm, err := time.ParseInLocation("2006-01-02 15:04:05", "2026-11-18 "+hm, time.Local)
 		if err != nil {
@@ -95,23 +90,41 @@ func TestIOTicketerOldSeriesAfterClose(t *testing.T) {
 	straddle := ioroute.Case{Start: at("11:20:59"), End: at("11:23:00"), DurMS: 121000, Class: "rg", Text: "18.11 11:20:59 через закрытие"}
 	late := ioroute.Case{Start: at("11:30:00"), End: at("11:30:05"), DurMS: 5000, Class: "rg", Text: "18.11 11:30:00 после закрытия, до поздней заметки"}
 	ls := `[{"slug":"io-freeze-rg","status":"готово"},{"slug":"io-freeze-rg-2","status":"готово","path":"docs/tasks/rg-2.md"}]`
-	tkr := &ioTicketer{a: a}
+	started := `started="2026-11-18 10:39:39, 2026-11-18 11:20:59"`
 	for _, tc := range []struct {
 		name  string
 		cases []ioroute.Case
 		want  []string // в вызовах; nil — вызовов нет
 		not   []string
+		log   string // в строке журнала демона «находки старой серии»; "" — строки нет
+		oldN  int64  // учёт ticket_old_series: число отсеянных; 0 — записи нет
+		newN  int64  // учёт ticket_new: случаев в новом тикете
 	}{
-		{"только старые — без тикета", []ioroute.Case{old, straddle}, nil, nil},
+		{"только старые — без тикета", []ioroute.Case{old, straddle}, nil, nil, started + " fresh=0", 2, 0},
 		{"старые и новые — новый тикет без старых", []ioroute.Case{old, straddle, edge, late},
-			[]string{"|new io-freeze-rg-3", "Прежний тикет класса: io-freeze-rg-2", edge.Text, late.Text}, []string{old.Text, straddle.Text}},
+			[]string{"|new io-freeze-rg-3", "Прежний тикет класса: io-freeze-rg-2", edge.Text, late.Text}, []string{old.Text, straddle.Text},
+			started + " fresh=2", 2, 2},
+		{"только новые — строки старой серии нет", []ioroute.Case{edge, late},
+			[]string{"|new io-freeze-rg-3", edge.Text, late.Text}, nil, "", 0, 2},
 	} {
+		a, _ := testIOApp(t)
+		var logBuf bytes.Buffer
+		a.log = slog.New(slog.NewTextHandler(&logBuf, nil))
+		proj := filepath.Join(a.home, "git", "dream")
+		if err := os.MkdirAll(filepath.Join(proj, "docs", "tasks"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(proj, "docs", "tasks", "rg-2.md"), []byte(journal), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		tkr := &ioTicketer{a: a}
 		dir := t.TempDir()
 		tk, calls := fakeTk(t, dir, ls)
 		job := ioTicketJob{owner: "dream-master", class: "rg", cases: tc.cases, tk: tk, lead: "lead"}
 		if err := tkr.apply(context.Background(), job); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
+		assertOldSeriesAccounting(t, a, logBuf.String(), tc.name, tc.log, tc.oldN, tc.newN)
 		b, err := os.ReadFile(calls)
 		if tc.want == nil {
 			if err == nil {
@@ -342,5 +355,35 @@ func TestIOOwnerWorkerMaster(t *testing.T) {
 		if len(acts) != 1 || acts[0].Kind != ioroute.Letter || acts[0].To != "sc2go-master" || acts[0].Why != ioroute.WhyUrgent {
 			t.Fatalf("%s 12,6 с: письмо не мастеру бойца: %+v", unit, acts)
 		}
+	}
+}
+
+// assertOldSeriesAccounting — строка журнала «находки старой серии» с началами отсеянных и учёт: ticket_old_series —
+// число отсеянных, ticket_new — случаев в новом тикете.
+func assertOldSeriesAccounting(t *testing.T, a *app, log, name, wantLog string, oldN, newN int64) {
+	t.Helper()
+	line := ""
+	for l := range strings.Lines(log) {
+		if strings.Contains(l, "находки старой серии") {
+			line = l
+		}
+	}
+	if wantLog == "" && line != "" || wantLog != "" && !strings.Contains(line, wantLog) {
+		t.Fatalf("%s: строка старой серии %q, ждали %q; журнал:\n%s", name, line, wantLog, log)
+	}
+	if err := a.act.Flush(time.Now(), activityKeep); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int64{}
+	_, err := activity.NewStore(filepath.Join(a.home, "activity")).Read(time.Time{}, func(r *activity.Record) { // путь testIOApp
+		if r.Watcher == "io" && (r.Kind == "ticket_old_series" || r.Kind == "ticket_new") {
+			got[r.Kind] = r.Max
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["ticket_old_series"] != oldN || got["ticket_new"] != newN {
+		t.Fatalf("%s: учёт %v, ждали ticket_old_series=%d ticket_new=%d", name, got, oldN, newN)
 	}
 }
