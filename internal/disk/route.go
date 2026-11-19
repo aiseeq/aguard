@@ -340,3 +340,24 @@ func (b *TicketBatch) Note(home string) string {
 	}
 	return s.String()
 }
+
+// Fresh — находки, ещё не разобранные в закрытом прежнем тикете класса (closed — время его закрытия, body — текст
+// с журналом): запись, названная в нём, без изменений после закрытия (Since раньше closed) — разобрана, у stale это
+// «оставляем» с доводом, и сутки спустя она не даёт нового тикета. Другая запись, изменение или рост после закрытия —
+// новые. dropped — пути отсеянных.
+func (b *TicketBatch) Fresh(home string, closed time.Time, body string) (TicketBatch, []string) {
+	out := TicketBatch{Class: b.Class, Owner: b.Owner}
+	var dropped []string
+	for i := range b.Recs {
+		r := &b.Recs[i]
+		path := short(r.Path, home)
+		// В тексте тикета и заметках после пробела путь кончается пробелом («- путь (…)», « путь выросла …») или
+		// запятой у следа («- путь, 3.0 ГБ»).
+		if path != "" && r.Since.Before(closed) && (strings.Contains(body, " "+path+" ") || strings.Contains(body, " "+path+",")) {
+			dropped = append(dropped, path)
+			continue
+		}
+		out.Recs = append(out.Recs, *r)
+	}
+	return out, dropped
+}
