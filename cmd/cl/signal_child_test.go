@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,7 +23,7 @@ func TestSignalChildLeavesGrandchild(t *testing.T) {
 	got, stop := filepath.Join(dir, "got"), filepath.Join(dir, "stop")
 	ping, pong := filepath.Join(dir, "ping"), filepath.Join(dir, "pong")
 	t.Cleanup(func() { _ = os.WriteFile(stop, nil, 0600) })
-	grandchild := fmt.Sprintf(`trap 'echo TERM > %q' TERM; while [ ! -e %q ]; do [ -e %q ] && : > %q; sleep 0.05; done`, got, stop, ping, pong)
+	grandchild := grandchildScript(dir, stop)
 	cmd := exec.Command("sh", "-c", fmt.Sprintf("sh -c %q & echo $!; wait", grandchild))
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -67,6 +68,53 @@ func TestSignalChildLeavesGrandchild(t *testing.T) {
 	}
 	if _, rest, ok := strings.Cut(string(stat), ") "); !ok || strings.HasPrefix(rest, "Z") {
 		t.Fatalf("внук %d — зомби: %s", grand, stat)
+	}
+}
+
+// Скрипт внука: отмечает SIGTERM в dir/got, отвечает dir/pong на dir/ping и выходит по файлу stop или когда
+// каталог dir удалён — иначе внук, не успевший увидеть stop до удаления t.TempDir, живёт вечно.
+func grandchildScript(dir, stop string) string {
+	got, ping, pong := filepath.Join(dir, "got"), filepath.Join(dir, "ping"), filepath.Join(dir, "pong")
+	return fmt.Sprintf(`trap 'echo TERM > %q' TERM; while [ -d %q ] && [ ! -e %q ]; do [ -e %q ] && : > %q; sleep 0.05; done`, got, dir, stop, ping, pong)
+}
+
+// Внук выходит сам, когда каталог удалён без stop (так идёт удаление t.TempDir после Cleanup или после падения теста).
+func TestGrandchildExitsWhenDirectoryIsRemoved(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "grandchild")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stop := filepath.Join(root, "stop")
+	grandchild := exec.Command("sh", "-c", grandchildScript(dir, stop))
+	if err := grandchild.Start(); err != nil {
+		t.Fatal(err)
+	}
+	grand := grandchild.Process.Pid
+	wait := make(chan error, 1)
+	go func() { wait <- grandchild.Wait() }()
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			_ = os.WriteFile(stop, nil, 0600)
+			<-wait
+		}
+	})
+
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-wait:
+		waited = true
+		if err != nil {
+			t.Fatalf("внук %d завершился с ошибкой: %v", grand, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("внук %d не вышел после удаления каталога за 1 с", grand)
+	}
+	if err := syscall.Kill(grand, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("kill(%d, 0) = %v, ожидался ESRCH", grand, err)
 	}
 }
 
