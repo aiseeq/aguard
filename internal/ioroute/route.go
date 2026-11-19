@@ -105,6 +105,10 @@ func (r *Router) Route(c Case, alive func(string) bool) []Action {
 	urgent := c.DurMS >= r.cfg.UrgentMin.Milliseconds() || recent >= r.cfg.SeriesN
 	switch {
 	case urgent && c.Owner == "":
+		if c.TicketOwner != "" {
+			out = append(out, ticketAction(c, WhyNoOwner))
+			c.ticketed = true
+		}
 		out = append(out, r.letter(r.cfg.Lead, WhyNoOwner, c, now)...)
 	case urgent && c.Victim:
 		out = append(out, ticketAction(c, WhyVictim))
@@ -116,7 +120,7 @@ func (r *Router) Route(c Case, alive func(string) bool) []Action {
 		out = append(out, ticketAction(c, WhyOffline))
 		c.ticketed = true
 		out = append(out, r.letter(r.cfg.Lead, WhyOffline, c, now)...)
-	case c.Owner == "":
+	case c.Owner == "" && c.ticketOwner() == "":
 		out = append(out, Action{Kind: Summary, Class: c.Class, Cases: []Case{c}})
 	default:
 		out = append(out, ticketAction(c, ""))

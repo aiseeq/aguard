@@ -348,10 +348,10 @@ func ioRouteLetter(act ioroute.Action, full []iowatch.Case, alertMin time.Durati
 		fmt.Fprintf(&b, "aguard io: класс %s фризит у разных хозяев (%s) — общая причина? Хозяевам ушли тикеты io-freeze-%s.\n",
 			act.Class, strings.Join(owners, ", "), act.Class)
 	case ioroute.WhyOffline:
-		fmt.Fprintf(&b, "aguard io: вред сейчас, хозяин %s не в сети — тебе; ему тикет.\n", act.Cases[0].Owner)
+		fmt.Fprintf(&b, "aguard io: вред сейчас, хозяин %s не в сети — тебе; %s.\n", act.Cases[0].Owner, ioTicketRecipient(act.Cases[0]))
 	case ioroute.WhyVictim:
-		fmt.Fprintf(&b, "aguard io: вред сейчас; главная cgroup %s в основном читала при подкачке не меньше половины чтения — может быть жертвой вытеснения, ей тикет, письмо тебе.\n",
-			act.Cases[0].Owner)
+		fmt.Fprintf(&b, "aguard io: вред сейчас; главная cgroup %s в основном читала при подкачке не меньше половины чтения — может быть жертвой вытеснения, %s, письмо тебе.\n",
+			act.Cases[0].Owner, ioTicketRecipient(act.Cases[0]))
 	case ioroute.WhyNoOwner:
 		b.WriteString("aguard io: вред сейчас, хозяина виновника нет.\n")
 	case ioroute.WhyAfter:
@@ -365,6 +365,13 @@ func ioRouteLetter(act ioroute.Action, full []iowatch.Case, alertMin time.Durati
 		b.WriteString(text)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func ioTicketRecipient(c ioroute.Case) string {
+	if c.TicketOwner != "" && c.TicketOwner != c.Owner {
+		return "тикет — владельцу инструмента " + c.TicketOwner
+	}
+	return "ему тикет"
 }
 
 // alertable — случай идёт в маршрут: от alert_min, не тихий и не под потолком.

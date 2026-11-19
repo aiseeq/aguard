@@ -117,6 +117,73 @@ func TestTicketOwnerRoutesTicketsAndCrossCheck(t *testing.T) {
 	}
 }
 
+func TestTicketOwnerWithoutCgroupOwnerGetsTicket(t *testing.T) {
+	c := at(0, 3, "", "tl")
+	c.TicketOwner = "akit-master"
+	acts := New(testConfig()).Route(c, alive("akit-master", "lead"))
+	if tk := tickets(acts); len(tk) != 1 || tk[0].Owner != "akit-master" || tk[0].Class != "tl" {
+		t.Fatalf("без хозяина cgroup тикет не инструменту: %+v", acts)
+	}
+	for _, act := range acts {
+		if act.Kind == Summary {
+			t.Fatalf("случай с TicketOwner ушёл в сводку: %+v", acts)
+		}
+	}
+	c = at(1, 12, "", "tl")
+	c.TicketOwner = "akit-master"
+	acts = New(testConfig()).Route(c, alive("akit-master", "lead"))
+	if tk := tickets(acts); len(tk) != 1 || tk[0].Owner != "akit-master" {
+		t.Fatalf("срочный случай без хозяина cgroup не тикетован инструменту: %+v", acts)
+	}
+	if l := letters(acts); len(l) != 1 || l[0].To != "lead" || l[0].Why != WhyNoOwner {
+		t.Fatalf("срочное письмо без хозяина cgroup изменилось: %+v", acts)
+	}
+}
+
+func TestTicketOwnerVictimRoute(t *testing.T) {
+	c := at(0, 12, "shop-master", "tl")
+	c.TicketOwner = "akit-master"
+	c.Victim = true
+	acts := New(testConfig()).Route(c, alive("shop-master", "akit-master", "lead"))
+	if tk := tickets(acts); len(tk) != 1 || tk[0].Owner != "akit-master" {
+		t.Fatalf("жертва получила не тикет владельца инструмента: %+v", acts)
+	}
+	if l := letters(acts); len(l) != 1 || l[0].To != "lead" || l[0].Why != WhyVictim {
+		t.Fatalf("письмо о жертве лиду: %+v", acts)
+	}
+}
+
+func TestTicketOwnerOfflineRoute(t *testing.T) {
+	c := at(0, 12, "shop-master", "tl")
+	c.TicketOwner = "akit-master"
+	acts := New(testConfig()).Route(c, alive("lead"))
+	if tk := tickets(acts); len(tk) != 1 || tk[0].Owner != "akit-master" {
+		t.Fatalf("offline тикет не владельцу инструмента: %+v", acts)
+	}
+	if l := letters(acts); len(l) != 1 || l[0].To != "lead" || l[0].Why != WhyOffline {
+		t.Fatalf("offline письмо лиду: %+v", acts)
+	}
+}
+
+func TestTicketOwnerAfterLetterPause(t *testing.T) {
+	r := New(testConfig())
+	first := at(0, 12, "shop-master", "tl")
+	first.TicketOwner = "akit-master"
+	acts := r.Route(first, alive("shop-master", "akit-master", "lead"))
+	if l := letters(acts); len(l) != 1 || l[0].To != "shop-master" {
+		t.Fatalf("первое письмо хозяину cgroup: %+v", acts)
+	}
+	pending := at(1, 12, "shop-master", "tl")
+	pending.TicketOwner = "akit-master"
+	if acts := r.Route(pending, alive("shop-master", "akit-master", "lead")); len(acts) != 0 {
+		t.Fatalf("случай в паузе не отложен: %+v", acts)
+	}
+	acts = r.Tick(t0.Add(61 * time.Minute))
+	if tk := tickets(acts); len(tk) != 1 || tk[0].Owner != "akit-master" || len(tk[0].Cases) != 1 {
+		t.Fatalf("после паузы тикет не владельцу инструмента: %+v", acts)
+	}
+}
+
 // Серия: третий случай от 2 с за 15 мин — письмо; первые два — тикеты.
 func TestSeriesThirdLetter(t *testing.T) {
 	r := New(testConfig())
