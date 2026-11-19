@@ -302,6 +302,21 @@ func TestIOClaudeVersionWithoutLeafUsesClaudeClass(t *testing.T) {
 	}
 }
 
+func TestIORouteLetterNamesToolTicketOwner(t *testing.T) {
+	for _, tc := range []struct {
+		why  ioroute.Why
+		want string
+	}{
+		{ioroute.WhyOffline, "хозяин shop-master не в сети — тебе; тикет — владельцу инструмента akit-master"},
+		{ioroute.WhyVictim, "может быть жертвой вытеснения, тикет — владельцу инструмента akit-master, письмо тебе"},
+	} {
+		act := ioroute.Action{Why: tc.why, Cases: []ioroute.Case{{Owner: "shop-master", TicketOwner: "akit-master"}}}
+		if got := ioRouteLetter(act, nil, 0, nil); !strings.Contains(got, tc.want) {
+			t.Errorf("причина %s: письмо %q не содержит %q", tc.why, got, tc.want)
+		}
+	}
+}
+
 // Хозяин временного scope (проба через systemd-run) — по scratchpad сессии в cmdline главного процесса: живая сессия с
 // этим SessionID, иначе мастер проекта по ключу; без scratchpad — по cwd.
 func TestIOOwnerByProcess(t *testing.T) {
