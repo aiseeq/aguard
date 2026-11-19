@@ -36,8 +36,8 @@ func (c *Config) OnCodex() bool { return c.Model != "opus" }
 // Item — находка модели.
 type Item struct {
 	Quote string `json:"quote"`
-	// Act — что делает цитата: ActLasting — действует дольше шага; вопрос (ActAsk) и поручение на этот ход
-	// (ActNow) в указатель не идут, даже если модель дала им вид.
+	// Act — что делает цитата: ActLasting — действует дольше шага; вопрос ("ask") и поручение на этот ход
+	// ("now") в указатель не идут, даже если модель дала им вид.
 	Act        string `json:"act"`
 	Kind       string `json:"kind"`
 	Scope      string `json:"scope"`

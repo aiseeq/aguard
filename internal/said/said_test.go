@@ -121,7 +121,7 @@ func TestClassify(t *testing.T) {
 		t.Errorf("обещание: чужой supersedes должен сброситься, %+v", e)
 	}
 	// Вопрос и поручение на этот ход в указатель не идут, даже с видом rule/decision/promise; act без значения — тоже.
-	for _, act := range []string{ActAsk, ActNow, ""} {
+	for _, act := range []string{"ask", "now", ""} {
 		out := `{"items":[{"act":"` + act + `","kind":"decision","quote":"Ладно.","scope":"~","words":"ладно","supersedes":""}]}`
 		rec, entries = c.Classify(context.Background(), fake(out, nil), p, home, prior, time.Now())
 		if len(entries) != 0 || len(rec.Items) != 0 || len(rec.Dropped) != 1 || rec.Dropped[0].Act != act {
