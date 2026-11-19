@@ -23,20 +23,21 @@ type Config struct {
 	Lead          string
 }
 
-// Case — случай для маршрута. Owner — сессия-хозяин виновника, "" — хозяина нет; Class — что фризило (служба,
-// главный процесс), общий для разных хозяев; Generic — класс без имени процесса (session, worker): в сверку
+// Case — случай для маршрута. Owner — сессия-хозяин cgroup, TicketOwner — хозяин тикета (пусто — Owner).
+// Class — что фризило (служба, главный процесс), общий для разных хозяев; Generic — класс без имени процесса (session, worker): в сверку
 // «класс у разных хозяев» не идёт.
 type Case struct {
-	Start   time.Time
-	End     time.Time
-	DurMS   int64
-	Owner   string
-	Class   string
-	Generic bool
+	Start       time.Time
+	End         time.Time
+	DurMS       int64
+	Owner       string
+	TicketOwner string
+	Class       string
+	Text        string // строка случая для письма и тикета
+	Generic     bool
 	// Victim — главная cgroup в основном читала при подкачке машины не меньше половины чтения: может быть жертвой
 	// вытеснения (правило 03.11 io-culprit-victim, сужено 08.11) — хозяину только тикет, срочное — лиду.
 	Victim bool
-	Text   string // строка случая для письма и тикета
 	// Offline — хозяин был не в сети, когда маршрут решал (сохранено со случаем): только для Seed.
 	Offline bool
 	// ticketed — тикет хозяину уже заведён при маршруте (жертва, хозяин не в сети): по концу паузы письма — не в тикет.
@@ -48,7 +49,7 @@ type Kind string
 
 const (
 	Letter Kind = "letter" // письмо сессии To
-	Ticket Kind = "ticket" // тикет хозяина Owner класса Class: открытый — заметка, иначе новый
+	Ticket Kind = "ticket" // тикет хозяина TicketOwner (или Owner) класса Class: открытый — заметка, иначе новый
 	// Summary — несрочный случай без хозяина: ни письма, ни тикета (некому), только в сводку (aguard io route, io report).
 	Summary Kind = "summary"
 )
@@ -106,24 +107,35 @@ func (r *Router) Route(c Case, alive func(string) bool) []Action {
 	case urgent && c.Owner == "":
 		out = append(out, r.letter(r.cfg.Lead, WhyNoOwner, c, now)...)
 	case urgent && c.Victim:
-		out = append(out, Action{Kind: Ticket, Owner: c.Owner, Class: c.Class, Why: WhyVictim, Cases: []Case{c}})
+		out = append(out, ticketAction(c, WhyVictim))
 		c.ticketed = true
 		out = append(out, r.letter(r.cfg.Lead, WhyVictim, c, now)...)
 	case urgent && c.Owner == r.cfg.Lead || urgent && alive(c.Owner):
 		out = append(out, r.letter(c.Owner, WhyUrgent, c, now)...)
 	case urgent:
-		out = append(out, Action{Kind: Ticket, Owner: c.Owner, Class: c.Class, Why: WhyOffline, Cases: []Case{c}})
+		out = append(out, ticketAction(c, WhyOffline))
 		c.ticketed = true
 		out = append(out, r.letter(r.cfg.Lead, WhyOffline, c, now)...)
 	case c.Owner == "":
 		out = append(out, Action{Kind: Summary, Class: c.Class, Cases: []Case{c}})
 	default:
-		out = append(out, Action{Kind: Ticket, Owner: c.Owner, Class: c.Class, Cases: []Case{c}})
+		out = append(out, ticketAction(c, ""))
 	}
 	if !urgent {
 		out = append(out, r.machineCheck(now)...)
 	}
 	return append(out, r.crossCheck(c, now)...)
+}
+
+func ticketAction(c Case, why Why) Action {
+	return Action{Kind: Ticket, Owner: c.ticketOwner(), Class: c.Class, Why: why, Cases: []Case{c}}
+}
+
+func (c Case) ticketOwner() string {
+	if c.TicketOwner != "" {
+		return c.TicketOwner
+	}
+	return c.Owner
 }
 
 // Tick — по концу паузы адресата: вред идёт (последний случай моложе SeriesWindow) — письмо, иначе — заметки в тикеты.
@@ -206,7 +218,8 @@ func (r *Router) machineCheck(now time.Time) []Action {
 
 // crossCheck — один класс у разных хозяев за CrossWindow: общая причина, лиду раз за окно на класс.
 func (r *Router) crossCheck(c Case, now time.Time) []Action {
-	if c.Owner == "" || c.Generic || c.Class == "" || r.cfg.CrossWindow <= 0 {
+	owner := c.ticketOwner()
+	if owner == "" || c.Generic || c.Class == "" || r.cfg.CrossWindow <= 0 {
 		return nil
 	}
 	m := r.cross[c.Class]
@@ -214,7 +227,7 @@ func (r *Router) crossCheck(c Case, now time.Time) []Action {
 		m = map[string]time.Time{}
 		r.cross[c.Class] = m
 	}
-	m[c.Owner] = now
+	m[owner] = now
 	from := now.Add(-r.cfg.CrossWindow)
 	for o, t := range m {
 		if t.Before(from) {
@@ -243,16 +256,17 @@ func Tickets(cases []Case) []Action {
 		if c.ticketed {
 			continue
 		}
-		k := [2]string{c.Owner, c.Class}
+		owner := c.ticketOwner()
+		k := [2]string{owner, c.Class}
 		i, ok := idx[k]
 		if !ok {
 			i = len(out)
 			idx[k] = i
 			kind := Ticket
-			if c.Owner == "" {
+			if owner == "" {
 				kind = Summary
 			}
-			out = append(out, Action{Kind: kind, Owner: c.Owner, Class: c.Class, Why: WhyUrgent})
+			out = append(out, Action{Kind: kind, Owner: owner, Class: c.Class, Why: WhyUrgent})
 		}
 		out[i].Cases = append(out[i].Cases, c)
 	}

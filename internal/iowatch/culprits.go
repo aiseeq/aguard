@@ -141,12 +141,33 @@ func processNames(details []Step) map[procID]string {
 	return names
 }
 
-// ProcBase — имя процесса из processNames без pid и пометки детей: comm(123)+дети → comm.
+// ProcBase — имя процесса из processNames без pid и пометки детей; comm-версию Claude Code сводит к claude.
 func ProcBase(name string) string {
 	if i := strings.LastIndex(name, "("); i > 0 {
-		return name[:i]
+		name = name[:i]
+	}
+	if claudeVersion(name) {
+		return "claude"
 	}
 	return name
+}
+
+func claudeVersion(name string) bool {
+	parts := strings.Split(name, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // MainCgroup — путь cgroup с наибольшей суммой записи её процессов и чтения; "" — нет.
@@ -198,25 +219,7 @@ func (c *Culprits) LeafProc(main string, wrappers []string) string {
 }
 
 func isWrapper(name string, wrappers []string) bool {
-	if slices.Contains(wrappers, name) {
-		return true
-	}
-	// comm Claude Code бывает его версией (2.1.328) — тоже обёртка.
-	parts := strings.Split(name, ".")
-	if len(parts) != 3 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" {
-			return false
-		}
-		for _, r := range part {
-			if r < '0' || r > '9' {
-				return false
-			}
-		}
-	}
-	return true
+	return slices.Contains(wrappers, name)
 }
 
 // ForeignOver — cgroup чужого uid (не Readable, не главная) с наибольшим I/O по io.stat (запись и чтение), если

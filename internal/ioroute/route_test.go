@@ -64,6 +64,59 @@ func TestLongCaseLetterOwner(t *testing.T) {
 	}
 }
 
+func TestTicketOwnerDoesNotRedirectLettersOrSeries(t *testing.T) {
+	cfg := testConfig()
+	cfg.CrossWindow = 0
+	cfg.Repeat = 0
+	r := New(cfg)
+	ownerAlive := alive("shop-master", "akit-master", "lead")
+	c := at(0, 12, "shop-master", "tl")
+	c.TicketOwner = "akit-master"
+	acts := r.Route(c, ownerAlive)
+	if l := letters(acts); len(l) != 1 || l[0].To != "shop-master" {
+		t.Fatalf("срочное письмо не хозяину cgroup: %+v", acts)
+	}
+	r = New(cfg)
+	for i, minute := range []float64{0, 1} {
+		c = at(minute, 3, "shop-master", "tl")
+		c.TicketOwner = []string{"akit-master", "other-tool-master"}[i]
+		acts = r.Route(c, ownerAlive)
+		if len(letters(acts)) != 0 {
+			t.Fatalf("серия сменила хозяина на инструмент: %+v", acts)
+		}
+	}
+	c = at(2, 3, "shop-master", "tl")
+	c.TicketOwner = "third-tool-master"
+	acts = r.Route(c, ownerAlive)
+	if l := letters(acts); len(l) != 1 || l[0].To != "shop-master" {
+		t.Fatalf("серийное письмо не хозяину cgroup: %+v", acts)
+	}
+}
+
+func TestTicketOwnerRoutesTicketsAndCrossCheck(t *testing.T) {
+	cfg := testConfig()
+	r := New(cfg)
+	first := at(0, 3, "host-a", "tl")
+	first.TicketOwner = "akit-master"
+	acts := r.Route(first, alive("host-a", "host-b", "akit-master", "lead"))
+	if tk := tickets(acts); len(tk) != 1 || tk[0].Owner != "akit-master" {
+		t.Fatalf("тикет не владельцу инструмента: %+v", acts)
+	}
+	second := at(60, 3, "host-b", "tl")
+	second.TicketOwner = "akit-master"
+	if l := letters(r.Route(second, alive("host-a", "host-b", "akit-master", "lead"))); len(l) != 0 {
+		t.Fatalf("один владелец тикета сочтён разными хозяевами класса: %+v", l)
+	}
+	third := at(120, 3, "host-c", "tl")
+	third.TicketOwner = "other-tool-master"
+	if l := letters(r.Route(third, alive("host-a", "host-b", "host-c", "akit-master", "other-tool-master", "lead"))); len(l) != 1 || l[0].Why != WhyCross {
+		t.Fatalf("cross не учёл владельца тикета: %+v", l)
+	}
+	if got := r.Owners("tl"); len(got) != 2 || got[0] != "akit-master" || got[1] != "other-tool-master" {
+		t.Fatalf("владельцы cross %v", got)
+	}
+}
+
 // Серия: третий случай от 2 с за 15 мин — письмо; первые два — тикеты.
 func TestSeriesThirdLetter(t *testing.T) {
 	r := New(testConfig())

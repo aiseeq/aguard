@@ -92,18 +92,17 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 	if name, _, ok := proc.SessionScope(cul.Main); ok {
 		rc.Class, rc.Generic = o.processClass(cul, "session")
 		rc.Owner = name
-		if owner := o.tools[iowatch.ProcBase(o.selectedProc(cul))]; owner != "" {
-			rc.Owner = owner
-		}
+		rc.TicketOwner = o.toolOwner(o.selectedProc(cul))
 		return rc, nil
 	}
 	if strings.HasPrefix(unit, "worker-") {
 		rc.Class, rc.Generic = o.processClass(cul, "worker")
-		owner, err := o.workerOwner(unit, o.selectedProc(cul))
+		owner, err := o.workerOwner(unit)
 		if err != nil {
 			return rc, err
 		}
 		rc.Owner = owner
+		rc.TicketOwner = o.toolOwner(o.selectedProc(cul))
 		return rc, nil
 	}
 	if owner, ok := o.units[unit]; ok {
@@ -113,12 +112,10 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 	rc.Class = ticketClass(iowatch.CgroupName(cul.Main))
 	owner, err := o.byProcess(cul.ProcessDetails[cul.MainProc])
 	rc.Owner = owner
-	toolOwner := o.tools[iowatch.ProcBase(o.selectedProc(cul))]
+	toolOwner := o.toolOwner(o.selectedProc(cul))
 	if owner != "" || toolOwner != "" {
 		rc.Class, rc.Generic = o.processClass(cul, rc.Class)
-		if toolOwner != "" {
-			rc.Owner = toolOwner
-		}
+		rc.TicketOwner = toolOwner
 	}
 	return rc, err
 }
@@ -134,7 +131,11 @@ func (o *ioOwnerFinder) processClass(c *iowatch.Culprit, generic string) (string
 	return byProc(o.selectedProc(c), generic)
 }
 
-func (o *ioOwnerFinder) workerOwner(unit, process string) (string, error) {
+func (o *ioOwnerFinder) toolOwner(process string) string {
+	return o.tools[iowatch.ProcBase(process)]
+}
+
+func (o *ioOwnerFinder) workerOwner(unit string) (string, error) {
 	job, err := o.jobs.ByUnit(unit)
 	if err != nil {
 		return "", fmt.Errorf("задание бойца %s: %w", unit, err)
@@ -145,9 +146,6 @@ func (o *ioOwnerFinder) workerOwner(unit, process string) (string, error) {
 		if owner != "" && job.Owner != nil && job.Owner.Name != "" && o.sessionExists != nil && !o.sessionExists(owner) {
 			owner = job.Owner.Name
 		}
-	}
-	if toolOwner := o.tools[iowatch.ProcBase(process)]; toolOwner != "" {
-		owner = toolOwner
 	}
 	return owner, nil
 }
