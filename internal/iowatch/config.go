@@ -91,7 +91,7 @@ func Default() Config {
 		CasesKeep:      policy.Duration(14 * 24 * time.Hour),
 		Keep:           policy.Duration(7 * 24 * time.Hour),
 		Device:         "nvme0n1",
-		Wrappers:       []string{"codex", "claude", "bash", "sh", "node", "worker", "python3", "timeout"},
+		Wrappers:       []string{"codex", "claude", "bash", "sh", "node", "worker", "python3", "timeout", "conmon"},
 		SeriesKeep:     policy.Duration(24 * time.Hour),
 		ProfilesKeep:   policy.Duration(30 * 24 * time.Hour),
 		EvictorSwapMin: 1 << 20,
