@@ -2,9 +2,11 @@ package said
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -298,5 +300,34 @@ func TestAppendChmodFailureWritesNothing(t *testing.T) {
 	}
 	if string(data) != Header+"\n" {
 		t.Errorf("файл дописан при отказе chmod: %q", data)
+	}
+}
+
+// TestSchemaActLasting — Classify пишет только act = ActLasting: если схема или промпт назовут его иначе,
+// модель не сможет его вернуть, и указатель молча перестанет пополняться.
+func TestSchemaActLasting(t *testing.T) {
+	var s struct {
+		Properties struct {
+			Items struct {
+				Items struct {
+					Required   []string `json:"required"`
+					Properties struct {
+						Act struct {
+							Enum []string `json:"enum"`
+						} `json:"act"`
+					} `json:"properties"`
+				} `json:"items"`
+			} `json:"items"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(Schema), &s); err != nil {
+		t.Fatal(err)
+	}
+	it := s.Properties.Items.Items
+	if !slices.Contains(it.Properties.Act.Enum, ActLasting) || !slices.Contains(it.Required, "act") {
+		t.Errorf("схема: act enum %v, required %v — нужен обязательный act с %q", it.Properties.Act.Enum, it.Required, ActLasting)
+	}
+	if !strings.Contains(Prompt, `"`+ActLasting+`"`) {
+		t.Errorf("промпт не называет %q", ActLasting)
 	}
 }
