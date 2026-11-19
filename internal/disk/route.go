@@ -352,7 +352,7 @@ func (b *TicketBatch) Note(home string) string {
 
 // Fresh — находки, ещё не разобранные в закрытом прежнем тикете класса (closed — время его закрытия, body — текст до
 // строки закрытия): stale, названная в нём и не менявшаяся после закрытия (Since — последнее изменение — раньше
-// closed) и названная той же строкой (размер и время изменения те же), разобрана — у stale это «оставляем» с доводом,
+// closed) и названная в нём с тем же временем изменения (staleNamed), разобрана — у stale это «оставляем» с доводом,
 // и сутки спустя она не даёт нового тикета; она уходит в
 // Settled. Другая запись и изменение после закрытия — новые. grew и trace не отсеиваются: их Since — начало окна роста
 // и рождение следа, рост после закрытия по нему не отличить. dropped — пути отсеянных.
@@ -362,10 +362,7 @@ func (b *TicketBatch) Fresh(home string, closed time.Time, body string) (TicketB
 	for i := range b.Recs {
 		r := &b.Recs[i]
 		path := short(r.Path, home)
-		// Строка stale в тексте и заметках — Record.What целиком: путь, размер и «не менялась с <Since>». Та же строка —
-		// запись не менялась и с разбора, даже если тот был раньше закрытия (изменилась, пока тикет был открыт, —
-		// строка другая, находка новая). Пробел впереди — не суффикс чужого пути.
-		if r.Kind == KindStale && path != "" && r.Since.Before(closed) && strings.Contains(body, " "+r.What(home)) {
+		if r.Kind == KindStale && path != "" && r.Since.Before(closed) && staleNamed(body, path, r.Since) {
 			dropped = append(dropped, path)
 			out.Settled = append(out.Settled, *r)
 			continue
@@ -373,4 +370,27 @@ func (b *TicketBatch) Fresh(home string, closed time.Time, body string) (TicketB
 		out.Recs = append(out.Recs, *r)
 	}
 	return out, dropped
+}
+
+// staleNamed — stale названа в тексте тикета с тем же временем изменения: « путь (размер) не менялась с <since> …»
+// (Record.What), до конца строки или «;» заметки. Время изменения то же — запись не менялась и с разбора, даже если тот
+// был раньше закрытия (изменилась, пока тикет был открыт, — время другое, находка новая). Размер не сверяется: его мера
+// менялась без изменения записи (07.11 — байты у 10 записей, 18.11 — пометка «без учёта сжатия» у 6) и дала бы дубль.
+// Пробел впереди — не суффикс чужого пути.
+func staleNamed(body, path string, since time.Time) bool {
+	head, changed := " "+path+" (", "не менялась с "+since.Local().Format("02.01 15:04")
+	for rest := body; ; {
+		i := strings.Index(rest, head)
+		if i < 0 {
+			return false
+		}
+		rest = rest[i+len(head):]
+		seg := rest
+		if j := strings.IndexAny(seg, ";\n"); j >= 0 {
+			seg = seg[:j]
+		}
+		if strings.Contains(seg, changed) {
+			return true
+		}
+	}
 }
