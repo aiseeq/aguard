@@ -175,6 +175,50 @@ func (c *Culprits) MainProc(main string) string {
 	return best
 }
 
+// LeafProc — процесс с наибольшим I/O в main, если главный процесс — обёртка и лист набрал не меньше четверти
+// его I/O. Пусто означает оставить MainProc. Claude Code иногда сообщает версию вместо имени comm.
+func (c *Culprits) LeafProc(main string, wrappers []string) string {
+	root := c.MainProc(main)
+	if root == "" || !isWrapper(ProcBase(root), wrappers) {
+		return ""
+	}
+	var best string
+	for name, value := range c.procIO {
+		if c.procCgroup[name] != main || value <= 0 || isWrapper(ProcBase(name), wrappers) {
+			continue
+		}
+		if best == "" || value > c.procIO[best] || value == c.procIO[best] && name < best {
+			best = name
+		}
+	}
+	if best == "" || c.procIO[best]*4 < c.procIO[root] {
+		return ""
+	}
+	return best
+}
+
+func isWrapper(name string, wrappers []string) bool {
+	if slices.Contains(wrappers, name) {
+		return true
+	}
+	// comm Claude Code бывает его версией (2.1.328) — тоже обёртка.
+	parts := strings.Split(name, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // ForeignOver — cgroup чужого uid (не Readable, не главная) с наибольшим I/O по io.stat (запись и чтение), если
 // он больше всей меры главной: своя запись её процессов не видна, и главная выбрана без неё. Без главной возвращает
 // наибольшую чужую cgroup с ненулевым I/O. Это может быть и коммит btrfs по её fsync (postgres 30.10 12:15), и

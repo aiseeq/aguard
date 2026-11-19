@@ -26,20 +26,23 @@ import (
 
 // ioOwnerFinder — хозяин главной cgroup случая.
 type ioOwnerFinder struct {
-	jobs     *cpuwatch.Jobs
-	units    map[string]string // служба → сессия ([io] owners)
-	home     string
-	table    map[string]string               // таблица имён cl: папка → сессия
-	tableErr error                           // таблица битая и прошлой нет: хозяина по папке не назвать
-	sessions func(id string) (string, error) // живая сессия по SessionID, "" — нет такой
+	jobs          *cpuwatch.Jobs
+	units         map[string]string // служба → сессия ([io] owners)
+	tools         map[string]string // процесс → сессия-хозяин инструмента ([io] tools)
+	home          string
+	table         map[string]string               // таблица имён cl: папка → сессия
+	tableErr      error                           // таблица битая и прошлой нет: хозяина по папке не назвать
+	sessions      func(id string) (string, error) // живая сессия по SessionID, "" — нет такой
+	sessionExists func(who string) bool           // результат той же проверки папки, что и у classTicket
 }
 
 func (a *app) ioOwners(cfg *iowatch.Config) *ioOwnerFinder {
 	// Холодный старт с битой таблицей — не пустая таблица, а ошибка в случаях с хозяином по папке: случай идёт как без
 	// хозяина (лиду), а не <проект>-master по догадке — мастеру, которого таблица могла переименовать.
 	table, err := a.namesTable("io")
-	return &ioOwnerFinder{units: cfg.Owners, home: a.home, table: table, tableErr: err,
-		jobs: &cpuwatch.Jobs{Dir: filepath.Join(a.home, ".local", "state", "worker"), Units: a.workerUnitDirs()},
+	return &ioOwnerFinder{units: cfg.Owners, tools: cfg.Tools, home: a.home, table: table, tableErr: err,
+		jobs:          &cpuwatch.Jobs{Dir: filepath.Join(a.home, ".local", "state", "worker"), Units: a.workerUnitDirs()},
+		sessionExists: func(who string) bool { _, err := a.sessionDir("io", who, cfg.Lead); return err == nil },
 		sessions: func(id string) (string, error) {
 			alive, err := a.reg.Alive()
 			if err != nil {
@@ -87,19 +90,20 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 		return rc, nil
 	}
 	if name, _, ok := proc.SessionScope(cul.Main); ok {
-		rc.Class, rc.Generic = byProc(cul.MainProc, "session")
+		rc.Class, rc.Generic = o.processClass(cul, "session")
 		rc.Owner = name
+		if owner := o.tools[iowatch.ProcBase(o.selectedProc(cul))]; owner != "" {
+			rc.Owner = owner
+		}
 		return rc, nil
 	}
 	if strings.HasPrefix(unit, "worker-") {
-		rc.Class, rc.Generic = byProc(cul.MainProc, "worker")
-		job, err := o.jobs.ByUnit(unit)
+		rc.Class, rc.Generic = o.processClass(cul, "worker")
+		owner, err := o.workerOwner(unit, o.selectedProc(cul))
 		if err != nil {
-			return rc, fmt.Errorf("задание бойца %s: %w", unit, err)
+			return rc, err
 		}
-		if job != nil {
-			rc.Owner = job.Master
-		}
+		rc.Owner = owner
 		return rc, nil
 	}
 	if owner, ok := o.units[unit]; ok {
@@ -109,10 +113,43 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 	rc.Class = ticketClass(iowatch.CgroupName(cul.Main))
 	owner, err := o.byProcess(cul.ProcessDetails[cul.MainProc])
 	rc.Owner = owner
-	if owner != "" {
-		rc.Class, rc.Generic = byProc(cul.MainProc, rc.Class)
+	toolOwner := o.tools[iowatch.ProcBase(o.selectedProc(cul))]
+	if owner != "" || toolOwner != "" {
+		rc.Class, rc.Generic = o.processClass(cul, rc.Class)
+		if toolOwner != "" {
+			rc.Owner = toolOwner
+		}
 	}
 	return rc, err
+}
+
+func (o *ioOwnerFinder) selectedProc(c *iowatch.Culprit) string {
+	if c.MainLeafProc != "" {
+		return c.MainLeafProc
+	}
+	return c.MainProc
+}
+
+func (o *ioOwnerFinder) processClass(c *iowatch.Culprit, generic string) (string, bool) {
+	return byProc(o.selectedProc(c), generic)
+}
+
+func (o *ioOwnerFinder) workerOwner(unit, process string) (string, error) {
+	job, err := o.jobs.ByUnit(unit)
+	if err != nil {
+		return "", fmt.Errorf("задание бойца %s: %w", unit, err)
+	}
+	owner := ""
+	if job != nil {
+		owner = job.Master
+		if owner != "" && job.Owner != nil && job.Owner.Name != "" && o.sessionExists != nil && !o.sessionExists(owner) {
+			owner = job.Owner.Name
+		}
+	}
+	if toolOwner := o.tools[iowatch.ProcBase(process)]; toolOwner != "" {
+		owner = toolOwner
+	}
+	return owner, nil
 }
 
 // sessionTmp — scratchpad сессии Claude Code: …/claude-tmp/claude-<uid>/<ключ проекта>/<SessionID>/.
