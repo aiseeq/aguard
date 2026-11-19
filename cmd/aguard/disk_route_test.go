@@ -546,3 +546,54 @@ func TestClassTicketLeadHomeTextStdin(t *testing.T) {
 		t.Fatalf("вызов tk:\n%s\nждал:\n%s", b, want)
 	}
 }
+
+// Повтор класса после закрытия (disk-stale-repeat-after-close): запись, названная в закрытом тикете и не менявшаяся
+// после закрытия, нового тикета не даёт; другая запись, изменение после закрытия и след с другим путём — новый тикет.
+func TestDiskRouteRepeatAfterClose(t *testing.T) {
+	now := time.Now()
+	closed := now.Add(-48 * time.Hour).Truncate(time.Minute)
+	for _, tc := range []struct {
+		name string
+		recs func(home string) []disk.Record
+		want []string // в вызовах tk; nil — вызовов нет
+		not  []string
+		log  string // в журнале демона «находки старой серии»
+	}{
+		{"та же запись без изменений — без тикета", func(home string) []disk.Record {
+			return []disk.Record{{At: now, Kind: disk.KindStale, Path: filepath.Join(home, ".cache", "s00"), Bytes: 2 << 30,
+				Since: now.Add(-72 * time.Hour), Owner: "dream-master", Why: "names"}}
+		}, nil, nil, "~/.cache/s00"},
+		{"другая запись и изменённая после закрытия — новый тикет только с ними", func(home string) []disk.Record {
+			return []disk.Record{
+				{At: now, Kind: disk.KindStale, Path: filepath.Join(home, ".cache", "s00"), Bytes: 2 << 30, Since: now.Add(-72 * time.Hour), Owner: "dream-master"},
+				{At: now, Kind: disk.KindStale, Path: filepath.Join(home, ".cache", "s0"), Bytes: 2 << 30, Since: now.Add(-72 * time.Hour), Owner: "dream-master"},
+				{At: now, Kind: disk.KindStale, Path: filepath.Join(home, ".cache", "s01"), Bytes: 2 << 30, Since: closed, Owner: "dream-master"},
+			}
+		}, []string{"|new disk-stale-2", "Прежний тикет класса: disk-stale (закрыт)", "Находки (2)", "~/.cache/s0 (", "~/.cache/s01 ("},
+			[]string{"~/.cache/s00 ("}, "~/.cache/s00"},
+	} {
+		a, _ := diskRouteApp(t)
+		var logBuf bytes.Buffer
+		a.log = slog.New(slog.NewTextHandler(&logBuf, nil))
+		proj := filepath.Join(a.home, "git", "dream")
+		if err := os.MkdirAll(filepath.Join(proj, "docs", "tasks"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		at := closed.Format("2006-01-02 15:04")
+		body := "# Остатки временного\n\nСтатус: готово\n\naguard disk: …\n\nНаходки (2):\n- ~/.cache/s00 (2.0 ГБ) не менялась с 15.11 10:00 — остаток временного?\n" +
+			"- ~/.cache/s01 (2.0 ГБ) не менялась с 15.11 10:00 — остаток временного?\n\n## Журнал\n- " + at + " готово — dream-master: оставляем, довод\n"
+		if err := os.WriteFile(filepath.Join(proj, "docs", "tasks", "stale.md"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := alertDiskConfig()
+		var calls string
+		cfg.Tk, calls = fakeTk(t, t.TempDir(), `[{"slug":"disk-stale","status":"готово","path":"docs/tasks/stale.md"}]`)
+		if err := a.diskRoute(t.Context(), &cfg, &disk.State{}, tc.recs(a.home), now); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(logBuf.String(), "находки старой серии") || !strings.Contains(logBuf.String(), tc.log) {
+			t.Fatalf("%s: нет строки старой серии с %q:\n%s", tc.name, tc.log, logBuf.String())
+		}
+		assertTkCalls(t, tc.name, calls, tc.want, tc.not)
+	}
+}

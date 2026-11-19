@@ -36,11 +36,11 @@ type classTicket struct {
 	// хозяина нет и тикет лиду.
 	text func(prev, redirect string) string
 	note string // заметка в открытый тикет
-	// fresh — что из находок началось не раньше закрытия прежнего тикета (closed): их число и текст нового тикета.
-	// Начавшееся раньше разобрано в закрытом: без этого закрытие давало дубль на хвосте старой серии (io-freeze-rg-3
-	// 18.11 на случай 10:39 при rg-2, закрытом в 11:21). nil — находки без времени начала (disk): все новые.
-	// dropped — начала отсеянных находок для журнала: отброшенное можно найти.
-	fresh func(closed time.Time) (n int64, text func(prev, redirect string) string, dropped string)
+	// fresh — что из находок ещё не разобрано в закрытом прежнем тикете (closed — время закрытия, body — его текст):
+	// их число и текст нового тикета. Без этого закрытие давало дубль на хвосте старой серии (io-freeze-rg-3 18.11 на
+	// случай 10:39 при rg-2, закрытом в 11:21), а у disk — на той же записи stale, оставленной с доводом. nil — все
+	// новые. dropped — отсеянные находки для журнала: отброшенное можно найти.
+	fresh func(closed time.Time, body string) (n int64, text func(prev, redirect string) string, dropped string)
 }
 
 // classTicket — тикет или заметка; ошибка — tk не ответил или упал.
@@ -65,12 +65,12 @@ func (a *app) classTicket(ctx context.Context, t classTicket) error {
 		return err
 	}
 	if open == "" && prev != "" && t.fresh != nil {
-		closed, ok, err := ticketClosedAt(filepath.Join(dir, prevPath))
+		closed, body, ok, err := ticketClosedAt(filepath.Join(dir, prevPath))
 		if err != nil { // повтор не теряем: находки — в новый тикет целиком
 			a.warn(t.watcher, "время закрытия прежнего тикета не прочитано", "prev", prev, "err", err)
 		}
 		if ok {
-			n, text, dropped := t.fresh(closed)
+			n, text, dropped := t.fresh(closed, body)
 			if dropped != "" {
 				a.log.Info("aguard "+t.watcher+": находки старой серии — разобраны в закрытом тикете", "dir", dir,
 					"prev", prev, "closed", closed.Format(time.DateTime), "started", dropped, "fresh", n)
@@ -142,13 +142,13 @@ func findClassTicket(ctx context.Context, tk, dir, base string) (open, next, pre
 // ticketClosedAt — время закрытия тикета: последняя строка журнала «- ГГГГ-ММ-ДД ЧЧ:ММ готово|отклонён|перенесён —»,
 // местное время, начало минуты. Не поле changed из tk ls: поздняя заметка в закрытом тикете сдвинула бы границу и
 // спрятала настоящий повтор. Файла или строки нет — false без ошибки: находки считаются новыми, повтор не теряется.
-func ticketClosedAt(path string) (time.Time, bool, error) {
+func ticketClosedAt(path string) (time.Time, string, bool, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return time.Time{}, false, nil
+		return time.Time{}, "", false, nil
 	}
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("тикет %s: %w", path, err)
+		return time.Time{}, "", false, fmt.Errorf("тикет %s: %w", path, err)
 	}
 	var closed time.Time
 	for line := range strings.Lines(string(data)) {
@@ -158,11 +158,11 @@ func ticketClosedAt(path string) (time.Time, bool, error) {
 		}
 		at, err := time.ParseInLocation("2006-01-02 15:04", m[1], time.Local)
 		if err != nil { // строка журнала с невозможной датой — порча файла, не пропуск
-			return time.Time{}, false, fmt.Errorf("тикет %s: %w", path, err)
+			return time.Time{}, "", false, fmt.Errorf("тикет %s: %w", path, err)
 		}
 		closed = at
 	}
-	return closed, !closed.IsZero(), nil
+	return closed, string(data), !closed.IsZero(), nil
 }
 
 // journalLine — строка журнала tk: «- ГГГГ-ММ-ДД ЧЧ:ММ <статус> …».

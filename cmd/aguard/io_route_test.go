@@ -125,23 +125,7 @@ func TestIOTicketerOldSeriesAfterClose(t *testing.T) {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		assertOldSeriesAccounting(t, a, logBuf.String(), tc.name, tc.log, tc.oldN, tc.newN)
-		b, err := os.ReadFile(calls)
-		if tc.want == nil {
-			if err == nil {
-				t.Fatalf("%s: лишний вызов tk:\n%s", tc.name, b)
-			}
-			continue
-		}
-		for _, w := range tc.want {
-			if !strings.Contains(string(b), w) {
-				t.Fatalf("%s: нет %q в\n%s", tc.name, w, b)
-			}
-		}
-		for _, w := range tc.not {
-			if strings.Contains(string(b), w) {
-				t.Fatalf("%s: лишнее %q в\n%s", tc.name, w, b)
-			}
-		}
+		assertTkCalls(t, tc.name, calls, tc.want, tc.not)
 	}
 }
 
@@ -156,23 +140,23 @@ func TestTicketClosedAt(t *testing.T) {
 	}
 	// Переоткрыт и снова закрыт — последняя строка закрытия; «отклонён» и «перенесён» — тоже закрытие.
 	p := write("a.md", "- 2026-11-18 10:00 готово — x\n- 2026-11-18 10:30 в работе — y\n- 2026-11-18 12:05 отклонён — z: дубль\n- 2026-11-18 13:00 note — z\n")
-	got, ok, err := ticketClosedAt(p)
+	got, _, ok, err := ticketClosedAt(p)
 	if want := time.Date(2026, 11, 18, 12, 5, 0, 0, time.Local); !ok || err != nil || !got.Equal(want) {
 		t.Errorf("закрытие %v %v %v, ждали %v", got, ok, err, want)
 	}
-	if _, ok, err := ticketClosedAt(write("b.md", "- 2026-11-18 10:00 открыт — x\n- 2026-11-18 10:01 note — x: готово\n")); ok || err != nil {
+	if _, _, ok, err := ticketClosedAt(write("b.md", "- 2026-11-18 10:00 открыт — x\n- 2026-11-18 10:01 note — x: готово\n")); ok || err != nil {
 		t.Errorf("без строки закрытия — нет времени и ошибки: %v %v", ok, err)
 	}
-	if _, ok, err := ticketClosedAt(filepath.Join(dir, "нет.md")); ok || err != nil {
+	if _, _, ok, err := ticketClosedAt(filepath.Join(dir, "нет.md")); ok || err != nil {
 		t.Errorf("нет файла — нет времени и ошибки: %v %v", ok, err)
 	}
-	if _, ok, err := ticketClosedAt(dir); ok || err == nil { // папка вместо файла: ошибка чтения не прячется
+	if _, _, ok, err := ticketClosedAt(dir); ok || err == nil { // папка вместо файла: ошибка чтения не прячется
 		t.Errorf("ошибка чтения: %v %v", ok, err)
 	}
-	if _, ok, err := ticketClosedAt(write("d.md", "- 2026-13-40 10:00 готово — x\n")); ok || err == nil {
+	if _, _, ok, err := ticketClosedAt(write("d.md", "- 2026-13-40 10:00 готово — x\n")); ok || err == nil {
 		t.Errorf("невозможная дата закрытия — ошибка: %v %v", ok, err)
 	}
-	if got, ok, err := ticketClosedAt(write("c.md", "- 2026-11-18 09:00 перенесён — x\n")); !ok || err != nil || got.Hour() != 9 {
+	if got, _, ok, err := ticketClosedAt(write("c.md", "- 2026-11-18 09:00 перенесён — x\n")); !ok || err != nil || got.Hour() != 9 {
 		t.Errorf("перенесён: %v %v %v", got, ok, err)
 	}
 }
@@ -385,5 +369,27 @@ func assertOldSeriesAccounting(t *testing.T, a *app, log, name, wantLog string, 
 	}
 	if got["ticket_old_series"] != oldN || got["ticket_new"] != newN {
 		t.Fatalf("%s: учёт %v, ждали ticket_old_series=%d ticket_new=%d", name, got, oldN, newN)
+	}
+}
+
+// assertTkCalls — вызовы поддельного tk (fakeTk): want == nil — вызовов нет; иначе все want есть, ни одного not.
+func assertTkCalls(t *testing.T, name, calls string, want, not []string) {
+	t.Helper()
+	b, err := os.ReadFile(calls)
+	if want == nil {
+		if err == nil {
+			t.Fatalf("%s: лишний вызов tk:\n%s", name, b)
+		}
+		return
+	}
+	for _, w := range want {
+		if !strings.Contains(string(b), w) {
+			t.Fatalf("%s: нет %q в\n%s", name, w, b)
+		}
+	}
+	for _, w := range not {
+		if strings.Contains(string(b), w) {
+			t.Fatalf("%s: лишнее %q в\n%s", name, w, b)
+		}
 	}
 }

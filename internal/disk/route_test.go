@@ -429,3 +429,21 @@ func TestTicketTextClosesOnFix(t *testing.T) {
 		t.Fatalf("приёмка с окном наблюдения:\n%s", text)
 	}
 }
+
+// Fresh: след в тексте тикета — с запятой после пути; рост с замера до закрытия — разобран, после — новый.
+func TestTicketBatchFreshTraceAndGrew(t *testing.T) {
+	home := "/h"
+	closed := time.Date(2026, 11, 18, 11, 21, 0, 0, time.Local)
+	// Двойной пробел в тексте: находка без пути не должна совпасть с « » + "" + « ».
+	body := "- ~/t/run, 3.0 ГБ, оставил  x\n- ~/g выросла на 2.0 ГБ с 17.11 10:00, теперь 9.0 ГБ\n"
+	b := TicketBatch{Class: TicketTrace, Owner: "x", Recs: []Record{
+		{Kind: KindTrace, Path: "/h/t/run", Since: closed.Add(-time.Hour)},
+		{Kind: KindGrew, Path: "/h/g", Since: closed.Add(-time.Hour)},
+		{Kind: KindGrew, Path: "/h/g", Since: closed},
+		{Kind: KindFinding, Text: "без пути", Since: closed.Add(-time.Hour)},
+	}}
+	f, dropped := b.Fresh(home, closed, body)
+	if len(f.Recs) != 2 || f.Recs[0].Since != closed || f.Recs[1].Kind != KindFinding || strings.Join(dropped, ",") != "~/t/run,~/g" {
+		t.Fatalf("новые %+v, отсеяны %v", f.Recs, dropped)
+	}
+}

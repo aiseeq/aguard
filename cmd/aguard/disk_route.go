@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/disk"
@@ -64,7 +65,12 @@ func (a *app) diskTickets(ctx context.Context, cfg *disk.Config, recs []disk.Rec
 	for _, b := range due {
 		err := a.classTicket(ctx, classTicket{watcher: "disk", owner: b.Owner, lead: cfg.Lead, tk: cfg.Tk,
 			log: cfg.Mode != disk.ModeAlert, base: b.Class, title: b.Title(), what: b.Class, count: int64(len(b.Recs)),
-			unit: "records", text: func(prev, redirect string) string { return b.Text(a.home, prev, redirect) }, note: b.Note(a.home)})
+			unit: "records", text: func(prev, redirect string) string { return b.Text(a.home, prev, redirect) }, note: b.Note(a.home),
+			fresh: func(closed time.Time, body string) (int64, func(prev, redirect string) string, string) {
+				f, dropped := b.Fresh(a.home, closed, body)
+				return int64(len(f.Recs)), func(prev, redirect string) string { return f.Text(a.home, prev, redirect) },
+					strings.Join(dropped, ", ")
+			}})
 		if err != nil {
 			a.warn("disk", "тикет находок", "owner", b.Owner, "class", b.Class, "err", err)
 			a.note("disk", "ticket_failed", b.Class, b.Owner, int64(len(b.Recs)), "records")
