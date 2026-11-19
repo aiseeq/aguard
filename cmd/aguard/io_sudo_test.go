@@ -490,7 +490,7 @@ func TestCanceledSudoSearchStillLogsAndRoutesCase(t *testing.T) {
 }
 
 func TestClosedCasesRouteWithoutWaitingForRootLookup(t *testing.T) {
-	started, release := make(chan struct{}), make(chan struct{})
+	started, release := make(chan struct{}, 1), make(chan struct{})
 	var logs bytes.Buffer
 	a, _ := testIOApp(t)
 	a.log = slog.New(slog.NewTextHandler(&logs, nil))
@@ -539,7 +539,7 @@ func TestClosedCasesRouteWithoutWaitingForRootLookup(t *testing.T) {
 }
 
 func TestProbeTrimKeepsRouting(t *testing.T) {
-	started, release := make(chan struct{}), make(chan struct{})
+	started, release := make(chan struct{}, 1), make(chan struct{})
 	var logs bytes.Buffer
 	a, _ := testIOApp(t)
 	a.log = slog.New(slog.NewTextHandler(&logs, nil))
@@ -548,8 +548,12 @@ func TestProbeTrimKeepsRouting(t *testing.T) {
 		case started <- struct{}{}:
 		default:
 		}
-		<-release
-		return nil, nil
+		select {
+		case <-release:
+			return nil, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	cfg := iowatch.Default()
 	cfg.Mode = iowatch.ModeLog
@@ -622,7 +626,7 @@ func TestSudoNegativeCacheExpiryPrunesOldEntries(t *testing.T) {
 }
 
 func TestTrimDuringSudoLookupDoesNotAttachToDifferentCase(t *testing.T) {
-	started, release := make(chan struct{}), make(chan struct{})
+	started, release := make(chan struct{}, 1), make(chan struct{})
 	start := time.Now().Add(-400 * 24 * time.Hour)
 	openedAt := start.Add(-time.Millisecond)
 	commandRow := journalRecord{Message: "aisee : USER=root ; COMMAND=trimmed case command", PID: "77", Timestamp: strconv.FormatInt(openedAt.UnixMicro(), 10), BootID: "boot"}
