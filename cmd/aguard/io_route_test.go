@@ -68,6 +68,100 @@ func TestIOTicketerNewNoteAndNext(t *testing.T) {
 	}
 }
 
+// Повтор класса после закрытия считается по началу случая (лид 18.11 11:54, io-freeze-rg-3): случай, начавшийся до
+// закрытия прежнего тикета, разобран в нём — нового тикета нет; начавшийся после — новый тикет только с ним.
+// Время закрытия — из журнала, не из поздней заметки.
+func TestIOTicketerOldSeriesAfterClose(t *testing.T) {
+	a, _ := testIOApp(t)
+	proj := filepath.Join(a.home, "git", "dream")
+	if err := os.MkdirAll(filepath.Join(proj, "docs", "tasks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	journal := "# x\n\nСтатус: готово\n\n## Журнал\n- 2026-11-18 10:09 открыт — aguard\n- 2026-11-18 11:00 note — aguard: 10:39\n" +
+		"- 2026-11-18 11:21 готово — lead: правка\n- 2026-11-18 11:40 note — lead: поздняя заметка\n"
+	if err := os.WriteFile(filepath.Join(proj, "docs", "tasks", "rg-2.md"), []byte(journal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	at := func(hm string) time.Time {
+		tm, err := time.ParseInLocation("2006-01-02 15:04:05", "2026-11-18 "+hm, time.Local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tm
+	}
+	old := ioroute.Case{Start: at("10:39:39"), End: at("10:49:45"), DurMS: 606000, Class: "rg", Text: "18.11 10:39:39 старый"}
+	edge := ioroute.Case{Start: at("11:21:00"), End: at("11:21:05"), DurMS: 5000, Class: "rg", Text: "18.11 11:21:00 на минуте закрытия"}
+	late := ioroute.Case{Start: at("11:30:00"), End: at("11:30:05"), DurMS: 5000, Class: "rg", Text: "18.11 11:30:00 после закрытия, до поздней заметки"}
+	ls := `[{"slug":"io-freeze-rg","status":"готово"},{"slug":"io-freeze-rg-2","status":"готово","path":"docs/tasks/rg-2.md"}]`
+	tkr := &ioTicketer{a: a}
+	for _, tc := range []struct {
+		name  string
+		cases []ioroute.Case
+		want  []string // в вызовах; nil — вызовов нет
+		not   []string
+	}{
+		{"только старый — без тикета", []ioroute.Case{old}, nil, nil},
+		{"старый и новые — новый тикет без старого", []ioroute.Case{old, edge, late},
+			[]string{"|new io-freeze-rg-3", "Прежний тикет класса: io-freeze-rg-2", edge.Text, late.Text}, []string{old.Text}},
+	} {
+		dir := t.TempDir()
+		tk, calls := fakeTk(t, dir, ls)
+		job := ioTicketJob{owner: "dream-master", class: "rg", cases: tc.cases, tk: tk, lead: "lead"}
+		if err := tkr.apply(context.Background(), job); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		b, err := os.ReadFile(calls)
+		if tc.want == nil {
+			if err == nil {
+				t.Fatalf("%s: лишний вызов tk:\n%s", tc.name, b)
+			}
+			continue
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(string(b), w) {
+				t.Fatalf("%s: нет %q в\n%s", tc.name, w, b)
+			}
+		}
+		for _, w := range tc.not {
+			if strings.Contains(string(b), w) {
+				t.Fatalf("%s: лишнее %q в\n%s", tc.name, w, b)
+			}
+		}
+	}
+}
+
+func TestTicketClosedAt(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, s string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	// Переоткрыт и снова закрыт — последняя строка закрытия; «отклонён» и «перенесён» — тоже закрытие.
+	p := write("a.md", "- 2026-11-18 10:00 готово — x\n- 2026-11-18 10:30 в работе — y\n- 2026-11-18 12:05 отклонён — z: дубль\n- 2026-11-18 13:00 note — z\n")
+	got, ok, err := ticketClosedAt(p)
+	if want := time.Date(2026, 11, 18, 12, 5, 0, 0, time.Local); !ok || err != nil || !got.Equal(want) {
+		t.Errorf("закрытие %v %v %v, ждали %v", got, ok, err, want)
+	}
+	if _, ok, err := ticketClosedAt(write("b.md", "- 2026-11-18 10:00 открыт — x\n- 2026-11-18 10:01 note — x: готово\n")); ok || err != nil {
+		t.Errorf("без строки закрытия — нет времени и ошибки: %v %v", ok, err)
+	}
+	if _, ok, err := ticketClosedAt(filepath.Join(dir, "нет.md")); ok || err != nil {
+		t.Errorf("нет файла — нет времени и ошибки: %v %v", ok, err)
+	}
+	if _, ok, err := ticketClosedAt(dir); ok || err == nil { // папка вместо файла: ошибка чтения не прячется
+		t.Errorf("ошибка чтения: %v %v", ok, err)
+	}
+	if _, ok, err := ticketClosedAt(write("d.md", "- 2026-13-40 10:00 готово — x\n")); ok || err == nil {
+		t.Errorf("невозможная дата закрытия — ошибка: %v %v", ok, err)
+	}
+	if got, ok, err := ticketClosedAt(write("c.md", "- 2026-11-18 09:00 перенесён — x\n")); !ok || err != nil || got.Hour() != 9 {
+		t.Errorf("перенесён: %v %v %v", got, ok, err)
+	}
+}
+
 // Папки хозяина нет — тикет лиду в домашней папке с именем хозяина.
 func TestIOTicketerUnknownOwnerToLead(t *testing.T) {
 	a, _ := testIOApp(t)

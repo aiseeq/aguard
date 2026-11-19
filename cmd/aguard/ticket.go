@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +36,10 @@ type classTicket struct {
 	// хозяина нет и тикет лиду.
 	text func(prev, redirect string) string
 	note string // заметка в открытый тикет
+	// fresh — что из находок началось не раньше закрытия прежнего тикета (closed): их число и текст нового тикета.
+	// Начавшееся раньше разобрано в закрытом: без этого закрытие давало дубль на хвосте старой серии (io-freeze-rg-3
+	// 18.11 на случай 10:39 при rg-2, закрытом в 11:21). nil — находки без времени начала (disk): все новые.
+	fresh func(closed time.Time) (int64, func(prev, redirect string) string)
 }
 
 // classTicket — тикет или заметка; ошибка — tk не ответил или упал.
@@ -52,9 +59,25 @@ func (a *app) classTicket(ctx context.Context, t classTicket) error {
 		a.note(t.watcher, "ticket_would", t.what, who, t.count, t.unit)
 		return nil
 	}
-	open, next, prev, err := findClassTicket(ctx, t.tk, dir, t.base)
+	open, next, prev, prevPath, err := findClassTicket(ctx, t.tk, dir, t.base)
 	if err != nil {
 		return err
+	}
+	if open == "" && prev != "" && t.fresh != nil {
+		closed, ok, err := ticketClosedAt(filepath.Join(dir, prevPath))
+		if err != nil { // повтор не теряем: находки — в новый тикет целиком
+			a.warn(t.watcher, "время закрытия прежнего тикета не прочитано", "prev", prev, "err", err)
+		}
+		if ok {
+			n, text := t.fresh(closed)
+			if n == 0 {
+				a.log.Info("aguard "+t.watcher+": находки старой серии, прежний тикет закрыт — без нового", "dir", dir,
+					"prev", prev, "closed", closed.Format(time.DateTime), t.unit, t.count)
+				a.note(t.watcher, "ticket_old_series", prev, who, t.count, t.unit)
+				return nil
+			}
+			t.count, t.text = n, text
+		}
 	}
 	if open != "" {
 		if err := tkRun(ctx, t.tk, dir, nil, "note", open, t.note, "--by", "aguard"); err != nil {
@@ -74,23 +97,25 @@ func (a *app) classTicket(ctx context.Context, t classTicket) error {
 type tkRow struct {
 	Slug   string `json:"slug"`
 	Status string `json:"status"`
+	Path   string `json:"path"` // от папки проекта
 }
 
 var tkClosed = map[string]bool{"готово": true, "отклонён": true, "перенесён": true}
 
-// findClassTicket — открытый тикет класса (base или base-N); иначе свободный slug и последний закрытый (ссылка в новом).
-func findClassTicket(ctx context.Context, tk, dir, base string) (open, next, prev string, err error) {
+// findClassTicket — открытый тикет класса (base или base-N); иначе свободный slug и последний закрытый (ссылка в новом)
+// с путём его файла.
+func findClassTicket(ctx context.Context, tk, dir, base string) (open, next, prev, prevPath string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tk, "ls", "--all", "--slug", base, "--json")
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		return "", "", "", fmt.Errorf("tk ls в %s: %w", dir, err)
+		return "", "", "", "", fmt.Errorf("tk ls в %s: %w", dir, err)
 	}
 	var rows []tkRow
 	if err := json.Unmarshal(out, &rows); err != nil {
-		return "", "", "", fmt.Errorf("tk ls в %s: %w", dir, err)
+		return "", "", "", "", fmt.Errorf("tk ls в %s: %w", dir, err)
 	}
 	maxN := 0
 	for _, r := range rows {
@@ -99,17 +124,46 @@ func findClassTicket(ctx context.Context, tk, dir, base string) (open, next, pre
 			continue
 		}
 		if !tkClosed[r.Status] {
-			return r.Slug, "", "", nil
+			return r.Slug, "", "", "", nil
 		}
 		if n >= maxN {
-			maxN, prev = n, r.Slug
+			maxN, prev, prevPath = n, r.Slug, r.Path
 		}
 	}
 	if prev == "" {
-		return "", base, "", nil
+		return "", base, "", "", nil
 	}
-	return "", base + "-" + strconv.Itoa(maxN+1), prev, nil
+	return "", base + "-" + strconv.Itoa(maxN+1), prev, prevPath, nil
 }
+
+// ticketClosedAt — время закрытия тикета: последняя строка журнала «- ГГГГ-ММ-ДД ЧЧ:ММ готово|отклонён|перенесён —»,
+// местное время, начало минуты. Не поле changed из tk ls: поздняя заметка в закрытом тикете сдвинула бы границу и
+// спрятала настоящий повтор. Файла или строки нет — false без ошибки: находки считаются новыми, повтор не теряется.
+func ticketClosedAt(path string) (time.Time, bool, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("тикет %s: %w", path, err)
+	}
+	var closed time.Time
+	for line := range strings.Lines(string(data)) {
+		m := journalLine.FindStringSubmatch(line)
+		if m == nil || !tkClosed[m[2]] {
+			continue
+		}
+		at, err := time.ParseInLocation("2006-01-02 15:04", m[1], time.Local)
+		if err != nil { // строка журнала с невозможной датой — порча файла, не пропуск
+			return time.Time{}, false, fmt.Errorf("тикет %s: %w", path, err)
+		}
+		closed = at
+	}
+	return closed, !closed.IsZero(), nil
+}
+
+// journalLine — строка журнала tk: «- ГГГГ-ММ-ДД ЧЧ:ММ <статус> …».
+var journalLine = regexp.MustCompile(`^- (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) (\S+) `)
 
 // classSlugN — slug класса base: сам base (номер 1) или base-N; иное (base-gopls) — не класс.
 func classSlugN(slug, base string) (int, bool) {
