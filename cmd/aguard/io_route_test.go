@@ -91,6 +91,8 @@ func TestIOTicketerOldSeriesAfterClose(t *testing.T) {
 	}
 	old := ioroute.Case{Start: at("10:39:39"), End: at("10:49:45"), DurMS: 606000, Class: "rg", Text: "18.11 10:39:39 старый"}
 	edge := ioroute.Case{Start: at("11:21:00"), End: at("11:21:05"), DurMS: 5000, Class: "rg", Text: "18.11 11:21:00 на минуте закрытия"}
+	// Начался за секунду до минуты закрытия и кончился после — старая серия: граница по началу, не по концу.
+	straddle := ioroute.Case{Start: at("11:20:59"), End: at("11:23:00"), DurMS: 121000, Class: "rg", Text: "18.11 11:20:59 через закрытие"}
 	late := ioroute.Case{Start: at("11:30:00"), End: at("11:30:05"), DurMS: 5000, Class: "rg", Text: "18.11 11:30:00 после закрытия, до поздней заметки"}
 	ls := `[{"slug":"io-freeze-rg","status":"готово"},{"slug":"io-freeze-rg-2","status":"готово","path":"docs/tasks/rg-2.md"}]`
 	tkr := &ioTicketer{a: a}
@@ -100,9 +102,9 @@ func TestIOTicketerOldSeriesAfterClose(t *testing.T) {
 		want  []string // в вызовах; nil — вызовов нет
 		not   []string
 	}{
-		{"только старый — без тикета", []ioroute.Case{old}, nil, nil},
-		{"старый и новые — новый тикет без старого", []ioroute.Case{old, edge, late},
-			[]string{"|new io-freeze-rg-3", "Прежний тикет класса: io-freeze-rg-2", edge.Text, late.Text}, []string{old.Text}},
+		{"только старые — без тикета", []ioroute.Case{old, straddle}, nil, nil},
+		{"старые и новые — новый тикет без старых", []ioroute.Case{old, straddle, edge, late},
+			[]string{"|new io-freeze-rg-3", "Прежний тикет класса: io-freeze-rg-2", edge.Text, late.Text}, []string{old.Text, straddle.Text}},
 	} {
 		dir := t.TempDir()
 		tk, calls := fakeTk(t, dir, ls)

@@ -39,7 +39,8 @@ type classTicket struct {
 	// fresh — что из находок началось не раньше закрытия прежнего тикета (closed): их число и текст нового тикета.
 	// Начавшееся раньше разобрано в закрытом: без этого закрытие давало дубль на хвосте старой серии (io-freeze-rg-3
 	// 18.11 на случай 10:39 при rg-2, закрытом в 11:21). nil — находки без времени начала (disk): все новые.
-	fresh func(closed time.Time) (int64, func(prev, redirect string) string)
+	// dropped — начала отсеянных находок для журнала: отброшенное можно найти.
+	fresh func(closed time.Time) (n int64, text func(prev, redirect string) string, dropped string)
 }
 
 // classTicket — тикет или заметка; ошибка — tk не ответил или упал.
@@ -69,11 +70,13 @@ func (a *app) classTicket(ctx context.Context, t classTicket) error {
 			a.warn(t.watcher, "время закрытия прежнего тикета не прочитано", "prev", prev, "err", err)
 		}
 		if ok {
-			n, text := t.fresh(closed)
+			n, text, dropped := t.fresh(closed)
+			if dropped != "" {
+				a.log.Info("aguard "+t.watcher+": находки старой серии — разобраны в закрытом тикете", "dir", dir,
+					"prev", prev, "closed", closed.Format(time.DateTime), "started", dropped, "fresh", n)
+				a.note(t.watcher, "ticket_old_series", prev, who, t.count-n, t.unit)
+			}
 			if n == 0 {
-				a.log.Info("aguard "+t.watcher+": находки старой серии, прежний тикет закрыт — без нового", "dir", dir,
-					"prev", prev, "closed", closed.Format(time.DateTime), t.unit, t.count)
-				a.note(t.watcher, "ticket_old_series", prev, who, t.count, t.unit)
 				return nil
 			}
 			t.count, t.text = n, text

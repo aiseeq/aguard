@@ -236,15 +236,19 @@ func (t *ioTicketer) apply(ctx context.Context, job ioTicketJob) error {
 	return t.a.classTicket(ctx, classTicket{watcher: "io", owner: job.owner, lead: job.lead, tk: job.tk, log: job.log,
 		base: "io-freeze-" + job.class, title: ioTicketTitle(job), what: job.class, count: int64(len(job.cases)), unit: "cases",
 		text: func(prev, redirect string) string { return ioTicketText(job, prev, redirect) }, note: ioTicketNote(job),
-		fresh: func(closed time.Time) (int64, func(prev, redirect string) string) {
+		fresh: func(closed time.Time) (int64, func(prev, redirect string) string, string) {
 			after := job
 			after.cases = nil
+			var old []string
 			for _, c := range job.cases {
-				if !c.Start.Before(closed) {
+				if c.Start.Before(closed) {
+					old = append(old, c.Start.Local().Format(time.DateTime))
+				} else {
 					after.cases = append(after.cases, c)
 				}
 			}
-			return int64(len(after.cases)), func(prev, redirect string) string { return ioTicketText(after, prev, redirect) }
+			return int64(len(after.cases)), func(prev, redirect string) string { return ioTicketText(after, prev, redirect) },
+				strings.Join(old, ", ")
 		}})
 }
 
