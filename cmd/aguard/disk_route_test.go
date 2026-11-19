@@ -569,8 +569,8 @@ func TestDiskRouteRepeatAfterClose(t *testing.T) {
 				{At: now, Kind: disk.KindStale, Path: filepath.Join(home, ".cache", "s0"), Bytes: 2 << 30, Since: now.Add(-72 * time.Hour), Owner: "dream-master"},
 				{At: now, Kind: disk.KindStale, Path: filepath.Join(home, ".cache", "s01"), Bytes: 2 << 30, Since: closed, Owner: "dream-master"},
 			}
-		}, []string{"|new disk-stale-2", "Прежний тикет класса: disk-stale (закрыт)", "Находки (2)", "~/.cache/s0 (", "~/.cache/s01 ("},
-			[]string{"~/.cache/s00 ("}, "~/.cache/s00"},
+		}, []string{"|new disk-stale-2", "Прежний тикет класса: disk-stale (закрыт)", "Находки (2):\n- ~/.cache/s0 (", "~/.cache/s01 (",
+			"разобраны там, не находки (1):\n- ~/.cache/s00 ("}, nil, "~/.cache/s00"},
 	} {
 		a, _ := diskRouteApp(t)
 		var logBuf bytes.Buffer
