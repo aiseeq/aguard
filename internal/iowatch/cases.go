@@ -430,7 +430,11 @@ func (r *Recorder) finish(c *Case) {
 		firstInterval = r.ring.DetailInterval(details[0].At, firstInterval)
 		c.Culprits.IdleWindowMS = details[len(details)-1].At.Sub(details[0].At.Add(-firstInterval)).Milliseconds()
 	}
-	v := cappedWaitFirstInterval(details, c.Start, c.End, firstInterval, c.DurMS, c.BusyMS)
+	// Закрытый случай занятость диска (io_ticks) не сверяет: при одной очереди мелких чтений под потолком она близка
+	// к 100 % и на быстром NVMe. Трасса 4 (19.11 12:03–14:03): 38 случаев, не признанных только из-за неё, — срез
+	// интерфейса не пересёк ни один (capped-busy-ioticks). Идущий случай и окна Live её сверяют: их признание читает
+	// akit busy, занятый диск там — занятость для допуска нагрузки.
+	v := cappedWaitFirstInterval(details, c.Start, c.End, firstInterval, c.DurMS, 0)
 	c.Capped, c.OutsideIdleMS, c.Culprits.CappedIdle = v.Capped, v.OutsideMS, v.Who
 	c.Culprits.OutsideIdle, c.Culprits.OutsideMajflt, c.Culprits.OutsideSwapIn = v.OutsideWho, v.OutsideMajflt, v.OutsideSwapIn
 	c.NeighborHarm = v.NeighborHarm // тихость (обмен случая с диском) не трогает: счётчики соседей — по целым записям шире случая

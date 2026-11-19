@@ -355,6 +355,58 @@ func TestRecorderCappedCaseAndSummary(t *testing.T) {
 	}
 }
 
+// Закрытый случай под потолком при диске, занятом больше половины окна (io_ticks одной очереди мелких чтений), —
+// под потолком; идущий случай того же окна — нет: его признание читает akit busy (capped-busy-ioticks).
+func TestRecorderCappedCaseIgnoresBusy(t *testing.T) {
+	for _, tc := range []struct {
+		ticks      int64
+		openCapped bool
+	}{{5, true}, {90, false}} {
+		got, openCapped := cappedBusyRun(t, tc.ticks)
+		if len(got) != 1 || !got[0].Capped || (tc.ticks > 50) != (got[0].BusyMS*2 >= got[0].DurMS) {
+			t.Fatalf("занят %d из 100 мс: закрытый случай под потолком при любой занятости диска: %+v", tc.ticks, got)
+		}
+		if openCapped != tc.openCapped {
+			t.Fatalf("занят %d из 100 мс: идущий случай признан %v, ждали %v (занятый диск — занятость для akit busy)", tc.ticks, openCapped, tc.openCapped)
+		}
+	}
+}
+
+func cappedBusyRun(t *testing.T, ticks int64) ([]Case, bool) {
+	t.Helper()
+	r := NewRecorder(Default())
+	live := NewLive()
+	r.Attach(nil, nil, live)
+	base := time.Date(2026, 11, 19, 7, 4, 5, 0, time.Local)
+	probe := Cap{Path: "/agents.slice/worker-round-x.service", RBps: 30_000_000}
+	var got []Case
+	openCapped := false
+	for i := range 60 {
+		at := base.Add(time.Duration(i) * 100 * time.Millisecond)
+		if i%10 == 0 {
+			d := Step{At: at}
+			if i >= 10 && i <= 40 {
+				d.Cgroups = []Cgroup{{Path: probe.Path, ReadBytes: 30_000_000, IOFullUS: 700_000, Cap: probe},
+					{Path: "/agents.slice/agent-lead-1.scope", IOFullUS: 3000}}
+			}
+			r.Detail(d)
+		}
+		var v int64
+		if i >= 10 && i < 40 {
+			v = 70_000
+		}
+		got = append(got, r.Step(Step{At: at, IOFullUS: v, ReadBytes: 3_000_000, RIOS: 24, IOTicks: ticks})...)
+		if i == 35 {
+			now, ok := live.Now()
+			if !ok || !now.Open.Open {
+				t.Fatalf("в 3,5 с случай идёт: %+v", now.Open)
+			}
+			openCapped = now.Open.Capped
+		}
+	}
+	return got, openCapped
+}
+
 func TestRecorderNeighborHarmRemainsFreeze(t *testing.T) {
 	r := NewRecorder(Default())
 	start := time.Now()
