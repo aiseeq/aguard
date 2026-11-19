@@ -76,6 +76,7 @@ type Culprit struct {
 	MainWrite      int64                     `json:"main_write,omitempty"`       // запись процессов; у выбранного io.stat писателя — запись cgroup
 	MainRead       int64                     `json:"main_read,omitempty"`        // чтение главной cgroup
 	MainProc       string                    `json:"main_proc,omitempty"`        // процесс главной cgroup с наибольшим I/O, comm(pid): класс тикета, хозяин временного scope
+	MainLeafProc   string                    `json:"main_leaf_proc,omitempty"`   // лист главной cgroup, когда MainProc — обёртка
 	IdleWindowMS   int64                     `json:"idle_window_ms,omitempty"`   // интервал деталей, из которого сложен CgroupIdle
 	CgroupMainProc map[string]string         `json:"cgroup_main_proc,omitempty"` // процесс с наибольшим I/O по имени cgroup
 	CgroupPaths    map[string]string         `json:"cgroup_paths,omitempty"`     // реальные пути cgroup, наблюдавшиеся в деталях
@@ -417,6 +418,7 @@ func (r *Recorder) finish(c *Case) {
 		}
 	}
 	c.Culprits = &Culprit{From: from, Main: main, MainValue: sum.cgroupTotal[main], MainWrite: sum.cgroupWrite[main], MainRead: sum.cgroupRead[main], MainProc: mainProc,
+		MainLeafProc:   sum.LeafProc(main, r.cfg.Wrappers),
 		CgroupMainProc: cgroupMainProc,
 		CgroupPaths:    cgroupPaths,
 		ProcWrite:      procWrite, ProcRead: procRead, ProcMajflt: Rank(sum.ProcMajflt, caseTop),

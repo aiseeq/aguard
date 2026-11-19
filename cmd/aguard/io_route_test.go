@@ -229,6 +229,46 @@ func TestIOBlameMainDeterminesRouteOwnerAndWaitingIsNotAlertable(t *testing.T) {
 	}
 }
 
+func TestIOToolOwnerOverridesSessionOwner(t *testing.T) {
+	main := "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-shop-master-123.scope"
+	c := iowatch.Case{Culprits: &iowatch.Culprit{Main: main, MainProc: "tl(474531)"}}
+	for _, tc := range []struct {
+		name, want string
+		tools      map[string]string
+	}{
+		{"tool configured", "akit-master", map[string]string{"tl": "akit-master"}},
+		{"tool absent", "shop-master", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := &ioOwnerFinder{tools: tc.tools}
+			rc, err := o.routeCase(&c)
+			if err != nil || rc.Owner != tc.want || rc.Class != "tl" || rc.Generic {
+				t.Fatalf("route: %+v %v, want owner=%s class=tl generic=false", rc, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestIOWorkerOwnerFallsBackToJobOwnerWithoutMasterSession(t *testing.T) {
+	dir := t.TempDir()
+	main := "/user.slice/user-1000.slice/user@1000.service/agents.slice/worker-job-J.service"
+	for _, tc := range []struct{ master, want string }{
+		{"measure-dir-master", "launcher-master"},
+		{"existing-master", "existing-master"},
+	} {
+		jobDir := filepath.Join(dir, tc.master)
+		writeIOFile(t, filepath.Join(jobDir, "J", "job.json"), `{"id":"J","master":"`+tc.master+`","owner":{"name":"launcher-master"}}`)
+		o := &ioOwnerFinder{jobs: &cpuwatch.Jobs{Dir: jobDir}, sessionExists: func(who string) bool {
+			return who == "existing-master"
+		}}
+		c := iowatch.Case{Culprits: &iowatch.Culprit{Main: main, MainProc: "codex(1)", MainLeafProc: "podman(2)"}}
+		rc, err := o.routeCase(&c)
+		if err != nil || rc.Owner != tc.want || rc.Class != "podman" || rc.Generic {
+			t.Fatalf("master %s: route %+v, err=%v, want owner=%s class=podman generic=false", tc.master, rc, err, tc.want)
+		}
+	}
+}
+
 // Хозяин временного scope (проба через systemd-run) — по scratchpad сессии в cmdline главного процесса: живая сессия с
 // этим SessionID, иначе мастер проекта по ключу; без scratchpad — по cwd.
 func TestIOOwnerByProcess(t *testing.T) {

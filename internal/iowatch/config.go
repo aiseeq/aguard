@@ -41,6 +41,8 @@ type Config struct {
 	MachineOwners int               `toml:"machine_owners"` // 0 в machine_n — общий вред не сверяется
 	CrossWindow   policy.Duration   `toml:"cross_window"`   // класс у двух хозяев за столько — письмо лиду, раз за окно на класс
 	Owners        map[string]string `toml:"owners"`         // служба (unit) → сессия-хозяин; agent-*.scope и бойцы worker — сами
+	Tools         map[string]string `toml:"tools"`          // имя процесса → сессия-хозяин инструмента; например tl = "akit-master"
+	Wrappers      []string          `toml:"wrappers"`       // процессы-обёртки для выбора листового процесса
 	Tk            string            `toml:"tk"`             // путь к tk: тикеты хозяевам
 	QuietBytes    int64             `toml:"quiet_bytes"`    // обмен с диском меньше — случай тихий (простой без трафика)
 	CasesKeep     policy.Duration   `toml:"cases_keep"`     // срок сводок случаев
@@ -89,6 +91,7 @@ func Default() Config {
 		CasesKeep:      policy.Duration(14 * 24 * time.Hour),
 		Keep:           policy.Duration(7 * 24 * time.Hour),
 		Device:         "nvme0n1",
+		Wrappers:       []string{"codex", "claude", "bash", "sh", "node", "worker", "python3", "timeout"},
 		SeriesKeep:     policy.Duration(24 * time.Hour),
 		ProfilesKeep:   policy.Duration(30 * 24 * time.Hour),
 		EvictorSwapMin: 1 << 20,
@@ -148,6 +151,11 @@ func (c *Config) validateRoute() error {
 	for unit, owner := range c.Owners {
 		if unit == "" || owner == "" {
 			return fmt.Errorf("owners: пустая служба или хозяин (%q = %q)", unit, owner)
+		}
+	}
+	for tool, owner := range c.Tools {
+		if tool == "" || owner == "" {
+			return fmt.Errorf("tools: пустой процесс или хозяин (%q = %q)", tool, owner)
 		}
 	}
 	return nil
