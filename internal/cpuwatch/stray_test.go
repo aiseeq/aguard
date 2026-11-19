@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/aguard/internal/testutil"
 )
 
 const (
@@ -323,9 +325,13 @@ func TestJobsByPathAndStrayOwner(t *testing.T) {
 	}
 }
 
-// Настоящий скрипт и настоящий процесс без родителя, занятый 3 с: виден, занятость считается, строка не рвётся. Сам
-// тест под службой или подреапером такого процесса не даст — тогда пропуск с причиной.
+// AGUARD_LIVE_STRAYS=1: настоящий скрипт и процесс без родителя, занятый 3 с: виден, занятость считается, строка не
+// рвётся. Сам тест под службой или подреапером такого процесса не даст — тогда пропуск с причиной.
 func TestStrayScriptLive(t *testing.T) {
+	if !testutil.LiveTestEnabled(t, "AGUARD_LIVE_STRAYS") {
+		t.Skip("AGUARD_LIVE_STRAYS=1 — проба настоящего списка процессов")
+	}
+	testutil.UseOriginalCommandPath(t)
 	cg, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
 		t.Skip("нет /proc: ", err)

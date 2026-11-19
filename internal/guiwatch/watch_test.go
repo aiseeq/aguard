@@ -79,6 +79,16 @@ func write(t *testing.T, path, value string) {
 	}
 }
 
+func stubJournalctl(t *testing.T) {
+	t.Helper()
+	bin := t.TempDir()
+	write(t, filepath.Join(bin, "journalctl"), "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(filepath.Join(bin, "journalctl"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+}
+
 func rewrite(t *testing.T, path, value string) {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0600)
@@ -575,7 +585,9 @@ func TestPruneKeepsOpenEpisodeSliceByStableID(t *testing.T) {
 
 func TestStormMergeRequiresSameStarttime(t *testing.T) {
 	root, dir, _, at := fixture(t)
+	stubJournalctl(t)
 	w := New(root, dir, Default(), nil)
+	defer w.closeAll()
 	w.now = func() time.Time { return at.Add(time.Second) }
 	for _, st := range []uint64{100, 101} {
 		e := &episode{start: at, end: at.Add(time.Second), kind: "D"}
@@ -637,7 +649,9 @@ func TestSuspendKeepsClosingEndAndResetsBasis(t *testing.T) {
 
 func TestLongEpisodeUpdateRetainsSamplesPastRing(t *testing.T) {
 	root, dir, _, at := fixture(t)
+	stubJournalctl(t)
 	w := New(root, dir, Default(), nil)
+	defer w.closeAll()
 	w.now = func() time.Time { return at.Add(40 * time.Second) }
 	old := Slice{ID: "stable", Target: "v", PID: 1, Starttime: 8, Start: at, End: at.Add(time.Second), Samples: []Sample{{AtMS: -5000, State: "D"}}}
 	w.document.Slices = []Slice{old}
@@ -1005,25 +1019,28 @@ func TestSamplerGapUsesThreadSelfWaitDelta(t *testing.T) {
 func TestJournalCollectionDoesNotBlockCaller(t *testing.T) {
 	root, dir, _, at := fixture(t)
 	w := New(root, dir, Default(), nil)
+	defer w.closeAll()
 	fake := filepath.Join(root, "bin")
 	if err := os.MkdirAll(fake, 0700); err != nil {
 		t.Fatal(err)
 	}
-	write(t, filepath.Join(fake, "journalctl"), "#!/bin/sh\n/bin/sleep 5\n")
+	write(t, filepath.Join(fake, "journalctl"), "#!/bin/sh\n/bin/sleep 0.3\n")
 	if err := os.Chmod(filepath.Join(fake, "journalctl"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fake)
 	started := time.Now()
 	w.queueJournal("async", at, at.Add(time.Second))
-	if time.Since(started) > 100*time.Millisecond {
+	if time.Since(started) > 50*time.Millisecond {
 		t.Fatal("journal command blocked sampler")
 	}
 }
 
 func TestMergedEpisodeKeepsCounterAndSamples(t *testing.T) {
 	root, dir, _, at := fixture(t)
+	stubJournalctl(t)
 	w := New(root, dir, Default(), nil)
+	defer w.closeAll()
 	w.now = func() time.Time { return at.Add(10 * time.Second) }
 	old := Slice{ID: "original", Target: "victim", PID: 4321, Starttime: 100, Start: at, End: at.Add(time.Second), Samples: []Sample{{AtMS: -1000, State: "D"}}}
 	w.document.Slices = []Slice{old}
@@ -1043,7 +1060,9 @@ func TestMergedEpisodeKeepsCounterAndSamples(t *testing.T) {
 // от начала нового эпизода ставит их на моменты, где опроса не было (тикет merge-atms).
 func TestMergedSliceSamplesOnTimeline(t *testing.T) {
 	root, dir, _, at := fixture(t)
+	stubJournalctl(t)
 	w := New(root, dir, Default(), nil)
+	defer w.closeAll()
 	ctx := w.Config.Context.D()
 	state := func(m time.Time) string {
 		if !m.Before(at) && !m.After(at.Add(10*time.Second)) || !m.Before(at.Add(18*time.Second)) && !m.After(at.Add(28*time.Second)) {
@@ -1086,16 +1105,9 @@ func TestMergedSliceSamplesOnTimeline(t *testing.T) {
 func TestMergedCountSurvivesLaterSliceUpdateOnDisk(t *testing.T) {
 	root, dir, _, at := fixture(t)
 	w := New(root, dir, Default(), nil)
+	defer w.closeAll()
 	w.now = func() time.Time { return at.Add(10 * time.Second) }
-	fakeBin := filepath.Join(root, "bin")
-	if err := os.MkdirAll(fakeBin, 0700); err != nil {
-		t.Fatal(err)
-	}
-	write(t, filepath.Join(fakeBin, "journalctl"), "#!/bin/sh\nexit 0\n")
-	if err := os.Chmod(filepath.Join(fakeBin, "journalctl"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", fakeBin)
+	stubJournalctl(t)
 	old := Slice{ID: "original", Target: "victim", PID: 4321, Starttime: 100, Start: at, End: at.Add(time.Second)}
 	w.document.Slices = []Slice{old}
 	s := &targetState{Target: Target{Name: "victim", PID: 4321, Start: 100}, ring: []Sample{{At: at.Add(2 * time.Second), State: "D"}}}

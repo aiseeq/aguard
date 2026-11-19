@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/aiseeq/aguard/internal/restart"
+	"github.com/aiseeq/aguard/internal/testutil"
 	"github.com/aiseeq/akit/proc"
 )
 
@@ -22,7 +23,7 @@ func TestMain(m *testing.M) {
 		main()
 		return
 	}
-	os.Exit(m.Run())
+	os.Exit(testutil.RunWithCommandGuard(m, "cmd/cl", "systemd-run"))
 }
 
 // runMain — cl с аргументами args в папке cwd под домом home; claude и systemd-run из PATH подменены, systemd-run

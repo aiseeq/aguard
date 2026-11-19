@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aiseeq/aguard/internal/night"
+	"github.com/aiseeq/aguard/internal/testutil"
 )
 
 // fakeUnits — подмена systemd: запуски, состояние unit и снятые.
@@ -294,9 +295,10 @@ func TestNightFallbackLogOff(t *testing.T) {
 // Живой systemd пользователя: unit с кодом 3 и с кодом 0 (RemainAfterExit держит его active/exited) — конец, код, хвост
 // журнала, снятие, после снятия — not-found. Только с AGUARD_LIVE_UNITS=1.
 func TestSystemdUnitsLive(t *testing.T) {
-	if os.Getenv("AGUARD_LIVE_UNITS") != "1" {
+	if !testutil.LiveTestEnabled(t, "AGUARD_LIVE_UNITS") {
 		t.Skip("AGUARD_LIVE_UNITS=1 — проба на systemd пользователя")
 	}
+	testutil.UseOriginalCommandPath(t)
 	for _, code := range []int{3, 0} {
 		liveUnit(t, code)
 	}

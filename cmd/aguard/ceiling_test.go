@@ -64,6 +64,12 @@ func reviewCeilingScope(t *testing.T, slice, unit, events string) {
 	}
 }
 
+func emptyCeilingJournalSource() func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) {
+	return func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) {
+		return nil, time.Time{}, nil
+	}
+}
+
 func TestCeilingNoticePersistedBeforePropertyFailure(t *testing.T) {
 	home := t.TempDir()
 	slice, unit := filepath.Join(home, "cg"), "agent-demo-1.scope"
@@ -135,7 +141,9 @@ func TestCeilingMissingAtClearedWhenScopeAppears(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &app{home: home, log: slog.New(slog.DiscardHandler), act: activity.New(filepath.Join(home, "act"), time.Now()),
-		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour)}
+		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour),
+		ceilingJournalSource: emptyCeilingJournalSource(),
+	}
 	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -169,9 +177,12 @@ func TestCeilingEventCountSendsWithoutJournalVictims(t *testing.T) {
 		t.Fatal(err)
 	}
 	count, victims := int64(0), -1
+	old := ceilingSetProperty
+	ceilingSetProperty = func(string, int64) error { return nil }
+	t.Cleanup(func() { ceilingSetProperty = old })
 	a := &app{home: home, log: slog.New(slog.DiscardHandler), act: activity.New(filepath.Join(home, "act"), time.Now()),
 		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour),
-		ceilingJournalSource: func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) { return nil, time.Time{}, nil },
+		ceilingJournalSource: emptyCeilingJournalSource(),
 		ceilingNoticeSend: func(_ ceiling.State, got []oomVictim, n, _, _ int64, _ map[string]session.Info, _ error) error {
 			victims, count = len(got), n
 			return nil
@@ -218,7 +229,9 @@ func TestCeilingStateNotRewrittenWhenUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &app{home: home, log: slog.New(slog.DiscardHandler), act: activity.New(filepath.Join(home, "act"), time.Now()),
-		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour)}
+		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour),
+		ceilingJournalSource: emptyCeilingJournalSource(),
+	}
 	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +277,9 @@ func TestCeilingRoundContinuesAfterScopeError(t *testing.T) {
 	old := ceilingSetProperty
 	ceilingSetProperty = func(unit string, n int64) error { set = append(set, unit); return nil }
 	t.Cleanup(func() { ceilingSetProperty = old })
-	a := &app{home: home, stateDir: filepath.Join(home, ".local", "state", "aguard"), cgroupDir: filepath.Join(home, "cg", "agents.slice"), log: slog.Default(), act: activity.New(filepath.Join(home, "activity"), time.Now())}
+	a := &app{home: home, stateDir: filepath.Join(home, ".local", "state", "aguard"), cgroupDir: filepath.Join(home, "cg", "agents.slice"), log: slog.Default(), act: activity.New(filepath.Join(home, "activity"), time.Now()),
+		ceilingJournalSource: emptyCeilingJournalSource(),
+	}
 	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}

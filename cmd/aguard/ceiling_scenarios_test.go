@@ -30,7 +30,9 @@ func scenarioScope(t *testing.T, slice, unit, events string) {
 
 func scenarioApp(home string) *app {
 	return &app{home: home, log: slog.New(slog.DiscardHandler), act: activity.New(filepath.Join(home, "act"), time.Now()),
-		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour)}
+		ceilingAlive: map[string]session.Info{}, ceilingAliveAt: time.Now().Add(time.Hour),
+		ceilingJournalSource: emptyCeilingJournalSource(),
+	}
 }
 
 // сбой set-property не даёт второго письма о том же снятии
@@ -78,7 +80,7 @@ func TestCeilingMissingAtClearedOnReturn(t *testing.T) {
 	ceilingSetProperty = func(string, int64) error { return nil }
 	t.Cleanup(func() { ceilingSetProperty = old })
 	a := scenarioApp(home)
-	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) { return nil, time.Time{}, nil }
+	a.ceilingJournalSource = emptyCeilingJournalSource()
 	if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +252,7 @@ func TestCeilingPIDHistoryBoundedAndCleared(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := scenarioApp(home)
-	a.ceilingJournalSource = func(context.Context, string, time.Time) ([]oomVictim, time.Time, error) { return nil, time.Time{}, nil }
+	a.ceilingJournalSource = emptyCeilingJournalSource()
 	for range 1000 {
 		if err := a.ceilingIteration(context.Background(), context.Background(), slice, 0, nil); err != nil {
 			t.Fatal(err)
