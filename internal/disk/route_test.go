@@ -430,33 +430,46 @@ func TestTicketTextClosesOnFix(t *testing.T) {
 	}
 }
 
-// Fresh: отсеивается только stale, названная в тексте тикета в форме What и не менявшаяся после закрытия; путь —
-// префикс названного с пробелом — не она; grew и trace — всегда новые (их Since — не последнее изменение).
+// Fresh: отсеивается только stale, названная в тексте тикета той же строкой What (путь, размер, «не менялась с») и не
+// менявшаяся после закрытия; путь — префикс названного с пробелом, другое время изменения — новые; grew и trace —
+// всегда новые (их Since — не последнее изменение).
 func TestTicketBatchFreshStaleOnly(t *testing.T) {
 	home := "/h"
 	closed := time.Date(2026, 11, 18, 11, 21, 0, 0, time.Local)
-	body := "- ~/s (2.0 ГБ) не менялась с 15.11 10:00 — остаток временного?\n- ~/a b (2.0 ГБ) не менялась с 15.11 10:00\n" +
-		"- ~/t/run, 3.0 ГБ, оставил x\n- ~/g выросла на 2.0 ГБ с 17.11 10:00, теперь 9.0 ГБ\n- ~/g (2.0 ГБ) x\n- ~/t/run (3.0 ГБ) x\n"
 	before := closed.Add(-time.Hour)
+	stale := func(p string, since time.Time) Record {
+		return Record{Kind: KindStale, Path: p, Bytes: 2 << 30, Since: since}
+	}
+	tr := Record{Kind: KindTrace, Path: "/h/t/run", Bytes: 3 << 30, Since: before, Trace: &Trace{Path: "/h/t/run", Kind: TraceLeft, Bytes: 3 << 30}}
+	gr := Record{Kind: KindGrew, Path: "/h/g", Bytes: 9 << 30, Delta: 2 << 30, Since: before}
+	var body strings.Builder
+	inMinute := closed.Add(30 * time.Second) // изменилась после закрытия в ту же минуту: строка What та же
+	for _, r := range []Record{stale("/h/s", before), stale("/h/a b", before), tr, gr, stale("/h/g", before), stale("/h/t/run", before),
+		stale("/h/var/s", before), stale("/h/m", inMinute)} {
+		body.WriteString("- " + r.What(home) + "\n")
+	}
 	b := TicketBatch{Class: TicketStale, Owner: "x", Recs: []Record{
-		{Kind: KindStale, Path: "/h/s", Since: before},
-		{Kind: KindStale, Path: "/h/s", Since: closed},
-		{Kind: KindStale, Path: "/h/a", Since: before},
-		{Kind: KindTrace, Path: "/h/t/run", Since: before},
-		{Kind: KindGrew, Path: "/h/g", Since: before},
+		stale("/h/s", before),
+		stale("/h/s", closed),
+		stale("/h/a", before),
+		tr,
+		gr,
+		stale("/h/s", before.Add(-time.Hour)), // изменилась до разбора, но не так, как названо: строка другая
+		stale("/var/s", before),               // «- ~/var/s (» в тексте — не она: суффикс чужого пути
+		stale("/h/m", inMinute),
 	}}
-	f, dropped := b.Fresh(home, closed, body)
-	if len(f.Recs) != 4 || f.Recs[0].Since != closed || f.Recs[1].Path != "/h/a" || len(f.Settled) != 1 ||
-		f.Settled[0].Since != before || strings.Join(dropped, ",") != "~/s" {
+	f, dropped := b.Fresh(home, closed, body.String())
+	if len(f.Recs) != 7 || f.Recs[0].Since != closed || f.Recs[1].Path != "/h/a" || f.Recs[4].Since != before.Add(-time.Hour) ||
+		len(f.Settled) != 1 || f.Settled[0].Since != before || strings.Join(dropped, ",") != "~/s" {
 		t.Fatalf("новые %+v, разобраны %+v, отсеяны %v", f.Recs, f.Settled, dropped)
 	}
 	text := f.Text(home, "disk-stale", "")
-	if !strings.Contains(text, "Находки (4)") || !strings.Contains(text, "Без изменений с закрытия disk-stale — разобраны там, не находки (1):\n- ~/s (") {
+	if !strings.Contains(text, "Находки (7)") || !strings.Contains(text, "Без изменений с закрытия disk-stale — разобраны там, не находки (1):\n- ~/s (") {
 		t.Fatalf("текст:\n%s", text)
 	}
 	// Следующий повтор сверяется с новым тикетом: разобранная запись названа в нём только списком Settled.
-	next := (&TicketBatch{Class: TicketStale, Recs: f.Recs[1:], Settled: f.Settled}).Text(home, "disk-stale", "")
-	if g, d := (&TicketBatch{Class: TicketStale, Recs: []Record{{Kind: KindStale, Path: "/h/s", Since: before}}}).Fresh(home, closed, next); len(g.Recs) != 0 || len(d) != 1 {
+	next := (&TicketBatch{Class: TicketStale, Recs: f.Recs[2:], Settled: f.Settled}).Text(home, "disk-stale", "")
+	if g, d := (&TicketBatch{Class: TicketStale, Recs: []Record{stale("/h/s", before)}}).Fresh(home, closed, next); len(g.Recs) != 0 || len(d) != 1 {
 		t.Fatalf("цепочка: новые %+v, отсеяны %v", g.Recs, d)
 	}
 }
