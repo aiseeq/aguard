@@ -580,8 +580,12 @@ func TestDiskRouteRepeatAfterClose(t *testing.T) {
 			t.Fatal(err)
 		}
 		at := closed.Format("2006-01-02 15:04")
-		body := "# Остатки временного\n\nСтатус: готово\n\naguard disk: …\n\nНаходки (2):\n- ~/.cache/s00 (2.0 ГБ) не менялась с 15.11 10:00 — остаток временного?\n" +
-			"- ~/.cache/s01 (2.0 ГБ) не менялась с 15.11 10:00 — остаток временного?\n\n## Журнал\n- " + at + " готово — dream-master: оставляем, довод\n"
+		// Тикет назвал s00 и s01 строками What; s01 потом изменилась (Since — closed), s00 — нет.
+		s00 := disk.Record{Kind: disk.KindStale, Path: filepath.Join(a.home, ".cache", "s00"), Bytes: 2 << 30, Since: now.Add(-72 * time.Hour)}
+		s01 := s00
+		s01.Path = filepath.Join(a.home, ".cache", "s01")
+		body := "# Остатки временного\n\nСтатус: готово\n\naguard disk: …\n\nНаходки (2):\n- " + s00.What(a.home) + "\n- " + s01.What(a.home) +
+			"\n\n## Журнал\n- " + at + " готово — dream-master: оставляем, довод\n"
 		if err := os.WriteFile(filepath.Join(proj, "docs", "tasks", "stale.md"), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}

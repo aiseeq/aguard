@@ -352,7 +352,8 @@ func (b *TicketBatch) Note(home string) string {
 
 // Fresh — находки, ещё не разобранные в закрытом прежнем тикете класса (closed — время его закрытия, body — текст до
 // строки закрытия): stale, названная в нём и не менявшаяся после закрытия (Since — последнее изменение — раньше
-// closed), разобрана — у stale это «оставляем» с доводом, и сутки спустя она не даёт нового тикета; она уходит в
+// closed) и названная той же строкой (размер и время изменения те же), разобрана — у stale это «оставляем» с доводом,
+// и сутки спустя она не даёт нового тикета; она уходит в
 // Settled. Другая запись и изменение после закрытия — новые. grew и trace не отсеиваются: их Since — начало окна роста
 // и рождение следа, рост после закрытия по нему не отличить. dropped — пути отсеянных.
 func (b *TicketBatch) Fresh(home string, closed time.Time, body string) (TicketBatch, []string) {
@@ -361,8 +362,10 @@ func (b *TicketBatch) Fresh(home string, closed time.Time, body string) (TicketB
 	for i := range b.Recs {
 		r := &b.Recs[i]
 		path := short(r.Path, home)
-		// Stale в тексте тикета и заметках — « путь (размер) не менялась с …» (Record.What).
-		if r.Kind == KindStale && path != "" && r.Since.Before(closed) && strings.Contains(body, " "+path+" (") {
+		// Строка stale в тексте и заметках — Record.What целиком: путь, размер и «не менялась с <Since>». Та же строка —
+		// запись не менялась и с разбора, даже если тот был раньше закрытия (изменилась, пока тикет был открыт, —
+		// строка другая, находка новая). Пробел впереди — не суффикс чужого пути.
+		if r.Kind == KindStale && path != "" && r.Since.Before(closed) && strings.Contains(body, " "+r.What(home)) {
 			dropped = append(dropped, path)
 			out.Settled = append(out.Settled, *r)
 			continue
