@@ -35,8 +35,11 @@ func (c *Config) OnCodex() bool { return c.Model != "opus" }
 
 // Item — находка модели.
 type Item struct {
+	Quote string `json:"quote"`
+	// Act — что делает цитата: ActLasting — действует дольше шага; вопрос (ActAsk) и поручение на этот ход
+	// (ActNow) в указатель не идут, даже если модель дала им вид.
+	Act        string `json:"act"`
 	Kind       string `json:"kind"`
-	Quote      string `json:"quote"`
 	Scope      string `json:"scope"`
 	Words      string `json:"words"`
 	Supersedes string `json:"supersedes"`
@@ -155,8 +158,8 @@ func (c *Config) Classify(ctx context.Context, model Model, p *Pending, home str
 		if len(entries) > 0 { // вторая запись той же реплики — своя ссылка, чтобы supersedes отменял одну
 			ref = fmt.Sprintf("%s#%d", Ref(ev.Session, ev.Line), len(entries)+1)
 		}
-		if it.Kind != KindRule && it.Kind != KindDecision && it.Kind != KindPromise || squash(it.Quote) == "" ||
-			!strings.Contains(text, squash(it.Quote)) {
+		if it.Act != ActLasting || it.Kind != KindRule && it.Kind != KindDecision && it.Kind != KindPromise ||
+			squash(it.Quote) == "" || !strings.Contains(text, squash(it.Quote)) {
 			rec.Dropped = append(rec.Dropped, it)
 			continue
 		}

@@ -22,6 +22,13 @@ const (
 	KindPromise  = "promise"
 )
 
+// Что делает цитата (Item.Act): в указатель идёт только ActLasting.
+const (
+	ActAsk     = "ask"     // вопрос: ответить, объяснить, оценить, проверить
+	ActNow     = "now"     // поручение на этот ход без правила на будущее
+	ActLasting = "lasting" // правило, решение или обещание дольше шага
+)
+
 // Entry — строка said.tsv.
 type Entry struct {
 	Time       time.Time

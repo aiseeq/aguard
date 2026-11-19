@@ -99,9 +99,9 @@ func TestSaidEvalReplay(t *testing.T) {
 					}
 				}
 				return oneshot.Result{Text: `{"items":[
-					{"kind":"rule","quote":"нужная реплика","scope":"~/elsewhere","words":"нужная реплика"},
-					{"kind":"decision","quote":"проверяем выбор","scope":"~/git/project","words":"проверяем выбор"},
-					{"kind":"promise","quote":"выбор","scope":"~/another","words":"выбор"}]}`,
+					{"act":"lasting","kind":"rule","quote":"нужная реплика","scope":"~/elsewhere","words":"нужная реплика"},
+					{"act":"lasting","kind":"decision","quote":"проверяем выбор","scope":"~/git/project","words":"проверяем выбор"},
+					{"act":"lasting","kind":"promise","quote":"выбор","scope":"~/another","words":"выбор"}]}`,
 					ID: "stub", Usage: price.Usage{}}, nil
 			}
 			if !strings.Contains(input, "второй уникальный эталон") ||
@@ -109,9 +109,9 @@ func TestSaidEvalReplay(t *testing.T) {
 				t.Errorf("неверный вход второй реплики: %s", input)
 			}
 			return oneshot.Result{Text: `{"items":[
-				{"kind":"rule","quote":"второй уникальный эталон","scope":"~/git/other","words":"второй уникальный эталон"},
-				{"kind":"promise","quote":"второй уникальный","scope":"~/wrong","words":"второй уникальный"},
-				{"kind":"decision","quote":"уникальный эталон","scope":"global","words":"уникальный эталон"}]}`,
+				{"act":"lasting","kind":"rule","quote":"второй уникальный эталон","scope":"~/git/other","words":"второй уникальный эталон"},
+				{"act":"lasting","kind":"promise","quote":"второй уникальный","scope":"~/wrong","words":"второй уникальный"},
+				{"act":"lasting","kind":"decision","quote":"уникальный эталон","scope":"global","words":"уникальный эталон"}]}`,
 				ID: "stub", Usage: price.Usage{}}, nil
 		}
 	}

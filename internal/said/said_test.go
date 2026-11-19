@@ -106,9 +106,9 @@ func TestClassify(t *testing.T) {
 		Cwd: "/h/git/x", Session: "0123456789ab", Name: "x-master", Line: 4}, Attempts: 1}
 	prior := []Entry{{Ref: "aaaaaaaa:1", Scope: "~/git/x", Kind: KindRule, Words: "моков всегда", Quote: "с моками"}}
 	out := `{"items":[
-		{"kind":"rule","quote":"Делаем без моков, всегда.","scope":"project","words":"Моки  База","supersedes":"aaaaaaaa:1"},
-		{"kind":"decision","quote":"чего нет в реплике","scope":"global","words":"","supersedes":""},
-		{"kind":"promise","quote":"Ладно.","scope":"global","words":"","supersedes":"zzzzzzzz:9"}]}`
+		{"act":"lasting","kind":"rule","quote":"Делаем без моков, всегда.","scope":"project","words":"Моки  База","supersedes":"aaaaaaaa:1"},
+		{"act":"lasting","kind":"decision","quote":"чего нет в реплике","scope":"global","words":"","supersedes":""},
+		{"act":"lasting","kind":"promise","quote":"Ладно.","scope":"global","words":"","supersedes":"zzzzzzzz:9"}]}`
 	rec, entries := c.Classify(context.Background(), fake(out, nil), p, home, prior, time.Now())
 	if rec.Err != "" || len(rec.Items) != 2 || len(rec.Dropped) != 1 || rec.Ref != "01234567:4" || rec.Usage.Input != 6000 {
 		t.Fatalf("журнал %+v", rec)
@@ -119,6 +119,14 @@ func TestClassify(t *testing.T) {
 	}
 	if e := entries[1]; e.Scope != "global" || e.Supersedes != "" || e.Ref != "01234567:4#2" {
 		t.Errorf("обещание: чужой supersedes должен сброситься, %+v", e)
+	}
+	// Вопрос и поручение на этот ход в указатель не идут, даже с видом rule/decision/promise; act без значения — тоже.
+	for _, act := range []string{ActAsk, ActNow, ""} {
+		out := `{"items":[{"act":"` + act + `","kind":"decision","quote":"Ладно.","scope":"~","words":"ладно","supersedes":""}]}`
+		rec, entries = c.Classify(context.Background(), fake(out, nil), p, home, prior, time.Now())
+		if len(entries) != 0 || len(rec.Items) != 0 || len(rec.Dropped) != 1 || rec.Dropped[0].Act != act {
+			t.Errorf("act %q записан: %+v %+v", act, rec, entries)
+		}
 	}
 	rec, entries = c.Classify(context.Background(), fake("", errors.New("таймаут")), p, home, prior, time.Now())
 	if rec.Err == "" || entries != nil {
@@ -179,7 +187,7 @@ func TestWorktreeProject(t *testing.T) {
 			if !strings.Contains(input, "папка "+want) {
 				t.Errorf("заголовок не содержит папку %q: %s", want, input)
 			}
-			_, entries := c.Classify(context.Background(), fake(`{"items":[{"kind":"rule","quote":"правило","scope":"project","words":"тест"}]}`, nil),
+			_, entries := c.Classify(context.Background(), fake(`{"items":[{"act":"lasting","kind":"rule","quote":"правило","scope":"project","words":"тест"}]}`, nil),
 				p, home, nil, time.Now())
 			if len(entries) != 1 || entries[0].Project != want {
 				t.Errorf("project: got %+v, want %q", entries, want)

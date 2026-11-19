@@ -8,10 +8,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "quote", "scope", "words", "supersedes"],
+        "required": ["quote", "act", "kind", "scope", "words", "supersedes"],
         "properties": {
-          "kind": {"type": "string", "enum": ["rule", "decision", "promise"]},
           "quote": {"type": "string"},
+          "act": {"type": "string", "enum": ["ask", "now", "lasting"]},
+          "kind": {"type": "string", "enum": ["rule", "decision", "promise"]},
           "scope": {"type": "string"},
           "words": {"type": "string"},
           "supersedes": {"type": "string"}
