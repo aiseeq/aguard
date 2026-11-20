@@ -88,14 +88,18 @@ func TestTrustDownWaitsForFocus(t *testing.T) {
 // Enter не принят (после него снова подсказка и «❯ No») — cl повторяет Down и Enter, а «подтвердил» пишет только
 // после окна, которое ушло.
 func TestTrustRetriesWhenEnterNotTaken(t *testing.T) {
-	setTrustTiming(t, 2*time.Second, 20*time.Millisecond)
+	setTrustTiming(t, 15*time.Second, 20*time.Millisecond)
+	// Тест подаёт подсказку повтора через PTY после чтения Enter. Длинное окно
+	// ожидания не даёт задержке планировщика превратить подсказку в ложное подтверждение.
+	trustEnterWait = 5 * time.Second
 	dir := filepath.Join(t.TempDir(), "shared")
 	frame, focus, selected, hint := trustFiles(t, dir)
 	shown, notes := runTrustScript(t, dir,
 		`cat "$0" "$1"; key 32 2 >/dev/null; k=$(key 3 5); [ "$k" = 1b5b42 ] || { echo "DONE-NO-DOWN-$k"; exit 0; }; `+
 			`cat "$2"; v=$(key 1 5); [ "$v" = 0d ] || { echo "DONE-NO-ENTER-$v"; exit 0; }; `+
-			`cat "$3" "$1"; k=$(key 3 5); [ "$k" = 1b5b42 ] || { echo "DONE-NO-RETRY-$k"; exit 0; }; `+
-			`cat "$2"; v=$(key 1 5); [ "$v" = 0d ] || { echo "DONE-NO-ENTER2-$v"; exit 0; }; sleep 0.05; echo DONE-OK`,
+			`cat "$3" "$1"; k=$(key 3 10); [ "$k" = 1b5b42 ] || { echo "DONE-NO-RETRY-$k"; exit 0; }; `+
+			`cat "$2"; v=$(key 1 5); [ "$v" = 0d ] || { echo "DONE-NO-ENTER2-$v"; exit 0; }; `+
+			`printf '\033[2J\033[HClaude Code v2.1.327\r\n'; sleep 0.05; echo DONE-OK`,
 		frame, focus, selected, hint)
 	if !shown.has("DONE-OK") {
 		t.Fatalf("после непринятого Enter нет повтора: %q", shown.text())
