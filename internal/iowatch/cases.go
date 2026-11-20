@@ -10,28 +10,30 @@ import (
 // Case — сводка случая фриза: подряд шаги с простоем (Stalled), спокойные промежутки до gap случай
 // не делят. Хранится только сводка: машина за случай и виновники; сырые шаги остаются в буфере.
 type Case struct {
-	BootID    string    `json:"boot_id,omitempty"`
-	Start     time.Time `json:"start"`  // начало первого шага с простоем
-	End       time.Time `json:"end"`    // конец последнего шага с простоем
-	DurMS     int64     `json:"dur_ms"` // End − Start, по стене
-	IdleMS    int64     `json:"idle_ms"`
-	PeakMS    int64     `json:"peak_ms"` // наибольший простой шага
-	IOFullMS  int64     `json:"io_full_ms,omitempty"`
-	IOSomeMS  int64     `json:"io_some_ms,omitempty"`
-	MemFullMS int64     `json:"mem_full_ms,omitempty"`
-	MemSomeMS int64     `json:"mem_some_ms,omitempty"`
-	SwapIn    int64     `json:"swapin,omitempty"` // страниц
-	SwapOut   int64     `json:"swapout,omitempty"`
-	Majflt    int64     `json:"majflt,omitempty"`
-	ReadB     int64     `json:"rd_b,omitempty"`
-	WriteB    int64     `json:"wr_b,omitempty"`
-	BusyMS    int64     `json:"busy_ms,omitempty"`    // занятость устройства (io_ticks)
-	RAwaitMS  int64     `json:"r_await_ms,omitempty"` // среднее ожидание операции чтения
-	WAwaitMS  int64     `json:"w_await_ms,omitempty"`
-	InFlight  int64     `json:"inflight,omitempty"` // наибольшая очередь устройства
-	Flushes   int64     `json:"flushes,omitempty"`
-	Dirty     int64     `json:"dirty,omitempty"` // наибольшие Dirty и Writeback за окно виновников, байт
-	Writeback int64     `json:"writeback,omitempty"`
+	BootID          string    `json:"boot_id,omitempty"`
+	Start           time.Time `json:"start"`  // начало первого шага с простоем
+	End             time.Time `json:"end"`    // конец последнего шага с простоем
+	DurMS           int64     `json:"dur_ms"` // End − Start, по стене
+	IdleMS          int64     `json:"idle_ms"`
+	PeakMS          int64     `json:"peak_ms"` // наибольший простой шага
+	VRateMin        *float64  `json:"vrate_min,omitempty"`
+	VRateBeforeCase *float64  `json:"vrate_before_case,omitempty"`
+	IOFullMS        int64     `json:"io_full_ms,omitempty"`
+	IOSomeMS        int64     `json:"io_some_ms,omitempty"`
+	MemFullMS       int64     `json:"mem_full_ms,omitempty"`
+	MemSomeMS       int64     `json:"mem_some_ms,omitempty"`
+	SwapIn          int64     `json:"swapin,omitempty"` // страниц
+	SwapOut         int64     `json:"swapout,omitempty"`
+	Majflt          int64     `json:"majflt,omitempty"`
+	ReadB           int64     `json:"rd_b,omitempty"`
+	WriteB          int64     `json:"wr_b,omitempty"`
+	BusyMS          int64     `json:"busy_ms,omitempty"`    // занятость устройства (io_ticks)
+	RAwaitMS        int64     `json:"r_await_ms,omitempty"` // среднее ожидание операции чтения
+	WAwaitMS        int64     `json:"w_await_ms,omitempty"`
+	InFlight        int64     `json:"inflight,omitempty"` // наибольшая очередь устройства
+	Flushes         int64     `json:"flushes,omitempty"`
+	Dirty           int64     `json:"dirty,omitempty"` // наибольшие Dirty и Writeback за окно виновников, байт
+	Writeback       int64     `json:"writeback,omitempty"`
 	// Quiet — обмен с диском за случай меньше quiet_bytes и memory full меньше половины случая: простой без трафика
 	// (одна задача ждёт датчик, как thinkfan) — PSI считает его 100 % full, а машина не стоит. В письма не идёт.
 	// Простой памяти без обмена (reclaim, сжатие) — не тихий: у 219 тихих случаев от 1 с по cases.jsonl на 10.11
@@ -165,6 +167,8 @@ type stepSum struct {
 	idle, peak, ioFull, ioSome, memFull, memSome  int64
 	swapIn, swapOut, majflt, rd, wr, ticks, flush int64
 	rms, rios, wms, wios, inflight                int64
+	vrateMin                                      float64
+	vrateKnown                                    bool
 }
 
 func (t *stepSum) add(s Step) {
@@ -187,6 +191,12 @@ func (t *stepSum) add(s Step) {
 	t.wms += s.WMS
 	t.wios += s.WIOS
 	t.inflight = max(t.inflight, s.InFlight)
+	if s.VRate != nil {
+		if !t.vrateKnown || *s.VRate < t.vrateMin {
+			t.vrateMin = *s.VRate
+		}
+		t.vrateKnown = true
+	}
 }
 
 func (t *stepSum) merge(o stepSum) {
@@ -208,6 +218,10 @@ func (t *stepSum) merge(o stepSum) {
 	t.wms += o.wms
 	t.wios += o.wios
 	t.inflight = max(t.inflight, o.inflight)
+	if o.vrateKnown && (!t.vrateKnown || o.vrateMin < t.vrateMin) {
+		t.vrateMin = o.vrateMin
+	}
+	t.vrateKnown = t.vrateKnown || o.vrateKnown
 }
 
 // openCase — идущий случай: шаги с простоем и спокойные между ними (calm — после последнего с
@@ -219,11 +233,16 @@ type openCase struct {
 
 func (o *openCase) toCase() Case {
 	t := o.sum
-	return Case{Start: o.start, End: o.last, DurMS: o.last.Sub(o.start).Milliseconds(),
+	c := Case{Start: o.start, End: o.last, DurMS: o.last.Sub(o.start).Milliseconds(),
 		IdleMS: t.idle / 1000, PeakMS: t.peak / 1000, IOFullMS: t.ioFull / 1000, IOSomeMS: t.ioSome / 1000,
 		MemFullMS: t.memFull / 1000, MemSomeMS: t.memSome / 1000, SwapIn: t.swapIn, SwapOut: t.swapOut, Majflt: t.majflt,
 		ReadB: t.rd, WriteB: t.wr, BusyMS: t.ticks, RAwaitMS: AwaitMS(t.rms, t.rios), WAwaitMS: AwaitMS(t.wms, t.wios),
 		InFlight: t.inflight, Flushes: t.flush}
+	if t.vrateKnown {
+		v := t.vrateMin
+		c.VRateMin = &v
+	}
+	return c
 }
 
 // Recorder — кольцевой буфер сырых записей и случаи фриза: один для службы, `aguard io record` и
@@ -373,6 +392,7 @@ func (r *Recorder) ready(covered time.Time) []Case {
 func (r *Recorder) finish(c *Case) {
 	c.Quiet = quietCase(c, r.cfg.QuietBytes)
 	from := c.Start.Add(-r.cfg.Context.D())
+	c.VRateBeforeCase = r.ring.VRateMin(c.Start.Add(-5*time.Second), c.Start)
 	// Closing is detected on a fast step after the gap threshold; the step boundary can add
 	// one more step. The next idle detail can then land detail_idle after closure.
 	details := r.ring.Details(from, c.End.Add(r.cfg.DetailIdle.D()+r.cfg.Gap.D()+2*r.cfg.Step.D()))

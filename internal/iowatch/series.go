@@ -10,6 +10,8 @@ import (
 // (Stalled); Dirty, Writeback, MemAvail, SwapUsed и GraftSliceMem — последние из детального прохода.
 type MachineSecond struct {
 	At                 time.Time `json:"at"`
+	VRateMin           *float64  `json:"vrate_min,omitempty"`
+	VRateLast          *float64  `json:"vrate_last,omitempty"`
 	IOFullMS           int64     `json:"io_full_ms,omitempty"`
 	IOSomeMS           int64     `json:"io_some_ms,omitempty"`
 	MemFullMS          int64     `json:"mem_full_ms,omitempty"`
@@ -31,10 +33,11 @@ type MachineSecond struct {
 	GraftSliceMemKnown bool      `json:"-"`
 }
 
-// secondRow — секунда ряда в памяти: 88 байт с выравниванием (байты диска — int64, остальное — int32,
+// secondRow — секунда ряда в памяти: 96 байт с выравниванием (байты диска — int64, остальное — int32,
 // Dirty, Writeback, MemAvail, SwapUsed и graftSliceMem — КиБ).
 type secondRow struct {
 	at, readB, writeB                                             int64 // at — unix-секунды
+	vrateMin, vrateLast                                           int32 // сотые доли процента; -1 — нет данных
 	ioFull, ioSome, memFull, stall, wAwait, inflight              int32
 	flushes, swapIn, majflt, dirtyKiB, writebackKiB               int32
 	cpuSome, runnable, memAvailKiB, swapUsedKiB, graftSliceMemKiB int32
@@ -49,11 +52,20 @@ func (r *secondRow) second() MachineSecond {
 	if known {
 		graftBytes = int64(r.graftSliceMemKiB) << 10
 	}
-	return MachineSecond{At: time.Unix(r.at, 0), IOFullMS: int64(r.ioFull), IOSomeMS: int64(r.ioSome), MemFullMS: int64(r.memFull),
+	sec := MachineSecond{At: time.Unix(r.at, 0), IOFullMS: int64(r.ioFull), IOSomeMS: int64(r.ioSome), MemFullMS: int64(r.memFull),
 		StallMS: int64(r.stall), ReadB: r.readB, WriteB: r.writeB, WAwaitMS: int64(r.wAwait), InFlightMax: int64(r.inflight),
 		Flushes: int64(r.flushes), Dirty: int64(r.dirtyKiB) << 10, Writeback: int64(r.writebackKiB) << 10,
 		SwapIn: int64(r.swapIn), Majflt: int64(r.majflt), CPUSomeMS: int64(r.cpuSome), RunnableMax: int64(r.runnable),
 		MemAvail: int64(r.memAvailKiB) << 10, SwapUsed: int64(r.swapUsedKiB) << 10, GraftSliceMem: graftBytes, GraftSliceMemKnown: known}
+	if r.vrateMin >= 0 {
+		v := float64(r.vrateMin) / 100
+		sec.VRateMin = &v
+	}
+	if r.vrateLast >= 0 {
+		v := float64(r.vrateLast) / 100
+		sec.VRateLast = &v
+	}
+	return sec
 }
 
 func rowOf(s *MachineSecond) secondRow {
@@ -61,11 +73,19 @@ func rowOf(s *MachineSecond) secondRow {
 	if s.GraftSliceMemKnown || s.GraftSliceMem != 0 {
 		graftMem = i32(s.GraftSliceMem >> 10)
 	}
-	return secondRow{at: s.At.Unix(), readB: s.ReadB, writeB: s.WriteB, ioFull: i32(s.IOFullMS), ioSome: i32(s.IOSomeMS),
+	row := secondRow{at: s.At.Unix(), readB: s.ReadB, writeB: s.WriteB, ioFull: i32(s.IOFullMS), ioSome: i32(s.IOSomeMS),
 		memFull: i32(s.MemFullMS), stall: i32(s.StallMS), wAwait: i32(s.WAwaitMS), inflight: i32(s.InFlightMax),
 		flushes: i32(s.Flushes), swapIn: i32(s.SwapIn), majflt: i32(s.Majflt), dirtyKiB: i32(s.Dirty >> 10),
 		writebackKiB: i32(s.Writeback >> 10), cpuSome: i32(s.CPUSomeMS), runnable: i32(s.RunnableMax),
-		memAvailKiB: i32(s.MemAvail >> 10), swapUsedKiB: i32(s.SwapUsed >> 10), graftSliceMemKiB: graftMem}
+		memAvailKiB: i32(s.MemAvail >> 10), swapUsedKiB: i32(s.SwapUsed >> 10), graftSliceMemKiB: graftMem,
+		vrateMin: -1, vrateLast: -1}
+	if s.VRateMin != nil {
+		row.vrateMin = i32(int64(math.Round(*s.VRateMin * 100)))
+	}
+	if s.VRateLast != nil {
+		row.vrateLast = i32(int64(math.Round(*s.VRateLast * 100)))
+	}
+	return row
 }
 
 // secondAcc — идущая секунда: суммы быстрых шагов в их единицах.
@@ -74,6 +94,7 @@ type secondAcc struct {
 	ioFull, ioSome, memFull, cpuSome, stall          int64 // мкс
 	rd, wr, wms, wios, inflight, flush, swap, majflt int64
 	runnable                                         int64 // пик
+	vrateMin, vrateLast                              int32 // сотые доли процента; -1 — нет данных
 }
 
 // detailLast — последние значения детального прохода: идут в секунды, закрытые после него. Байты.
@@ -144,6 +165,13 @@ func (s *Series) step(st *Step, stallUS int64, interval time.Duration) {
 		c.stall += stallUS
 	}
 	c := s.acc(st.At.Unix())
+	if st.VRate != nil {
+		value := i32(int64(math.Round(*st.VRate * 100)))
+		if c.vrateMin < 0 || value < c.vrateMin {
+			c.vrateMin = value
+		}
+		c.vrateLast = value
+	}
 	c.runnable = max(c.runnable, st.Runnable)
 	c.rd += st.ReadBytes
 	c.wr += st.WriteBytes
@@ -160,6 +188,9 @@ func (s *Series) acc(sec int64) *secondAcc {
 	if s.cur.at != 0 && sec != s.cur.at {
 		s.flush()
 	}
+	if s.cur.at == 0 {
+		s.cur.vrateMin, s.cur.vrateLast = -1, -1
+	}
 	s.cur.at = sec
 	return &s.cur
 }
@@ -173,7 +204,7 @@ func (s *Series) detail(st *Step) {
 // flush — идущая секунда в кольцо.
 func (s *Series) flush() {
 	c, d := &s.cur, &s.last
-	s.push(secondRow{at: c.at, readB: c.rd, writeB: c.wr, ioFull: i32(c.ioFull / 1000), ioSome: i32(c.ioSome / 1000),
+	s.push(secondRow{at: c.at, readB: c.rd, writeB: c.wr, vrateMin: c.vrateMin, vrateLast: c.vrateLast, ioFull: i32(c.ioFull / 1000), ioSome: i32(c.ioSome / 1000),
 		memFull: i32(c.memFull / 1000), stall: i32(c.stall / 1000), wAwait: i32(AwaitMS(c.wms, c.wios)), inflight: i32(c.inflight),
 		flushes: i32(c.flush), swapIn: i32(c.swap), majflt: i32(c.majflt), dirtyKiB: i32(d.dirty >> 10), writebackKiB: i32(d.writeback >> 10),
 		cpuSome: i32(c.cpuSome / 1000), runnable: i32(c.runnable), memAvailKiB: i32(d.memAvail >> 10), swapUsedKiB: i32(d.swapUsed >> 10), graftSliceMemKiB: rowGraftMemKiB(d)})

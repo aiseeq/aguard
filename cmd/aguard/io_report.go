@@ -28,6 +28,12 @@ func ioCaseLine(c *iowatch.Case) string {
 	}
 	line := fmt.Sprintf("%s, %s (простой %s, %s; пик шага %d мс)", c.Start.Format("02.01 15:04:05"), ioSeconds(c.DurMS),
 		ioSeconds(c.IdleMS), cause, c.PeakMS)
+	if c.VRateMin != nil && *c.VRateMin < 100 {
+		line += ", iocost vrate до " + strings.ReplaceAll(strconv.FormatFloat(*c.VRateMin, 'f', -1, 64), ".", ",") + " %"
+		if c.VRateBeforeCase != nil {
+			line += " (за 5 с до — " + strings.ReplaceAll(strconv.FormatFloat(*c.VRateBeforeCase, 'f', -1, 64), ".", ",") + " %)"
+		}
+	}
 	if attribution := ioCaseAttribution(c); attribution != "" {
 		line += ", " + attribution
 	}

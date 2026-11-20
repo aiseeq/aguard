@@ -119,9 +119,13 @@ func writeIOSeries(w io.Writer, rows []iowatch.MachineSecondFileRow) {
 	for i := range rows {
 		second := rows[i].MachineSecond()
 		s := &second
-		fmt.Fprintf(w, "%s  io full %d мс  mem full %d мс  простой %d мс  R/W %.0f/%.0f МБ  ожид W %d мс  очередь %d  flush %d  dirty %.0f МБ  writeback %.0f МБ  swapin %d  cpu some %d мс  runnable %d  avail %.0f МБ\n",
+		vrate := "нет данных"
+		if s.VRateMin != nil && s.VRateLast != nil {
+			vrate = fmt.Sprintf("%.3g/%.3g %%", *s.VRateMin, *s.VRateLast)
+		}
+		fmt.Fprintf(w, "%s  io full %d мс  mem full %d мс  простой %d мс  R/W %.0f/%.0f МБ  ожид W %d мс  очередь %d  flush %d  dirty %.0f МБ  writeback %.0f МБ  swapin %d  cpu some %d мс  runnable %d  avail %.0f МБ  vrate min/last %s\n",
 			s.At.Format("02.01 15:04:05"), s.IOFullMS, s.MemFullMS, s.StallMS, megabytes(s.ReadB), megabytes(s.WriteB), s.WAwaitMS,
-			s.InFlightMax, s.Flushes, megabytes(s.Dirty), megabytes(s.Writeback), s.SwapIn, s.CPUSomeMS, s.RunnableMax, megabytes(s.MemAvail))
+			s.InFlightMax, s.Flushes, megabytes(s.Dirty), megabytes(s.Writeback), s.SwapIn, s.CPUSomeMS, s.RunnableMax, megabytes(s.MemAvail), vrate)
 	}
 }
 

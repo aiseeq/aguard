@@ -36,3 +36,23 @@ func TestParseIOStatMax(t *testing.T) {
 		})
 	}
 }
+
+func TestParseIOStatVRateKnownAndMissing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		data  string
+		want  float64
+		known bool
+	}{
+		{name: "known after other device", data: "252:0 cost.vrate=7.5\n259:0 rbytes=1 cost.vrate=29.10 wbytes=2\n", want: 29.1, known: true},
+		{name: "missing field", data: "259:0 rbytes=1 wbytes=2\n", known: false},
+		{name: "missing device", data: "252:0 cost.vrate=7.5\n", known: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, known, err := parseIOStatVRate([]byte(tc.data), "259:0")
+			if err != nil || known != tc.known || (known && got != tc.want) {
+				t.Fatalf("got %v known=%v err=%v; want %v known=%v", got, known, err, tc.want, tc.known)
+			}
+		})
+	}
+}

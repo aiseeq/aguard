@@ -22,6 +22,7 @@ const (
 // MemAvail, SwapUsed, GraftSliceMem, Processes, Cgroups). Нулевые поля в снимок не пишутся.
 type Step struct {
 	At                 time.Time `json:"at"`
+	VRate              *float64  `json:"vrate,omitempty"` // cost.vrate устройства из корневого io.stat, проценты
 	IOFullUS           int64     `json:"io_full_us,omitempty"`
 	IOSomeUS           int64     `json:"io_some_us,omitempty"`
 	MemFullUS          int64     `json:"mem_full_us,omitempty"`

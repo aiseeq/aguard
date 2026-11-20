@@ -82,13 +82,20 @@ func TestIOSamplingStepTimeIsReadTime(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(block, "nvme0n1", "dev"), []byte("259:0\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	cgroup := filepath.Join(dir, "cgroup")
+	if err := os.MkdirAll(cgroup, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cgroup, "io.stat"), []byte("259:0 cost.vrate=100.00\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg := iowatch.Default()
 	cfg.Device, cfg.Step, cfg.Detail = "nvme0n1", policy.Duration(20*time.Millisecond), policy.Duration(time.Hour)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	const delay = 300 * time.Millisecond
 	sink := &delaySink{delay: delay, enough: cancel}
-	err := runIOSampling(ctx, cfg, iowatch.Roots{Proc: proc, Cgroup: filepath.Join(dir, "cgroup"), Block: block}, sink, nil)
+	err := runIOSampling(ctx, cfg, iowatch.Roots{Proc: proc, Cgroup: cgroup, Block: block}, sink, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("цикл: %v", err)
 	}
@@ -561,6 +568,20 @@ func TestIONoDeviceWarnsDaily(t *testing.T) {
 	}
 }
 
+func TestIOVRateReadWarningIsHourly(t *testing.T) {
+	a, _ := testIOApp(t)
+	var logged bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logged, nil))
+	s := newIOService(context.Background(), a)
+	now := time.Now()
+	for _, at := range []time.Time{now, now.Add(30 * time.Minute), now.Add(time.Hour)} {
+		s.sampleErrAt(at, "vrate", errors.New("io.stat unavailable"))
+	}
+	if got := strings.Count(logged.String(), "level=WARN"); got != 2 {
+		t.Fatalf("ожидали предупреждения раз в час, получили %d:\n%s", got, logged.String())
+	}
+}
+
 // Цикл io — не safePass: проход отмечает сам, раз в ioPassEvery, иначе отчёт и страница Сна видят
 // «ни одного прохода» (29.10).
 func TestIOStepNotesPassEveryMinute(t *testing.T) {
@@ -652,6 +673,33 @@ func TestIOCaseIncludesProcessCommand(t *testing.T) {
 }
 
 // Письмо называет фон ядра и помечает io.stat, набранный чужим коммитом по fsync; своя запись в пределах — без пометки.
+func TestIOCaseLineShowsLowIocostVRate(t *testing.T) {
+	rate := 30.0
+	before := 142.0
+	c := iowatch.Case{Start: time.Now(), VRateMin: &rate, VRateBeforeCase: &before}
+	line := ioCaseLine(&c)
+	if !strings.Contains(line, "iocost vrate до 30 % (за 5 с до — 142 %)") {
+		t.Fatalf("строка случая без vrate: %s", line)
+	}
+	rate = 100
+	if line := ioCaseLine(&c); strings.Contains(line, "iocost vrate") {
+		t.Fatalf("для vrate >= 100%% показали сообщение: %s", line)
+	}
+}
+
+func TestWriteIOSeriesShowsVRateAndUnknown(t *testing.T) {
+	known, last := 1.15, 0.29
+	rows := []iowatch.MachineSecondFileRow{
+		iowatch.MachineSecondFileRowOf(iowatch.MachineSecond{At: time.Now(), VRateMin: &known, VRateLast: &last}),
+		iowatch.MachineSecondFileRowOf(iowatch.MachineSecond{At: time.Now().Add(time.Second)}),
+	}
+	var out bytes.Buffer
+	writeIOSeries(&out, rows)
+	if text := out.String(); !strings.Contains(text, "vrate min/last 1.15/0.29 %") || !strings.Contains(text, "vrate min/last нет данных") {
+		t.Fatalf("строка ряда не показывает vrate/нет данных:\n%s", text)
+	}
+}
+
 func TestIOCaseFsyncAndKernel(t *testing.T) {
 	c := alertCase(time.Date(2026, 10, 30, 12, 15, 12, 0, time.Local), 7400)
 	c.Culprits.CgroupWrite = []iowatch.Ranked{{Name: "postgresql.service", Value: 870 << 20}, {Name: "sess7", Value: 300 << 20}}

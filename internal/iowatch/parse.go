@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 // Разборщики файлов /proc и cgroup — без копий строк: замер идёт 10 раз в секунду.
@@ -280,6 +281,32 @@ func parseIOStat(data []byte, devices []string, dst [][ioFields]int64) error {
 		}
 	}
 	return nil
+}
+
+// parseIOStatVRate reads cost.vrate from a selected device row. Missing iocost data is unknown, not zero.
+func parseIOStatVRate(data []byte, device string) (float64, bool, error) {
+	for len(data) > 0 {
+		line, rest := nextLine(data)
+		data = rest
+		id, fields := nextField(line)
+		if string(id) != device {
+			continue
+		}
+		for len(fields) > 0 {
+			field, rest := nextField(fields)
+			fields = rest
+			key, value, ok := bytes.Cut(field, []byte{'='})
+			if !ok || !bytes.Equal(key, []byte("cost.vrate")) {
+				continue
+			}
+			n, err := strconv.ParseFloat(string(value), 64)
+			if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 {
+				return 0, false, fmt.Errorf("io.stat %s cost.vrate: неверное число %q", device, value)
+			}
+			return n, true, nil
+		}
+	}
+	return 0, false, nil
 }
 
 // BenchIOStatBytes возвращает максимальные счётчики чтения и записи stacked devices.

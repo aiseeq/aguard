@@ -88,5 +88,21 @@ func (r *Ring) DeviceWrite(from, to time.Time) int64 {
 	return sum
 }
 
+// VRateMin returns the minimum known cost.vrate from fast steps in [from, to).
+func (r *Ring) VRateMin(from, to time.Time) *float64 {
+	var minRate *float64
+	for i := range r.count {
+		rec := &r.records[(r.head+i)%len(r.records)]
+		if rec.Kind != KindStep || rec.At.Before(from) || !rec.At.Before(to) || rec.VRate == nil {
+			continue
+		}
+		if minRate == nil || *rec.VRate < *minRate {
+			v := *rec.VRate
+			minRate = &v
+		}
+	}
+	return minRate
+}
+
 // Len — сколько записей в буфере.
 func (r *Ring) Len() int { return r.count }

@@ -372,3 +372,35 @@ func TestCgroupPathUsesLargestValueForDuplicateDisplayName(t *testing.T) {
 		t.Fatalf("path for foo.service = %q, want largest-value path %q", got, high)
 	}
 }
+
+func TestCaseVRateMinimumMergesCalmSteps(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	open := openCase{start: base, last: base.Add(time.Second)}
+	first, calm, later := 40.0, 25.0, 30.0
+	open.sum.add(Step{At: base, VRate: &first})
+	open.calm.add(Step{At: base.Add(500 * time.Millisecond), VRate: &calm})
+	open.sum.merge(open.calm)
+	open.sum.add(Step{At: base.Add(time.Second), VRate: &later})
+	c := open.toCase()
+	if c.VRateMin == nil || *c.VRateMin != 25 {
+		t.Fatalf("минимум не включил спокойный шаг из merge: %+v", c)
+	}
+}
+
+func TestCaseVRateBeforeStartIncludesFiveSecondsNotFivePointOne(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	start := base.Add(10 * time.Second)
+	r := NewRecorder(Default())
+	for _, sample := range []struct {
+		at time.Time
+		v  float64
+	}{{start.Add(-5100 * time.Millisecond), 20}, {start.Add(-5 * time.Second), 35}, {start.Add(-time.Second), 42}, {start, 10}} {
+		value := sample.v
+		r.ring.Add(Record{Kind: KindStep, Step: Step{At: sample.at, VRate: &value}})
+	}
+	c := Case{Start: start, End: start.Add(100 * time.Millisecond), DurMS: 100}
+	r.finish(&c)
+	if c.VRateBeforeCase == nil || *c.VRateBeforeCase != 35 {
+		t.Fatalf("окно [start−5s,start): %+v", c.VRateBeforeCase)
+	}
+}

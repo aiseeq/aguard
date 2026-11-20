@@ -11,6 +11,9 @@ import (
 type FastReader struct {
 	device                                           string
 	ioPSI, memPSI, cpuPSI, vmstat, diskstat, loadavg cachedFile
+	iocost                                           cachedFile
+	iocostDevice                                     string
+	vrateErr                                         error
 	buf                                              []byte
 	prev                                             fastCounters
 	primed                                           bool
@@ -21,20 +24,37 @@ type fastCounters struct {
 	disk                                                               diskCounters
 }
 
-func NewFastReader(procRoot, device string) *FastReader {
+// NewFastReaderWithCgroup adds cost.vrate from the root cgroup's io.stat to every fast step.
+func NewFastReaderWithCgroup(procRoot, blockRoot, device, cgroupRoot string) (*FastReader, error) {
+	devices, err := blockDevices(blockRoot, device)
+	if err != nil {
+		return nil, err
+	}
+	return newFastReader(procRoot, device, devices[0], cgroupRoot), nil
+}
+
+func newFastReader(procRoot, device, ioStatDevice, cgroupRoot string) *FastReader {
 	path := func(name string) cachedFile { return cachedFile{path: filepath.Join(procRoot, name)} }
-	return &FastReader{device: device, ioPSI: path("pressure/io"), memPSI: path("pressure/memory"), cpuPSI: path("pressure/cpu"),
-		vmstat: path("vmstat"), diskstat: path("diskstats"), loadavg: path("loadavg"), buf: make([]byte, 8192)}
+	r := &FastReader{device: device, ioPSI: path("pressure/io"), memPSI: path("pressure/memory"), cpuPSI: path("pressure/cpu"),
+		vmstat: path("vmstat"), diskstat: path("diskstats"), loadavg: path("loadavg"), buf: make([]byte, 8192), iocostDevice: ioStatDevice}
+	if cgroupRoot != "" {
+		r.iocost.path = filepath.Join(cgroupRoot, "io.stat")
+	}
+	return r
 }
 
 func (r *FastReader) Close() {
-	for _, f := range []*cachedFile{&r.ioPSI, &r.memPSI, &r.cpuPSI, &r.vmstat, &r.diskstat, &r.loadavg} {
+	for _, f := range []*cachedFile{&r.ioPSI, &r.memPSI, &r.cpuPSI, &r.vmstat, &r.diskstat, &r.loadavg, &r.iocost} {
 		f.close()
 	}
 }
 
+// LastVRateError returns the latest observational error reading cost.vrate; it never invalidates Read.
+func (r *FastReader) LastVRateError() error { return r.vrateErr }
+
 // Read — шаг: дельты к прошлому чтению. Первое чтение только запоминает счётчики и даёт пустой шаг.
 func (r *FastReader) Read(now time.Time) (Step, error) {
+	r.vrateErr = nil
 	var c fastCounters
 	var data []byte
 	var err error
@@ -78,6 +98,17 @@ func (r *FastReader) Read(now time.Time) (Step, error) {
 	p := r.prev
 	r.prev = c
 	s := Step{At: now}
+	if r.iocost.path != "" {
+		if r.buf, data, err = r.iocost.read(r.buf); err == nil {
+			if value, ok, parseErr := parseIOStatVRate(data, r.iocostDevice); parseErr != nil {
+				r.vrateErr = fmt.Errorf("разобрать %s: %w", r.iocost.path, parseErr)
+			} else if ok {
+				s.VRate = &value
+			}
+		} else {
+			r.vrateErr = err
+		}
+	}
 	if !r.primed {
 		r.primed = true
 		return s, nil

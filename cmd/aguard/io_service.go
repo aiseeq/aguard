@@ -83,10 +83,16 @@ func (p *ioPressureState) update(at time.Time, open bool, context time.Duration)
 // runIOSampling — быстрые шаги по тикеру здесь, детальные записи из своей горутины, extra —
 // действия других горутин (сигнал, итог разбора), исполняются здесь же. Возвращается по ctx.
 func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots, sink ioSink, extra <-chan func()) error {
-	fast := iowatch.NewFastReader(roots.Proc, cfg.Device)
+	fast, err := iowatch.NewFastReaderWithCgroup(roots.Proc, roots.Block, cfg.Device, roots.Cgroup)
+	if err != nil {
+		return err
+	}
 	defer fast.Close()
 	if _, err := fast.Read(time.Now()); err != nil { // первое чтение — только точка отсчёта
 		return err
+	}
+	if err := fast.LastVRateError(); err != nil {
+		sink.sampleErr("vrate", err)
 	}
 	detail, err := iowatch.NewDetailReader(roots, cfg.Device)
 	if err != nil {
@@ -119,6 +125,9 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 			if err != nil {
 				sink.sampleErr("fast", err)
 				continue
+			}
+			if err := fast.LastVRateError(); err != nil {
+				sink.sampleErr("vrate", err)
 			}
 			advanceIOFastStep(sink, s, cfg, &pressure, control)
 		case r := <-details:
@@ -800,7 +809,15 @@ func (s *ioService) saveEvictorsStop(now time.Time) error {
 }
 
 func (s *ioService) sampleErr(key string, err error) {
-	s.warn(time.Now(), key, "замер не удался", err)
+	s.sampleErrAt(time.Now(), key, err)
+}
+
+func (s *ioService) sampleErrAt(now time.Time, key string, err error) {
+	if key == "vrate" {
+		s.warnEvery(now, key, time.Hour, "cost.vrate не прочитан", err)
+		return
+	}
+	s.warn(now, key, "замер не удался", err)
 }
 
 // warn — предупреждение не чаще ioWarnEvery на ключ.

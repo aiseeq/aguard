@@ -431,7 +431,7 @@ func TestDeltaFastCounterReset(t *testing.T) {
 		writeFile(t, filepath.Join(root, "diskstats"), "259 0 nvme0n1 0 0 0 0 0 0 "+strconv.Itoa(written)+" 0 0 0 0\n")
 	}
 	write(1000, 10, 8, 500, 3)
-	r := NewFastReader(root, "nvme0n1")
+	r := newFastReader(root, "nvme0n1", "", "")
 	defer r.Close()
 	now := time.Now()
 	if s, err := r.Read(now); err != nil || s.IOFullUS != 0 {
@@ -444,6 +444,53 @@ func TestDeltaFastCounterReset(t *testing.T) {
 	}
 	if s.IOFullUS != 60000 || s.SwapIn != 0 || s.WriteBytes != 8*512 || s.CPUSomeUS != 12000 || s.Runnable != 17 { // 18 в loadavg без читающего потока
 		t.Fatalf("дельты (своп сброшен), CPU some — дельта, runnable — моментальное: %+v", s)
+	}
+}
+
+func TestFastReaderReadsRootIOStatVRateAndKeepsMissingUnknown(t *testing.T) {
+	procRoot, cgroupRoot, blockRoot := t.TempDir(), t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(blockRoot, "nvme0n1", "dev"), "259:0\n")
+	write := func(vrate string) {
+		writeFile(t, filepath.Join(procRoot, "pressure", "io"), "some avg10=0 total=1\nfull avg10=0 total=1\n")
+		writeFile(t, filepath.Join(procRoot, "pressure", "memory"), "some avg10=0 total=1\nfull avg10=0 total=1\n")
+		writeFile(t, filepath.Join(procRoot, "pressure", "cpu"), "some avg10=0 total=1\n")
+		writeFile(t, filepath.Join(procRoot, "loadavg"), "1 1 1 1/2 1\n")
+		writeFile(t, filepath.Join(procRoot, "vmstat"), "pswpin 0\npswpout 0\npgmajfault 0\n")
+		writeFile(t, filepath.Join(procRoot, "diskstats"), "259 0 nvme0n1 0 0 0 0 0 0 0 0 0 0 0\n")
+		writeFile(t, filepath.Join(cgroupRoot, "io.stat"), "259:0 rbytes=0 wbytes=0 cost.vrate="+vrate+"\n")
+	}
+	write("30.00")
+	r, err := NewFastReaderWithCgroup(procRoot, blockRoot, "nvme0n1", cgroupRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err := r.Read(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	write("29.50")
+	s, err := r.Read(time.Now().Add(time.Second))
+	if err != nil || s.VRate == nil || *s.VRate != 29.5 {
+		t.Fatalf("vrate быстрым шагом: %+v, err=%v", s, err)
+	}
+	writeFile(t, filepath.Join(cgroupRoot, "io.stat"), "259:0 rbytes=0 wbytes=0\n")
+	s, err = r.Read(time.Now().Add(2 * time.Second))
+	if err != nil || s.VRate != nil {
+		t.Fatalf("без cost.vrate ожидали нет данных: %+v, err=%v", s, err)
+	}
+	writeFile(t, filepath.Join(cgroupRoot, "io.stat"), "259:0 rbytes=0 wbytes=0 cost.vrate=oops\n")
+	s, err = r.Read(time.Now().Add(3 * time.Second))
+	if err != nil || s.VRate != nil || r.LastVRateError() == nil {
+		t.Fatalf("ошибка наблюдения должна быть нефатальной и сообщаемой: %+v, read=%v vrate=%v", s, err, r.LastVRateError())
+	}
+	missingRoot := t.TempDir()
+	missing, err := NewFastReaderWithCgroup(procRoot, blockRoot, "nvme0n1", missingRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer missing.Close()
+	if _, err := missing.Read(time.Now().Add(4 * time.Second)); err != nil || missing.LastVRateError() == nil {
+		t.Fatalf("ошибка чтения io.stat должна быть нефатальной: read=%v vrate=%v", err, missing.LastVRateError())
 	}
 }
 
@@ -1411,7 +1458,20 @@ func BenchmarkReadLive(b *testing.B) {
 		b.Skipf("нет диска %s: %v", device, err)
 	}
 	b.Run("fast", func(b *testing.B) {
-		r := NewFastReader(roots.Proc, device)
+		r, err := NewFastReaderWithCgroup(roots.Proc, roots.Block, device, roots.Cgroup)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer r.Close()
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := r.Read(time.Now()); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("fast_without_iocost", func(b *testing.B) {
+		r := newFastReader(roots.Proc, device, "", "")
 		defer r.Close()
 		b.ReportAllocs()
 		for b.Loop() {

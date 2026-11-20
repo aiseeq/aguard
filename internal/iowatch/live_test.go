@@ -1,6 +1,7 @@
 package iowatch
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,8 +110,45 @@ func TestSeriesFoldsStepsIntoSeconds(t *testing.T) {
 		second.CPUSomeMS != 12 || second.RunnableMax != 12 {
 		t.Fatalf("секунда 1: %+v", second)
 	}
-	if size := unsafe.Sizeof(secondRow{}); size != 88 {
-		t.Fatalf("строка ряда %d байт, в доке — 88", size)
+	if size := unsafe.Sizeof(secondRow{}); size != 96 {
+		t.Fatalf("строка ряда %d байт, в доке — 96", size)
+	}
+}
+
+func TestSeriesStoresVRateMinAndLastWithUnknown(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	s := NewSeries(time.Minute)
+	first, lower := 45.0, 30.0
+	s.step(&Step{At: base.Add(100 * time.Millisecond), VRate: &first}, 0, time.Second)
+	s.step(&Step{At: base.Add(500 * time.Millisecond), VRate: &lower}, 0, time.Second)
+	s.step(&Step{At: base.Add(time.Second)}, 0, time.Second)
+	got := s.Rows(time.Time{}).Seconds()[0]
+	if got.VRateMin == nil || *got.VRateMin != 30 || got.VRateLast == nil || *got.VRateLast != 30 {
+		t.Fatalf("vrate min/last: %+v", got)
+	}
+	unknown := NewSeries(time.Minute)
+	unknown.step(&Step{At: base}, 0, time.Second)
+	unknown.step(&Step{At: base.Add(time.Second)}, 0, time.Second)
+	if sec := unknown.Rows(time.Time{}).Seconds()[0]; sec.VRateMin != nil || sec.VRateLast != nil {
+		t.Fatalf("без iocost появились данные: %+v", sec)
+	}
+}
+
+func TestSeriesVRateRoundsHundredths(t *testing.T) {
+	for _, value := range []float64{1.15, 0.29} {
+		row := rowOf(&MachineSecond{VRateMin: &value, VRateLast: &value})
+		want := int32(math.Round(value * 100))
+		if row.vrateMin != want || row.vrateLast != want {
+			t.Errorf("rowOf(%v) = %d/%d, want %d", value, row.vrateMin, row.vrateLast, want)
+		}
+		base := time.Unix(1_800_000_000, 0)
+		series := NewSeries(time.Minute)
+		series.step(&Step{At: base, VRate: &value}, 0, time.Second)
+		series.step(&Step{At: base.Add(time.Second)}, 0, time.Second)
+		got := series.Rows(time.Time{}).Seconds()[0]
+		if got.VRateMin == nil || *got.VRateMin != value || got.VRateLast == nil || *got.VRateLast != value {
+			t.Errorf("series step %v: %+v", value, got)
+		}
 	}
 }
 
