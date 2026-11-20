@@ -10,6 +10,10 @@ Nice=10
 # PATH своей строкой: демон стартует при входе раньше импорта окружения сессии, и said, graft worktree clean, podman
 # остались бы без команд (тикет daemon-path-after-boot: 04.11 09:45 PATH=/usr/local/bin:/usr/bin).
 Environment=PATH=%h/go/bin:%h/.npm/bin:%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
+# Четыре P рантайма Go вместо числа ядер (22): демону нужно ~0,3–0,6 ядра, а при 22 P простаивающие потоки крутят
+# планировщик (findRunnable 28 % профиля 20.11 12:27, тикет aguard-run-cpu). Блокирующие вызовы (fanotify, netlink)
+# P не держат.
+Environment=GOMAXPROCS=4
 
 [Install]
 WantedBy=default.target
