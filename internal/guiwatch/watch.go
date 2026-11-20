@@ -104,8 +104,9 @@ func dedupeSamples(in []Sample) []Sample {
 }
 
 const (
-	DirectoryMode   = 0o700
-	privateFileMode = 0o600
+	DirectoryMode          = 0o700
+	privateFileMode        = 0o600
+	storedSizeScanInterval = 24 * time.Hour
 )
 
 type Document struct {
@@ -2291,7 +2292,7 @@ func (w *Watcher) prune() error {
 		return err
 	}
 	w.storageMu.Lock()
-	needsScan := w.storedSizes == nil || w.lastStoredSizeScan.IsZero() || !now.Before(w.lastStoredSizeScan.Add(time.Hour))
+	needsScan := w.storedSizes == nil || w.lastStoredSizeScan.IsZero() || !now.Before(w.lastStoredSizeScan.Add(storedSizeScanInterval))
 	w.storageMu.Unlock()
 	if needsScan {
 		if err := w.refreshStoredSizes(); err != nil {

@@ -29,6 +29,8 @@ import (
 	"github.com/aiseeq/akit/session"
 )
 
+const trackerCopyMtimeSkew = 30 * time.Second
+
 func (a *app) tmpCmd(args []string) error {
 	cmd, rest := sub(args)
 	cfg, err := a.config()
@@ -65,16 +67,32 @@ func (a *app) tmpCmd(args []string) error {
 func (a *app) tmpStatePath() string { return filepath.Join(a.dir("tmp"), "state.json") }
 
 // snapshot — свежий снимок трекера: /run, а если его нет — диск.
+// Tracker.save создаёт State с Updated один раз на поколение и атомарно пишет /run, затем диск.
+// Их mtime может различаться внутри записи на несколько секунд, хотя Updated совпадает; сохраняем /run,
+// если разница меньше половины периода YoungEvery (минута). Если запись /run не удалась, а предыдущая успешная
+// была менее чем за 30 с до записи диска, /run может отставать до 30 с изменений; этот снимок будет выбран до
+// следующей записи диска, хотя HEAD по Updated выбрал бы диск. Ошибка чтения невыбранной копии теперь игнорируется.
 func (a *app) snapshot(cfg *policy.Config) (*record.State, error) {
-	var best *record.State
-	for _, dir := range []string{cfg.RunDir, cfg.TrackDir} {
-		s, err := record.ReadState(filepath.Join(dir, record.StateFile))
-		if err != nil {
-			return nil, err
-		}
-		if best == nil || s.Updated.After(best.Updated) {
-			best = s
-		}
+	runPath := filepath.Join(cfg.RunDir, record.StateFile)
+	diskPath := filepath.Join(cfg.TrackDir, record.StateFile)
+	runInfo, runErr := os.Stat(runPath)
+	diskInfo, diskErr := os.Stat(diskPath)
+	if runErr != nil && !errors.Is(runErr, os.ErrNotExist) {
+		return nil, runErr
+	}
+	if diskErr != nil && !errors.Is(diskErr, os.ErrNotExist) {
+		return nil, diskErr
+	}
+	path := runPath
+	switch {
+	case runErr != nil:
+		path = diskPath
+	case diskErr == nil && diskInfo.ModTime().After(runInfo.ModTime().Add(trackerCopyMtimeSkew)):
+		path = diskPath
+	}
+	best, err := record.ReadState(path)
+	if err != nil {
+		return nil, err
 	}
 	if best.Updated.IsZero() {
 		return nil, errors.New("снимка слежения нет: проверьте aguard-track-helper и строки «слежение» в журнале aguard")
@@ -163,6 +181,9 @@ func (a *app) workerUnitDirs() []string {
 // порог без поправки (множитель 1), с записью в журнал: недочитанный /proc
 // не повод ни пропускать проход, ни ужесточать порог.
 func (a *app) tmpFactor(cfg *policy.Config) float64 {
+	if a.tmpFactorForTest != nil {
+		return a.tmpFactorForTest()
+	}
 	p, err := pressure.ReadMemory(procRoot)
 	if err != nil {
 		a.warn("tmp", "давление памяти не прочиталось, порог без поправки", "err", err)

@@ -74,6 +74,7 @@ func TestTmpLitterLogStats(t *testing.T) {
 func TestTmpRoundResolvesWorkerJobForRouting(t *testing.T) {
 	a, log := quietObservedApp(t)
 	a.out = &bytes.Buffer{}
+	a.tmpFactorForTest = func() float64 { return 1 }
 	a.uid = os.Getuid()
 	a.workerJobsDir, a.workerUnitsDir = t.TempDir(), t.TempDir()
 	if err := os.MkdirAll(filepath.Join(a.workerJobsDir, "J"), 0o700); err != nil {
@@ -516,5 +517,63 @@ func TestTmpSnapshotDropsEntryWithoutBornWithWarn(t *testing.T) {
 	}
 	if out := log.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "/tmp/noborn") {
 		t.Fatalf("ожидался WARN о записи без born: %s", out)
+	}
+}
+
+func TestTmpSnapshotDecodesOnlyNewestMtimeCopy(t *testing.T) {
+	a, _ := quietObservedApp(t)
+	run, track := t.TempDir(), t.TempDir()
+	runPath, diskPath := filepath.Join(run, record.StateFile), filepath.Join(track, record.StateFile)
+	updated := time.Now().Truncate(time.Second)
+	writeState := func(path, entry string, stateTime, mtime time.Time) {
+		t.Helper()
+		state := record.State{Updated: stateTime, Entries: []record.Entry{{Path: entry, Bytes: 42, Born: stateTime.Add(-time.Hour)}}}
+		b, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeState(runPath, "/tmp/run-generation", updated, updated)
+	// save пишет на диск позже, но Updated у двух копий одного поколения совпадает.
+	writeState(diskPath, "/tmp/disk-copy", updated, updated.Add(5*time.Second))
+	got, err := a.snapshot(&policy.Config{RunDir: run, TrackDir: track})
+	if err != nil || len(got.Entries) != 1 || got.Entries[0].Path != "/tmp/run-generation" {
+		t.Fatalf("snapshot from fresh /run copy = %+v, %v", got, err)
+	}
+	if err := os.WriteFile(diskPath, []byte("must not decode"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(diskPath, updated.Add(5*time.Second), updated.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = a.snapshot(&policy.Config{RunDir: run, TrackDir: track})
+	if err != nil || len(got.Entries) != 1 || got.Entries[0].Path != "/tmp/run-generation" {
+		t.Fatalf("bad unselected disk copy changed result = %+v, %v", got, err)
+	}
+	// В допуске 29 секунд берём /run, за допуском 31 секунда выбираем диск.
+	diskUpdated := updated.Add(29 * time.Second)
+	writeState(diskPath, "/tmp/disk-29s", diskUpdated, diskUpdated)
+	got, err = a.snapshot(&policy.Config{RunDir: run, TrackDir: track})
+	if err != nil || len(got.Entries) != 1 || got.Entries[0].Path != "/tmp/run-generation" {
+		t.Fatalf("snapshot with disk mtime +29s = %+v, %v", got, err)
+	}
+	diskUpdated = updated.Add(31 * time.Second)
+	writeState(diskPath, "/tmp/disk-31s", diskUpdated, diskUpdated)
+	got, err = a.snapshot(&policy.Config{RunDir: run, TrackDir: track})
+	if err != nil || len(got.Entries) != 1 || got.Entries[0].Path != "/tmp/disk-31s" {
+		t.Fatalf("snapshot with disk mtime +31s = %+v, %v", got, err)
+	}
+	if err := os.Remove(runPath); err != nil {
+		t.Fatal(err)
+	}
+	got, err = a.snapshot(&policy.Config{RunDir: run, TrackDir: track})
+	if err != nil || len(got.Entries) != 1 || got.Entries[0].Path != "/tmp/disk-31s" {
+		t.Fatalf("snapshot from disk fallback = %+v, %v", got, err)
 	}
 }

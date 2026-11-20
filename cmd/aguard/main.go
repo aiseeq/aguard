@@ -123,6 +123,8 @@ type app struct {
 	diskWalkLoaded       bool                                    // sizes и traces загружены до первого обхода
 	diskStateMtimes      diskStateMtimes                         // версии state.json и round.json, принятые кешем
 	diskLoadRound        func(string) (*disk.State, bool, error) // подмена загрузчика в тестах
+	nightTrust           trustLogCache
+	tmpFactorForTest     func() float64 // подмена давления памяти в тестах tmp
 	queueCache           queueTicketCache
 	queueExternalAt      time.Time // последний обход внешнего трекера
 	queueNext            map[string]queueNextResult
