@@ -118,6 +118,7 @@ func (a *app) reportSpecs(cfg *config.Config) []activity.Spec {
 		{Name: "restart", Mode: cfg.Restart.Mode},
 		{Name: "compact", Mode: cfg.Compact.Mode, Looped: cfg.Compact.Mode != restart.CompactOff},
 		{Name: "disk", Mode: cfg.Disk.Mode, Looped: true},
+		{Name: "claude-tmp", Mode: cfg.ClaudeTmp.Mode, Looped: true},
 		{Name: "said", Mode: cfg.Said.Mode, Looped: cfg.Said.Mode != said.ModeOff},
 		{Name: "bgtask", Mode: cfg.Bgtask.Mode, Looped: cfg.Bgtask.Mode != bgtask.ModeOff},
 		{Name: "cpu", Mode: cfg.Cpu.Mode, Looped: cfg.Cpu.Mode != cpuwatch.ModeOff},

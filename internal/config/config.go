@@ -26,6 +26,7 @@ import (
 	"github.com/aiseeq/aguard/internal/night"
 	"github.com/aiseeq/aguard/internal/orphans"
 	"github.com/aiseeq/aguard/internal/policy"
+	"github.com/aiseeq/aguard/internal/prune"
 	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/remotebroken"
@@ -49,20 +50,21 @@ type Config struct {
 	// Agentwaits — ожидания, которые агенты заводят сами: циклы sleep, wfor, фоновые команды, ответы сессий.
 	Agentwaits agentwait.Config `toml:"agentwaits"`
 	// Compact — своё сжатие сессий в простое, пока кэш подсказки жив.
-	Compact  restart.CompactConfig `toml:"compact"`
-	Disk     disk.Config           `toml:"disk"`   // рост папок кэшей и состояний, остатки временного
-	Said     said.Config           `toml:"said"`   // указатель сказанного пользователем
-	Bgtask   bgtask.Config         `toml:"bgtask"` // забытые фоновые задачи Bash: письмо владельцу
-	Cpu      cpuwatch.Config       `toml:"cpu"`    // перегрузка процессора ноута и PC: письмо тем, чья она
-	IO       iowatch.Config        `toml:"io"`     // телеметрия диска, свопа и фризов
-	GUI      guiwatch.Config       `toml:"gui"`    // потоки графического интерфейса
-	Remote   remotebroken.Config   `toml:"remote"` // сломанный путь graft на PC: письмо владельцу и сводка лиду
-	Codex    codexwatch.Config     `toml:"codex"`  // недельный лимит Codex: письмо лиду перед досрочным 100% и при нём
-	Queue    queue.Config          `toml:"queue"`
-	Night    night.Config          `toml:"night"` // Сон, Дайджест и окна доверия
-	Sigguard sigguard.Config       `toml:"sigguard"`
-	Ceiling  ceilingwatch.Config   `toml:"ceiling"`
-	Quiet    QuietConfig           `toml:"quiet"`
+	Compact   restart.CompactConfig `toml:"compact"`
+	Disk      disk.Config           `toml:"disk"`       // рост папок кэшей и состояний, остатки временного
+	ClaudeTmp prune.Config          `toml:"claude_tmp"` // уборка старых scratchpad-сессий
+	Said      said.Config           `toml:"said"`       // указатель сказанного пользователем
+	Bgtask    bgtask.Config         `toml:"bgtask"`     // забытые фоновые задачи Bash: письмо владельцу
+	Cpu       cpuwatch.Config       `toml:"cpu"`        // перегрузка процессора ноута и PC: письмо тем, чья она
+	IO        iowatch.Config        `toml:"io"`         // телеметрия диска, свопа и фризов
+	GUI       guiwatch.Config       `toml:"gui"`        // потоки графического интерфейса
+	Remote    remotebroken.Config   `toml:"remote"`     // сломанный путь graft на PC: письмо владельцу и сводка лиду
+	Codex     codexwatch.Config     `toml:"codex"`      // недельный лимит Codex: письмо лиду перед досрочным 100% и при нём
+	Queue     queue.Config          `toml:"queue"`
+	Night     night.Config          `toml:"night"` // Сон, Дайджест и окна доверия
+	Sigguard  sigguard.Config       `toml:"sigguard"`
+	Ceiling   ceilingwatch.Config   `toml:"ceiling"`
+	Quiet     QuietConfig           `toml:"quiet"`
 }
 
 // QuietConfig — окно тишины после загрузки машины.
@@ -96,6 +98,7 @@ func Default(home string) Config {
 		Agentwaits: agentwait.Default(),
 		Compact:    restart.DefaultCompact(),
 		Disk:       disk.Default(),
+		ClaudeTmp:  prune.Config{Mode: prune.ModeLog, Age: policy.Duration(7 * 24 * time.Hour), Window: prune.DefaultWindow},
 		Said:       said.Default(),
 		Bgtask:     bgtask.Default(),
 		Cpu:        cpuwatch.Default(home),
@@ -191,6 +194,13 @@ func (c *Config) finish(home string, uid int) error {
 	if err := c.Disk.Validate(home); err != nil {
 		return err
 	}
+	if err := c.finishClaudeTmp(home); err != nil {
+		return err
+	}
+	return c.finishRemaining(home)
+}
+
+func (c *Config) finishRemaining(home string) error {
 	if err := c.Said.Validate(home); err != nil {
 		return err
 	}
@@ -225,4 +235,18 @@ func (c *Config) finish(home string, uid int) error {
 		return fmt.Errorf("ceiling: %w", err)
 	}
 	return c.Compact.Validate()
+}
+
+func (c *Config) finishClaudeTmp(home string) error {
+	if c.ClaudeTmp.Mode != prune.ModeLog && c.ClaudeTmp.Mode != prune.ModeAct {
+		return fmt.Errorf("claude_tmp.mode = %q: log или act", c.ClaudeTmp.Mode)
+	}
+	if c.ClaudeTmp.Age.D() < 24*time.Hour {
+		return errors.New("claude_tmp.age >= 24h")
+	}
+	c.ClaudeTmp.Window = prune.DefaultWindow
+	c.ClaudeTmp.Home = home
+	c.ClaudeTmp.Root = filepath.Join(home, ".cache", "claude-tmp", "claude-1000")
+	c.ClaudeTmp.Projects = filepath.Join(home, ".claude", "projects")
+	return nil
 }

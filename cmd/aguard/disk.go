@@ -177,41 +177,29 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	// Пауза обхода на занятой машине — internal/yield (общая с замером слежения).
-	yielder := yield.New(procRoot, func(err error) { a.warn("disk", "замер машины для паузы обхода", "err", err) })
+	yielder := a.pressureYielder("disk", func(err error) { a.warn("disk", "замер машины для паузы обхода", "err", err) }, cfg.Lead, cfg.SendAuth)
 	walkReason := st.WalkDue(&cfg.Disk, now, free)
+	var yieldErr error
 	measure := func(entries []string) map[string]disk.Usage {
-		readBefore, readErr := iowatch.SelfReadBytes(procRoot)
-		usage := cfg.Disk.MeasureAll(ctx, entries, func() { yielder.Wait(ctx) })
-		var files, fiemaps int64
-		for _, u := range usage {
-			files += u.Files
-			fiemaps += u.Fiemaps
+		usage, err := a.measureDiskEntries(ctx, cfg, entries, walkReason, now, yielder)
+		if err != nil && yieldErr == nil {
+			yieldErr = err
 		}
-		attrs := []any{"reason", string(walkReason), "entries", len(entries), "files", files, "fiemaps", fiemaps,
-			"took", time.Since(now).Round(time.Second).String(), "paused", yielder.Paused.String(), "pauses", yielder.Pauses,
-			"interrupted", ctx.Err() != nil}
-		// Цена обхода: read_bytes всего процесса за обход, тикет self-io-reads. Прочие наблюдатели — фон поверх.
-		readAfter, err := iowatch.SelfReadBytes(procRoot)
-		if readErr = errors.Join(readErr, err); readErr != nil {
-			a.warn("disk", "чтение диска за обход", "err", readErr)
-		} else {
-			attrs = append(attrs, "read_mb", (readAfter-readBefore)/1_000_000)
-		}
-		a.log.Info("aguard disk: обход", attrs...)
 		return usage
 	}
 	recs, usage, err := st.Pass(&cfg.Disk, now, free, cfg.Disk.Entries, measure, owners.Of)
 	if ctx.Err() != nil {
 		// Pass обновляет состояние до окончания обхода; остановка демона должна отбросить эти частичные изменения.
-		restored, err := disk.Load(statePath)
-		if err != nil {
-			return err
-		}
-		a.diskState, a.diskWalkLoaded = restored, true
-		if err := a.refreshDiskStateMtimes(statePath); err != nil {
+		if err := a.restoreDiskRoundState(statePath); err != nil {
 			return err
 		}
 		return nil
+	}
+	if yieldErr != nil {
+		if err := a.restoreDiskRoundState(statePath); err != nil {
+			return err
+		}
+		return fmt.Errorf("уступка disk: %w", yieldErr)
 	}
 	if err != nil { // список записей неполон: сигналы по прочитанным всё равно пишем
 		a.warn("disk", "записи", "err", err)
@@ -244,6 +232,55 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	return store.Rotate(now, cfg.Disk.Keep.D())
+}
+
+func (a *app) measureDiskEntries(ctx context.Context, cfg *config.Config, entries []string, reason disk.WalkReason, started time.Time, yielder *yield.Yielder) (map[string]disk.Usage, error) {
+	return a.measureDiskEntriesWith(ctx, entries, reason, started, yielder.Wait, cfg.Disk.MeasureAll, func() (time.Duration, int) {
+		return yielder.Paused, yielder.Pauses
+	})
+}
+
+func (a *app) measureDiskEntriesWith(ctx context.Context, entries []string, reason disk.WalkReason, started time.Time,
+	wait func(context.Context) (bool, error), measure func(context.Context, []string, func()) map[string]disk.Usage,
+	stats func() (time.Duration, int)) (map[string]disk.Usage, error) {
+	readBefore, readErr := iowatch.SelfReadBytes(procRoot)
+	walkCtx, cancelWalk := context.WithCancel(ctx)
+	defer cancelWalk()
+	var yieldErr error
+	usage := measure(walkCtx, entries, func() {
+		if _, err := wait(walkCtx); err != nil {
+			if yieldErr == nil {
+				yieldErr = err
+			}
+			cancelWalk()
+		}
+	})
+	var files, fiemaps int64
+	for _, u := range usage {
+		files += u.Files
+		fiemaps += u.Fiemaps
+	}
+	paused, pauses := stats()
+	attrs := []any{"reason", string(reason), "entries", len(entries), "files", files, "fiemaps", fiemaps,
+		"took", time.Since(started).Round(time.Second).String(), "paused", paused.String(), "pauses", pauses,
+		"interrupted", ctx.Err() != nil}
+	readAfter, err := iowatch.SelfReadBytes(procRoot)
+	if readErr = errors.Join(readErr, err); readErr != nil {
+		a.warn("disk", "чтение диска за обход", "err", readErr)
+	} else {
+		attrs = append(attrs, "read_mb", (readAfter-readBefore)/1_000_000)
+	}
+	a.log.Info("aguard disk: обход", attrs...)
+	return usage, yieldErr
+}
+
+func (a *app) restoreDiskRoundState(statePath string) error {
+	restored, err := disk.Load(statePath)
+	if err != nil {
+		return err
+	}
+	a.diskState, a.diskWalkLoaded = restored, true
+	return a.refreshDiskStateMtimes(statePath)
 }
 
 // saveDiskFrequentState сохраняет отметки прохода, сливая более новые чужие told/letters.

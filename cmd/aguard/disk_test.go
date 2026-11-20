@@ -14,6 +14,7 @@ import (
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/statefile"
+	"github.com/aiseeq/aguard/internal/yield"
 	"github.com/aiseeq/akit/session"
 )
 
@@ -473,7 +474,8 @@ func TestDiskRoundYieldsAndMarksInterrupted(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(state, "akit"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(state, "akit", "quiet-until"), []byte("не время\n"), 0o600); err != nil {
+	quietUntil := time.Now().Add(time.Hour).Format(time.RFC3339) + "\n"
+	if err := os.WriteFile(filepath.Join(state, "akit", "quiet-until"), []byte(quietUntil), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := testIOApp(t)
@@ -487,18 +489,23 @@ func TestDiskRoundYieldsAndMarksInterrupted(t *testing.T) {
 	if err := os.MkdirAll(cache, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for i := range 1100 {
-		if err := os.WriteFile(filepath.Join(cache, fmt.Sprintf("f%d", i)), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(filepath.Join(cache, "fixture"), nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	cfg := config.Default(a.home)
 	cfg.Disk.Roots, cfg.Disk.Containers, cfg.Disk.Track = []string{filepath.Join(a.home, ".cache")}, nil, nil
 	cfg.Disk.FreeMode = disk.FreeOff
 	stopped, cancel := context.WithCancel(t.Context())
 	cancel()
+	before := time.Now().Add(-48 * time.Hour)
+	if err := (&disk.State{LastWalk: before, Told: map[string]time.Time{}}).Save(filepath.Join(a.dir("disk"), "state.json")); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.diskRound(stopped, &cfg); err != nil {
 		t.Fatal(err)
+	}
+	if a.diskState == nil || !a.diskState.LastWalk.Equal(before) {
+		t.Fatalf("cancelled round did not restore in-memory state: %+v", a.diskState)
 	}
 	if !strings.Contains(logged.String(), "interrupted=true") {
 		t.Fatalf("оборванный обход не помечен:\n%s", logged.String())
@@ -507,7 +514,51 @@ func TestDiskRoundYieldsAndMarksInterrupted(t *testing.T) {
 	if err := a.diskRound(t.Context(), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(logged.String(), "замер машины для паузы обхода") || !strings.Contains(logged.String(), "interrupted=false") {
-		t.Fatalf("обход не спросил о машине:\n%s", logged.String())
+	if !strings.Contains(logged.String(), "interrupted=false") {
+		t.Fatalf("обход после отмены не завершился:\n%s", logged.String())
+	}
+}
+
+func TestDiskMeasureCancelsWalkWhenYieldFails(t *testing.T) {
+	a, _ := testIOApp(t)
+	want := fmt.Errorf("yield failed")
+	var sawCanceled bool
+	measure := func(ctx context.Context, _ []string, yield func()) map[string]disk.Usage {
+		yield()
+		sawCanceled = ctx.Err() != nil
+		return nil
+	}
+	_, err := a.measureDiskEntriesWith(t.Context(), nil, "test", time.Now(), func(context.Context) (bool, error) { return false, want }, measure, func() (time.Duration, int) { return 0, 0 })
+	if err == nil || !strings.Contains(err.Error(), want.Error()) || !sawCanceled {
+		t.Fatalf("yield error did not cancel disk walk: err=%v canceled=%v", err, sawCanceled)
+	}
+}
+
+func TestDiskMeasureContinuesAfterPressureErrorPause(t *testing.T) {
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	pressureDir := filepath.Join(configHome, "akit")
+	if err := os.MkdirAll(pressureDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pressureDir, "pressure.yaml"), []byte("runnable: broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := testIOApp(t)
+	var logged bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logged, nil))
+	warned := false
+	yielder := yield.New(procRoot, func(error) { warned = true })
+	var sawCanceled bool
+	measure := func(ctx context.Context, _ []string, checkpoint func()) map[string]disk.Usage {
+		checkpoint()
+		sawCanceled = ctx.Err() != nil
+		return map[string]disk.Usage{"fixture": {Files: 1}}
+	}
+	usage, err := a.measureDiskEntriesWith(t.Context(), []string{"fixture"}, "test", time.Now(), yielder.Wait, measure, func() (time.Duration, int) {
+		return yielder.Paused, yielder.Pauses
+	})
+	if err != nil || !warned || sawCanceled || len(usage) != 1 || yielder.Pauses != 1 || yielder.Paused < 2*time.Second || !strings.Contains(logged.String(), "pauses=1") {
+		t.Fatalf("disk did not continue after pressure-error pause: err=%v warned=%v canceled=%v usage=%v pauses=%d duration=%v log=%s", err, warned, sawCanceled, usage, yielder.Pauses, yielder.Paused, logged.String())
 	}
 }

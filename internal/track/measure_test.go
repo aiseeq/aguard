@@ -3,6 +3,7 @@ package track
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -47,12 +48,33 @@ func measureFixture(t *testing.T) measureJob {
 	return job
 }
 
+func TestMeasureYieldErrorStopsIncompletePass(t *testing.T) {
+	job := measureFixture(t)
+	want := errors.New("pressure unavailable")
+	d := runMeasure(t.Context(), job, func(context.Context) (bool, error) { return true, want })
+	if !d.aborted || !errors.Is(d.err, want) || len(d.usages) != 0 {
+		t.Fatalf("yield failure did not abort safely: aborted=%v err=%v usages=%d", d.aborted, d.err, len(d.usages))
+	}
+}
+
+func TestMeasureContinuesAfterPressureFailurePause(t *testing.T) {
+	job := measureFixture(t)
+	calls := 0
+	d := runMeasure(t.Context(), job, func(context.Context) (bool, error) {
+		calls++
+		return true, nil // yield.Wait converts a failed pressure sample to a busy pause
+	})
+	if d.aborted || d.err != nil || calls == 0 || d.pauses != calls || len(d.usages) != len(job.items) {
+		t.Fatalf("track did not finish in portions after pressure failure: aborted=%v err=%v calls=%d pauses=%d usages=%d", d.aborted, d.err, calls, d.pauses, len(d.usages))
+	}
+}
+
 // Уступка — перед каждой записью и папкой-контейнером и каждые yieldEvery записей каталога внутри обхода большой
 // записи: 4 записи + 1 папка + 3 внутри обхода.
 func TestMeasureYieldsBetweenEntriesAndInsideWalk(t *testing.T) {
 	job := measureFixture(t)
 	calls := 0
-	d := runMeasure(t.Context(), job, func(context.Context) bool { calls++; return false })
+	d := runMeasure(t.Context(), job, func(context.Context) (bool, error) { calls++; return false, nil })
 	if want := len(job.items) + len(job.dirs) + 3; calls != want {
 		t.Fatalf("уступка спрошена %d раз, ждал %d", calls, want)
 	}
@@ -66,7 +88,7 @@ func TestMeasureYieldsBetweenEntriesAndInsideWalk(t *testing.T) {
 func TestMeasurePausedSameResult(t *testing.T) {
 	job := measureFixture(t)
 	plain := runMeasure(t.Context(), job, nil)
-	paused := runMeasure(t.Context(), job, func(context.Context) bool { time.Sleep(time.Millisecond); return true })
+	paused := runMeasure(t.Context(), job, func(context.Context) (bool, error) { time.Sleep(time.Millisecond); return true, nil })
 	if !reflect.DeepEqual(plain.usages, paused.usages) || !reflect.DeepEqual(plain.listing, paused.listing) {
 		t.Fatalf("замер с паузами другой:\n%+v\n%+v", plain.usages, paused.usages)
 	}
@@ -83,13 +105,13 @@ func TestMeasureCancelInPause(t *testing.T) {
 	defer cancel()
 	inPause := make(chan struct{})
 	calls := 0
-	yield := func(ctx context.Context) bool {
+	yield := func(ctx context.Context) (bool, error) {
 		if calls++; calls == 2 { // первая уступка внутри обхода большой записи
 			close(inPause)
 			<-ctx.Done()
-			return true
+			return true, nil
 		}
-		return false
+		return false, nil
 	}
 	got := make(chan measureDone, 1)
 	go func() { got <- runMeasure(ctx, job, yield) }()
@@ -155,7 +177,7 @@ func TestFinishMeasureLogsAndSkipsAborted(t *testing.T) {
 func TestStartMeasureUsesConfigYield(t *testing.T) {
 	job := measureFixture(t)
 	calls := 0
-	tr := &Tracker{cfg: Config{Yield: func(context.Context) bool { calls++; return false }}, entries: map[string]*record.Entry{}}
+	tr := &Tracker{cfg: Config{Yield: func(context.Context) (bool, error) { calls++; return false, nil }}, entries: map[string]*record.Entry{}}
 	for _, it := range job.items {
 		tr.entries[it.path] = &record.Entry{Path: it.path}
 	}
@@ -181,7 +203,7 @@ func TestStopMeasureWaitsGoroutine(t *testing.T) {
 		<-ctx.Done() // пауза занятой машины, пока замер не отменят
 		return true
 	}
-	tr := &Tracker{cfg: Config{Yield: func(ctx context.Context) bool { r := yield(ctx); returned.Store(true); return r }},
+	tr := &Tracker{cfg: Config{Yield: func(ctx context.Context) (bool, error) { r := yield(ctx); returned.Store(true); return r, nil }},
 		entries: map[string]*record.Entry{}}
 	for _, it := range job.items {
 		tr.entries[it.path] = &record.Entry{Path: it.path}
@@ -207,7 +229,7 @@ func TestLoopExitWaitsMeasure(t *testing.T) {
 	job := measureFixture(t)
 	var inside atomic.Int32
 	entered := make(chan struct{}, 8)
-	yield := func(ctx context.Context) bool {
+	yield := func(ctx context.Context) (bool, error) {
 		inside.Add(1)
 		defer inside.Add(-1)
 		select {
@@ -216,7 +238,7 @@ func TestLoopExitWaitsMeasure(t *testing.T) {
 		}
 		<-ctx.Done()
 		time.Sleep(50 * time.Millisecond) // уступка доходит до конца не сразу: невыжданная горутина ещё внутри
-		return true
+		return true, nil
 	}
 	cfg := Config{Name: "probe", Yield: yield, YoungEvery: time.Hour, Full: time.Hour, Young: time.Hour}
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
