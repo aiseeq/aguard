@@ -697,7 +697,7 @@ func TestWorkerCacheFindsNewTasksContinueAndTail(t *testing.T) {
 		if err := os.MkdirAll(base, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(base, "status.json"), fmt.Appendf(nil, `{"phase":%q}`, phase), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(base, "status.json"), fmt.Appendf(nil, `{"phase":%q,"thread":"thread-%s"}`, phase, session), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		path := filepath.Join(base, "codex", "sessions", "2026", "11", "18", "rollout-"+session+".jsonl")
@@ -709,6 +709,9 @@ func TestWorkerCacheFindsNewTasksContinueAndTail(t *testing.T) {
 	writeTask("new-task", "готово", "first")
 	if _, err := p.Run(st, stamp); err != nil {
 		t.Fatal(err)
+	}
+	if st.Workers.Tasks["new-task"].Final {
+		t.Fatal("готовая задача без worker done ошибочно признана окончательной")
 	}
 	key := "codex/new-task/codex/sessions/2026/11/18/rollout-first.jsonl"
 	if st.Files[key] == nil || st.Files[key].Offset == 0 {
@@ -790,6 +793,200 @@ func TestWorkerCacheFindsNewTasksContinueAndTail(t *testing.T) {
 	}
 	if st.Files[liveKey].Offset <= before {
 		t.Fatalf("дописанный хвост не прочитан: до %d после %d", before, st.Files[liveKey].Offset)
+	}
+}
+
+func TestWorkerFinalTasksAvoidStatusStat(t *testing.T) {
+	const count = 17_000
+	workers := t.TempDir()
+	statCalls := 0
+	p := &Pass{Workers: workers, statStatus: func(string) (os.FileInfo, error) {
+		statCalls++
+		return nil, os.ErrNotExist
+	}, listWorker: func(string, string) ([]Source, error) { return nil, nil }}
+	for i := range count {
+		task := workerTask{}
+		if _, _, err := p.workerTaskSources(fmt.Sprintf("task-%05d", i), &task, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := statCalls
+	if before != count {
+		t.Fatalf("stat status.json до кеша: %d, want %d", before, count)
+	}
+	statCalls = 0
+	for i := range count {
+		task := workerTask{Done: true, Final: true}
+		if _, _, err := p.workerTaskSources(fmt.Sprintf("task-%05d", i), &task, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if statCalls != 0 {
+		t.Fatalf("stat status.json для %d окончательных задач: %d; до кеша окончательности было бы %d", count, statCalls, before)
+	}
+	t.Logf("stat status.json на проход: до %d, после %d (задач %d)", before, statCalls, count)
+}
+
+func TestWorkerLegacyDoneCacheMigratesOnce(t *testing.T) {
+	workers := t.TempDir()
+	writeStatus := func(name, data string) os.FileInfo {
+		t.Helper()
+		base := filepath.Join(workers, name)
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		status := filepath.Join(base, "status.json")
+		if err := os.WriteFile(status, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	finalInfo := writeStatus("legacy-final", `{"phase":"готово","thread":"t","released_at":"2026-11-19T10:00:00Z"}`)
+	noEndedInfo := writeStatus("legacy-no-ended", `{"phase":"готово","thread":"t"}`)
+	stats := 0
+	p := &Pass{Workers: workers, statStatus: func(path string) (os.FileInfo, error) {
+		stats++
+		return os.Stat(path)
+	}, listWorker: func(string, string) ([]Source, error) { return nil, nil }}
+	cachedRollout := []workerTranscript{{Key: RunnerCodex + "/legacy-final/codex/sessions/2026/11/19/rollout-1.jsonl", Size: 10, Mtime: 1}}
+	legacyFinal := workerTask{Done: true, StatusMod: finalInfo.ModTime().UnixNano(), StatusSize: finalInfo.Size(), Sources: cachedRollout}
+	legacyNoEnded := workerTask{Done: true, StatusMod: noEndedInfo.ModTime().UnixNano(), StatusSize: noEndedInfo.Size()}
+	noEndedStatus := filepath.Join(workers, "legacy-no-ended", "status.json")
+	for i := range 3 {
+		srcs, _, err := p.workerTaskSources("legacy-final", &legacyFinal, stamp.Add(time.Duration(i)*time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// миграция и Final не теряют закешированные транскрипты: иначе открытое ожидание в них не дочитается
+		if len(srcs) != 1 || len(legacyFinal.Sources) != 1 {
+			t.Fatalf("pass %d: legacy final sources=%d cached=%d, want 1", i, len(srcs), len(legacyFinal.Sources))
+		}
+		if _, _, err := p.workerTaskSources("legacy-no-ended", &legacyNoEnded, stamp.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			// Same-size edit with the original mtime would be read again by a migration
+			// keyed only on Ended.IsZero(). StatusRead must make migration one-shot.
+			if err := os.WriteFile(noEndedStatus, []byte(`{"phase":"работа","thread":"t"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(noEndedStatus, noEndedInfo.ModTime(), noEndedInfo.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if stats != 4 || !legacyFinal.Final || legacyNoEnded.Final || !legacyNoEnded.Done || !legacyNoEnded.StatusRead {
+		t.Fatalf("old cache migration: status stats=%d final=%t no-ended done=%t final=%t read=%t", stats, legacyFinal.Final, legacyNoEnded.Done, legacyNoEnded.Final, legacyNoEnded.StatusRead)
+	}
+}
+
+func TestWorkerFinalRequiresNoContinuationPath(t *testing.T) {
+	workers := t.TempDir()
+	status := filepath.Join(workers, "task", "status.json")
+	if err := os.MkdirAll(filepath.Dir(status), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	info := func(data string) os.FileInfo {
+		t.Helper()
+		if err := os.WriteFile(status, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fi, err := os.Stat(status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi
+	}
+	p := &Pass{Workers: workers}
+	for _, tc := range []struct {
+		name string
+		json string
+		want bool
+	}{
+		{"released_at запрещает continue", `{"phase":"готово","thread":"t","released_at":"2026-11-20T00:01:00Z"}`, true},
+		{"keep-tree разрешает continue", `{"phase":"готово","thread":"t","closed":"2026-11-20T00:00:00Z","keep_tree":true}`, false},
+		{"closed без released_at разрешает continue", `{"phase":"готово","thread":"t","closed":"2026-11-20T00:00:00Z"}`, false},
+		{"нет thread для продолжения", `{"phase":"готово"}`, true},
+		{"работает без thread не окончательно", `{"phase":"работает"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			task := workerTask{}
+			if err := p.readWorkerStatus("task", status, info(tc.json), &task); err != nil {
+				t.Fatal(err)
+			}
+			if task.Final != tc.want {
+				t.Fatalf("Final=%t, want %t", task.Final, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkerPruneMarkerMakesOldTaskFinal(t *testing.T) {
+	workers := t.TempDir()
+	marker := filepath.Join(workers, "task", "pruned")
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("pruned\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	statusStats := 0
+	writeOldStatus := func(name string) {
+		t.Helper()
+		base := filepath.Join(workers, name)
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		data := fmt.Appendf(nil, `{"phase":"готово","thread":"t","ended":%q}`, stamp.Add(-workerPruneAfter-time.Hour).Format(time.RFC3339))
+		if err := os.WriteFile(filepath.Join(base, "status.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeOldStatus("task")
+	writeOldStatus("unpruned")
+	p := &Pass{Workers: workers, listWorker: func(string, string) ([]Source, error) { return nil, nil }, statStatus: func(path string) (os.FileInfo, error) {
+		statusStats++
+		return os.Stat(path)
+	}}
+	task := workerTask{}
+	if _, _, err := p.workerTaskSources("task", &task, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if !task.Final || statusStats != 1 {
+		t.Fatalf("pruned task: Final=%t status stat calls=%d", task.Final, statusStats)
+	}
+	if _, skip, err := p.workerTaskSources("task", &task, stamp.Add(time.Minute)); err != nil || !skip || statusStats != 1 {
+		t.Fatalf("cached pruned task: skip=%t status stat calls=%d err=%v", skip, statusStats, err)
+	}
+
+	// Age is only eligibility for prune. Without the marker, continuation remains possible.
+	pruneStats := 0
+	p.statPruned = func(string) (os.FileInfo, error) {
+		pruneStats++
+		return nil, os.ErrNotExist
+	}
+	stale := workerTask{}
+	if _, _, err := p.workerTaskSources("unpruned", &stale, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if stale.Final || stale.PruneCheckAt != stamp {
+		t.Fatalf("old unpruned task: Final=%t prune check=%v", stale.Final, stale.PruneCheckAt)
+	}
+	if _, _, err := p.workerTaskSources("unpruned", &stale, stamp.Add(workerPruneRecheck-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if pruneStats != 1 {
+		t.Fatalf("prune проверен до истечения интервала: stat=%d want=1", pruneStats)
+	}
+	if _, _, err := p.workerTaskSources("unpruned", &stale, stamp.Add(workerPruneRecheck)); err != nil {
+		t.Fatal(err)
+	}
+	if pruneStats != 2 {
+		t.Fatalf("prune не перепроверен через интервал: stat=%d want=2", pruneStats)
 	}
 }
 

@@ -36,10 +36,14 @@ type workerCache struct {
 }
 
 type workerTask struct {
-	StatusMod  int64              `json:"status_mod,omitempty"`
-	StatusSize int64              `json:"status_size,omitempty"`
-	Done       bool               `json:"done,omitempty"`
-	Sources    []workerTranscript `json:"sources,omitempty"`
+	StatusMod    int64              `json:"status_mod,omitempty"`
+	StatusSize   int64              `json:"status_size,omitempty"`
+	Done         bool               `json:"done,omitempty"`
+	Final        bool               `json:"final,omitempty"`
+	StatusRead   bool               `json:"status_read,omitempty"`
+	Ended        time.Time          `json:"ended,omitzero"`
+	PruneCheckAt time.Time          `json:"prune_check_at,omitzero"`
+	Sources      []workerTranscript `json:"sources,omitempty"`
 }
 
 type workerTranscript struct {
@@ -217,7 +221,15 @@ type Pass struct {
 	Name       func(cwd string) string
 	openFile   func(string) (io.ReaderAt, io.Closer, error)
 	listWorker func(root, task string) ([]Source, error)
+	statStatus func(string) (os.FileInfo, error)
+	statPruned func(string) (os.FileInfo, error)
 }
+
+const (
+	workerPruneAfter     = 72 * time.Hour
+	workerPruneRecheck   = 6 * time.Hour
+	workerPrunedFilename = "pruned"
+)
 
 // Run читает дописанное и отдаёт законченные ожидания. Сначала файлы с меньшим непрочитанным: хвосты живых
 // сессий не ждут, пока дочитается неделя старых. Ошибки отдельных файлов возвращаются вместе с ожиданиями;
@@ -227,7 +239,7 @@ func (p *Pass) Run(st *State, now time.Time) ([]Wait, error) {
 	if err != nil {
 		return nil, err
 	}
-	workerFiles, skipWorkers, workerErrs, err := p.workerSources(st)
+	workerFiles, skipWorkers, workerErrs, err := p.workerSources(st, now)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +327,7 @@ func (p *Pass) expireWorker(f Source, s *File, now time.Time) []Wait {
 
 // workerSources caches each task's transcript list. A completed task is re-listed only after
 // status.json changes; failed task refreshes leave that task's prior cache intact.
-func (p *Pass) workerSources(st *State) ([]Source, map[string]bool, []error, error) {
+func (p *Pass) workerSources(st *State, now time.Time) ([]Source, map[string]bool, []error, error) {
 	cache := &st.Workers
 	root, err := os.Stat(p.Workers)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -361,7 +373,7 @@ func (p *Pass) workerSources(st *State) ([]Source, map[string]bool, []error, err
 		}
 		candidate := *old
 		candidate.Sources = slices.Clone(old.Sources)
-		sources, skipTask, err := p.workerTaskSources(name, &candidate)
+		sources, skipTask, err := p.workerTaskSources(name, &candidate, now)
 		if err != nil {
 			errs = append(errs, err)
 			if known {
@@ -406,11 +418,19 @@ func sameTaskKeys(a, b map[string]*workerTask) bool {
 	return true
 }
 
-func (p *Pass) workerTaskSources(name string, task *workerTask) ([]Source, bool, error) {
+func (p *Pass) workerTaskSources(name string, task *workerTask, now time.Time) ([]Source, bool, error) {
+	if task.Final {
+		return sourcesFromCache(p.Workers, name, task.Sources), true, nil
+	}
 	statusPath := filepath.Join(p.Workers, name, "status.json")
-	info, err := os.Stat(statusPath)
+	stat := p.statStatus
+	if stat == nil {
+		stat = os.Stat
+	}
+	info, err := stat(statusPath)
 	if errors.Is(err, fs.ErrNotExist) {
-		task.Done = false
+		task.Done, task.Final = false, false
+		task.StatusRead = false
 		task.StatusMod, task.StatusSize = 0, 0
 		return p.refreshWorkerSources(name, task)
 	}
@@ -418,18 +438,59 @@ func (p *Pass) workerTaskSources(name string, task *workerTask) ([]Source, bool,
 		return nil, false, fmt.Errorf("статус worker %s: %w", name, err)
 	}
 	changed := task.StatusMod != info.ModTime().UnixNano() || task.StatusSize != info.Size()
-	if changed {
+	// Старый формат кеша не сохранял ended. Перечитываем его один раз, даже если
+	// mtime и размер совпали, иначе Done-задачи никогда не получат Final.
+	legacyDone := task.Done && !task.StatusRead
+	if changed || legacyDone {
+		cachedSources := task.Sources
 		if err := p.readWorkerStatus(name, statusPath, info, task); err != nil {
 			return nil, false, err
 		}
-	}
-	if task.Done && !changed {
-		return sourcesFromCache(p.Workers, name, task.Sources), true, nil
+		if !changed {
+			task.Sources = cachedSources
+		}
 	}
 	if changed || !task.Done {
-		return p.refreshWorkerSources(name, task)
+		sources, skip, err := p.refreshWorkerSources(name, task)
+		if err != nil {
+			return nil, false, err
+		}
+		// Сначала обновляем список источников для изменившегося status.json; только затем можно кешировать
+		// окончательность по released_at, отсутствию thread или метке prune.
+		if _, err := p.finalAfterPrune(name, task, now); err != nil {
+			return nil, false, err
+		}
+		return sources, skip, nil
 	}
-	return sourcesFromCache(p.Workers, name, task.Sources), false, nil
+	if final, err := p.finalAfterPrune(name, task, now); err != nil {
+		return nil, false, err
+	} else if final {
+		return sourcesFromCache(p.Workers, name, task.Sources), true, nil
+	}
+	return sourcesFromCache(p.Workers, name, task.Sources), true, nil
+}
+
+// finalAfterPrune по ended ограничивает проверку метки задачами, которым уже пора в worker prune.
+// Одного возраста мало: continue не вызывает autoPrune и может начаться до появления метки.
+func (p *Pass) finalAfterPrune(name string, task *workerTask, now time.Time) (bool, error) {
+	if !task.Done || task.Ended.IsZero() || now.Sub(task.Ended) <= workerPruneAfter ||
+		(!task.PruneCheckAt.IsZero() && now.Sub(task.PruneCheckAt) < workerPruneRecheck) {
+		return false, nil
+	}
+	stat := p.statPruned
+	if stat == nil {
+		stat = os.Stat
+	}
+	_, err := stat(filepath.Join(p.Workers, name, workerPrunedFilename))
+	task.PruneCheckAt = now
+	if err == nil {
+		task.Final = true
+		return true, nil
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("метка worker prune %s: %w", name, err)
 }
 
 func (p *Pass) readWorkerStatus(name, path string, info os.FileInfo, task *workerTask) error {
@@ -438,12 +499,19 @@ func (p *Pass) readWorkerStatus(name, path string, info os.FileInfo, task *worke
 		return fmt.Errorf("статус worker %s: %w", name, err)
 	}
 	var status struct {
-		Phase string `json:"phase"`
+		Phase      string    `json:"phase"`
+		Thread     string    `json:"thread"`
+		Ended      time.Time `json:"ended"`
+		ReleasedAt time.Time `json:"released_at"`
 	}
 	if json.Unmarshal(b, &status) != nil {
 		status.Phase = ""
 	}
 	task.Done = status.Phase == "готово"
+	task.StatusRead = true
+	task.Ended = status.Ended
+	// Без thread продолжать нечего; ReleasedAt и метка prune worker тоже запрещают continue.
+	task.Final = task.Done && (status.Thread == "" || !status.ReleasedAt.IsZero())
 	task.StatusMod, task.StatusSize = info.ModTime().UnixNano(), info.Size()
 	task.Sources = nil
 	return nil

@@ -15,7 +15,7 @@ func rvTask(t *testing.T, workers, task, phase, session string, lines int) strin
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(base, "status.json"), fmt.Appendf(nil, `{"phase":%q}`, phase), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(base, "status.json"), fmt.Appendf(nil, `{"phase":%q,"thread":%q}`, phase, session), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(base, "codex", "sessions", "2026", "11", "18", "rollout-"+session+".jsonl")
@@ -95,6 +95,7 @@ func TestReviewDeletedTaskGarbage(t *testing.T) {
 	if _, err := p.Run(st, stamp); err != nil {
 		t.Fatal(err)
 	}
+	st.Workers.Tasks["gone"].Final = true
 	if err := os.RemoveAll(filepath.Join(workers, "gone")); err != nil {
 		t.Fatal(err)
 	}
@@ -110,5 +111,10 @@ func TestReviewDeletedTaskGarbage(t *testing.T) {
 	t.Logf("files %s", strings.Join(keys, ","))
 	if _, ok := st.Workers.Tasks["gone"]; ok {
 		t.Fatalf("удалённая задача в кеше: %d задач", len(st.Workers.Tasks))
+	}
+	for key := range st.Files {
+		if strings.HasPrefix(key, "codex/gone/") {
+			t.Fatalf("источник удалённой задачи остался в кеше: %s", key)
+		}
 	}
 }
