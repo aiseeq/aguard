@@ -9,6 +9,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/aiseeq/aguard/internal/record"
 )
 
 // Записи без события выхода (выход потерян, процесс в чужом пространстве
@@ -68,6 +72,76 @@ func execMsg(pid int) []byte {
 	binary.LittleEndian.PutUint32(b[20+16:], uint32(pid))
 	binary.LittleEndian.PutUint32(b[20+16+4:], uint32(pid))
 	return b
+}
+
+func forkMsg(parent, child int) []byte {
+	b := make([]byte, 20+16+24)
+	binary.LittleEndian.PutUint32(b[20:], procEvFork)
+	d := b[20+16:]
+	binary.LittleEndian.PutUint32(d[4:], uint32(parent))
+	binary.LittleEndian.PutUint32(d[8:], uint32(child))
+	binary.LittleEndian.PutUint32(d[12:], uint32(child))
+	return b
+}
+
+func exitMsg(pid, ppid int) []byte {
+	b := make([]byte, 20+16+24)
+	binary.LittleEndian.PutUint32(b[20:], procEvExit)
+	d := b[20+16:]
+	binary.LittleEndian.PutUint32(d[0:], uint32(pid))
+	binary.LittleEndian.PutUint32(d[4:], uint32(pid))
+	binary.LittleEndian.PutUint32(d[20:], uint32(ppid))
+	return b
+}
+
+func TestTombKeepsExitedCreatorIdentity(t *testing.T) {
+	child := startReadProcChild(t, "echo ready; read x")
+	want, err := readProc(child.pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tombs := newTombs(time.Minute, slog.New(slog.DiscardHandler))
+	tombs.handle(forkMsg(os.Getpid(), child.pid))
+	tombs.handle(execMsg(child.pid))
+	if err := child.in.Close(); err != nil {
+		t.Fatal(err)
+	}
+	child.wait()
+	tombs.handle(exitMsg(child.pid, os.Getpid()))
+	owner := &record.Owner{}
+	r := newResolver(tombs, slog.New(slog.DiscardHandler))
+	if ppid := r.fromTomb(owner, child.pid); ppid != os.Getpid() {
+		t.Fatalf("tomb owner parent = %d; want %d", ppid, os.Getpid())
+	}
+	if owner.Proc.State != record.ProcReaped || owner.Proc.Comm != want.comm || owner.Proc.Args != want.args || owner.Proc.UID != want.uid {
+		t.Fatalf("tomb owner = %+v; want exited creator comm=%q args=%q uid=%d", owner.Proc, want.comm, want.args, want.uid)
+	}
+	if owner.Proc.Cwd != "" {
+		t.Fatalf("tomb owner cwd = %q; dead-owner cwd is not captured", owner.Proc.Cwd)
+	}
+}
+
+func BenchmarkTombsForkExecExitSelf(b *testing.B) {
+	pid := os.Getpid()
+	msgs := [][]byte{forkMsg(pid, pid), execMsg(pid), exitMsg(pid, pid)}
+	t := newTombs(time.Minute, slog.New(slog.DiscardHandler))
+	b.ReportAllocs()
+	b.ResetTimer()
+	var start, end unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_PROCESS_CPUTIME_ID, &start); err != nil {
+		b.Fatal(err)
+	}
+	for range b.N {
+		for _, msg := range msgs {
+			t.handle(msg)
+		}
+	}
+	if err := unix.ClockGettime(unix.CLOCK_PROCESS_CPUTIME_ID, &end); err != nil {
+		b.Fatal(err)
+	}
+	cpuNS := end.Nano() - start.Nano()
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*len(msgs)), "ns/event")
+	b.ReportMetric(float64(cpuNS)/float64(b.N*len(msgs)), "cpu-ns/event")
 }
 
 // Пока /proc проверяется без мьютекса, pid ушёл новому процессу (exec

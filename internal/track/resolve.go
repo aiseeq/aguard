@@ -56,6 +56,17 @@ type procData struct {
 // идут относительно одного открытого /proc/<pid>, чтобы путь разбирался один
 // раз и uid брался у того же процесса.
 func readProc(pid int) (procData, error) {
+	return readProcFields(pid, true)
+}
+
+// readProcForTomb пропускает cwd: сохранённый cwd процесса не используется,
+// когда Resolver восстанавливает владельца из надгробия. Для живого владельца
+// cwd по-прежнему читает readProc; данные для опознания умершего сохраняются.
+func readProcForTomb(pid int) (procData, error) {
+	return readProcFields(pid, false)
+}
+
+func readProcFields(pid int, withCwd bool) (procData, error) {
 	ps := "/proc/" + strconv.Itoa(pid)
 	d := procData{uid: -1}
 	dir, err := unix.Open(ps, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
@@ -101,6 +112,9 @@ func readProc(pid int) (procData, error) {
 	_, _ = args.Write(cmdline)
 	d.args = args.String()
 
+	if !withCwd {
+		return d, nil
+	}
 	// Чужой процесс (root) пользовательскому демону cwd не показывает: остальное о нём известно, cwd пуст.
 	var cwd [4096]byte
 	n, err := unix.Readlinkat(dir, "cwd", cwd[:])

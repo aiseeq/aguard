@@ -16,7 +16,7 @@ import (
 )
 
 // Netlink proc connector (CONFIG_PROC_EVENTS): fork/exec/exit всех процессов.
-// Держим «надгробия» — ppid, comm, argv, cwd, uid — ещё минуту-две после
+// Держим «надгробия» — ppid, comm, argv, uid — ещё минуту-две после
 // выхода, чтобы создатель-однодневка (mktemp, sh -c), умерший до разбора его
 // события fanotify, всё равно получил цепочку предков.
 
@@ -217,7 +217,7 @@ func (t *Tombs) handle(cn []byte) {
 		t.mu.Unlock()
 	case procEvExec: // process_pid, process_tgid
 		pid := u(1)
-		d, err := readProc(pid)
+		d, err := readProcForTomb(pid)
 		if err != nil { //nolint:silent-error-handling // процесс вышел раньше, чем прочитали /proc: обычно для однодневок, остаётся унаследованное при fork
 			return
 		}
