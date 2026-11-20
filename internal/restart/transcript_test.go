@@ -99,7 +99,7 @@ func TestScanTranscriptWaitingAgent(t *testing.T) {
 	if f := scanLines(t, since, mustTime(t, tsNew).Add(2*time.Hour), lines...); !slices.Equal(f.Tasks, []string{"Agent «части» a1"}) || !slices.Equal(f.Agents, []string{"Agent «части» a1"}) {
 		t.Errorf("агент ждёт свою работу, finished не было — задача открыта: Tasks %q, Agents %q", f.Tasks, f.Agents)
 	}
-	lines = append(lines, notice(tsNew, "queue-operation", `<task-id>a1</task-id>\n<output-file>`+missing+`</output-file>\n<status>completed</status>\n<summary>Agent \"части\" finished</summary>`))
+	lines = append(lines, notice(tsNew, "queue-operation", `<task-id>a1</task-id>\n<output-file>`+missing+`</output-file>\n<status>completed</status>\n<summary>Agent \"части\" finished</summary>\n<result>Отчёт: родителю приходило «is waiting on its own background work».</result>`))
 	if f := scanLines(t, since, mustTime(t, tsNew).Add(2*time.Hour), lines...); len(f.Tasks) != 0 || len(f.Agents) != 0 {
 		t.Errorf("пришло finished — задача закрыта: Tasks %q, Agents %q", f.Tasks, f.Agents)
 	}

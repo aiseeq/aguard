@@ -146,8 +146,9 @@ type toolUse struct {
 var (
 	monitorStarted = regexp.MustCompile(`Monitor started \(task ([A-Za-z0-9_-]+)(?:, expires in (\d+[smh]))?`)
 	notifyTaskID   = regexp.MustCompile(`<task-id>([^<]+)</task-id>`)
-
-	notifyStatus = regexp.MustCompile(`<status>([a-z_]+)</status>`)
+	notifyStatus   = regexp.MustCompile(`<status>([a-z_]+)</status>`)
+	// notifySummary — подпись уведомления: фразу ожидания ищем только в ней, отчёт суб-агента в <result> может её цитировать.
+	notifySummary = regexp.MustCompile(`(?s)<summary>(.*?)</summary>`)
 )
 
 // markers — строки без них транскрипт-скан не разбирает: в них нет ни вызовов, ни уведомлений, ни таймеров, ни
@@ -443,8 +444,12 @@ func (s *transcriptScan) notifications(text string) {
 			continue
 		}
 		status := notifyStatus.FindStringSubmatch(chunk)
+		summary := ""
+		if m := notifySummary.FindStringSubmatch(chunk); m != nil {
+			summary = m[1]
+		}
 		switch {
-		case strings.Contains(chunk, "is waiting on its own background work"):
+		case strings.Contains(summary, "is waiting on its own background work"):
 			s.closed[id[1]] = false
 		case strings.Contains(chunk, "[Monitor expired after"):
 			s.closed[id[1]] = true
