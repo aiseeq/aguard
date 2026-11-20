@@ -5,6 +5,7 @@ package cllog
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -186,6 +187,92 @@ type trustLine struct {
 	trust    string
 	trustDir string
 }
+
+// TrustState разбирает дописываемый restart.log. Незаконченная строка остаётся в tail;
+// для событий хранятся только ещё не разрешённые связи с последующими строками.
+type TrustState struct {
+	tail    []byte
+	events  []TrustEvent
+	pending []int
+	bad     int
+}
+
+// Append добавляет очередной непрерывный фрагмент журнала.
+func (s *TrustState) Append(data []byte) error {
+	s.tail = append(s.tail, data...)
+	for {
+		i := bytes.IndexByte(s.tail, '\n')
+		if i < 0 {
+			if len(s.tail) > 1024*1024 {
+				return errors.New("журнал cl: строка превышает 1 МБ")
+			}
+			return nil
+		}
+		if i > 1024*1024 {
+			return errors.New("журнал cl: строка превышает 1 МБ")
+		}
+		s.addLine(string(s.tail[:i]))
+		s.tail = append(s.tail[:0], s.tail[i+1:]...)
+	}
+}
+
+func (s *TrustState) addLine(text string) {
+	text = strings.TrimSuffix(text, "\r")
+	stamp, body, ok := strings.Cut(text, " ")
+	when, err := time.Parse(TimeFormat, stamp)
+	if !ok || err != nil {
+		s.bad++
+		return
+	}
+	lineEvent, isWindow, parseErr := parseTrustWindow(body)
+	if parseErr != nil { //nolint:fallback-return,silent-error-handling // считаем bad, но сохраняем смысл reUp/SIGTERM из текста, как в TrustEvents
+		s.bad++
+	}
+	remaining := s.pending[:0]
+	for _, index := range s.pending {
+		ev := s.events[index]
+		if m := reUp.FindStringSubmatch(body); m != nil && m[1] == ev.Name {
+			s.events[index].Recovered = when
+			continue
+		}
+		if trustBarrier(body, ev, lineEvent, isWindow) {
+			continue
+		}
+		remaining = append(remaining, index)
+	}
+	s.pending = remaining
+	if parseErr == nil && isWindow {
+		lineEvent.At = when
+		s.events = append(s.events, lineEvent)
+		s.pending = append(s.pending, len(s.events)-1)
+	}
+}
+
+func trustBarrier(text string, ev, lineEvent TrustEvent, isWindow bool) bool {
+	if m := reRestart.FindStringSubmatch(text); m != nil && m[1] == ev.Name {
+		return true
+	}
+	if m := reUp.FindStringSubmatch(text); m != nil && m[1] == ev.Name {
+		return true
+	}
+	if isWindow && lineEvent.Name == ev.Name && lineEvent.Dir == ev.Dir {
+		return true
+	}
+	return false
+}
+
+// Snapshot возвращает результат, эквивалентный TrustEvents для прочитанных байтов,
+// включая текущую строку без завершающего перевода строки.
+func (s *TrustState) Snapshot() ([]TrustEvent, int, error) {
+	copyState := TrustState{tail: append([]byte(nil), s.tail...), events: append([]TrustEvent(nil), s.events...), pending: append([]int(nil), s.pending...), bad: s.bad}
+	if len(copyState.tail) > 0 {
+		copyState.addLine(string(copyState.tail))
+	}
+	return copyState.events, copyState.bad, nil
+}
+
+// Reset забывает состояние перед чтением заменённого или усечённого файла.
+func (s *TrustState) Reset() { *s = TrustState{} }
 
 // parseTrustWindow разбирает текст строки как окно доверия: ok — окно; ошибка — строка окна с битым pid.
 // Строка «повтор Down» — не окно: за ней идёт итог той же папки.

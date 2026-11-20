@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,6 +17,125 @@ import (
 	"github.com/aiseeq/aguard/internal/night"
 	"github.com/aiseeq/akit/session"
 )
+
+func TestNightTrustReadsAppendedChunksEquivalentToFullLog(t *testing.T) {
+	home := t.TempDir()
+	path := cllog.Path(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{home: home, log: slog.New(slog.NewTextHandler(os.Stderr, nil))}
+	chunks := []string{
+		"2026-11-20T10:00:00+01:00 lead: окно доверия к /home/lead: человек у терминала",
+		" — не подтверждаю\n2026-11-20T10:01:00+01:00 lead pid=42 2.1.1→",
+		"2.1.2 act: версия свежая\n2026-11-20T10:02:00+01:00 other: подтвердил доверие к /home/other: ok\n",
+	}
+	var accumulated strings.Builder
+	for i, chunk := range chunks {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(chunk); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		accumulated.WriteString(chunk)
+		got, err := a.readNightTrustEvents(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _, err := cllog.TrustEvents(strings.NewReader(accumulated.String()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("after append %d: incremental=%+v full=%+v", i, got, want)
+		}
+	}
+}
+
+func TestNightTrustCacheResetsOnTruncateAndReplace(t *testing.T) {
+	home := t.TempDir()
+	path := cllog.Path(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{home: home, log: slog.New(slog.NewTextHandler(os.Stderr, nil))}
+	old := strings.Repeat(cllog.Line(time.Now(), "old: подтвердил доверие к /home/old: ok"), 3)
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.readNightTrustEvents(path)
+	if err != nil || len(got) != 3 || got[0].Name != "old" {
+		t.Fatalf("initial events=%+v err=%v", got, err)
+	}
+	truncated := cllog.Line(time.Now(), "new: подтвердил доверие к /home/new: ok")
+	if len(truncated) >= len(old) {
+		t.Fatal("fixture for truncate must be smaller than initial log")
+	}
+	if err := os.WriteFile(path, []byte(truncated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = a.readNightTrustEvents(path)
+	if err != nil || len(got) != 1 || got[0].Name != "new" {
+		t.Fatalf("after truncation events=%+v err=%v", got, err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(filepath.Dir(path), "replacement.log")
+	replaced := cllog.Line(time.Now(), "replacement: подтвердил доверие к /home/replacement: ok")
+	if err := os.WriteFile(replacement, []byte(replaced), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Sys().(*syscall.Stat_t).Ino == after.Sys().(*syscall.Stat_t).Ino {
+		t.Fatal("replacement fixture reused the same inode")
+	}
+	got, err = a.readNightTrustEvents(path)
+	if err != nil || len(got) != 1 || got[0].Name != "replacement" {
+		t.Fatalf("after replacement events=%+v err=%v", got, err)
+	}
+}
+
+func TestNightTrustCacheResetsAfterAppendError(t *testing.T) {
+	home := t.TempDir()
+	path := cllog.Path(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 1024*1024+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{home: home, log: slog.New(slog.NewTextHandler(os.Stderr, nil))}
+	if _, err := a.readNightTrustEvents(path); err == nil {
+		t.Fatal("oversized unterminated line did not fail")
+	}
+	if a.nightTrust.offset != 0 {
+		t.Fatalf("offset after Append error=%d, want 0", a.nightTrust.offset)
+	}
+	if _, bad, err := a.nightTrust.state.Snapshot(); err != nil || bad != 0 {
+		t.Fatalf("cached parser state after Append error: bad=%d err=%v", bad, err)
+	}
+	valid := cllog.Line(time.Now(), "fresh: подтвердил доверие к /home/fresh: ok")
+	if err := os.WriteFile(path, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.readNightTrustEvents(path)
+	if err != nil || len(got) != 1 || got[0].Name != "fresh" {
+		t.Fatalf("full read after reset = %+v, %v", got, err)
+	}
+}
 
 func TestNightDryRunDoesNotWriteState(t *testing.T) {
 	dir := t.TempDir()

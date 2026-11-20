@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cllog"
@@ -334,18 +335,61 @@ func (a *app) nightFacts(cfg *night.Config, now time.Time) (night.Facts, error) 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		a.log.Warn("aguard night: маркер Дайджеста", "path", cfg.DigestMarker, "err", err)
 	}
-	f, err := os.Open(cllog.Path(a.home))
-	if err == nil {
-		facts.TrustEvents, _, err = cllog.TrustEvents(f)
-		if closeErr := f.Close(); err == nil && closeErr != nil {
-			err = closeErr
-		}
-		facts.TrustEvents = openTrust(facts.TrustEvents, clRunning)
-	}
+	facts.TrustEvents, err = a.readNightTrustEvents(cllog.Path(a.home))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		a.log.Warn("aguard night: журнал cl", "err", err)
 	}
 	return facts, nil
+}
+
+type trustLogCache struct {
+	state  cllog.TrustState
+	offset int64
+	inode  uint64
+	loaded bool
+}
+
+func (a *app) readNightTrustEvents(path string) ([]cllog.TrustEvent, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		a.nightTrust.state.Reset()
+		a.nightTrust.offset, a.nightTrust.inode, a.nightTrust.loaded = 0, 0, false
+		return nil, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("night: открыть журнал cl %s: %w", path, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("night: получить сведения о журнале cl %s: %w", path, err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, errors.New("night: inode журнала cl недоступен")
+	}
+	if !a.nightTrust.loaded || a.nightTrust.inode != st.Ino || info.Size() < a.nightTrust.offset {
+		a.nightTrust.state.Reset()
+		a.nightTrust.offset, a.nightTrust.inode, a.nightTrust.loaded = 0, st.Ino, true
+	}
+	if info.Size() > a.nightTrust.offset {
+		n := info.Size() - a.nightTrust.offset
+		chunk := make([]byte, int(n))
+		if _, err := f.ReadAt(chunk, a.nightTrust.offset); err != nil {
+			return nil, fmt.Errorf("night: дочитать журнал cl %s: %w", path, err)
+		}
+		if err := a.nightTrust.state.Append(chunk); err != nil {
+			a.nightTrust.state.Reset()
+			a.nightTrust.offset = 0
+			return nil, err
+		}
+		a.nightTrust.offset = info.Size()
+	}
+	events, _, err := a.nightTrust.state.Snapshot()
+	if err != nil {
+		return nil, err
+	}
+	return openTrust(events, clRunning), nil
 }
 
 // openTrust — окна, чей cl ещё жив: консоль закрыли — claude не стоит на окне (ревью 28.10: 3 закрытые пробы

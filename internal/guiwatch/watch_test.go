@@ -1007,7 +1007,7 @@ func TestPruneChecksMaxBytesAtMostOncePerMinute(t *testing.T) {
 	}
 }
 
-func TestPruneUsesCachedSizesAndScansAtMostHourly(t *testing.T) {
+func TestPruneUsesCachedSizesAndScansAtMostDaily(t *testing.T) {
 	_, dir, _, at := fixture(t)
 	w := New("/proc", dir, Default(), nil)
 	w.now = func() time.Time { return at }
@@ -1032,18 +1032,32 @@ func TestPruneUsesCachedSizesAndScansAtMostHourly(t *testing.T) {
 		}
 	}
 	if infoCalls != perScan {
-		t.Fatalf("Info calls before hourly scan=%d, want %d", infoCalls, perScan)
+		t.Fatalf("Info calls before daily scan=%d, want %d", infoCalls, perScan)
 	}
 	w.now = func() time.Time { return at.Add(time.Hour) }
 	if err := w.prune(); err != nil {
 		t.Fatal(err)
 	}
+	if infoCalls != perScan {
+		t.Fatalf("hourly prune scanned %d entries; want no full scan", infoCalls-perScan)
+	}
+	w.now = func() time.Time { return at.Add(23 * time.Hour) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if infoCalls != perScan {
+		t.Fatalf("23-hour prune scanned %d entries; want no full scan", infoCalls-perScan)
+	}
+	w.now = func() time.Time { return at.Add(24 * time.Hour) }
+	if err := w.prune(); err != nil {
+		t.Fatal(err)
+	}
 	if infoCalls != perScan*2 {
-		t.Fatalf("Info calls in one hour=%d, want %d (two scans of %d entries)", infoCalls, perScan*2, perScan)
+		t.Fatalf("Info calls in one day=%d, want %d (two scans of %d entries)", infoCalls, perScan*2, perScan)
 	}
 }
 
-func TestPruneHourlyScanReconcilesExternalFileChanges(t *testing.T) {
+func TestPruneDailyScanReconcilesExternalFileChanges(t *testing.T) {
 	_, dir, _, at := fixture(t)
 	w := New("/proc", dir, Default(), nil)
 	w.now = func() time.Time { return at }
@@ -1056,7 +1070,7 @@ func TestPruneHourlyScanReconcilesExternalFileChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(t, slicePath(dir, "external"), strings.Repeat("c", 35))
-	w.now = func() time.Time { return at.Add(time.Hour) }
+	w.now = func() time.Time { return at.Add(24 * time.Hour) }
 	if err := w.prune(); err != nil {
 		t.Fatal(err)
 	}
@@ -1434,7 +1448,7 @@ func TestSaveAndWatchIgnoreFileVanishingAfterWrite(t *testing.T) {
 	})
 }
 
-func TestPruneKeepsExpiredCleanupWhenHourlyScanFails(t *testing.T) {
+func TestPruneKeepsExpiredCleanupWhenDailyScanFails(t *testing.T) {
 	at := time.Now()
 	w, expired := pruneStorageFixture(t, at)
 	expired.End = at.Add(-w.Config.Keep.D() - time.Minute)
@@ -1451,9 +1465,9 @@ func TestPruneKeepsExpiredCleanupWhenHourlyScanFails(t *testing.T) {
 		}
 		return ent.Info()
 	}
-	w.now = func() time.Time { return at.Add(time.Hour) }
+	w.now = func() time.Time { return at.Add(24 * time.Hour) }
 	if err := w.prune(); err == nil {
-		t.Fatal("expected hourly scan error")
+		t.Fatal("expected daily scan error")
 	}
 	if len(w.document.Slices) != 1 || w.document.Slices[0].ID != "unexpired" {
 		t.Fatalf("expired slice was not removed before scan failure: %#v", w.document.Slices)
