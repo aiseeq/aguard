@@ -146,8 +146,8 @@ type toolUse struct {
 var (
 	monitorStarted = regexp.MustCompile(`Monitor started \(task ([A-Za-z0-9_-]+)(?:, expires in (\d+[smh]))?`)
 	notifyTaskID   = regexp.MustCompile(`<task-id>([^<]+)</task-id>`)
-	notifyOutput   = regexp.MustCompile(`<output-file>([^<]+)</output-file>`)
-	notifyStatus   = regexp.MustCompile(`<status>([a-z_]+)</status>`)
+
+	notifyStatus = regexp.MustCompile(`<status>([a-z_]+)</status>`)
 )
 
 // markers — строки без них транскрипт-скан не разбирает: в них нет ни вызовов, ни уведомлений, ни таймеров, ни
@@ -165,9 +165,7 @@ type transcriptScan struct {
 	closed  map[string]bool
 	// expires — срок монитора: после него Claude Code монитор снимает, а уведомление об этом приходит не всегда.
 	expires map[string]time.Time
-	// waiting — суб-агент, который ждёт свою фоновую работу, и его транскрипт; subs — разбор этих транскриптов.
-	waiting        map[string]string
-	subs           map[string]*scanCache
+
 	crons          map[string]cronJob
 	oldCronDeletes map[string]struct{}
 	fired          map[string]bool
@@ -189,7 +187,7 @@ func scanTranscript(r io.Reader, since time.Time) (*transcriptScan, error) {
 
 func newScan(since time.Time) *transcriptScan {
 	return &transcriptScan{since: since, uses: map[string]toolUse{}, pending: map[string]string{}, tasks: map[string]string{},
-		agents: map[string]bool{}, closed: map[string]bool{}, expires: map[string]time.Time{}, waiting: map[string]string{}, subs: map[string]*scanCache{},
+		agents: map[string]bool{}, closed: map[string]bool{}, expires: map[string]time.Time{},
 		crons: map[string]cronJob{}, oldCronDeletes: map[string]struct{}{}, fired: map[string]bool{}}
 }
 
@@ -434,7 +432,9 @@ func recordTime(rec object) (time.Time, error) {
 // notifications отмечают по уведомлениям, закрыта ли задача; решает последнее. Закрывают итоговый статус
 // (completed, failed, killed) и истечение монитора («[Monitor expired after 30m…]»). Не закрывают события монитора и
 // «Agent … is waiting on its own background work»: статус у него completed, но суб-агент ждёт свою фоновую работу и
-// вернётся с тем же task-id.
+// вернётся с тем же task-id. Конец такой работы родителю приходит уведомлением «finished» (Claude Code 2.1.329: пробы
+// Сна 20.11, ~/.claude/improve/runs/2026-11-20/workarounds.md, cc-subagent-monitor-silent), транскрипт суб-агента
+// не разбираем.
 func (s *transcriptScan) notifications(text string) {
 	for _, chunk := range strings.Split(text, "<task-notification>")[1:] {
 		chunk, _, _ = strings.Cut(chunk, "</task-notification>")
@@ -446,15 +446,10 @@ func (s *transcriptScan) notifications(text string) {
 		switch {
 		case strings.Contains(chunk, "is waiting on its own background work"):
 			s.closed[id[1]] = false
-			if out := notifyOutput.FindStringSubmatch(chunk); out != nil {
-				s.waiting[id[1]] = out[1]
-			}
 		case strings.Contains(chunk, "[Monitor expired after"):
 			s.closed[id[1]] = true
-			delete(s.waiting, id[1])
 		case status != nil && status[1] != "running":
 			s.closed[id[1]] = true
-			delete(s.waiting, id[1])
 		}
 	}
 }
@@ -575,14 +570,10 @@ func (s *transcriptScan) facts(now time.Time) transcriptFacts {
 		if s.closed[id] {
 			continue
 		}
-		switch done, err := s.ended(id, now); {
-		case err != nil:
-			f.Tasks = append(f.Tasks, label+" "+id+" ("+err.Error()+")")
-		case !done:
-			f.Tasks = append(f.Tasks, label+" "+id)
-		default:
+		if s.ended(id, now) {
 			continue
 		}
+		f.Tasks = append(f.Tasks, label+" "+id)
 		if s.agents[id] {
 			f.Agents = append(f.Agents, label+" "+id)
 		}
@@ -606,32 +597,10 @@ func (s *transcriptScan) facts(now time.Time) transcriptFacts {
 	return f
 }
 
-// ended — задача без уведомления о конце, но кончилась: монитор после своего срока или суб-агент, чья фоновая
-// работа закончилась. Монитор суб-агента истекает после конца хода молча, и родителю уведомление не приходит
-// (sc2go 25.10: агент a0505c3725309a1d5 держал довод tasks 29 часов). Транскрипта суб-агента нет или он не
-// разбирается — не проверить: задача остаётся, ошибка — в её подписи.
-func (s *transcriptScan) ended(id string, now time.Time) (bool, error) {
-	if exp, ok := s.expires[id]; ok && !now.Before(exp) {
-		return true, nil
-	}
-	file, ok := s.waiting[id]
-	if !ok {
-		return false, nil
-	}
-	info, err := os.Stat(file)
-	if err != nil {
-		return false, fmt.Errorf("транскрипт суб-агента: %w", err)
-	}
-	c := s.subs[file]
-	if c == nil {
-		c = &scanCache{}
-		s.subs[file] = c
-	}
-	sub, err := c.read(file, info, time.Time{}, now)
-	if err != nil {
-		return false, fmt.Errorf("суб-агент: %w", err)
-	}
-	return len(sub.Tasks) == 0, nil
+// ended — задача без уведомления о конце, но кончилась: монитор после своего срока.
+func (s *transcriptScan) ended(id string, now time.Time) bool {
+	exp, ok := s.expires[id]
+	return ok && !now.Before(exp)
 }
 
 // blocks — содержимое сообщения массивом блоков; строка (простой текст) блоков не даёт.

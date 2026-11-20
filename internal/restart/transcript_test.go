@@ -1,7 +1,6 @@
 package restart
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -86,39 +85,23 @@ func TestScanTranscriptTasks(t *testing.T) {
 	}
 }
 
-// Суб-агент кончил ход, пока его монитор жил, — «is waiting on its own background work»; монитор потом истёк молча,
-// и второго уведомления родителю не пришло (sc2go 25.10). Ждёт ли он ещё — по его транскрипту.
+// Суб-агент кончил ход, пока его фоновая работа жила, — «is waiting on its own background work»: задача открыта, пока
+// не придёт «finished» (Claude Code 2.1.329 шлёт его родителю, пробы Сна 20.11 cc-subagent-monitor-silent). Транскрипт
+// суб-агента не читается: его может и не быть.
 func TestScanTranscriptWaitingAgent(t *testing.T) {
 	since, _ := time.Parse(time.RFC3339, "2026-10-24T09:00:00Z")
-	sub := filepath.Join(t.TempDir(), "a1.output")
-	writeLines(t, sub,
-		use(tsNew, "s1", "Monitor", `{"description":"партии"}`),
-		result(tsNew, "s1", "Monitor started (task ms, expires in 30m unless the source ends first)", `null`),
-		notice(tsNew, "user", `<task-id>ms</task-id>\n<event>g03 exit=0</event>`),
-	)
+	missing := filepath.Join(t.TempDir(), "a1.output")
 	lines := []string{
 		use(tsNew, "t1", "Agent", `{"description":"части"}`),
 		result(tsNew, "t1", "Async agent launched", `{"isAsync":true,"agentId":"a1"}`),
-		notice(tsNew, "queue-operation", `<task-id>a1</task-id>\n<output-file>`+sub+`</output-file>\n<status>completed</status>\n<summary>Agent \"части\" is waiting on its own background work</summary>`),
+		notice(tsNew, "queue-operation", `<task-id>a1</task-id>\n<output-file>`+missing+`</output-file>\n<status>completed</status>\n<summary>Agent \"части\" is waiting on its own background work</summary>`),
 	}
-	if f := scanLines(t, since, mustTime(t, tsNew).Add(10*time.Minute), lines...); !slices.Equal(f.Tasks, []string{"Agent «части» a1"}) {
-		t.Errorf("монитор суб-агента жив — агент ждёт: %q", f.Tasks)
+	if f := scanLines(t, since, mustTime(t, tsNew).Add(2*time.Hour), lines...); !slices.Equal(f.Tasks, []string{"Agent «части» a1"}) || !slices.Equal(f.Agents, []string{"Agent «части» a1"}) {
+		t.Errorf("агент ждёт свою работу, finished не было — задача открыта: Tasks %q, Agents %q", f.Tasks, f.Agents)
 	}
-	if f := scanLines(t, since, mustTime(t, tsNew).Add(31*time.Minute), lines...); len(f.Tasks) != 0 {
-		t.Errorf("монитор суб-агента истёк — агент кончил: %q", f.Tasks)
-	}
-	if err := os.Remove(sub); err != nil {
-		t.Fatal(err)
-	}
-	if f := scanLines(t, since, mustTime(t, tsNew).Add(31*time.Minute), lines...); len(f.Tasks) != 1 || !strings.Contains(f.Tasks[0], "транскрипт суб-агента") {
-		t.Errorf("транскрипта суб-агента нет — не проверить, агент ждёт: %q", f.Tasks)
-	}
-}
-
-func writeLines(t *testing.T, file string, lines ...string) {
-	t.Helper()
-	if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatal(err)
+	lines = append(lines, notice(tsNew, "queue-operation", `<task-id>a1</task-id>\n<output-file>`+missing+`</output-file>\n<status>completed</status>\n<summary>Agent \"части\" finished</summary>`))
+	if f := scanLines(t, since, mustTime(t, tsNew).Add(2*time.Hour), lines...); len(f.Tasks) != 0 || len(f.Agents) != 0 {
+		t.Errorf("пришло finished — задача закрыта: Tasks %q, Agents %q", f.Tasks, f.Agents)
 	}
 }
 
