@@ -43,6 +43,8 @@ func queueGuideKind(kind string) guide.Kind {
 	}
 }
 
+func claudeTmpGuideKind() guide.Kind { return "claude_tmp.failure" }
+
 func bgtaskGuideKind(auto bool, wait string) guide.Kind {
 	switch {
 	case auto:

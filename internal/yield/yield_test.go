@@ -2,6 +2,7 @@ package yield
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,14 +18,54 @@ func TestPausesOnBusyMachine(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	start := time.Now()
-	if !y.Wait(ctx) || y.Pauses != 1 {
+	paused, err := y.Wait(ctx)
+	if !errors.Is(err, context.Canceled) || !paused || y.Pauses != 1 {
 		t.Fatalf("пауз на занятой машине: %d, ждал 1", y.Pauses)
 	}
 	if took := time.Since(start); took >= Pause/2 {
 		t.Fatalf("отменённая пауза длилась %v", took)
 	}
-	if y.Wait(ctx) || y.Pauses != 1 { // второй вызов в ту же секунду — без замера и паузы
+	paused, err = y.Wait(ctx)
+	if !errors.Is(err, context.Canceled) || paused || y.Pauses != 1 { // второй вызов в ту же секунду — без замера и паузы
 		t.Fatalf("пауз после второго вызова: %d", y.Pauses)
+	}
+}
+
+func TestWaitSafePausesOnBusyAndFailsClosedOnMeasureError(t *testing.T) {
+	y := newWith(busyMeter(t), func(err error) { t.Errorf("замер: %v", err) })
+	y.check = 0
+	y.pause = time.Millisecond
+	if err := y.WaitSafe(t.Context()); err != nil || y.Pauses != 1 {
+		t.Fatalf("busy: err=%v pauses=%d", err, y.Pauses)
+	}
+	y = newWith(pressure.NewMeter(t.TempDir()), func(error) {})
+	y.check = 0
+	y.pause = time.Millisecond
+	configDir := os.Getenv("XDG_CONFIG_HOME")
+	if err := os.MkdirAll(filepath.Join(configDir, "akit"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "akit", "pressure.yaml"), []byte("runnable: broken\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := y.WaitSafe(t.Context()); err == nil || y.Pauses != 1 {
+		t.Fatalf("measurement error must pause and fail closed: err=%v pauses=%d", err, y.Pauses)
+	}
+}
+
+// Disk and track use Wait: a broken pressure config now pauses their scan before it proceeds.
+func TestDiskYielderPausesWhenPressureMeasurementFails(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	writeBrokenPressureConfig(t)
+	var warned error
+	y := newWith(pressure.NewMeter(t.TempDir()), func(err error) { warned = err })
+	y.check, y.pause = 0, time.Millisecond
+	paused, err := y.Wait(t.Context())
+	if err != nil || !paused || y.Pauses != 1 {
+		t.Fatalf("disk-facing Wait did not pause and allow one work portion: err=%v pauses=%d", err, y.Pauses)
+	}
+	if warned == nil {
+		t.Fatal("measurement error was not reported")
 	}
 }
 
@@ -34,7 +75,8 @@ func TestPauseIsFinite(t *testing.T) {
 	y := newWith(busyMeter(t), func(err error) { t.Errorf("замер: %v", err) })
 	y.check, y.pause = 200*time.Millisecond, 300*time.Millisecond
 	start := time.Now()
-	if !y.Wait(t.Context()) {
+	paused, err := y.Wait(t.Context())
+	if err != nil || !paused {
 		t.Fatal("занятая машина без паузы")
 	}
 	if took := time.Since(start); took < y.pause || took > 5*time.Second {
@@ -43,7 +85,8 @@ func TestPauseIsFinite(t *testing.T) {
 	if y.Paused < y.pause {
 		t.Fatalf("время пауз %v меньше паузы %v", y.Paused, y.pause)
 	}
-	if y.Wait(t.Context()) {
+	paused, err = y.Wait(t.Context())
+	if err != nil || paused {
 		t.Fatal("после паузы новый замер раньше Check: обход не продвинулся бы")
 	}
 }
@@ -61,20 +104,31 @@ func TestUserLimits(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	y := newWith(m, func(err error) { t.Errorf("замер: %v", err) })
-	if y.Wait(ctx) || y.Pauses != 0 {
+	paused, err := y.Wait(ctx)
+	if !errors.Is(err, context.Canceled) || paused || y.Pauses != 0 {
 		t.Fatalf("порог пользователя 100 готовых, а пауза была: %d", y.Pauses)
 	}
-	if err := os.WriteFile(file, []byte("runnable 16\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeBrokenPressureConfig(t)
 	var warned error
 	warns := 0
 	y = newWith(m, func(err error) { warned = err; warns++ })
 	y.check = 0 // каждый вызов — замер
-	y.Wait(ctx)
-	y.Wait(ctx)
-	if warned == nil || !strings.Contains(warned.Error(), "pressure.yaml") || y.Pauses != 0 || warns != 1 {
-		t.Fatalf("битый файл порогов: ошибка %v (раз %d), пауз %d — ждал одну ошибку с путём и без паузы", warned, warns, y.Pauses)
+	y.pause = time.Millisecond
+	firstPaused, firstErr := y.Wait(t.Context())
+	secondPaused, secondErr := y.Wait(t.Context())
+	if warned == nil || !strings.Contains(warned.Error(), "pressure.yaml") || firstErr != nil || secondErr != nil || !firstPaused || !secondPaused || y.Pauses != 2 || warns != 1 {
+		t.Fatalf("битый файл порогов: ошибка %v (раз %d), вызовы %v/%v err=%v/%v, пауз %d", warned, warns, firstPaused, secondPaused, firstErr, secondErr, y.Pauses)
+	}
+}
+
+func writeBrokenPressureConfig(t *testing.T) {
+	t.Helper()
+	file := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "akit", "pressure.yaml")
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("runnable: broken\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

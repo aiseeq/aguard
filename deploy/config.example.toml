@@ -143,6 +143,7 @@ keep = "1440h"         # 60 дней
 trace_min = "1G"       # scratchpad умершей сессии и копии транскриптов — следы от этого; находка по классу — от него
 # снимки слежения за следами: кто создал след; первый свежий из списка
 track = ["/run/user/1000/aguard/track-home/state.json", "~/.local/state/aguard/track-home/state.json"]
+
 # На /home свободно меньше free_min — письмо лиду и free_tell сразу и раз в сутки, пока не поднимется (не зависит от mode).
 free_min = "150G"
 free_mode = "alert"    # off | log (только журнал «написал бы») | alert
@@ -191,6 +192,11 @@ what = "снимки кейсов evals Сна (~/.claude/improve/moment-frame.s
 owner = "lead"
 cleanup = "moment-frame.sh убирает после кейса"
 lifetime = "24h"
+
+# ── claude_tmp: ночная уборка устаревших scratchpad-сессий ─
+[claude_tmp]
+mode = "log"           # log — отчёт «удалил бы»; act — удаление после проверки
+age = "168h"           # возраст по самому свежему mtime внутри каталога; минимум 24h
 
 # Отказы agent-signal-guard (journalctl -u agent-signal-guard-log) — авария: письмо сессии-отправителю (по root),
 # мастеру бойца (worker-*) или лиду. Строки одного root за window — одно письмо; старше stale — только учёт.

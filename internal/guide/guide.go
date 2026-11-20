@@ -31,6 +31,8 @@ type Interruption struct {
 }
 
 var letters = []Letter{
+	{Kind: "pressure.failure", Observer: "disk, track", To: "лид", When: "замер занятости машины недоступен дольше часа", Next: "почините источник ошибки pressure; обходы будут продолжаться порциями после паузы", Quiet: QuietWait},
+	{Kind: "claude_tmp.failure", Observer: "claude-tmp", To: "лид", When: "проход ночной уборки не смог безопасно завершить проверку", Next: "проверьте причину сбоя в журнале aguard; следующий проход будет в следующем окне", Quiet: QuietWait},
 	{Kind: "bgtask.stalled", Observer: "bgtask", To: "владелец фоновой задачи", When: "обычная команда, уведённая Claude Code по таймауту, долго работает без нового вывода", Next: "проверьте, нужна ли задача; если нет — `TaskStop <id>` из письма", Quiet: QuietLose},
 	{Kind: "bgtask.wait", Observer: "bgtask", To: "владелец задачи", When: "намеренное фоновое ожидание длится дольше `bgtask.age` (по умолчанию 1 ч)", Next: "снимите ожидание через `TaskStop <id>` из письма; ждать дольше — отложите тикет через `tk wait`", Quiet: QuietLose},
 	{Kind: "bgtask.other", Observer: "bgtask", To: "получатель уведомления", When: "получен неизвестный тип уведомления фоновой задачи; причина в a.log", Next: "проверьте тип уведомления и текст в a.log", Quiet: QuietLose},

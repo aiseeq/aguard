@@ -154,6 +154,7 @@ type app struct {
 	bootTime           func() (time.Time, error)
 	bootID             func() (string, error)
 	quietRuntime       *quietRuntime
+	pressureAlerts     *pressureAlerts
 	benchIO            benchBackend
 	sudoJournalSource  func(context.Context, string, string, ...string) ([]journalRecord, error)
 	saidModel          func(string, string) said.Model
@@ -447,7 +448,7 @@ func (a *app) run(ctx context.Context) error {
 	defer signal.Stop(usr1)
 	signal.Notify(usr2, syscall.SIGUSR2)
 	defer signal.Stop(usr2)
-	for _, n := range []string{"orphans", "tmp", "memory", "ceiling", "waits", "agentwaits", "compact", "disk", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "sigguard", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "ceiling", "waits", "agentwaits", "compact", "disk", "claude-tmp", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "sigguard", "activity"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -505,6 +506,8 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Compact.Interval.D() }},
 		{"disk", func(ctx context.Context, c *config.Config) error { return a.diskRound(ctx, c) },
 			func(c *config.Config) time.Duration { return c.Disk.Interval.D() }},
+		{"claude-tmp", func(ctx context.Context, c *config.Config) error { return a.claudeTmpRound(ctx, c) },
+			func(*config.Config) time.Duration { return 10 * time.Minute }},
 		{"said", func(ctx context.Context, c *config.Config) error { return a.saidRound(ctx, c, false) },
 			func(c *config.Config) time.Duration { return c.Said.Interval.D() }},
 		{"bgtask", func(_ context.Context, c *config.Config) error { return a.bgtaskRound(&c.Bgtask, false) },

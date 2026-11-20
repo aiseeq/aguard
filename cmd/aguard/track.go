@@ -16,7 +16,6 @@ import (
 
 	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/aguard/internal/trackfd"
-	"github.com/aiseeq/aguard/internal/yield"
 )
 
 // trackRetry — пауза перед новой парой: помощник ещё не поднялся или экземпляр упал.
@@ -80,11 +79,15 @@ func (s *trackModeState) note(mode string, log *slog.Logger) {
 // идут по одному, экземпляры — параллельно).
 func (a *app) trackInstances() []track.Config {
 	insts := track.Instances(a.home)
+	cfg, cfgErr := a.config()
+	if cfgErr != nil {
+		a.warn("track", "конфиг для письма о pressure", "err", cfgErr)
+	}
 	for i := range insts {
 		name := insts[i].Name
-		insts[i].Yield = yield.New(procRoot, func(err error) {
+		insts[i].Yield = a.pressureYielder("track", func(err error) {
 			a.warn("track", "замер машины для паузы замера", "name", name, "err", err)
-		}).Wait
+		}, cfg.Lead, cfg.SendAuth).Wait
 	}
 	return insts
 }

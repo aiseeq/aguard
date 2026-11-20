@@ -36,9 +36,9 @@ type Config struct {
 	Persist     time.Duration // как часто копировать снимок на диск
 	RotateBytes int64         // размер owners.jsonl до ротации
 	// Yield — уступка занятой машине в замере (internal/yield): зовётся перед каждой записью и папкой-контейнером и
-	// каждые yieldEvery записей каталога внутри обхода; true — была пауза, отмена ctx обрывает паузу. nil — без уступки.
+	// каждые yieldEvery записей каталога внутри обхода; ошибка замера обрывает неполный замер. nil — без уступки.
 	// Зовётся из горутины замера; замеры одного экземпляра идут по одному и при перезапуске цикла (stopMeasure).
-	Yield func(context.Context) bool
+	Yield func(context.Context) (bool, error)
 }
 
 type counters struct {
@@ -85,6 +85,7 @@ type measureDone struct {
 	job     measureJob
 	usages  []usage
 	listing map[string][]string
+	err     error
 	pauses  int           // уступок занятой машине
 	paused  time.Duration // их время
 	aborted bool          // отменён посреди замера: неполон, не применяется
@@ -514,29 +515,61 @@ func (t *Tracker) startMeasureMode(ctx context.Context, done chan<- measureDone,
 // молодые замеры каждого тика: мелкий замер стоит одного сравнения времени на запись и не больше одного замера машины,
 // а в нём бывают и большие записи — свежая распаковка, найденная сверкой и ни разу не замеренная. Отмена ctx — итог
 // прерван.
-func runMeasure(ctx context.Context, job measureJob, yield func(context.Context) bool) measureDone {
+func runMeasure(ctx context.Context, job measureJob, yield func(context.Context) (bool, error)) measureDone {
 	d := measureDone{job: job, listing: map[string][]string{}}
 	p := &pacer{ctx: ctx, yield: yield}
 	for _, it := range job.items {
-		if !p.wait() {
+		proceed, err := p.wait()
+		if err != nil {
+			d.aborted = true
+			if ctx.Err() == nil {
+				d.err = err
+			}
 			break
 		}
-		d.usages = append(d.usages, measure(it.path, it.ino, p))
+		if !proceed {
+			break
+		}
+		usage, err := measure(it.path, it.ino, p)
+		if err != nil {
+			d.aborted = true
+			if ctx.Err() == nil {
+				d.err = err
+			}
+			break
+		}
+		d.usages = append(d.usages, usage)
 	}
 	for _, dir := range job.dirs {
-		if !p.wait() { // отменён — и в первом цикле: дальше не идём
+		if d.aborted {
+			break
+		}
+		proceed, err := p.wait()
+		if err != nil {
+			d.aborted = true
+			if ctx.Err() == nil {
+				d.err = err
+			}
+			break
+		}
+		if !proceed { // отменён — и в первом цикле: дальше не идём
 			break
 		}
 		if names, err := listDir(dir); err == nil {
 			d.listing[dir] = names
 		}
 	}
-	d.pauses, d.paused, d.aborted = p.pauses, p.paused, ctx.Err() != nil
+	d.pauses, d.paused = p.pauses, p.paused
+	d.aborted = d.aborted || p.stopped || ctx.Err() != nil
 	return d
 }
 
 func (t *Tracker) finishMeasure(d measureDone) {
 	t.measuring = false
+	if d.err != nil {
+		t.log.Error("aguard слежение: замер прерван", "name", t.cfg.Name, "err", d.err)
+		return
+	}
 	if d.aborted {
 		return // остановка демона посреди замера: неполные размеры и листинг не применяем
 	}
