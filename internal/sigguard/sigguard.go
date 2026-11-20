@@ -156,6 +156,18 @@ type Batcher struct {
 func NewBatcher(window time.Duration) *Batcher {
 	return &Batcher{Window: window, groups: map[string]*Group{}}
 }
+
+// Next returns the first group deadline, or zero when there is no pending group.
+func (b *Batcher) Next() time.Time {
+	var next time.Time
+	for _, g := range b.groups {
+		deadline := g.Started.Add(b.Window)
+		if next.IsZero() || deadline.Before(next) {
+			next = deadline
+		}
+	}
+	return next
+}
 func (b *Batcher) Add(d Deny, at time.Time) []Group {
 	out := b.Flush(at)
 	g := b.groups[d.Root]

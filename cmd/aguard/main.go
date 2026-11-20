@@ -74,6 +74,7 @@ import (
 	"github.com/aiseeq/aguard/internal/queue"
 	"github.com/aiseeq/aguard/internal/restart"
 	"github.com/aiseeq/aguard/internal/said"
+	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/aguard/internal/trackfd"
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
@@ -117,8 +118,13 @@ type app struct {
 	cpu                  map[string]*cpuHost                                            // окна наблюдателя cpu по машинам ("" — своя): живут между проходами
 	cpuRemoteRead        func(context.Context, *cpuHost, bool) ([]cpuwatch.Task, error) // тестовый источник готового SSH-ответа
 	cpuDetails           *cpuDetailBuffer
-	strayRead            strayReader                             // замер процессов без родителя; подменяется в тестах
-	trackFetch           func() (trackfd.Pair, error)            // пара дескрипторов слежения; подменяется в тестах
+	strayRead            strayReader                  // замер процессов без родителя; подменяется в тестах
+	trackFetch           func() (trackfd.Pair, error) // пара дескрипторов слежения; подменяется в тестах
+	trackShared          *track.SharedTombs
+	trackFanFetch        func() (int, error)
+	trackRunShared       func(context.Context, *track.Config, int, *track.Tombs) error
+	trackRunLegacy       func(context.Context, *track.Config, trackfd.Pair) error
+	trackMode            *trackModeState
 	diskState            *disk.State                             // состояние наблюдателя disk в памяти демона
 	diskWalkLoaded       bool                                    // sizes и traces загружены до первого обхода
 	diskStateMtimes      diskStateMtimes                         // версии state.json и round.json, принятые кешем
@@ -467,6 +473,8 @@ func (a *app) run(ctx context.Context) error {
 	wg.Go(func() { a.sigguardLoop(ctx) })
 	wg.Go(func() { a.ceilingLoop(ctx) })
 	insts := a.trackInstances()
+	a.trackMode = &trackModeState{}
+	a.trackShared = track.NewSharedTombs(2*time.Minute, a.log, a.openTrackConnector)
 	for i := range insts {
 		wg.Go(func() { a.trackLoop(ctx, &insts[i], trackRetry) }) //nolint:unbounded-goroutine-fanout // экземпляров два, список задан в track.Instances
 	}

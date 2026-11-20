@@ -468,6 +468,35 @@ func TestSigguardWindowTimerWithOpenSource(t *testing.T) {
 	}
 }
 
+// За виртуальную минуту без событий таймер не срабатывает; две группы
+// получают отдельные сроки, а десятиминутный проход не теряется.
+func TestSigguardDeadlineIdleAndGroups(t *testing.T) {
+	start := time.Unix(1000, 0)
+	pass := start.Add(10 * time.Minute)
+	b := sigguard.NewBatcher(3 * time.Second)
+	if got := sigguardDeadline(pass, b); !got.Equal(pass) || !got.After(start.Add(time.Minute)) {
+		t.Fatalf("idle deadline %v, want %v", got, pass)
+	}
+	b.Add(sigguard.Deny{Root: "one"}, start)
+	b.Add(sigguard.Deny{Root: "two"}, start.Add(time.Second))
+	if got := sigguardDeadline(pass, b); !got.Equal(start.Add(3 * time.Second)) {
+		t.Fatalf("first deadline %v", got)
+	}
+	if got := b.Flush(start.Add(3 * time.Second)); len(got) != 1 || got[0].Root != "one" {
+		t.Fatalf("first flush %+v", got)
+	}
+	if got := sigguardDeadline(pass, b); !got.Equal(start.Add(4 * time.Second)) {
+		t.Fatalf("second deadline %v", got)
+	}
+	if got := sigguardDeadline(start.Add(3500*time.Millisecond), b); !got.Equal(start.Add(3500 * time.Millisecond)) {
+		t.Fatalf("pass deadline %v", got)
+	}
+	b.Flush(start.Add(4 * time.Second))
+	if got := sigguardDeadline(pass, b); !got.Equal(pass) {
+		t.Fatalf("deadline after flush %v", got)
+	}
+}
+
 func TestSigguardUnparsedBatch(t *testing.T) {
 	dir := t.TempDir()
 	a := testSigguardApp(dir)

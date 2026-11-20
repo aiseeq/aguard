@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"runtime/debug"
@@ -30,10 +32,11 @@ type tomb struct {
 
 // Tombs — таблица процессов из proc connector.
 type Tombs struct {
-	mu      sync.Mutex
-	m       map[int]*tomb
-	keep    time.Duration
-	overrun atomic.Int64
+	mu           sync.Mutex
+	m            map[int]*tomb
+	keep         time.Duration
+	overrun      atomic.Int64
+	connFailures atomic.Int64
 	// lastFailWarn — последний WARN об ошибке проверки /proc: постоянная ошибка — строка раз в час, не каждые 30 с
 	lastFailWarn time.Time
 	log          *slog.Logger
@@ -101,6 +104,28 @@ func (t *Tombs) recvLoop(conn *os.File) {
 			return
 		}
 	}
+}
+
+// readConnector returns on a broken socket so the shared supervisor can reopen it.
+func (t *Tombs) readConnector(conn io.Reader) (received bool, err error) {
+	buf := make([]byte, 64<<10)
+	for {
+		n, err := conn.Read(buf)
+		if errors.Is(err, unix.ENOBUFS) {
+			t.overrun.Add(1)
+			continue
+		}
+		if err != nil {
+			return received, fmt.Errorf("чтение proc connector: %w", err)
+		}
+		received = true
+		t.sharedMessages(buf[:n])
+	}
+}
+
+func (t *Tombs) sharedMessages(data []byte) {
+	defer recovered(t.log, "разбор proc connector")
+	t.messages(data)
 }
 
 // recvOnce читает и разбирает одну датаграмму; паника в разборе пишется в

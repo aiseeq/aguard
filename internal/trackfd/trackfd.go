@@ -112,39 +112,70 @@ func peerUID(c *net.UnixConn) (int, error) {
 }
 
 // Serve отдаёт пары процессам заданного uid до отмены ctx; остальным — разрыв и строка журнала.
-func Serve(ctx context.Context, path string, uid int, open func() (Pair, error), lg *slog.Logger) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("старый сокет: %w", err)
-	}
+func Serve(ctx context.Context, path string, uid int, open func() (Pair, error), openFan, openConn func() (int, error), lg *slog.Logger) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("папка сокета: %w", err)
 	}
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	listen := func(name string) (*net.UnixListener, error) {
+		if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("старый сокет: %w", err)
+		}
+		l, err := net.ListenUnix("unix", &net.UnixAddr{Name: name, Net: "unix"})
+		if err != nil {
+			return nil, fmt.Errorf("сокет %s: %w", name, err)
+		}
+		if err := os.Chmod(name, 0o666); err != nil {
+			_ = l.Close()
+			return nil, fmt.Errorf("права сокета: %w", err)
+		}
+		return l, nil
+	}
+	// Старый сокет отвечает парой сразу; новый принимает явный запрос.
+	// Готовность старого сокета означает, что оба уже открыты.
+	modern, err := listen(path + ".v2")
 	if err != nil {
-		return fmt.Errorf("сокет %s: %w", path, err)
+		return err
 	}
-	defer l.Close()
-	if err := os.Chmod(path, 0o666); err != nil { // кому отдавать, решает SO_PEERCRED
-		return fmt.Errorf("права сокета: %w", err)
+	defer modern.Close()
+	legacy, err := listen(path)
+	if err != nil {
+		return err
 	}
-	stop := context.AfterFunc(ctx, func() { _ = l.Close() })
+	defer legacy.Close()
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(serveCtx, func() { _ = modern.Close(); _ = legacy.Close() })
 	defer stop()
 	lg.Info("помощник слежения: готов", "uid", uid, "socket", path)
-	for {
-		c, err := l.AcceptUnix()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
+	errCh := make(chan error, 2)
+	accept := func(l *net.UnixListener, single bool) {
+		for {
+			c, err := l.AcceptUnix()
+			if err != nil {
+				errCh <- err
+				return
 			}
-			return fmt.Errorf("accept: %w", err)
+			serveOne(serveCtx, c, uid, open, openFan, openConn, single, lg)
 		}
-		serveOne(c, uid, open, lg)
 	}
+	go accept(legacy, false)
+	go accept(modern, true)
+	err = <-errCh
+	cancel()
+	_ = legacy.Close()
+	_ = modern.Close()
+	<-errCh
+	if ctx.Err() != nil {
+		return nil
+	}
+	return fmt.Errorf("accept: %w", err)
 }
 
 // serveOne — одно подключение: помощник последовательный, запросы редки (старт демона).
-func serveOne(c *net.UnixConn, uid int, open func() (Pair, error), lg *slog.Logger) {
+func serveOne(ctx context.Context, c *net.UnixConn, uid int, open func() (Pair, error), openFan, openConn func() (int, error), single bool, lg *slog.Logger) {
 	defer c.Close()
+	stop := context.AfterFunc(ctx, func() { _ = c.Close() })
+	defer stop()
 	got, err := peerUID(c)
 	if err != nil {
 		lg.Warn("помощник слежения: подключение", "err", err)
@@ -152,6 +183,35 @@ func serveOne(c *net.UnixConn, uid int, open func() (Pair, error), lg *slog.Logg
 	}
 	if got != uid {
 		lg.Warn("помощник слежения: чужой uid", "uid", got)
+		return
+	}
+	if single {
+		if err := c.SetReadDeadline(time.Now().Add(fetchTimeout)); err != nil {
+			lg.Warn("помощник слежения: срок запроса", "err", err)
+			return
+		}
+		var request [1]byte
+		if _, err := io.ReadFull(c, request[:]); err != nil {
+			lg.Warn("помощник слежения: запрос", "err", err)
+			return
+		}
+		if request[0] != 'F' && request[0] != 'C' {
+			lg.Warn("помощник слежения: неизвестный запрос")
+			return
+		}
+		fn := openFan
+		if request[0] == 'C' {
+			fn = openConn
+		}
+		fd, err := fn()
+		if err != nil {
+			lg.Error("помощник слежения: дескриптор", "err", err)
+			return
+		}
+		defer unix.Close(fd)
+		if _, _, err := c.WriteMsgUnix([]byte{1}, unix.UnixRights(fd), nil); err != nil {
+			lg.Warn("помощник слежения: передача", "err", err)
+		}
 		return
 	}
 	p, err := open()
@@ -185,6 +245,62 @@ func fetch(path string, serverUID int, timeout time.Duration) (Pair, error) {
 		return Pair{}, fmt.Errorf("помощник слежения: %s не unix-сокет: %T", path, c)
 	}
 	return readPair(uc, path, serverUID, timeout)
+}
+
+// FetchFan and FetchConn require the new helper protocol and never subscribe twice.
+func FetchFan(path string, serverUID int) (int, error)  { return fetchSingle(path, serverUID, 'F') }
+func FetchConn(path string, serverUID int) (int, error) { return fetchSingle(path, serverUID, 'C') }
+
+func fetchSingle(path string, serverUID int, request byte) (int, error) {
+	c, err := net.DialTimeout("unix", path+".v2", fetchTimeout)
+	if err != nil {
+		return -1, fmt.Errorf("помощник слежения: подключение: %w", err)
+	}
+	defer c.Close()
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return -1, fmt.Errorf("помощник слежения: не unix-сокет: %T", c)
+	}
+	if err := uc.SetDeadline(time.Now().Add(fetchTimeout)); err != nil {
+		return -1, fmt.Errorf("помощник слежения: срок: %w", err)
+	}
+	uid, err := peerUID(uc)
+	if err != nil {
+		return -1, err
+	}
+	if uid != serverUID {
+		return -1, fmt.Errorf("помощник слежения: сокет %s держит uid %d, ждали %d", path, uid, serverUID)
+	}
+	if _, err := uc.Write([]byte{request}); err != nil {
+		return -1, fmt.Errorf("помощник слежения: запрос: %w", err)
+	}
+	buf, oob := make([]byte, 1), make([]byte, unix.CmsgSpace(2*4))
+	_, n, _, _, err := uc.ReadMsgUnix(buf, oob)
+	if err != nil {
+		return -1, fmt.Errorf("помощник слежения: чтение: %w", err)
+	}
+	msgs, err := unix.ParseSocketControlMessage(oob[:n])
+	if err != nil {
+		return -1, fmt.Errorf("помощник слежения: ответ: %w", err)
+	}
+	var fds []int
+	for i := range msgs {
+		got, err := unix.ParseUnixRights(&msgs[i])
+		if err != nil {
+			for _, fd := range fds {
+				_ = unix.Close(fd)
+			}
+			return -1, fmt.Errorf("помощник слежения: дескрипторы: %w", err)
+		}
+		fds = append(fds, got...)
+	}
+	if len(fds) != 1 {
+		for _, fd := range fds {
+			_ = unix.Close(fd)
+		}
+		return -1, fmt.Errorf("помощник слежения: нужен обновлённый протокол, получено дескрипторов %d", len(fds))
+	}
+	return fds[0], nil
 }
 
 func readPair(c *net.UnixConn, path string, serverUID int, timeout time.Duration) (Pair, error) {

@@ -126,10 +126,29 @@ func Run(ctx context.Context, cfg Config, pair trackfd.Pair, lg *slog.Logger) er
 		return err
 	}
 	defer conn.Close()
+	tombs := newTombs(2*time.Minute, lg)
+	done := make(chan struct{})
+	defer close(done)
+	tombs.listen(conn, done)
+	return runWithTombs(ctx, cfg, pair.Fan, fan, tombs, lg)
+}
+
+// RunShared uses the common connector table while retaining a separate fanotify group.
+func RunShared(ctx context.Context, cfg Config, fanFD int, tombs *Tombs, lg *slog.Logger) error {
+	fan, err := pollable(fanFD, "fanotify")
+	if err != nil {
+		_ = unix.Close(fanFD)
+		return err
+	}
+	defer fan.Close()
+	return runWithTombs(ctx, cfg, fanFD, fan, tombs, lg)
+}
+
+func runWithTombs(ctx context.Context, cfg Config, fanFD int, fan *os.File, tombs *Tombs, lg *slog.Logger) error {
 	t := &Tracker{
 		cfg: cfg, log: lg, entries: map[string]*record.Entry{}, watchKey: map[string]string{},
 		watched: map[string]string{}, containers: map[string]bool{}, started: time.Now(),
-		fd: pair.Fan, fan: fan, done: make(chan struct{}),
+		fd: fanFD, fan: fan, done: make(chan struct{}),
 	}
 	defer close(t.done)
 	for _, c := range cfg.Containers {
@@ -150,8 +169,7 @@ func Run(ctx context.Context, cfg Config, pair trackfd.Pair, lg *slog.Logger) er
 		return err
 	}
 	defer t.owners.close()
-	t.tombs = newTombs(2*time.Minute, lg)
-	t.tombs.listen(conn, t.done)
+	t.tombs = tombs
 	t.res = newResolver(t.tombs, lg)
 	for _, d := range append(append([]string{}, cfg.Roots...), cfg.Containers...) {
 		if err := t.mark(d); err != nil && !t.containers[d] {
@@ -684,9 +702,9 @@ func (t *Tracker) logStats() {
 	tombs, open := t.tombs.size()
 	t.log.Info(fmt.Sprintf("aguard слежение: за час событий %d (создано %d, удалено %d, переименовано %d, переполнений %d); "+
 		"создатель: жив %d, восстановлен %d, неизвестен %d; сессия по ppid %d, по cgroup %d, нет %d; "+
-		"потерь proc connector %d; записей %d; надгробий %d (без выхода %d); пауз замера на занятой машине %d (%v)",
+		"потерь proc connector %d, ошибок соединения %d; записей %d; надгробий %d (без выхода %d); пауз замера на занятой машине %d (%v)",
 		s.events, s.creates, s.deletes, s.renames, s.overflow, s.procOK, s.procReaped, s.procUnknown,
-		s.sessPpid, s.sessCgroup, s.noSession, t.tombs.overrun.Load(), len(t.entries), tombs, open,
+		s.sessPpid, s.sessCgroup, s.noSession, t.tombs.overrun.Load(), t.tombs.connFailures.Load(), len(t.entries), tombs, open,
 		s.measurePauses, s.measurePaused.Round(time.Second)))
 	t.st = counters{}
 }

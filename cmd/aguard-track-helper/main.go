@@ -31,5 +31,5 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	return trackfd.Serve(ctx, trackfd.Socket, *uid, trackfd.OpenPair, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	return trackfd.Serve(ctx, trackfd.Socket, *uid, trackfd.OpenPair, trackfd.OpenFan, trackfd.OpenConn, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 }

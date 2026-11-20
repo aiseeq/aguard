@@ -93,11 +93,14 @@ func journalArgs(cursor string, initial bool) []string {
 	return args
 }
 
-func sigguardTickEvery(window time.Duration) time.Duration {
-	return max(time.Millisecond, min(100*time.Millisecond, window/10))
-}
-
 func sigguardPassDue(now, next time.Time) bool { return !now.Before(next) }
+
+func sigguardDeadline(passAt time.Time, b *sigguard.Batcher) time.Time {
+	if next := b.Next(); !next.IsZero() && next.Before(passAt) {
+		return next
+	}
+	return passAt
+}
 
 func (a *app) sigguardLoop(ctx context.Context) {
 	source := a.sigSource
@@ -184,7 +187,7 @@ func (a *app) sigguardReadStream(ctx context.Context, cfg *sigguard.Config, sour
 	}
 	defer func() { retErr = errors.Join(retErr, r.Close()) }()
 	b := sigguard.NewBatcher(cfg.Window.D())
-	timer := time.NewTicker(sigguardTickEvery(cfg.Window.D()))
+	timer := time.NewTimer(10 * time.Minute)
 	defer timer.Stop()
 	passAt := time.Now()
 	a.note("sigguard", activity.KindPass, "", "", 0, "")
@@ -200,6 +203,7 @@ func (a *app) sigguardReadStream(ctx context.Context, cfg *sigguard.Config, sour
 		scanErr <- s.Err()
 	}()
 	for {
+		timer.Reset(max(0, time.Until(sigguardDeadline(passAt, b))))
 		select {
 		case <-ctx.Done():
 			a.sigguardDrainUntilDone(cfg, b, path, &cursor, lines, scanErr, onRead)

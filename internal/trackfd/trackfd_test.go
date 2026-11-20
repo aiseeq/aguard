@@ -39,7 +39,21 @@ func serve(t *testing.T, uid int, open func() (Pair, error)) string {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		if err := Serve(ctx, path, uid, open, slog.New(slog.DiscardHandler)); err != nil {
+		if err := Serve(ctx, path, uid, open, func() (int, error) {
+			p, err := open()
+			if err != nil {
+				return -1, err
+			}
+			_ = unix.Close(p.Conn)
+			return p.Fan, nil
+		}, func() (int, error) {
+			p, err := open()
+			if err != nil {
+				return -1, err
+			}
+			_ = unix.Close(p.Fan)
+			return p.Conn, nil
+		}, slog.New(slog.DiscardHandler)); err != nil {
 			t.Error(err)
 		}
 	})
@@ -77,6 +91,89 @@ func TestFetchFreshPairEachConnect(t *testing.T) {
 		if err != nil || flags&unix.FD_CLOEXEC == 0 {
 			t.Fatalf("fd %d без CLOEXEC: %d, %v", fd, flags, err)
 		}
+	}
+}
+
+func TestSingleRequestsOpenOnlyRequestedDescriptor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fds.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	var pairs, fans, conns atomic.Int32
+	newFD := func(counter *atomic.Int32) (int, error) {
+		counter.Add(1)
+		var fds [2]int
+		if err := unix.Pipe(fds[:]); err != nil {
+			return -1, err
+		}
+		_ = unix.Close(fds[1])
+		return fds[0], nil
+	}
+	wg.Go(func() {
+		if err := Serve(ctx, path, os.Getuid(), pipes(t, &pairs), func() (int, error) { return newFD(&fans) }, func() (int, error) { return newFD(&conns) }, slog.New(slog.DiscardHandler)); err != nil {
+			t.Error(err)
+		}
+	})
+	defer func() { cancel(); wg.Wait() }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("сокет не появился")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	fan, err := FetchFan(path, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fan)
+	if pairs.Load() != 0 || fans.Load() != 1 || conns.Load() != 0 {
+		t.Fatalf("fan открыл pair=%d fan=%d connector=%d", pairs.Load(), fans.Load(), conns.Load())
+	}
+	conn, err := FetchConn(path, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(conn)
+	if pairs.Load() != 0 || fans.Load() != 1 || conns.Load() != 1 {
+		t.Fatalf("pair=%d fan=%d connector=%d", pairs.Load(), fans.Load(), conns.Load())
+	}
+}
+
+func TestServeStopsWithSilentSingleClient(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fds.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	var opened atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, path, os.Getuid(), pipes(t, &opened), func() (int, error) { return -1, errors.New("unexpected") }, func() (int, error) { return -1, errors.New("unexpected") }, slog.New(slog.DiscardHandler))
+	}()
+	defer cancel()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("сокет не появился")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	c, err := net.Dial("unix", path+".v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("помощник завис на пустом запросе")
 	}
 }
 
