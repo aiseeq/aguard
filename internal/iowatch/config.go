@@ -50,10 +50,12 @@ type Config struct {
 	Device        string            `toml:"device"`         // диск в /proc/diskstats и /sys/block
 	// Посекундный ряд машины и профили завершившихся cgroup — в памяти службы; файлы — их копия при
 	// остановке (профили — и раз в час, как сводки).
-	SeriesKeep     policy.Duration `toml:"series_keep"`      // срок посекундного ряда в памяти
-	ProfilesKeep   policy.Duration `toml:"profiles_keep"`    // срок профилей cgroup
-	EvictorSwapMin int64           `toml:"evictor_swap_min"` // минимум прироста свопа других сессий для интервала
-	EvictorAnonMin int64           `toml:"evictor_anon_min"` // минимум прироста anon кандидата для зачёта
+	SeriesKeep          policy.Duration `toml:"series_keep"`      // срок посекундного ряда в памяти
+	ProfilesKeep        policy.Duration `toml:"profiles_keep"`    // срок профилей cgroup
+	EvictorSwapMin      int64           `toml:"evictor_swap_min"` // минимум прироста свопа других сессий для интервала
+	EvictorAnonMin      int64           `toml:"evictor_anon_min"` // минимум прироста anon кандидата для зачёта
+	BtrfsSysfsRoot      string          `toml:"-"`
+	BtrfsCommitReportMS int64           `toml:"btrfs_commit_report_ms"`
 	// Socket — сокет моментального состояния диска (запросы now, series, profiles, cases); смена — с перезапуском
 	// службы. По умолчанию $XDG_RUNTIME_DIR/io-state.sock (DefaultSocket).
 	Socket   string `toml:"socket"`
@@ -69,33 +71,34 @@ func (c *Config) Route() ioroute.Config {
 
 func Default() Config {
 	return Config{
-		Mode:           ModeAlert,
-		Step:           policy.Duration(100 * time.Millisecond),
-		Detail:         policy.Duration(time.Second),
-		DetailIdle:     policy.Duration(5 * time.Second),
-		Ring:           policy.Duration(5 * time.Minute),
-		Trigger:        .5,
-		Gap:            policy.Duration(300 * time.Millisecond),
-		CaseMin:        policy.Duration(500 * time.Millisecond),
-		Context:        policy.Duration(5 * time.Second),
-		AlertMin:       policy.Duration(2 * time.Second),
-		AlertEvery:     policy.Duration(time.Hour),
-		UrgentMin:      policy.Duration(10 * time.Second),
-		SeriesN:        3,
-		SeriesWindow:   policy.Duration(15 * time.Minute),
-		MachineN:       6,
-		MachineOwners:  3,
-		CrossWindow:    policy.Duration(24 * time.Hour),
-		Tk:             "~/bin/tk",
-		QuietBytes:     1 << 20,
-		CasesKeep:      policy.Duration(14 * 24 * time.Hour),
-		Keep:           policy.Duration(7 * 24 * time.Hour),
-		Device:         "nvme0n1",
-		Wrappers:       []string{"codex", "claude", "bash", "sh", "node", "worker", "python3", "timeout", "conmon"},
-		SeriesKeep:     policy.Duration(24 * time.Hour),
-		ProfilesKeep:   policy.Duration(30 * 24 * time.Hour),
-		EvictorSwapMin: 1 << 20,
-		EvictorAnonMin: 1 << 20,
+		Mode:                ModeAlert,
+		Step:                policy.Duration(100 * time.Millisecond),
+		Detail:              policy.Duration(time.Second),
+		DetailIdle:          policy.Duration(5 * time.Second),
+		Ring:                policy.Duration(5 * time.Minute),
+		Trigger:             .5,
+		Gap:                 policy.Duration(300 * time.Millisecond),
+		CaseMin:             policy.Duration(500 * time.Millisecond),
+		Context:             policy.Duration(5 * time.Second),
+		AlertMin:            policy.Duration(2 * time.Second),
+		AlertEvery:          policy.Duration(time.Hour),
+		UrgentMin:           policy.Duration(10 * time.Second),
+		SeriesN:             3,
+		SeriesWindow:        policy.Duration(15 * time.Minute),
+		MachineN:            6,
+		MachineOwners:       3,
+		CrossWindow:         policy.Duration(24 * time.Hour),
+		Tk:                  "~/bin/tk",
+		QuietBytes:          1 << 20,
+		CasesKeep:           policy.Duration(14 * 24 * time.Hour),
+		Keep:                policy.Duration(7 * 24 * time.Hour),
+		Device:              "nvme0n1",
+		Wrappers:            []string{"codex", "claude", "bash", "sh", "node", "worker", "python3", "timeout", "conmon"},
+		SeriesKeep:          policy.Duration(24 * time.Hour),
+		ProfilesKeep:        policy.Duration(30 * 24 * time.Hour),
+		EvictorSwapMin:      1 << 20,
+		EvictorAnonMin:      1 << 20,
+		BtrfsCommitReportMS: 2000,
 	}
 }
 
@@ -119,8 +122,8 @@ func (c *Config) Validate() error {
 	if c.Context.D()+c.DetailIdle.D() >= c.Ring.D() {
 		return errors.New("context + detail_idle должны быть меньше ring: виновники берутся из буфера")
 	}
-	if c.CasesKeep.D() <= 0 || c.Keep.D() <= 0 || c.QuietBytes < 0 || c.EvictorSwapMin <= 0 || c.EvictorAnonMin <= 0 {
-		return errors.New("cases_keep, keep, evictor_swap_min и evictor_anon_min должны быть положительными; quiet_bytes — не отрицательным")
+	if c.CasesKeep.D() <= 0 || c.Keep.D() <= 0 || c.QuietBytes < 0 || c.EvictorSwapMin <= 0 || c.EvictorAnonMin <= 0 || c.BtrfsCommitReportMS <= 0 {
+		return errors.New("cases_keep, keep, evictor_swap_min, evictor_anon_min и btrfs_commit_report_ms должны быть положительными; quiet_bytes — не отрицательным")
 	}
 	if c.Device == "" {
 		return errors.New("device не должен быть пустым")

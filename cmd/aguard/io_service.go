@@ -68,6 +68,22 @@ type ioPressureState struct {
 	quietTill time.Time
 }
 
+type ioBtrfsPending struct {
+	curMS, commits, lastMS int64
+}
+
+func (p *ioBtrfsPending) add(curMS, commits, lastMS int64) {
+	p.curMS = max(p.curMS, curMS)
+	p.commits += commits
+	p.lastMS = max(p.lastMS, lastMS)
+}
+
+func (p *ioBtrfsPending) take() (curMS, commits, lastMS int64) {
+	curMS, commits, lastMS = p.curMS, p.commits, p.lastMS
+	p.curMS, p.commits, p.lastMS = 0, 0, 0
+	return curMS, commits, lastMS
+}
+
 func (p *ioPressureState) update(at time.Time, open bool, context time.Duration) (pressured, entered bool) {
 	if open {
 		p.quietTill = time.Time{}
@@ -100,6 +116,16 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 	}
 	detail.SetGraftHeavyDir(iowatch.GraftHeavyDir(record.RuntimeDir()))
 	detail.SetEvictorThresholds(cfg.EvictorSwapMin, cfg.EvictorAnonMin)
+	var btrfsCommits iowatch.BtrfsCommitSampler
+	btrfsCommits.Root = cfg.BtrfsSysfsRoot
+	var pendingBtrfs ioBtrfsPending
+	curMS, count, lastMS, commitErr := btrfsCommits.Sample()
+	pendingBtrfs.add(curMS, count, lastMS)
+	if commitErr != nil {
+		sink.sampleErr("btrfs_commit", commitErr)
+	}
+	commitTicker := time.NewTicker(time.Second)
+	defer commitTicker.Stop()
 	details := make(chan ioDetailResult, 4)
 	control := make(chan ioDetailChange, 1)
 	detailCtx, stop := context.WithCancel(ctx)
@@ -130,7 +156,15 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 			if err := fast.LastVRateError(); err != nil {
 				sink.sampleErr("vrate", err)
 			}
+			s.BtrfsCommitCurMS, s.BtrfsCommits, s.BtrfsCommitLastMS = pendingBtrfs.take()
 			advanceIOFastStep(sink, s, cfg, &pressure, control)
+		case <-commitTicker.C:
+			var curMS, count, lastMS int64
+			curMS, count, lastMS, err = btrfsCommits.Sample()
+			pendingBtrfs.add(curMS, count, lastMS)
+			if err != nil {
+				sink.sampleErr("btrfs_commit", err)
+			}
 		case r := <-details:
 			if r.err != nil {
 				sink.sampleErr("detail", r.err)

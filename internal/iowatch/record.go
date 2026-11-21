@@ -52,6 +52,9 @@ type Step struct {
 	SwapUsed           int64     `json:"swap_used,omitempty"` // SwapTotal − SwapFree, байт
 	GraftSliceMem      int64     `json:"graft_slice_mem,omitempty"`
 	GraftSliceMemKnown bool      `json:"graft_slice_mem_known,omitempty"`
+	BtrfsCommitCurMS   int64     `json:"btrfs_commit_cur_ms,omitempty"`
+	BtrfsCommits       int64     `json:"btrfs_commits,omitempty"`
+	BtrfsCommitLastMS  int64     `json:"btrfs_commit_last_ms,omitempty"`
 	Processes          []Process `json:"processes,omitempty"`
 	Cgroups            []Cgroup  `json:"cgroups,omitempty"`
 

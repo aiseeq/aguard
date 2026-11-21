@@ -1097,6 +1097,7 @@ func TestRecorderUsesWallClockStepIntervals(t *testing.T) {
 		}
 		r.Step(Step{At: base.Add(3300 * time.Millisecond)})
 		r.Step(Step{At: base.Add(4 * time.Second)}) // закрывает секунду ряда на отметке 3 с
+		r.Step(Step{At: base.Add(5 * time.Second)}) // закрывает секунду конца случая на отметке 4 с
 		rows := series.Rows(time.Time{}).Seconds()
 		var atThree *MachineSecond
 		for i := range rows {

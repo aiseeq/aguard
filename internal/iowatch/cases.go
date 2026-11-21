@@ -10,33 +10,34 @@ import (
 // Case — сводка случая фриза: подряд шаги с простоем (Stalled), спокойные промежутки до gap случай
 // не делят. Хранится только сводка: машина за случай и виновники; сырые шаги остаются в буфере.
 type Case struct {
-	BootID          string    `json:"boot_id,omitempty"`
-	Start           time.Time `json:"start"`  // начало первого шага с простоем
-	End             time.Time `json:"end"`    // конец последнего шага с простоем
-	DurMS           int64     `json:"dur_ms"` // End − Start, по стене
-	IdleMS          int64     `json:"idle_ms"`
-	PeakMS          int64     `json:"peak_ms"` // наибольший простой шага
-	VRateMin        *float64  `json:"vrate_min,omitempty"`
-	VRateBeforeCase *float64  `json:"vrate_before_case,omitempty"`
-	IOFullMS        int64     `json:"io_full_ms,omitempty"`
-	IOSomeMS        int64     `json:"io_some_ms,omitempty"`
-	MemFullMS       int64     `json:"mem_full_ms,omitempty"`
-	MemSomeMS       int64     `json:"mem_some_ms,omitempty"`
-	SwapIn          int64     `json:"swapin,omitempty"` // страниц
-	SwapOut         int64     `json:"swapout,omitempty"`
-	Majflt          int64     `json:"majflt,omitempty"`
-	ReadB           int64     `json:"rd_b,omitempty"`
-	WriteB          int64     `json:"wr_b,omitempty"`
-	BusyMS          int64     `json:"busy_ms,omitempty"`    // занятость устройства (io_ticks)
-	RAwaitMS        int64     `json:"r_await_ms,omitempty"` // среднее ожидание операции чтения
-	WAwaitMS        int64     `json:"w_await_ms,omitempty"`
-	InFlight        int64     `json:"inflight,omitempty"` // наибольшая очередь устройства
-	Flushes         int64     `json:"flushes,omitempty"`
-	FlushMS         int64     `json:"flush_ms,omitempty"`
-	DiscardOps      int64     `json:"discard_ops,omitempty"`
-	DiscardMS       int64     `json:"discard_ms,omitempty"` // сумма задержек discard-запросов, не время занятости устройства
-	Dirty           int64     `json:"dirty,omitempty"`      // наибольшие Dirty и Writeback за окно виновников, байт
-	Writeback       int64     `json:"writeback,omitempty"`
+	BootID           string    `json:"boot_id,omitempty"`
+	Start            time.Time `json:"start"`  // начало первого шага с простоем
+	End              time.Time `json:"end"`    // конец последнего шага с простоем
+	DurMS            int64     `json:"dur_ms"` // End − Start, по стене
+	IdleMS           int64     `json:"idle_ms"`
+	PeakMS           int64     `json:"peak_ms"` // наибольший простой шага
+	BtrfsCommitMaxMS int64     `json:"btrfs_commit_max_ms,omitempty"`
+	VRateMin         *float64  `json:"vrate_min,omitempty"`
+	VRateBeforeCase  *float64  `json:"vrate_before_case,omitempty"`
+	IOFullMS         int64     `json:"io_full_ms,omitempty"`
+	IOSomeMS         int64     `json:"io_some_ms,omitempty"`
+	MemFullMS        int64     `json:"mem_full_ms,omitempty"`
+	MemSomeMS        int64     `json:"mem_some_ms,omitempty"`
+	SwapIn           int64     `json:"swapin,omitempty"` // страниц
+	SwapOut          int64     `json:"swapout,omitempty"`
+	Majflt           int64     `json:"majflt,omitempty"`
+	ReadB            int64     `json:"rd_b,omitempty"`
+	WriteB           int64     `json:"wr_b,omitempty"`
+	BusyMS           int64     `json:"busy_ms,omitempty"`    // занятость устройства (io_ticks)
+	RAwaitMS         int64     `json:"r_await_ms,omitempty"` // среднее ожидание операции чтения
+	WAwaitMS         int64     `json:"w_await_ms,omitempty"`
+	InFlight         int64     `json:"inflight,omitempty"` // наибольшая очередь устройства
+	Flushes          int64     `json:"flushes,omitempty"`
+	FlushMS          int64     `json:"flush_ms,omitempty"`
+	DiscardOps       int64     `json:"discard_ops,omitempty"`
+	DiscardMS        int64     `json:"discard_ms,omitempty"` // сумма задержек discard-запросов, не время занятости устройства
+	Dirty            int64     `json:"dirty,omitempty"`      // наибольшие Dirty и Writeback за окно виновников, байт
+	Writeback        int64     `json:"writeback,omitempty"`
 	// Quiet — обмен с диском за случай меньше quiet_bytes и memory full меньше половины случая: простой без трафика
 	// (одна задача ждёт датчик, как thinkfan) — PSI считает его 100 % full, а машина не стоит. В письма не идёт.
 	// Простой памяти без обмена (reclaim, сжатие) — не тихий: у 219 тихих случаев от 1 с по cases.jsonl на 10.11
@@ -413,24 +414,34 @@ func (r *Recorder) Detail(s Step) {
 
 // ready — закрытые случаи с концом не позже covered (детальные записи за них уже в буфере).
 func (r *Recorder) ready(covered time.Time) []Case {
-	n := 0
-	for n < len(r.waiting) && !r.waiting[n].End.After(covered) {
-		n++
+	var out, waiting []Case
+	for i := range r.waiting {
+		c := r.waiting[i]
+		if c.End.After(covered) || (!covered.Equal(farFuture) && !r.caseSeriesClosed(c.End)) {
+			waiting = append(waiting, c)
+			continue
+		}
+		r.finish(&c)
+		out = append(out, c)
 	}
-	if n == 0 {
-		return nil
-	}
-	out := slices.Clone(r.waiting[:n])
-	r.waiting = slices.Delete(r.waiting, 0, n)
-	for i := range out {
-		r.finish(&out[i])
-	}
+	r.waiting = waiting
 	return out
+}
+
+func (r *Recorder) caseSeriesClosed(end time.Time) bool {
+	if r.series == nil {
+		return true
+	}
+	last, ok := r.series.LastAt()
+	return ok && !last.Before(end.Truncate(time.Second).Add(time.Second))
 }
 
 // finish — Dirty, Writeback и (от case_min) виновники из детальных записей окна случая.
 func (r *Recorder) finish(c *Case) {
 	c.Quiet = quietCase(c, r.cfg.QuietBytes)
+	if r.series != nil {
+		c.BtrfsCommitMaxMS = btrfsCommitMaxForCase(r.series, c.Start, c.End)
+	}
 	from := c.Start.Add(-r.cfg.Context.D())
 	// Closing is detected on a fast step after the gap threshold; the step boundary can add
 	// one more step. The next idle detail can then land detail_idle after closure.
@@ -518,6 +529,25 @@ func (r *Recorder) finish(c *Case) {
 		c.Culprits.KernelWrite = max(0, c.Culprits.DeviceWrite-cgroups)
 	}
 	resolveCaseMain(c, &sum)
+}
+
+func btrfsCommitMaxForCase(series *Series, start, end time.Time) int64 {
+	var longest int64
+	series.VisitSince(start.Truncate(time.Second), func(sec MachineSecond) {
+		for _, duration := range []int64{sec.BtrfsCommitCurMS, sec.BtrfsCommitLastMS} {
+			if duration > 0 && BtrfsCommitOverlaps(sec.At, duration, start, end) {
+				longest = max(longest, duration)
+			}
+		}
+	})
+	return longest
+}
+
+// BtrfsCommitOverlaps treats a sampled commit as spanning its measured duration plus the sysfs poll uncertainty.
+func BtrfsCommitOverlaps(at time.Time, durationMS int64, start, end time.Time) bool {
+	commitStart := at.Add(-time.Duration(durationMS)*time.Millisecond - time.Second)
+	commitEnd := at.Add(time.Second)
+	return commitStart.Before(end) && commitEnd.After(start)
 }
 
 // resolveCaseMain assigns one cause to the case: kernel writeback, a cgroup waiting while the disk is mostly idle,

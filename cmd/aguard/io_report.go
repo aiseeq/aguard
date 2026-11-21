@@ -28,6 +28,9 @@ func ioCaseLine(c *iowatch.Case) string {
 	}
 	line := fmt.Sprintf("%s, %s (простой %s, %s; пик шага %d мс)", c.Start.Format("02.01 15:04:05"), ioSeconds(c.DurMS),
 		ioSeconds(c.IdleMS), cause, c.PeakMS)
+	if c.BtrfsCommitMaxMS >= 1000 {
+		line += fmt.Sprintf(", коммит btrfs до %d мс", c.BtrfsCommitMaxMS)
+	}
 	if c.VRateMin != nil && *c.VRateMin < 100 {
 		line += ", iocost vrate до " + formatIOVRate(*c.VRateMin) + " %"
 		if c.VRateBeforeCase != nil {
@@ -288,8 +291,25 @@ func (a *app) ioReport(ctx context.Context, path string, live bool, since, until
 	if err != nil {
 		return err
 	}
+	seriesKeep := max(cfg.SeriesKeep.D(), ioSeriesMinKeep)
+	seriesSince, seriesClipped := ioReportSeriesWindow(since, until, seriesKeep)
+	series, seriesErr := a.ioReportSeries(&cfg, path, live, seriesSince)
 	sudoStats := a.ioReportSudoStats(ctx, got.cases, since, until)
 	sum := iowatch.Summarize(iowatch.FilterCases(got.cases, who), since, until, minDur)
+	if seriesErr != nil {
+		sum.BtrfsUnavailable = oneLineError(seriesErr)
+		if seriesClipped {
+			sum.BtrfsUnavailable += "; за последние " + ioSpan(seriesKeep.Milliseconds())
+		}
+	} else {
+		sumBtrfsCommits(&sum, series, got.cases, seriesSince, until, cfg.BtrfsCommitReportMS)
+		if sum.BtrfsHasData {
+			sum.BtrfsCommitReportMS = cfg.BtrfsCommitReportMS
+			if seriesClipped {
+				sum.BtrfsWindow = "за последние " + ioSpan(seriesKeep.Milliseconds())
+			}
+		}
+	}
 	cover := iowatch.Cover(got.cover, got.source, since, until, time.Now().Add(-cfg.CasesKeep.D()))
 	sum.Coverage = &cover
 	if asJSON {
@@ -308,6 +328,61 @@ func (a *app) ioReport(ctx context.Context, path string, live bool, since, until
 	}
 	fmt.Fprintf(a.out, "срезов интерфейса: %d, самый длинный S по wchan: %s\n", len(gui.Slices), guiwatch.LongestSleep(gui))
 	return nil
+}
+
+func ioReportSeriesWindow(since, until time.Time, keep time.Duration) (time.Time, bool) {
+	cutoff := until.Add(-keep)
+	if since.Before(cutoff) {
+		return cutoff, true
+	}
+	return since, false
+}
+
+func sumBtrfsCommits(sum *iowatch.Summary, seconds []iowatch.MachineSecond, cases []iowatch.Case, since, until time.Time, threshold int64) {
+	for i := range seconds {
+		sec := &seconds[i]
+		if sec.At.Before(since) || !sec.At.Before(until) {
+			continue
+		}
+		if sec.BtrfsCommitCurMS != 0 || sec.BtrfsCommits != 0 || sec.BtrfsCommitLastMS != 0 {
+			sum.BtrfsHasData = true
+		}
+		if sec.BtrfsCommits <= 0 || sec.BtrfsCommitLastMS < threshold {
+			continue
+		}
+		sum.BtrfsLongCommits++
+		if sec.BtrfsCommitLastMS > sum.BtrfsLongestCommitMS {
+			sum.BtrfsLongestCommitMS = sec.BtrfsCommitLastMS
+			sum.BtrfsLongestCommitAt = sec.At
+		}
+		inCase := false
+		for i := range cases {
+			if iowatch.BtrfsCommitOverlaps(sec.At, sec.BtrfsCommitLastMS, cases[i].Start, cases[i].End) {
+				inCase = true
+				break
+			}
+		}
+		if !inCase {
+			sum.BtrfsOutsideCases++
+		}
+	}
+}
+
+func (a *app) ioReportSeries(cfg *iowatch.Config, casesPath string, live bool, since time.Time) ([]iowatch.MachineSecond, error) {
+	if live {
+		ans, err := askIO(cfg.Socket, iowatch.Request{Q: iowatch.QuerySeries, Since: since.Format(time.RFC3339)})
+		if err == nil {
+			seconds := make([]iowatch.MachineSecond, len(ans.Series))
+			for i := range ans.Series {
+				seconds[i] = ans.Series[i].MachineSecond()
+			}
+			return seconds, nil
+		}
+		if !errors.Is(err, errIONotRunning) {
+			return nil, err
+		}
+	}
+	return iowatch.LoadSeries(filepath.Join(filepath.Dir(casesPath), ioSeriesFile), since)
 }
 
 type ioReportSudoStats struct {
@@ -377,6 +452,24 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 	if s.Coverage != nil {
 		writeIOCoverage(w, s.Coverage)
 	}
+	if s.BtrfsUnavailable != "" {
+		line := "коммиты btrfs: ряд недоступен: " + s.BtrfsUnavailable
+		if s.BtrfsWindow != "" {
+			line += "; " + s.BtrfsWindow
+		}
+		fmt.Fprintln(w, line)
+	} else if s.BtrfsHasData {
+		longest := "0 с в --:--:--"
+		if s.BtrfsLongestCommitMS > 0 {
+			longest = ioDecimal(float64(s.BtrfsLongestCommitMS)/1000) + " с в " + s.BtrfsLongestCommitAt.Format("15:04:05")
+		}
+		line := fmt.Sprintf("долгие коммиты btrfs (≥ %s): %d, самый долгий %s; из них вне случаев фриза: %d",
+			ioMillisSeconds(s.BtrfsCommitReportMS), s.BtrfsLongCommits, longest, s.BtrfsOutsideCases)
+		if s.BtrfsWindow != "" {
+			line += "; " + s.BtrfsWindow
+		}
+		fmt.Fprintln(w, line)
+	}
 	if s.Quiet > 0 {
 		fmt.Fprintf(w, "тихих (простой без обмена с диском, не фриз): %d, простой %s; кто ждал (случаев от %s): %s\n", s.Quiet,
 			ioSeconds(s.QuietIdleMS), ioSeconds(s.Min), ioRankedCases(s.QuietWho, -1))
@@ -432,6 +525,13 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 			writeProcessIOTop(w, "  запись процессов", k.ProcWrite[:min(3, len(k.ProcWrite))], ioBytes, k.ProcessDetails)
 		}
 	}
+}
+
+func ioMillisSeconds(ms int64) string {
+	if ms%1000 == 0 {
+		return fmt.Sprintf("%d с", ms/1000)
+	}
+	return ioDecimal(float64(ms)/1000) + " с"
 }
 
 // ioCoverWhy — причина пробела покрытия человеку.

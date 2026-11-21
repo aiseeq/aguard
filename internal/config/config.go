@@ -170,6 +170,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Disk.Lead, c.Disk.SendAuth = c.Lead, c.SendAuth
 	c.Btrfs.Lead, c.Btrfs.SendAuth = c.Lead, c.SendAuth
 	c.IO.Lead, c.IO.SendAuth = c.Lead, c.SendAuth
+	c.IO.BtrfsSysfsRoot = c.Btrfs.SysfsRoot
 	c.IO.Socket = policy.ExpandHome(c.IO.Socket, home)
 	c.IO.Tk = policy.ExpandHome(c.IO.Tk, home)
 	c.Disk.Tk = c.IO.Tk // тикеты хозяевам disk — тем же tk
