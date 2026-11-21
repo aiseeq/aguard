@@ -1051,6 +1051,31 @@ func TestRecorderGapWithLongStalledStep(t *testing.T) {
 	}
 }
 
+func TestCaseSumsDiscardAndFlushWithinWindow(t *testing.T) {
+	base := time.Date(2026, 11, 20, 9, 51, 38, 0, time.Local)
+	cfg := Default()
+	cfg.CaseMin = policy.Duration(0)
+	r := NewRecorder(cfg)
+	step := func(elapsed time.Duration, idle, dios, dms, fios, fms int64) []Case {
+		return r.Step(Step{At: base.Add(elapsed), IOFullUS: idle, DIOS: dios, DMS: dms, FIOS: fios, FMS: fms})
+	}
+	step(0, 0, 100, 1000, 100, 1000) // до начала случая — исключить
+	step(100*time.Millisecond, 100_000, 1, 10, 1, 10)
+	step(200*time.Millisecond, 0, 2, 20, 2, 20) // спокойный шаг внутри случая — включить при продолжении
+	step(300*time.Millisecond, 100_000, 3, 30, 3, 30)
+	step(400*time.Millisecond, 0, 4, 40, 4, 40) // хвост спокойных шагов — исключить
+	step(500*time.Millisecond, 0, 5, 50, 5, 50)
+	step(800*time.Millisecond, 0, 6, 60, 6, 60) // закрывает случай; сам шаг уже вне окна
+	cases := r.Close()
+	if len(cases) != 1 {
+		t.Fatalf("закрытых случаев %d: %+v", len(cases), cases)
+	}
+	c := cases[0]
+	if c.DiscardOps != 6 || c.DiscardMS != 60 || c.Flushes != 6 || c.FlushMS != 60 {
+		t.Fatalf("суммы только по окну случая: %+v", c)
+	}
+}
+
 func TestRecorderUsesWallClockStepIntervals(t *testing.T) {
 	base := time.Date(2026, 10, 28, 15, 0, 0, 0, time.Local)
 	steps := []time.Duration{0, 100 * time.Millisecond, 200 * time.Millisecond}

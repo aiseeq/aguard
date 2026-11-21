@@ -365,6 +365,52 @@ func TestReportTextAndJSONFromFile(t *testing.T) {
 	}
 }
 
+func TestReportShowsDiscardAndFlushOnlyWhenPresent(t *testing.T) {
+	a, out := testIOApp(t)
+	path := filepath.Join(t.TempDir(), "cases.jsonl")
+	base := time.Now().Add(-2 * time.Hour).Truncate(time.Hour)
+	withIO := alertCase(base, 3000)
+	withIO.DiscardOps, withIO.DiscardMS = 7, 300
+	withIO.Flushes, withIO.FlushMS = 2, 15
+	withoutIO := iowatch.Case{Start: base.Add(time.Minute), End: base.Add(time.Minute + time.Second), DurMS: 1000,
+		Culprits: &iowatch.Culprit{Main: "/user.slice/agent-sess7-1.scope"}}
+	withoutIO.Flushes = 9 // flush_ms у старой сводки неизвестно; строка должна остаться прежней.
+	if err := iowatch.SaveCases(path, []iowatch.Case{withIO, withoutIO}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ioReport(context.Background(), path, false, base.Add(-time.Minute), time.Now(), 0, "", false); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "discard 7 ops, задержки 300 мс") {
+		t.Errorf("report не показывает discard:\n%s", text)
+	}
+	if strings.Contains(text, "; flush ") {
+		t.Errorf("flush дублируется в строке случая:\n%s", text)
+	}
+	wantUnchanged := withoutIO.Start.Format("02.01 15:04:05") + ", 1,0 с (простой 0 мс, io; пик шага 0 мс), главная cgroup sess7"
+	if got := ioCaseLine(&withoutIO); got != wantUnchanged {
+		t.Errorf("строка без discard/flush изменилась: получено %q, ожидалось %q", got, wantUnchanged)
+	}
+	out.Reset()
+	if err := a.ioReport(context.Background(), path, false, base.Add(-time.Minute), time.Now(), 0, "", true); err != nil {
+		t.Fatal(err)
+	}
+	var sum iowatch.Summary
+	if err := json.Unmarshal(out.Bytes(), &sum); err != nil {
+		t.Fatal(err)
+	}
+	var got *iowatch.Case
+	for i := range sum.Cases {
+		if sum.Cases[i].DiscardOps != 0 {
+			got = &sum.Cases[i]
+		}
+	}
+	if got == nil || got.DiscardOps != 7 || got.DiscardMS != 300 || got.Flushes != 2 || got.FlushMS != 15 {
+		t.Fatalf("JSON report: %+v", sum.Cases)
+	}
+}
+
 // report -since/-until в формах series (30m, ЧЧ:ММ, RFC3339) — окно [since, until); -who — случаи, где подстрока в главной
 // cgroup, топах процессов или их cmdline, и в тексте, и в -json; until раньше since — ошибка. У случая «в основном
 // чтение» в «самых длинных» — топ чтения, у остальных — записи (08.11 04:25:48: текст называл chrome 4 МБ записи, а

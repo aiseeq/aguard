@@ -32,7 +32,10 @@ type Case struct {
 	WAwaitMS        int64     `json:"w_await_ms,omitempty"`
 	InFlight        int64     `json:"inflight,omitempty"` // наибольшая очередь устройства
 	Flushes         int64     `json:"flushes,omitempty"`
-	Dirty           int64     `json:"dirty,omitempty"` // наибольшие Dirty и Writeback за окно виновников, байт
+	FlushMS         int64     `json:"flush_ms,omitempty"`
+	DiscardOps      int64     `json:"discard_ops,omitempty"`
+	DiscardMS       int64     `json:"discard_ms,omitempty"` // сумма задержек discard-запросов, не время занятости устройства
+	Dirty           int64     `json:"dirty,omitempty"`      // наибольшие Dirty и Writeback за окно виновников, байт
 	Writeback       int64     `json:"writeback,omitempty"`
 	// Quiet — обмен с диском за случай меньше quiet_bytes и memory full меньше половины случая: простой без трафика
 	// (одна задача ждёт датчик, как thinkfan) — PSI считает его 100 % full, а машина не стоит. В письма не идёт.
@@ -164,11 +167,11 @@ func (c *Case) Dur() time.Duration { return time.Duration(c.DurMS) * time.Millis
 
 // stepSum — сумма быстрых шагов.
 type stepSum struct {
-	idle, peak, ioFull, ioSome, memFull, memSome  int64
-	swapIn, swapOut, majflt, rd, wr, ticks, flush int64
-	rms, rios, wms, wios, inflight                int64
-	vrateMin                                      float64
-	vrateKnown                                    bool
+	idle, peak, ioFull, ioSome, memFull, memSome                                  int64
+	swapIn, swapOut, majflt, rd, wr, ticks, flush, flushMS, discardOps, discardMS int64
+	rms, rios, wms, wios, inflight                                                int64
+	vrateMin                                                                      float64
+	vrateKnown                                                                    bool
 }
 
 func (t *stepSum) add(s Step) {
@@ -186,6 +189,9 @@ func (t *stepSum) add(s Step) {
 	t.wr += s.WriteBytes
 	t.ticks += s.IOTicks
 	t.flush += s.FIOS
+	t.flushMS += s.FMS
+	t.discardOps += s.DIOS
+	t.discardMS += s.DMS
 	t.rms += s.RMS
 	t.rios += s.RIOS
 	t.wms += s.WMS
@@ -213,6 +219,9 @@ func (t *stepSum) merge(o stepSum) {
 	t.wr += o.wr
 	t.ticks += o.ticks
 	t.flush += o.flush
+	t.flushMS += o.flushMS
+	t.discardOps += o.discardOps
+	t.discardMS += o.discardMS
 	t.rms += o.rms
 	t.rios += o.rios
 	t.wms += o.wms
@@ -237,7 +246,8 @@ func (o *openCase) toCase() Case {
 		IdleMS: t.idle / 1000, PeakMS: t.peak / 1000, IOFullMS: t.ioFull / 1000, IOSomeMS: t.ioSome / 1000,
 		MemFullMS: t.memFull / 1000, MemSomeMS: t.memSome / 1000, SwapIn: t.swapIn, SwapOut: t.swapOut, Majflt: t.majflt,
 		ReadB: t.rd, WriteB: t.wr, BusyMS: t.ticks, RAwaitMS: AwaitMS(t.rms, t.rios), WAwaitMS: AwaitMS(t.wms, t.wios),
-		InFlight: t.inflight, Flushes: t.flush}
+		InFlight: t.inflight, Flushes: t.flush, FlushMS: t.flushMS,
+		DiscardOps: t.discardOps, DiscardMS: t.discardMS}
 	if t.vrateKnown {
 		v := t.vrateMin
 		c.VRateMin = &v
