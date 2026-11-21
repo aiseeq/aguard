@@ -742,3 +742,15 @@ func TestPassGrewHourlyWalkWindow(t *testing.T) {
 		t.Fatalf("повтор: %+v", second)
 	}
 }
+
+func TestDefaultExpandsTrackPaths(t *testing.T) {
+	home := t.TempDir()
+	c := Default()
+	if err := c.Validate(home); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(home, ".local/state/aguard/track-home/state.json")
+	if c.Track[1] != want {
+		t.Fatalf("persistent track path = %q, want %q", c.Track[1], want)
+	}
+}

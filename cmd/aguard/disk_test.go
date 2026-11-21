@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,7 +14,9 @@ import (
 
 	"github.com/aiseeq/aguard/internal/config"
 	"github.com/aiseeq/aguard/internal/disk"
+	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/statefile"
+	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/aguard/internal/yield"
 	"github.com/aiseeq/akit/session"
 )
@@ -560,5 +563,50 @@ func TestDiskMeasureContinuesAfterPressureErrorPause(t *testing.T) {
 	})
 	if err != nil || !warned || sawCanceled || len(usage) != 1 || yielder.Pauses != 1 || yielder.Paused < 2*time.Second || !strings.Contains(logged.String(), "pauses=1") {
 		t.Fatalf("disk did not continue after pressure-error pause: err=%v warned=%v canceled=%v usage=%v pauses=%d duration=%v log=%s", err, warned, sawCanceled, usage, yielder.Pauses, yielder.Paused, logged.String())
+	}
+}
+
+func TestDiskCreatorsPrefersLiveSnapshotAndFallsBackFromEmpty(t *testing.T) {
+	runDir, stateDir := t.TempDir(), t.TempDir()
+	runPath := filepath.Join(runDir, record.StateFile)
+	diskPath := filepath.Join(stateDir, record.StateFile)
+	now := time.Now()
+	write := func(path, command string, updated time.Time) {
+		t.Helper()
+		b, err := json.Marshal(record.State{Updated: updated, Entries: []record.Entry{{Path: "/home/u/.cache/item", Born: now,
+			Owner: &record.Owner{Proc: record.Proc{Args: command}}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(runPath, "run-file", now.Add(-2*time.Minute))
+	write(diskPath, "disk-file", now.Add(-time.Minute))
+	cfg := &config.Config{}
+	cfg.Disk.Track = []string{runPath, diskPath}
+	var logbuf bytes.Buffer
+	a := &app{log: slog.New(slog.NewTextHandler(&logbuf, nil))}
+	facts := &disk.Facts{Created: map[string]disk.Creator{}}
+	track.PublishSnapshot(runDir, &record.State{Updated: now, Entries: []record.Entry{{Path: "/home/u/.cache/item", Born: now,
+		Owner: &record.Owner{Proc: record.Proc{Args: "memory"}}}}})
+	if err := os.WriteFile(diskPath, []byte("invalid JSON must not be read while memory is live"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.diskCreators(cfg, facts)
+	if got := facts.Created["/home/u/.cache/item"].Command; got != "memory" {
+		t.Fatalf("creator from memory = %q", got)
+	}
+	if logbuf.Len() != 0 {
+		t.Fatalf("disk decoded a file despite a live snapshot: %s", logbuf.String())
+	}
+
+	write(diskPath, "disk-file", now.Add(-time.Minute))
+	track.PublishSnapshot(runDir, &record.State{})
+	facts = &disk.Facts{Created: map[string]disk.Creator{}}
+	a.diskCreators(cfg, facts)
+	if got := facts.Created["/home/u/.cache/item"].Command; got != "disk-file" {
+		t.Fatalf("creator fallback = %q", got)
 	}
 }

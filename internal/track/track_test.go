@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,9 +90,9 @@ func TestDeleteReachesLogAndSnapshot(t *testing.T) {
 	if tr.measuring {
 		t.Fatal("замер запущен без записей")
 	}
-	st, err := record.ReadState(filepath.Join(dir, record.StateFile))
-	if err != nil {
-		t.Fatal(err)
+	st := Snapshot(dir)
+	if st == nil {
+		t.Fatal("снимок в памяти не опубликован")
 	}
 	if len(st.Entries) != 1 || st.Entries[0].Path != "/tmp/old-b" {
 		t.Fatalf("в снимке осталось удалённое: %+v", st.Entries)
@@ -569,5 +570,270 @@ func TestProcUID(t *testing.T) {
 	}
 	if uid, err := procUID(cmd.Process.Pid); err == nil {
 		t.Fatalf("умерший процесс %d: uid %d без ошибки", cmd.Process.Pid, uid)
+	}
+}
+
+func TestSnapshotConcurrentPublishAndRead(t *testing.T) {
+	dir := t.TempDir()
+	original := &record.State{Updated: time.Now(), Entries: []record.Entry{{Path: "/tmp/immutable", Born: time.Now(), Owner: &record.Owner{Chain: []record.Link{{Pid: 1}}}}}}
+	publishSnapshot(dir, cloneState(original, []*record.Entry{&original.Entries[0]}))
+	original.Entries[0].Path = "/tmp/mutated"
+	original.Entries[0].Owner.Chain[0].Pid = 99
+	got := Snapshot(dir + string(filepath.Separator) + ".")
+	if got.Entries[0].Path != "/tmp/immutable" || got.Entries[0].Owner.Chain[0].Pid != 1 {
+		t.Fatal("публикация разделяет изменяемую память с Tracker")
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 2000 {
+				s := Snapshot(dir)
+				if len(s.Entries) != 1 || s.Entries[0].Path != "/tmp/immutable" || s.Entries[0].Owner.Chain[0].Pid < 1 {
+					t.Errorf("повреждён опубликованный снимок: %+v", s.Entries[0])
+					return
+				}
+			}
+		})
+	}
+	for i := 1; i <= 2000; i++ {
+		publishSnapshot(dir, cloneState(&record.State{Updated: time.Now()}, []*record.Entry{{Path: "/tmp/immutable", Born: time.Now(), Owner: &record.Owner{Chain: []record.Link{{Pid: i}}}}}))
+	}
+	wg.Wait()
+}
+
+func BenchmarkSnapshotAccess(b *testing.B) {
+	entries := make([]*record.Entry, 1000)
+	for i := range entries {
+		entries[i] = &record.Entry{Path: fmt.Sprintf("/tmp/entry-%d", i), Born: time.Now(), Owner: &record.Owner{
+			Proc:    record.Proc{Pid: i + 1, Args: "node --synthetic workload", State: record.ProcOK},
+			Chain:   []record.Link{{Pid: i + 2, Comm: "claude"}},
+			Session: &record.Session{Pid: i + 2, Name: "synthetic-lead", Via: "ppid"},
+		}}
+	}
+	s := &record.State{Updated: time.Now()}
+	cloned := cloneState(s, entries)
+	dir := b.TempDir()
+	publishSnapshot(dir, cloned)
+	raw, _ := json.Marshal(cloned)
+	b.Run("before-json-read", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var state record.State
+			if err := json.Unmarshal(raw, &state); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("clone-on-save", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = cloneState(s, entries)
+		}
+	})
+	b.Run("after-atomic-pointer", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = Snapshot(dir)
+		}
+	})
+}
+
+func TestRevMemoryEqualsFile(t *testing.T) {
+	runDir, stateDir := t.TempDir(), t.TempDir()
+	ownerLog, err := openEventLog(filepath.Join(stateDir, record.OwnersFile), 0, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownerLog.close()
+	now := time.Now()
+	tr := &Tracker{cfg: Config{RunDir: runDir, StateDir: stateDir, Persist: time.Hour, Roots: []string{"/tmp"}, Containers: []string{"/tmp/c"}},
+		owners: ownerLog, log: slog.New(slog.DiscardHandler), entries: map[string]*record.Entry{}, started: now.Add(-time.Hour), lastFull: now.Add(-time.Minute)}
+	tr.entries["/tmp/b"] = &record.Entry{Path: "/tmp/b", Born: now.Add(-time.Hour), Bytes: 5, MeasuredAt: now,
+		Owner: &record.Owner{Proc: record.Proc{Pid: 7, Args: "x y", State: "ok"}, Chain: []record.Link{{Pid: 3, Comm: "c"}}, Session: &record.Session{Pid: 3, Name: "lead", Via: "ppid"}}}
+	tr.entries["/tmp/a"] = &record.Entry{Path: "/tmp/a", Born: now.Add(-2 * time.Hour), Dir: true}
+	tr.entries["/tmp/noborn"] = &record.Entry{Path: "/tmp/noborn"}
+	tr.entries["/tmp/emptychain"] = &record.Entry{Path: "/tmp/emptychain", Born: now, Owner: &record.Owner{Chain: []record.Link{}}}
+	tr.save(true)
+	mem := Snapshot(runDir)
+	file, err := record.ReadState(filepath.Join(runDir, record.StateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskCopy, err := record.ReadState(filepath.Join(stateDir, record.StateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mj, _ := json.Marshal(mem)
+	fj, _ := json.Marshal(file)
+	dj, _ := json.Marshal(diskCopy)
+	if string(mj) != string(fj) || string(fj) != string(dj) {
+		t.Fatalf("json differs:\nmem %s\nfile %s\ndisk %s", mj, fj, dj)
+	}
+	if !reflect.DeepEqual(mem.NoBorn, file.NoBorn) {
+		t.Fatalf("NoBorn memory %v file %v", mem.NoBorn, file.NoBorn)
+	}
+	normalize := func(s *record.State) *record.State {
+		c := *s
+		c.Updated, c.Started, c.LastFull = c.Updated.Round(0), c.Started.Round(0), c.LastFull.Round(0)
+		c.Entries = append([]record.Entry(nil), s.Entries...)
+		for i := range c.Entries {
+			c.Entries[i].Born = c.Entries[i].Born.Round(0)
+			c.Entries[i].MeasuredAt = c.Entries[i].MeasuredAt.Round(0)
+		}
+		return &c
+	}
+	if !reflect.DeepEqual(normalize(mem), normalize(file)) {
+		t.Fatalf("struct differs:\nmem %#v\nfile %#v", mem.Entries, file.Entries)
+	}
+}
+
+func TestRevRestoreAfterErrorSeesLatest(t *testing.T) {
+	runDir, stateDir := t.TempDir(), t.TempDir()
+	ownerLog, err := openEventLog(filepath.Join(stateDir, record.OwnersFile), 0, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownerLog.close()
+	makeTracker := func() *Tracker {
+		return &Tracker{cfg: Config{RunDir: runDir, StateDir: stateDir, Young: 15 * time.Minute, Persist: time.Hour}, owners: ownerLog,
+			log: slog.New(slog.DiscardHandler), entries: map[string]*record.Entry{}, watched: map[string]string{}, started: time.Now().Add(-time.Hour),
+			statMeta: func(string) (meta, error) { return meta{}, nil }}
+	}
+	tr := makeTracker()
+	now := time.Now()
+	tr.entries["/tmp/a"] = &record.Entry{Path: "/tmp/a", Born: now.Add(-time.Hour)}
+	tr.save(true)
+	tr.entries["/tmp/new"] = &record.Entry{Path: "/tmp/new", Born: now, Owner: &record.Owner{Proc: record.Proc{Pid: 42, State: "ok"}}}
+	tr.save(false) // error before the 5-minute runtime-file deadline
+	restarted := makeTracker()
+	restarted.restore()
+	if restarted.entries["/tmp/new"] == nil {
+		t.Fatal("restore не взял более свежий снимок из памяти")
+	}
+	_ = restarted.withFinalSnapshot(func() error { return errors.New("injected tracker error") })
+	diskCopy, err := record.ReadState(filepath.Join(runDir, record.StateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range diskCopy.Entries {
+		if e.Path == "/tmp/new" {
+			return
+		}
+	}
+	t.Fatalf("deferred runtime write lacks latest entry: %d entries", len(diskCopy.Entries))
+}
+
+func TestSaveRunSnapshotThrottle(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	tr := &Tracker{cfg: Config{RunDir: dir, StateDir: dir, Persist: time.Hour}, entries: map[string]*record.Entry{}, log: slog.New(slog.DiscardHandler), started: now}
+	tr.entries["/tmp/old"] = &record.Entry{Path: "/tmp/old", Born: now}
+	tr.save(false)
+	path := filepath.Join(dir, record.StateFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.entries["/tmp/new"] = &record.Entry{Path: "/tmp/new", Born: now}
+	tr.lastRunSave = time.Now().Add(-runSnapshotInterval + time.Second)
+	tr.save(false)
+	within, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, within) {
+		t.Fatal("runtime-файл обновился раньше 5 минут")
+	}
+	priorWrite := tr.lastRunSave
+	tr.lastRunSave = time.Now().Add(-runSnapshotInterval)
+	tr.save(false)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(within, after) {
+		t.Fatal("runtime-файл не обновился по истечении 5 минут")
+	}
+	if !tr.lastRunSave.After(priorWrite) {
+		t.Fatal("время последней runtime-записи не обновлено")
+	}
+}
+
+func TestCloneStateIsDeepAndPreservesEmptySlices(t *testing.T) {
+	state := &record.State{Roots: []string{"/tmp"}, Containers: []string{"/tmp/c"}, Entries: []record.Entry{{Path: "/tmp/x", Born: time.Now(), Owner: &record.Owner{
+		Chain: []record.Link{{Pid: 1}}, Session: &record.Session{Name: "leader"}}}}}
+	es := []*record.Entry{&state.Entries[0]}
+	cloned := cloneState(state, es)
+	state.Roots[0] = "/changed"
+	state.Containers[0] = "/changed"
+	state.Entries[0].Owner.Chain[0].Pid = 2
+	state.Entries[0].Owner.Session.Name = "changed"
+	if cloned.Roots[0] != "/tmp" || len(cloned.Containers) != 1 || cloned.Containers[0] != "/tmp/c" || cloned.Entries[0].Owner.Chain[0].Pid != 1 || cloned.Entries[0].Owner.Session.Name != "leader" {
+		t.Fatalf("clone aliases source: %+v", cloned)
+	}
+	empty := cloneState(&record.State{Containers: []string{}}, nil)
+	if empty.Containers == nil {
+		t.Fatal("clone lost non-nil empty Containers")
+	}
+}
+
+// A failed startup before restore must not write an empty runtime snapshot.
+func TestRev2FailedStartKeepsRunSnapshot(t *testing.T) {
+	runDir, stateDir := t.TempDir(), t.TempDir()
+	lg := slog.New(slog.DiscardHandler)
+	ownerLog, err := openEventLog(filepath.Join(stateDir, record.OwnersFile), 0, lg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownerLog.close()
+	cfg := Config{RunDir: runDir, StateDir: stateDir, Young: 15 * time.Minute, Persist: time.Hour}
+	live := &Tracker{cfg: cfg, owners: ownerLog, log: lg, entries: map[string]*record.Entry{}, watched: map[string]string{}, started: time.Now()}
+	live.entries["/tmp/a"] = &record.Entry{Path: "/tmp/a", Born: time.Now().Add(-time.Hour)}
+	live.save(true)
+	lock, err := lockWriter(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := runWithTombs(t.Context(), cfg, -1, nil, nil, lg); err == nil {
+		t.Fatal("second writer started under a held lock")
+	}
+	st, err := record.ReadState(filepath.Join(runDir, record.StateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Entries) != 1 {
+		t.Fatalf("failed second instance rewrote /run: %d entries (want 1)", len(st.Entries))
+	}
+	restored := &Tracker{cfg: cfg, owners: ownerLog, log: lg, entries: map[string]*record.Entry{}, watched: map[string]string{},
+		statMeta: func(string) (meta, error) { return meta{}, nil }}
+	restored.restore()
+	if restored.entries["/tmp/a"] == nil {
+		t.Fatal("restore after failed start lost entries")
+	}
+}
+
+func TestRestorePrefersNewerRunFileOverMemory(t *testing.T) {
+	runDir, stateDir := t.TempDir(), t.TempDir()
+	now := time.Now()
+	writeStateFile := func(path, entry string, updated time.Time) {
+		t.Helper()
+		state := record.State{Updated: updated, Entries: []record.Entry{{Path: entry, Born: now}}}
+		raw, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeStateFile(filepath.Join(runDir, record.StateFile), "/tmp/run-newer", now)
+	writeStateFile(filepath.Join(stateDir, record.StateFile), "/tmp/disk-older", now.Add(-time.Minute))
+	PublishSnapshot(runDir, &record.State{Updated: now.Add(-time.Minute), Entries: []record.Entry{{Path: "/tmp/memory-older", Born: now}}})
+	tr := &Tracker{cfg: Config{RunDir: runDir, StateDir: stateDir}, entries: map[string]*record.Entry{}, log: slog.New(slog.DiscardHandler),
+		statMeta: func(string) (meta, error) { return meta{}, nil }}
+	tr.restore()
+	if tr.entries["/tmp/run-newer"] == nil || tr.entries["/tmp/memory-older"] != nil {
+		t.Fatalf("restore did not select newer /run snapshot: entries=%v", tr.entries)
 	}
 }

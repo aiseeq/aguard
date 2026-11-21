@@ -29,6 +29,7 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/statefile"
+	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/aguard/internal/waits"
 	"github.com/aiseeq/aguard/internal/yield"
 )
@@ -567,13 +568,22 @@ func (a *app) diskFacts(cfg *config.Config, owners *disk.Owners, list []string) 
 func (a *app) diskCreators(cfg *config.Config, f *disk.Facts) {
 	var best *record.State
 	for _, path := range cfg.Disk.Track {
-		s, err := record.ReadState(path)
-		if err != nil {
-			a.warn("disk", "снимок слежения "+path, "err", err)
-			continue
-		}
-		if best == nil || s.Updated.After(best.Updated) {
+		s := track.Snapshot(filepath.Dir(path))
+		if s != nil && !s.Updated.IsZero() && (best == nil || s.Updated.After(best.Updated)) {
 			best = s
+		}
+	}
+	// Decode disk copies only when no live in-process snapshot exists.
+	if best == nil {
+		for _, path := range cfg.Disk.Track {
+			s, err := record.ReadState(path)
+			if err != nil {
+				a.warn("disk", "снимок слежения "+path, "err", err)
+				continue
+			}
+			if best == nil || s.Updated.After(best.Updated) {
+				best = s
+			}
 		}
 	}
 	if best == nil {

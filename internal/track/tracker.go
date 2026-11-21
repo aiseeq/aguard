@@ -14,7 +14,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -49,28 +52,72 @@ type counters struct {
 	measurePaused                               time.Duration
 }
 
+const runSnapshotInterval = 5 * time.Minute
+
+var snapshots = struct {
+	sync.RWMutex
+	byDir map[string]*atomic.Pointer[record.State] // Два настроенных экземпляра; снимки переживают retry в том же процессе.
+}{byDir: make(map[string]*atomic.Pointer[record.State])}
+
+// Snapshot returns the latest immutable in-process snapshot for a runtime state directory.
+func Snapshot(runDir string) *record.State {
+	snapshots.RLock()
+	ptr := snapshots.byDir[filepath.Clean(runDir)]
+	snapshots.RUnlock()
+	if ptr == nil {
+		return nil
+	}
+	return ptr.Load()
+}
+
+func publishSnapshot(dir string, s *record.State) {
+	key := filepath.Clean(dir)
+	snapshots.Lock()
+	ptr := snapshots.byDir[key]
+	if ptr == nil {
+		ptr = &atomic.Pointer[record.State]{}
+		snapshots.byDir[key] = ptr
+	}
+	ptr.Store(s)
+	snapshots.Unlock()
+}
+
+// PublishSnapshot stores an immutable copy for in-process observers.
+func PublishSnapshot(runDir string, s *record.State) {
+	if s == nil {
+		return
+	}
+	entries := make([]*record.Entry, len(s.Entries))
+	for i := range s.Entries {
+		entries[i] = &s.Entries[i]
+	}
+	cloned := cloneState(s, entries)
+	publishSnapshot(runDir, cloned)
+}
+
 // Tracker — состояние сторожа. Все поля меняет только главная горутина.
 type Tracker struct {
-	cfg        Config
-	fd         int      // группа fanotify: fanotify_mark
-	fan        *os.File // она же: чтение через опрос среды, Close будит читателя
-	done       chan struct{}
-	res        *Resolver
-	tombs      *Tombs
-	owners     *eventLog // owners.jsonl
-	log        *slog.Logger
-	entries    map[string]*record.Entry
-	statMeta   func(string) (meta, error) // подменяется только в тестах восстановления
-	watchKey   map[string]string          // ключ handle папки -> путь
-	watched    map[string]string          // путь папки -> ключ handle
-	containers map[string]bool
-	started    time.Time
-	lastFull   time.Time
-	fullLogged bool
-	lastSave   time.Time
-	measuring  bool
-	dirty      bool // таблица менялась после последнего снимка
-	st         counters
+	cfg         Config
+	fd          int      // группа fanotify: fanotify_mark
+	fan         *os.File // она же: чтение через опрос среды, Close будит читателя
+	done        chan struct{}
+	res         *Resolver
+	tombs       *Tombs
+	owners      *eventLog // owners.jsonl
+	log         *slog.Logger
+	entries     map[string]*record.Entry
+	statMeta    func(string) (meta, error) // подменяется только в тестах восстановления
+	watchKey    map[string]string          // ключ handle папки -> путь
+	watched     map[string]string          // путь папки -> ключ handle
+	containers  map[string]bool
+	started     time.Time
+	lastFull    time.Time
+	fullLogged  bool
+	lastSave    time.Time
+	lastRunSave time.Time
+	measuring   bool
+	dirty       bool // таблица менялась после последнего снимка
+	st          counters
 }
 
 type measureJob struct {
@@ -178,7 +225,12 @@ func runWithTombs(ctx context.Context, cfg Config, fanFD int, fan *os.File, tomb
 		}
 	}
 	t.restore()
-	return t.loop(ctx)
+	return t.withFinalSnapshot(func() error { return t.loop(ctx) })
+}
+
+func (t *Tracker) withFinalSnapshot(run func() error) error {
+	defer t.writeRunSnapshot()
+	return run()
 }
 
 // loop — главная горутина: события, замеры, снимки и сводка.
@@ -669,7 +721,7 @@ func restoreMatches(e record.Entry, m meta) bool {
 	return (e.Ino == 0 || m.ino == e.Ino) && (!m.hasBorn || !m.born.After(e.Born.Add(time.Second)))
 }
 
-// restore поднимает таблицу из снимка: свежий из /run, иначе с диска.
+// restore поднимает таблицу из самого свежего снимка: память, /run или долговременная копия.
 // Записи, которых больше нет (или inode/btime другой), закрываются как gone.
 func (t *Tracker) restore() {
 	var st *record.State
@@ -685,6 +737,9 @@ func (t *Tracker) restore() {
 		if st == nil || s.Updated.After(st.Updated) {
 			st = s
 		}
+	}
+	if s := Snapshot(t.cfg.RunDir); s != nil && (st == nil || s.Updated.After(st.Updated)) {
+		st = s
 	}
 	if st == nil {
 		return
@@ -718,9 +773,12 @@ func (t *Tracker) save(persist bool) {
 	}
 	sort.Slice(es, func(i, j int) bool { return es[i].Path < es[j].Path })
 	t.dirty = false
+	// Копия глубоко отделена от изменяемых записей Tracker: опубликованный State неизменяем.
+	published := cloneState(&s, es)
+	publishSnapshot(t.cfg.RunDir, published)
 	fill := func(w io.Writer) error { return writeState(w, &s, es) }
-	if err := record.WriteFileAtomicFunc(filepath.Join(t.cfg.RunDir, record.StateFile), 0o644, fill); err != nil {
-		t.log.Error("aguard слежение: снимок", "err", err)
+	if t.lastRunSave.IsZero() || now.Sub(t.lastRunSave) >= runSnapshotInterval {
+		t.writeRunSnapshotAt(now, &s, es)
 	}
 	if persist {
 		if err := record.WriteFileAtomicFunc(filepath.Join(t.cfg.StateDir, record.StateFile), 0o644, fill); err != nil {
@@ -728,6 +786,63 @@ func (t *Tracker) save(persist bool) {
 		}
 		t.lastSave = now
 	}
+}
+
+func (t *Tracker) writeRunSnapshot() {
+	now := time.Now()
+	s := record.State{Updated: now, Started: t.started, LastFull: t.lastFull, Roots: t.cfg.Roots, Containers: t.cfg.Containers}
+	es := make([]*record.Entry, 0, len(t.entries))
+	for _, e := range t.entries {
+		es = append(es, e)
+	}
+	sort.Slice(es, func(i, j int) bool { return es[i].Path < es[j].Path })
+	t.writeRunSnapshotAt(now, &s, es)
+}
+
+func (t *Tracker) writeRunSnapshotAt(now time.Time, s *record.State, es []*record.Entry) {
+	fill := func(w io.Writer) error { return writeState(w, s, es) }
+	if err := record.WriteFileAtomicFunc(filepath.Join(t.cfg.RunDir, record.StateFile), 0o644, fill); err != nil {
+		t.log.Error("aguard слежение: снимок", "err", err)
+		return
+	}
+	t.lastRunSave = now
+}
+
+func cloneStrings(in []string) []string { return slices.Clone(in) }
+
+func cloneLinks(in []record.Link) []record.Link {
+	if len(in) == 0 {
+		return nil // The JSON encoder omits an empty chain; match the decoded representation.
+	}
+	out := make([]record.Link, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneState(s *record.State, es []*record.Entry) *record.State {
+	out := *s
+	out.Roots = cloneStrings(s.Roots)
+	out.Containers = cloneStrings(s.Containers)
+	out.NoBorn = cloneStrings(s.NoBorn)
+	out.Entries = make([]record.Entry, 0, len(es))
+	for _, e := range es {
+		if e.Born.IsZero() {
+			out.NoBorn = append(out.NoBorn, e.Path)
+			continue
+		}
+		entry := *e
+		if e.Owner != nil {
+			owner := *e.Owner
+			owner.Chain = cloneLinks(e.Owner.Chain)
+			if e.Owner.Session != nil {
+				session := *e.Owner.Session
+				owner.Session = &session
+			}
+			entry.Owner = &owner
+		}
+		out.Entries = append(out.Entries, entry)
+	}
+	return &out
 }
 
 func (t *Tracker) logStats() {

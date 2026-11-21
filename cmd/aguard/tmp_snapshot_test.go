@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/report"
+	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
 )
@@ -575,5 +577,77 @@ func TestTmpSnapshotDecodesOnlyNewestMtimeCopy(t *testing.T) {
 	got, err = a.snapshot(&policy.Config{RunDir: run, TrackDir: track})
 	if err != nil || len(got.Entries) != 1 || got.Entries[0].Path != "/tmp/disk-31s" {
 		t.Fatalf("snapshot from disk fallback = %+v, %v", got, err)
+	}
+}
+
+func TestRevTmpMemorySnapshotMatchesFile(t *testing.T) {
+	runDir, diskDir := t.TempDir(), t.TempDir()
+	now := time.Now()
+	fileState := record.State{Updated: now.Add(-time.Minute), Roots: []string{"/tmp"}, Entries: []record.Entry{
+		{Path: "/tmp/a", Born: now.Add(-time.Hour), Owner: &record.Owner{Proc: record.Proc{Pid: 4, Args: "file"}, Chain: []record.Link{}}},
+		{Path: "/tmp/noborn"},
+	}}
+	raw, err := json.Marshal(fileState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, record.StateFile), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(diskDir, record.StateFile), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := record.ReadState(filepath.Join(runDir, record.StateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	a := &app{log: slog.New(slog.NewTextHandler(&logs, nil))}
+	track.PublishSnapshot(runDir, &record.State{Updated: now, Roots: []string{"/tmp"}, Entries: []record.Entry{
+		{Path: "/tmp/a", Born: now.Add(-time.Hour), Owner: &record.Owner{Proc: record.Proc{Pid: 4, Args: "file"}, Chain: []record.Link{}}},
+		{Path: "/tmp/noborn"},
+	}})
+	got, err := a.snapshot(&policy.Config{RunDir: runDir, TrackDir: diskDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected.Updated = got.Updated // наблюдатель получает поколение новее файлового снимка
+	wantJSON, _ := json.Marshal(expected)
+	gotJSON, _ := json.Marshal(got)
+	if !reflect.DeepEqual(gotJSON, wantJSON) {
+		t.Fatalf("memory observer differs from file:\n got %s\nwant %s", gotJSON, wantJSON)
+	}
+	if !strings.Contains(logs.String(), "/tmp/noborn") {
+		t.Fatalf("missing no-born warning: %s", logs.String())
+	}
+}
+
+func TestTmpRejectsEmptyMemorySnapshot(t *testing.T) {
+	runDir := t.TempDir()
+	track.PublishSnapshot(runDir, &record.State{})
+	a := &app{log: slog.New(slog.DiscardHandler)}
+	if _, err := a.snapshot(&policy.Config{RunDir: runDir, TrackDir: t.TempDir()}); err == nil {
+		t.Fatal("empty in-memory snapshot accepted")
+	}
+}
+
+func TestTmpReadsNewestMemorySnapshot(t *testing.T) {
+	runDir, trackDir := t.TempDir(), t.TempDir()
+	now := time.Now()
+	fileBytes, err := json.Marshal(record.State{Updated: now, Entries: []record.Entry{{Path: "/tmp/file-copy", Born: now}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, record.StateFile), fileBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	track.PublishSnapshot(runDir, &record.State{Updated: now.Add(time.Minute), Entries: []record.Entry{{Path: "/tmp/memory-copy", Born: now}}})
+	a := &app{log: slog.New(slog.DiscardHandler)}
+	got, err := a.snapshot(&policy.Config{RunDir: runDir, TrackDir: trackDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Entries) != 1 || got.Entries[0].Path != "/tmp/memory-copy" {
+		t.Fatalf("snapshot = %+v", got.Entries)
 	}
 }
