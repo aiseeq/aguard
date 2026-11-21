@@ -459,12 +459,12 @@ func writeIOReport(w io.Writer, s *iowatch.Summary) {
 		}
 		fmt.Fprintln(w, line)
 	} else if s.BtrfsHasData {
-		longest := "0 с в --:--:--"
-		if s.BtrfsLongestCommitMS > 0 {
-			longest = ioDecimal(float64(s.BtrfsLongestCommitMS)/1000) + " с в " + s.BtrfsLongestCommitAt.Format("15:04:05")
+		line := fmt.Sprintf("долгие коммиты btrfs (≥ %s): 0", ioMillisSeconds(s.BtrfsCommitReportMS))
+		if s.BtrfsLongCommits > 0 {
+			line = fmt.Sprintf("долгие коммиты btrfs (≥ %s): %d, самый долгий %s с в %s; из них вне случаев фриза: %d",
+				ioMillisSeconds(s.BtrfsCommitReportMS), s.BtrfsLongCommits, ioDecimal(float64(s.BtrfsLongestCommitMS)/1000),
+				s.BtrfsLongestCommitAt.Format("15:04:05"), s.BtrfsOutsideCases)
 		}
-		line := fmt.Sprintf("долгие коммиты btrfs (≥ %s): %d, самый долгий %s; из них вне случаев фриза: %d",
-			ioMillisSeconds(s.BtrfsCommitReportMS), s.BtrfsLongCommits, longest, s.BtrfsOutsideCases)
 		if s.BtrfsWindow != "" {
 			line += "; " + s.BtrfsWindow
 		}

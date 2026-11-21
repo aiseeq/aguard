@@ -75,7 +75,7 @@ func TestIOReportBtrfsNoDataPreservesLegacyTextAndJSON(t *testing.T) {
 	}
 	out.Reset()
 	writeIOReport(&out, &zero)
-	if !bytes.Contains(out.Bytes(), []byte("долгие коммиты btrfs (≥ 2 с): 0")) {
+	if !bytes.Contains(out.Bytes(), []byte("долгие коммиты btrfs (≥ 2 с): 0\n")) {
 		t.Fatalf("Btrfs data with no long commits lacks line: %s", out.String())
 	}
 }
