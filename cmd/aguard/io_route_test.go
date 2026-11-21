@@ -400,6 +400,21 @@ func TestIOOwnerGraftHeavyPriority(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIOFile(t, filepath.Join(jobDir, "job.json"), `{"id":"J","master":"worker-master"}`)
+	// Случай 21.11 10:05:40: graft heavy запущен из timeout 55m bash … в scope сессии, выше цепочка уходит в systemd --user.
+	detached := []iowatch.Process{
+		{PID: 3890701, PPID: 3890696, Comm: "bash", Cgroup: "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-akit-master-1332071.scope"},
+		{PID: 3890696, PPID: 3431, Comm: "timeout", Cgroup: "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-akit-master-1332071.scope"},
+		{PID: 3431, PPID: 1, Comm: "systemd", Cgroup: "/user.slice/user-1000.slice/user@1000.service/init.scope"},
+	}
+	worktree := filepath.Join(a.home, ".cache", "worktrees", "dream", "user-word-cache")
+	if err := os.MkdirAll(filepath.Join(worktree, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeIOFile(t, filepath.Join(worktree, ".git"), "gitdir: "+filepath.Join(repo, ".git", "worktrees", "user-word-cache")+"\n")
+	notWorktree := filepath.Join(a.home, ".cache", "worktrees", "dream", "plain")
+	if err := os.MkdirAll(notWorktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name, kind, cwd, want string
 		chain                 []iowatch.Process
@@ -410,6 +425,13 @@ func TestIOOwnerGraftHeavyPriority(t *testing.T) {
 		{name: "slash kind falls back to Claude parent", kind: "/:exec:user-word", chain: []iowatch.Process{parentSession}, want: "other-master"},
 		{name: "slash kind finds worker parent", kind: "/:exec:user-word", chain: []iowatch.Process{parentWorker}, want: "worker-master"},
 		{name: "no kind or parent uses byProcess", cwd: repo, want: "dream-master"},
+		{name: "detached parent chain up to systemd finds session scope", kind: "akit:exec:bash", chain: detached, want: "akit-master"},
+		{name: "session scope above a non-session parent", kind: "/:exec:bash", chain: append([]iowatch.Process{
+			{PID: 80, PPID: 3890701, Comm: "nohup", Cgroup: "/user.slice/user-1000.slice/user@1000.service/app.slice/run-u12.scope"}}, detached...), want: "akit-master"},
+		{name: "no kind, cwd in project worktree", cwd: worktree, want: "dream-master"},
+		{name: "no kind, cwd below project worktree root", cwd: filepath.Join(worktree, "sub"), want: "dream-master"},
+		{name: "folder under worktrees without .git file", cwd: notWorktree, want: ""},
+		{name: "worktrees repo folder itself", cwd: filepath.Dir(worktree), want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := iowatch.Case{Culprits: &iowatch.Culprit{Main: main, MainProc: "user-word(4018124)",
@@ -560,5 +582,56 @@ func assertTkCalls(t *testing.T, name, calls string, want, not []string) {
 		if strings.Contains(string(b), w) {
 			t.Fatalf("%s: лишнее %q в\n%s", name, w, b)
 		}
+	}
+}
+
+// Хозяин по дереву graft: имя сессии — из таблицы имён для основного репозитория; битая таблица и ошибка чтения
+// .git дерева не проглатываются.
+func TestIOOwnerWorktreeTableAndErrors(t *testing.T) {
+	a, _ := testIOApp(t)
+	repo := filepath.Join(a.home, "git", "dream")
+	worktree := filepath.Join(a.home, ".cache", "worktrees", "dream", "cache")
+	looped := filepath.Join(a.home, ".cache", "worktrees", "dream", "looped")
+	for _, dir := range []string{repo, worktree, looped, filepath.Join(a.home, ".config", "cl")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeIOFile(t, filepath.Join(worktree, ".git"), "gitdir: "+filepath.Join(repo, ".git", "worktrees", "cache")+"\n")
+	if err := os.Symlink(".git", filepath.Join(looped, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.home, ".config", "cl", "names.tsv"), []byte("~/git/dream\tdream-renamed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := iowatch.Default()
+	cfg.Lead = "lead"
+	o := a.ioOwners(&cfg)
+	route := func(cwd string) (string, error) {
+		c := iowatch.Case{Culprits: &iowatch.Culprit{Main: "/user.slice/graft-heavy-1.scope", MainProc: "bash(1)",
+			ProcessDetails: map[string]iowatch.ProcessDetails{"bash(1)": {Cmdline: "bash", CWD: cwd}}}}
+		rc, err := o.routeCase(&c)
+		return rc.Owner, err
+	}
+	if owner, err := route(worktree); err != nil || owner != "dream-renamed" {
+		t.Fatalf("worktree owner %q, err=%v, want dream-renamed from names table", owner, err)
+	}
+	workRepo := filepath.Join(a.home, "work", "shop")
+	workTree := filepath.Join(a.home, ".cache", "worktrees", "shop-accept", "fix")
+	for _, dir := range []string{workRepo, workTree} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeIOFile(t, filepath.Join(workTree, ".git"), "gitdir: "+filepath.Join(workRepo, ".git", "worktrees", "fix")+"\n")
+	if owner, err := route(workTree); err != nil || owner != "shop-master" {
+		t.Fatalf("~/work worktree owner %q, err=%v, want shop-master from .git, not folder name", owner, err)
+	}
+	if _, err := route(looped); err == nil {
+		t.Fatal("unreadable worktree .git: error swallowed")
+	}
+	o.tableErr = errors.New("broken names table")
+	if _, err := route(filepath.Join(a.home, "git", "other")); err == nil || !strings.Contains(err.Error(), "broken names table") {
+		t.Fatalf("broken names table for plain cwd: err=%v", err)
 	}
 }

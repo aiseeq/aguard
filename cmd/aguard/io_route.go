@@ -20,6 +20,7 @@ import (
 	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/names"
+	"github.com/aiseeq/aguard/internal/worktree"
 	"github.com/aiseeq/akit/proc"
 )
 
@@ -215,7 +216,7 @@ var sessionTmp = regexp.MustCompile(`/claude-tmp/claude-\d+/(-[^/ ]+)/([0-9a-f]{
 
 // byProcess — хозяин временного scope (systemd-run пробы, песочница) по главному процессу: scratchpad сессии в
 // cmdline или cwd — живая сессия с этим SessionID, иначе мастер проекта по ключу; cwd в ~/git|~/work/<проект> — его
-// мастер. Ничего — "".
+// мастер; cwd в дереве graft ~/.cache/worktrees/<репо>/<ветка> — мастер основного репозитория. Ничего — "".
 func (o *ioOwnerFinder) byProcess(d iowatch.ProcessDetails) (string, error) {
 	for _, s := range []string{d.CWD, d.Cmdline} {
 		m := sessionTmp.FindStringSubmatch(s)
@@ -238,9 +239,31 @@ func (o *ioOwnerFinder) byProcess(d iowatch.ProcessDetails) (string, error) {
 	// cwd ровно ~ хозяина не говорит: из него работают Chrome, Telegram и прочие программы рабочего стола, а по таблице
 	// имён ~ — лид (находка проверки alert-async 08.11: Chrome — 178 случаев за неделю ушли бы лиду).
 	if d.CWD != "" && filepath.Clean(d.CWD) != o.home {
-		return o.nameFor(d.CWD)
+		name, err := o.nameFor(d.CWD)
+		if name != "" || err != nil {
+			return name, err
+		}
+		return o.byWorktree(d.CWD)
 	}
 	return "", nil
+}
+
+// byWorktree — сессия основного репозитория для cwd в дереве graft ~/.cache/worktrees/<репо>/<ветка>[/…]:
+// процесс без вида задачи graft и без сессии или бойца в цепочке родителей (приёмка io-owner-heavy-scope-detached).
+func (o *ioOwnerFinder) byWorktree(cwd string) (string, error) {
+	rel, ok := strings.CutPrefix(filepath.Clean(cwd), filepath.Join(o.home, ".cache", "worktrees")+"/")
+	if !ok {
+		return "", nil
+	}
+	parts := strings.SplitN(rel, "/", 3)
+	if len(parts) < 2 {
+		return "", nil
+	}
+	repo, err := worktree.Repo(filepath.Join(o.home, ".cache", "worktrees", parts[0], parts[1]))
+	if err != nil || repo == "" {
+		return "", err
+	}
+	return o.nameFor(repo)
 }
 
 // byProjectKey — сессия проекта по ключу папки Claude Code (путь, где / заменён на -): ~/git/<проект>, ~/work/<проект>.
