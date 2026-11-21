@@ -120,6 +120,19 @@ func TestLoadErrors(t *testing.T) {
 	}
 }
 
+func TestBtrfsIntervalIndependentOfDisk(t *testing.T) {
+	c, err := Load(write(t, "[disk]\ninterval = \"10m\"\n[btrfs]\ninterval = \"1m\"\n"), home, 1000)
+	if err != nil {
+		t.Fatalf("btrfs interval should not depend on disk interval: %v", err)
+	}
+	if c.Disk.Interval.D() != 10*time.Minute || c.Btrfs.Interval.D() != time.Minute {
+		t.Fatalf("intervals not preserved: disk=%s btrfs=%s", c.Disk.Interval.D(), c.Btrfs.Interval.D())
+	}
+	if _, err := Load(write(t, "[btrfs]\ninterval = \"59s\"\n"), home, 1000); err == nil {
+		t.Fatal("btrfs interval below 1m accepted")
+	}
+}
+
 func TestLoadMissing(t *testing.T) {
 	c, err := Load(filepath.Join(t.TempDir(), "нет.toml"), home, 1000)
 	if err != nil || c.Orphans.Mode != orphans.ModeObserve || c.Tmp.Mode != policy.ModeObserve {

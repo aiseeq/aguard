@@ -506,6 +506,8 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Compact.Interval.D() }},
 		{"disk", func(ctx context.Context, c *config.Config) error { return a.diskRound(ctx, c) },
 			func(c *config.Config) time.Duration { return c.Disk.Interval.D() }},
+		{"btrfs", func(ctx context.Context, c *config.Config) error { return a.btrfsRound(ctx, c) },
+			func(c *config.Config) time.Duration { return c.Btrfs.Interval.D() }},
 		{"claude-tmp", func(ctx context.Context, c *config.Config) error { return a.claudeTmpRound(ctx, c) },
 			func(*config.Config) time.Duration { return 10 * time.Minute }},
 		{"said", func(ctx context.Context, c *config.Config) error { return a.saidRound(ctx, c, false) },

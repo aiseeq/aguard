@@ -16,6 +16,7 @@ import (
 
 	"github.com/aiseeq/aguard/internal/agentwait"
 	"github.com/aiseeq/aguard/internal/bgtask"
+	"github.com/aiseeq/aguard/internal/btrfswatch"
 	ceilingwatch "github.com/aiseeq/aguard/internal/ceiling"
 	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/aguard/internal/cpuwatch"
@@ -52,6 +53,7 @@ type Config struct {
 	// Compact — своё сжатие сессий в простое, пока кэш подсказки жив.
 	Compact   restart.CompactConfig `toml:"compact"`
 	Disk      disk.Config           `toml:"disk"`       // рост папок кэшей и состояний, остатки временного
+	Btrfs     btrfswatch.Config     `toml:"btrfs"`      // запас Btrfs, заполнение метаданных и квоты
 	ClaudeTmp prune.Config          `toml:"claude_tmp"` // уборка старых scratchpad-сессий
 	Said      said.Config           `toml:"said"`       // указатель сказанного пользователем
 	Bgtask    bgtask.Config         `toml:"bgtask"`     // забытые фоновые задачи Bash: письмо владельцу
@@ -98,6 +100,7 @@ func Default(home string) Config {
 		Agentwaits: agentwait.Default(),
 		Compact:    restart.DefaultCompact(),
 		Disk:       disk.Default(),
+		Btrfs:      btrfswatch.Default(),
 		ClaudeTmp:  prune.Config{Mode: prune.ModeLog, Age: policy.Duration(7 * 24 * time.Hour), Window: prune.DefaultWindow},
 		Said:       said.Default(),
 		Bgtask:     bgtask.Default(),
@@ -165,6 +168,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Bgtask.SendAuth = c.SendAuth
 	c.Cpu.Lead, c.Cpu.SendAuth = c.Lead, c.SendAuth
 	c.Disk.Lead, c.Disk.SendAuth = c.Lead, c.SendAuth
+	c.Btrfs.Lead, c.Btrfs.SendAuth = c.Lead, c.SendAuth
 	c.IO.Lead, c.IO.SendAuth = c.Lead, c.SendAuth
 	c.IO.Socket = policy.ExpandHome(c.IO.Socket, home)
 	c.IO.Tk = policy.ExpandHome(c.IO.Tk, home)
@@ -193,6 +197,9 @@ func (c *Config) finish(home string, uid int) error {
 	}
 	if err := c.Disk.Validate(home); err != nil {
 		return err
+	}
+	if c.Btrfs.Interval.D() < time.Minute || c.Btrfs.UnallocatedMin <= 0 || c.Btrfs.MetadataUnallocatedMax <= c.Btrfs.UnallocatedMin || c.Btrfs.MetadataPercent < 1 || c.Btrfs.MetadataPercent > 99 || c.Btrfs.SysfsRoot == "" {
+		return errors.New("btrfs: interval >= 1m, пороги места положительны, metadata_percent от 1 до 99, sysfs_root задан")
 	}
 	if err := c.finishClaudeTmp(home); err != nil {
 		return err

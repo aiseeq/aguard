@@ -155,6 +155,15 @@ forecast_window = "6h"
 forecast_recent = "1h"
 forecast_within = "48h"
 
+# ── btrfs: запас невыделенных блоков, метаданные и включённые квоты ───────
+[btrfs]
+interval = "1m"                 # собственный интервал, минимум 1m
+sysfs_root = "/sys/fs/btrfs"    # корень sysfs; можно подменить в тестах
+unallocated_min = "20G"         # устройство минус allocation/{data,metadata,system}/disk_total
+metadata_percent = 85           # занято строго больше этого процента
+metadata_unallocated_max = "40G" # тревожить по метаданным, только если запас ниже этого
+tell = ["git-admin"]            # дополнительно к lead; повторы раз в сутки
+
 [disk.owners]          # папка -> сессия-хозяин; остальных хозяин ищется по сессиям и таблице имён cl, иначе — лид
 "~/.cache/farm-hard" = "llmark-master"
 "~/.local/state/worker" = "llmark-master"
