@@ -238,6 +238,7 @@ func (t *stepSum) merge(o stepSum) {
 type openCase struct {
 	start, last time.Time
 	sum, calm   stepSum
+	vrateBefore *float64
 }
 
 func (o *openCase) toCase() Case {
@@ -252,6 +253,7 @@ func (o *openCase) toCase() Case {
 		v := t.vrateMin
 		c.VRateMin = &v
 	}
+	c.VRateBeforeCase = o.vrateBefore
 	return c
 }
 
@@ -318,7 +320,8 @@ func (r *Recorder) Step(s Step) []Case {
 	}
 	switch {
 	case stalled && r.open == nil:
-		r.open = &openCase{start: s.At.Add(-interval), last: s.At}
+		start := s.At.Add(-interval)
+		r.open = &openCase{start: start, last: s.At, vrateBefore: r.ring.VRateMin(start.Add(-5*time.Second), start)}
 		r.open.sum.add(s)
 	case stalled:
 		r.open.sum.merge(r.open.calm)
@@ -402,7 +405,6 @@ func (r *Recorder) ready(covered time.Time) []Case {
 func (r *Recorder) finish(c *Case) {
 	c.Quiet = quietCase(c, r.cfg.QuietBytes)
 	from := c.Start.Add(-r.cfg.Context.D())
-	c.VRateBeforeCase = r.ring.VRateMin(c.Start.Add(-5*time.Second), c.Start)
 	// Closing is detected on a fast step after the gap threshold; the step boundary can add
 	// one more step. The next idle detail can then land detail_idle after closure.
 	details := r.ring.Details(from, c.End.Add(r.cfg.DetailIdle.D()+r.cfg.Gap.D()+2*r.cfg.Step.D()))

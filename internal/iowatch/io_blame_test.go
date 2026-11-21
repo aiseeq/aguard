@@ -398,9 +398,39 @@ func TestCaseVRateBeforeStartIncludesFiveSecondsNotFivePointOne(t *testing.T) {
 		value := sample.v
 		r.ring.Add(Record{Kind: KindStep, Step: Step{At: sample.at, VRate: &value}})
 	}
-	c := Case{Start: start, End: start.Add(100 * time.Millisecond), DurMS: 100}
-	r.finish(&c)
+	value := 10.0
+	r.Step(Step{At: start.Add(100 * time.Millisecond), IOFullUS: 100_000, VRate: &value})
+	c := r.open.toCase()
 	if c.VRateBeforeCase == nil || *c.VRateBeforeCase != 35 {
 		t.Fatalf("окно [start−5s,start): %+v", c.VRateBeforeCase)
+	}
+}
+
+func TestCaseVRateBeforeCaseSurvivesRingEviction(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	start := base.Add(10 * time.Second)
+	r := NewRecorder(Default())
+	r.ring.window = 6 * time.Second
+	for i := 0; i <= 49; i++ {
+		value := 42.0
+		if i == 0 {
+			value = 35
+		}
+		r.Step(Step{At: start.Add(-5*time.Second + time.Duration(i)*100*time.Millisecond), VRate: &value})
+	}
+	for i := 1; i <= 85; i++ {
+		value := 10.0
+		r.Step(Step{At: start.Add(time.Duration(i) * 100 * time.Millisecond), IOFullUS: 100_000, VRate: &value})
+	}
+	for i := 86; i <= 92; i++ {
+		r.Step(Step{At: start.Add(time.Duration(i) * 100 * time.Millisecond)})
+	}
+	if got := r.ring.VRateMin(start.Add(-5*time.Second), start); got != nil {
+		t.Fatalf("vrate до случая ещё в кольце: %v", *got)
+	}
+	r.Detail(Step{At: start.Add(20 * time.Second)})
+	closed := r.Step(Step{At: start.Add(20 * time.Second)})
+	if len(closed) != 1 || closed[0].VRateBeforeCase == nil || *closed[0].VRateBeforeCase != 35 {
+		t.Fatalf("vrate до длинного случая потерян: %+v", closed)
 	}
 }

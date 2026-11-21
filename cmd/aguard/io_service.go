@@ -280,7 +280,7 @@ type ioService struct {
 	restart   context.CancelFunc
 	restarted bool
 	gen       int // номер цикла замера: итог фоновой работы прошлого цикла не применяется
-	warnAt    map[string]time.Time
+	warnings  ioWarningLimiter
 	passAt    time.Time // следующая отметка прохода в учёте срабатываний
 	cases     []iowatch.Case
 	cover     *iowatch.Coverer // учёт покрытия замера: шаги продлевают интервал, перезапуск цикла — новый
@@ -321,7 +321,7 @@ func newIOService(ctx context.Context, a *app) *ioService {
 		evictorPath: evictorStorePath(a), evictors: evictors.NewAggregate(),
 		cgroupRoot: iowatch.SystemRoots().Cgroup, kindSources: iowatch.KindSources{WorkerState: filepath.Join(a.home, ".local", "state", "worker"), GraftHeavy: iowatch.GraftHeavyDir(record.RuntimeDir())},
 		series: iowatch.NewSeries(max(iowatch.Default().SeriesKeep.D(), ioSeriesMinKeep)), profiles: iowatch.NewProfiles(), live: iowatch.NewLive(),
-		extra: make(chan func(), 16), warnAt: map[string]time.Time{}, sudoCache: newSudoLookupCache(), bootID: bootID,
+		extra: make(chan func(), 16), sudoCache: newSudoLookupCache(), bootID: bootID,
 		tickets: &ioTicketer{a: a, queue: make(chan ioTicketJob, 64)}}
 }
 
@@ -826,10 +826,9 @@ func (s *ioService) warn(now time.Time, key, what string, err error) {
 }
 
 func (s *ioService) warnEvery(now time.Time, key string, every time.Duration, what string, err error) {
-	if now.Before(s.warnAt[key]) {
+	if !s.warnings.allow(now, key, every) {
 		return
 	}
-	s.warnAt[key] = now.Add(every)
 	s.a.warn("io", what, "err", err)
 }
 

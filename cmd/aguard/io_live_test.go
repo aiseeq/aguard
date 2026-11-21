@@ -174,6 +174,16 @@ func TestIOSocketSeriesGraftKnownZeroRoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteIOSeriesUsesCaseVRateFormat(t *testing.T) {
+	var out bytes.Buffer
+	min, last := 28.63, 12500.0
+	row := iowatch.MachineSecondFileRowOf(iowatch.MachineSecond{At: time.Unix(1_800_000_000, 0), VRateMin: &min, VRateLast: &last})
+	writeIOSeries(&out, []iowatch.MachineSecondFileRow{row})
+	if !strings.Contains(out.String(), "vrate min/last 28,63/12500 %") {
+		t.Fatalf("vrate ряда отличается от формата строки случая:\n%s", out.String())
+	}
+}
+
 // Ряд и профили переживают перезапуск: остановка пишет файлы, старт читает с отсечением по
 // series_keep и profiles_keep; битый файл откладывается, история начинается заново.
 func TestSeriesProfilesSurviveRestartKeepAndBrokenFile(t *testing.T) {

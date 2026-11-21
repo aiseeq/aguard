@@ -29,9 +29,9 @@ func ioCaseLine(c *iowatch.Case) string {
 	line := fmt.Sprintf("%s, %s (простой %s, %s; пик шага %d мс)", c.Start.Format("02.01 15:04:05"), ioSeconds(c.DurMS),
 		ioSeconds(c.IdleMS), cause, c.PeakMS)
 	if c.VRateMin != nil && *c.VRateMin < 100 {
-		line += ", iocost vrate до " + strings.ReplaceAll(strconv.FormatFloat(*c.VRateMin, 'f', -1, 64), ".", ",") + " %"
+		line += ", iocost vrate до " + formatIOVRate(*c.VRateMin) + " %"
 		if c.VRateBeforeCase != nil {
-			line += " (за 5 с до — " + strings.ReplaceAll(strconv.FormatFloat(*c.VRateBeforeCase, 'f', -1, 64), ".", ",") + " %)"
+			line += " (за 5 с до — " + formatIOVRate(*c.VRateBeforeCase) + " %)"
 		}
 	}
 	if attribution := ioCaseAttribution(c); attribution != "" {
@@ -55,6 +55,10 @@ func ioCaseLine(c *iowatch.Case) string {
 		line += fmt.Sprintf("; discard %d ops, задержки %d мс", c.DiscardOps, c.DiscardMS)
 	}
 	return line
+}
+
+func formatIOVRate(value float64) string {
+	return strings.ReplaceAll(strconv.FormatFloat(value, 'f', -1, 64), ".", ",")
 }
 
 // ioCaseAttribution — одна подпись виновника для заголовка и кратких списков случаев.

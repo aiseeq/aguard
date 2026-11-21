@@ -628,6 +628,28 @@ func TestIOVRateReadWarningIsHourly(t *testing.T) {
 	}
 }
 
+func TestIORecordSampleWarningsAreHourlyPerKind(t *testing.T) {
+	a, _ := testIOApp(t)
+	var logged bytes.Buffer
+	a.log = slog.New(slog.NewTextHandler(&logged, nil))
+	s := &ioRecordSink{a: a}
+	now := time.Now()
+	for _, sample := range []struct {
+		after time.Duration
+		label string
+	}{{0, "start"}, {30 * time.Minute, "30 minutes"}, {55 * time.Minute, "55 minutes"}, {time.Hour, "one hour"}} {
+		s.sampleErrAt(now.Add(sample.after), "vrate", errors.New("vrate "+sample.label))
+	}
+	s.sampleErrAt(now.Add(30*time.Minute), "detail", errors.New("partial"))
+	s.sampleErr("fast", errors.New("unavailable"))
+	s.sampleErr("fast", errors.New("still unavailable"))
+	text := logged.String()
+	if got := strings.Count(text, "level=WARN"); got != 4 || !strings.Contains(text, "vrate start") || !strings.Contains(text, "vrate one hour") ||
+		strings.Contains(text, "vrate 30 minutes") || strings.Contains(text, "vrate 55 minutes") {
+		t.Fatalf("vrate должно предупреждать в начале и через час, повторы на 30 и 55 мин должны подавляться (WARN=%d):\n%s", got, text)
+	}
+}
+
 // Цикл io — не safePass: проход отмечает сам, раз в ioPassEvery, иначе отчёт и страница Сна видят
 // «ни одного прохода» (29.10).
 func TestIOStepNotesPassEveryMinute(t *testing.T) {
@@ -741,7 +763,7 @@ func TestWriteIOSeriesShowsVRateAndUnknown(t *testing.T) {
 	}
 	var out bytes.Buffer
 	writeIOSeries(&out, rows)
-	if text := out.String(); !strings.Contains(text, "vrate min/last 1.15/0.29 %") || !strings.Contains(text, "vrate min/last нет данных") {
+	if text := out.String(); !strings.Contains(text, "vrate min/last 1,15/0,29 %") || !strings.Contains(text, "vrate min/last нет данных") {
 		t.Fatalf("строка ряда не показывает vrate/нет данных:\n%s", text)
 	}
 }

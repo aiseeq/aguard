@@ -151,8 +151,9 @@ func (a *app) ioRecord(ctx context.Context, dur time.Duration, dir string) error
 
 // ioRecordSink — получатель замеров `aguard io record`: случаи — строкой в вывод.
 type ioRecordSink struct {
-	a   *app
-	rec *iowatch.Recorder
+	a        *app
+	rec      *iowatch.Recorder
+	warnings ioWarningLimiter
 }
 
 func (s *ioRecordSink) step(st iowatch.Step) { s.print(s.rec.Step(st)) }
@@ -166,8 +167,14 @@ func (s *ioRecordSink) print(cases []iowatch.Case) {
 
 func (s *ioRecordSink) detail(st iowatch.Step) { s.rec.Detail(st) }
 
-func (s *ioRecordSink) sampleErr(_ string, err error) {
-	s.a.log.Warn("aguard io: замер", "err", err)
+func (s *ioRecordSink) sampleErr(key string, err error) {
+	s.sampleErrAt(time.Now(), key, err)
+}
+
+func (s *ioRecordSink) sampleErrAt(now time.Time, key string, err error) {
+	if s.warnings.allow(now, key, time.Hour) {
+		s.a.log.Warn("aguard io: замер", "kind", key, "err", err)
+	}
 }
 
 // ioSignal — сигнал службе aguard (0 — только проверка, что она запущена); служба не запущена — ошибка
