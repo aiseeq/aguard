@@ -51,6 +51,9 @@ func ioCaseLine(c *iowatch.Case) string {
 			line += ", не фриз машины"
 		}
 	}
+	if c.DiscardOps != 0 || c.DiscardMS != 0 {
+		line += fmt.Sprintf("; discard %d ops, задержки %d мс", c.DiscardOps, c.DiscardMS)
+	}
 	return line
 }
 
