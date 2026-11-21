@@ -112,9 +112,24 @@ func (a *app) logClaudeTmpReport(r prune.Report) {
 		}
 	}
 	for _, it := range r.Outside {
-		a.log.Info("aguard claude-tmp: вне claude-1000", "path", it.Path, "bytes", it.Bytes, "age", it.Age.Round(time.Hour).String(), "reason", it.Reason)
+		if it.Removed {
+			a.log.Info("aguard claude-tmp: удалил", "path", it.Path, "bytes", it.Bytes, "reason", it.Reason)
+		} else if it.Reason == "удалил бы" {
+			a.log.Info("aguard claude-tmp: удалил бы", "path", it.Path, "bytes", it.Bytes, "age", it.Age.Round(time.Hour).String(), "reason", it.Reason)
+		} else {
+			a.log.Info("aguard claude-tmp: пропущен", "path", it.Path, "bytes", it.Bytes, "age", it.Age.Round(time.Hour).String(), "reason", it.Reason)
+		}
 	}
-	summary := fmt.Sprintf("aguard claude-tmp: проход удалено %d, освобождено %d байт, пропущено %d, по ссылкам %d", deleted, bytes, skipped, r.Linked)
+	outsideCount, outsideDeleted, outsideSkipped, outsideBytes := len(r.Outside), int64(0), int64(0), int64(0)
+	for _, it := range r.Outside {
+		if it.Removed {
+			outsideDeleted++
+			outsideBytes += it.Bytes
+		} else {
+			outsideSkipped++
+		}
+	}
+	summary := fmt.Sprintf("aguard claude-tmp: проход удалено %d, освобождено %d байт, пропущено %d, по ссылкам %d; вне claude-1000 записей %d, удалено %d, пропущено %d, освобождено %d байт", deleted, bytes, skipped, r.Linked, outsideCount, outsideDeleted, outsideSkipped, outsideBytes)
 	if r.Err != nil {
 		a.log.Error(summary, "err", r.Err)
 	} else {

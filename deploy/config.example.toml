@@ -205,6 +205,7 @@ lifetime = "24h"
 # ── claude_tmp: ночная уборка устаревших scratchpad-сессий ─
 [claude_tmp]
 mode = "log"           # log — отчёт «удалил бы»; act — удаление после проверки
+outside_mode = "log"   # независимый режим записей вне claude-1000; по умолчанию безопасный log
 age = "168h"           # возраст по самому свежему mtime внутри каталога; минимум 24h
 
 # Отказы agent-signal-guard (journalctl -u agent-signal-guard-log) — авария: письмо сессии-отправителю (по root),

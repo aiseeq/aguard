@@ -17,6 +17,7 @@ import (
 const transcriptOverlap = 512 // project component is capped by NAME_MAX; keeps full paths across read chunks.
 
 var scratchpadIDRE = regexp.MustCompile(`(?i)claude-tmp/claude-1000/[^/\\\s"'<>]+/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:/|["'<>!#\\\s,})\x60.:;\]|&*?])`)
+var outsideNameRE = regexp.MustCompile(`(?i)claude-tmp/([a-z0-9._-]+)`)
 
 type referenceFile struct {
 	mtime time.Time
@@ -385,6 +386,17 @@ func collectTicketFile(path string, ids map[string]bool) error {
 	}
 	for _, id := range uuidInTextRE.FindAllString(content, -1) {
 		ids[strings.ToLower(id)] = true
+	}
+	for _, match := range outsideNameRE.FindAllStringSubmatchIndex(content, -1) {
+		start, end := match[2], match[3]
+		name := strings.TrimRight(strings.ToLower(content[start:end]), ".")
+		if name == "" {
+			continue
+		}
+		if end < len(content) && content[end] == '*' && strings.HasSuffix(name, "-") && (end+1 == len(content) || content[end+1] != '*') {
+			name += "*"
+		}
+		ids["outside:"+name] = true
 	}
 	return nil
 }

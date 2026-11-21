@@ -20,3 +20,18 @@ func TestReportSpecsCoverWatchers(t *testing.T) {
 		}
 	}
 }
+
+func TestReportShowsClaudeTmpOutsideMode(t *testing.T) {
+	a := &app{}
+	cfg := config.Default("/home/u")
+	cfg.ClaudeTmp.OutsideMode = "act"
+	for _, spec := range a.reportSpecs(&cfg) {
+		if spec.Name == "claude-tmp outside" {
+			if spec.Mode != "act" {
+				t.Fatalf("outside mode in report=%q", spec.Mode)
+			}
+			return
+		}
+	}
+	t.Fatal("outside mode is missing from reportSpecs")
+}

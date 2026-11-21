@@ -27,17 +27,20 @@ var ErrWindowEnded = errors.New("night window ended")
 var ErrYield = errors.New("machine yield failed")
 var ErrMountBoundary = errors.New("session directory crosses a mount boundary")
 var ErrLiveSession = errors.New("session became live before deletion")
+var ErrCandidateProtected = errors.New("cleanup candidate is protected")
 
 var uuidRE = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 var uuidInTextRE = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+var claudeNumberRE = regexp.MustCompile(`(?i)^claude-[0-9]+$`)
 
 type Config struct {
-	Mode     string          `toml:"mode"`
-	Age      policy.Duration `toml:"age"`
-	Window   string          `toml:"-"`
-	Root     string          `toml:"-"`
-	Projects string          `toml:"-"`
-	Home     string          `toml:"-"`
+	Mode        string          `toml:"mode"`
+	OutsideMode string          `toml:"outside_mode"`
+	Age         policy.Duration `toml:"age"`
+	Window      string          `toml:"-"`
+	Root        string          `toml:"-"`
+	Projects    string          `toml:"-"`
+	Home        string          `toml:"-"`
 }
 type Candidate struct {
 	Path, ID, Reason string
@@ -58,6 +61,7 @@ type Hooks struct {
 	Tickets    func(context.Context) (map[string]bool, error)
 	Measure    func(context.Context, string) (int64, time.Time, error)
 	References func(context.Context, time.Time, func(context.Context) error) (*References, error)
+	ProcRoot   string
 }
 
 // SetThreadIdle sets Linux ioprio on the current OS thread. LockOSThread is required
@@ -165,6 +169,13 @@ func run(ctx context.Context, c Config, h Hooks) (report Report) {
 		return report
 	}
 	pass := newScanPass(ctx, c, h, now)
+	if pass.cfg.OutsideMode == "" {
+		pass.cfg.OutsideMode = ModeLog
+	}
+	if pass.cfg.OutsideMode != ModeLog && pass.cfg.OutsideMode != ModeAct {
+		report.Err = fmt.Errorf("invalid outside mode %q", pass.cfg.OutsideMode)
+		return report
+	}
 	pass.yield = pass.guardedYield
 	if h.SetIdle == nil {
 		report.Err = errors.New("missing IO priority setter")
@@ -275,6 +286,8 @@ type scanPass struct {
 	yield                    func(context.Context) error
 	live, links, transcripts map[string]bool
 	refs                     *References
+	procTargets              procTargets
+	procErr                  error
 }
 
 func (p *scanPass) guardedYield(ctx context.Context) error {
@@ -389,6 +402,203 @@ func (p *scanPass) measureCandidate(path string) (int64, time.Time, error) {
 	return measureWith(p.hooks, path, p.ctx, p.yield)
 }
 
+func (p *scanPass) handleCandidateError(item *Candidate, err error, reason string) (bool, error) {
+	if errors.Is(err, ErrWindowEnded) {
+		item.Reason = "ночное окно закончилось"
+		return true, nil
+	}
+	if errors.Is(err, ErrYield) {
+		return false, err
+	}
+	if errors.Is(err, ErrMountBoundary) {
+		item.Reason = "точка монтирования: " + err.Error()
+		return false, nil
+	}
+	item.Reason = reason + err.Error()
+	return false, nil
+}
+
+func (p *scanPass) scanOutside(report *Report) error {
+	parent := filepath.Dir(p.cfg.Root)
+	targets, procErr := collectProcTargets(p.ctx, p.hooks.ProcRoot, filepath.Dir(p.cfg.Root), os.Getuid(), p.yield)
+	if errors.Is(procErr, ErrWindowEnded) || errors.Is(procErr, ErrYield) || errors.Is(procErr, context.Canceled) {
+		return procErr
+	}
+	p.procTargets, p.procErr = targets, procErr
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return fmt.Errorf("вне claude-1000: read parent: %w", err)
+	}
+	for _, entry := range entries {
+		if !p.inside() {
+			return ErrWindowEnded
+		}
+		if err := p.scanOutsideEntry(entry.Name(), report); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *scanPass) scanOutsideEntry(name string, report *Report) error {
+	if name == filepath.Base(p.cfg.Root) || claudeNumberRE.MatchString(name) {
+		return nil
+	}
+	path := filepath.Join(filepath.Dir(p.cfg.Root), name)
+	tree, err := measureOutside(path, p.procTargets, p.yield, p.ctx)
+	item := Candidate{Path: path, ID: name, Bytes: tree.Bytes}
+	if err == nil && p.hooks.Measure != nil {
+		if _, _, measureErr := p.hooks.Measure(p.ctx, path); measureErr != nil {
+			err = fmt.Errorf("measure outside candidate: %w", measureErr)
+		}
+	}
+	if err != nil {
+		if errors.Is(err, ErrWindowEnded) || errors.Is(err, ErrYield) {
+			return err
+		}
+		if errors.Is(err, errMountIDUnknown) {
+			item.Reason = "сомнение: ошибка чтения /proc: " + err.Error()
+		} else {
+			item.Reason = "ошибка обхода: " + err.Error()
+		}
+	} else {
+		item.Age = p.now.Sub(tree.Changed)
+		item.Reason = p.outsideReason(item, tree.Busy)
+		if item.Reason == "" && p.cfg.OutsideMode == ModeLog {
+			item.Reason = "удалил бы"
+		}
+		if item.Reason == "" && p.cfg.OutsideMode == ModeAct {
+			stop, actErr := p.revalidateOutsideAndAct(&item, name)
+			if actErr != nil {
+				return actErr
+			}
+			if stop {
+				report.Outside = append(report.Outside, item)
+				return ErrWindowEnded
+			}
+		}
+	}
+	report.Outside = append(report.Outside, item)
+	return nil
+}
+
+func (p *scanPass) outsideReason(item Candidate, busy bool) string {
+	if item.Age < p.cfg.Age.D() {
+		return "свежее порога"
+	}
+	if outsideTicketLinked(strings.ToLower(item.ID), p.links) {
+		return "ссылка из открытого тикета"
+	}
+	if p.procErr != nil {
+		return "сомнение: ошибка чтения /proc: " + p.procErr.Error()
+	}
+	if busy {
+		return "открытый файл или cwd живого процесса"
+	}
+	return ""
+}
+
+func outsideTicketLinked(name string, links map[string]bool) bool {
+	name = strings.TrimRight(name, ".")
+	for ref := range links {
+		if !strings.HasPrefix(ref, "outside:") {
+			continue
+		}
+		pattern := strings.TrimPrefix(ref, "outside:")
+		if strings.HasSuffix(pattern, "*") && strings.HasPrefix(name, strings.TrimSuffix(pattern, "*")) {
+			return true
+		}
+		if pattern == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *scanPass) revalidateOutsideAndAct(item *Candidate, id string) (bool, error) {
+	if err := p.refreshOutsideLinks(); err != nil {
+		return false, err
+	}
+	tree, err := measureOutside(item.Path, procTargets{Inodes: map[inodeKey]struct{}{}, MountDevices: p.procTargets.MountDevices}, p.yield, p.ctx)
+	if err != nil {
+		return p.handleCandidateError(item, err, "повторная проверка возраста: ")
+	}
+	item.Bytes, item.Age = tree.Bytes, p.now.Sub(tree.Changed)
+	item.Reason = p.outsideReason(*item, false)
+	if item.Reason != "" {
+		return false, nil
+	}
+	if !p.inside() {
+		item.Reason = "ночное окно закончилось"
+		return true, nil
+	}
+	protected := ""
+	err = removeRootEntryChecked(filepath.Dir(p.cfg.Root), id, p.yield, p.ctx, func() error {
+		return p.beforeRemoveOutside(item, &protected)
+	})
+	if errors.Is(err, ErrCandidateProtected) {
+		item.Reason = protected
+		return false, nil
+	}
+	if err != nil {
+		return p.handleCandidateError(item, err, "ошибка удаления: ")
+	}
+	item.Removed, item.Reason = true, "удалил"
+	return false, nil
+}
+
+func (p *scanPass) refreshOutsideLinks() error {
+	if p.refs != nil {
+		if err := p.refs.Refresh(p.ctx, p.yield); err != nil {
+			return fmt.Errorf("refresh reference snapshot: %w", err)
+		}
+		p.links, p.transcripts = p.refs.TicketIDs(), p.refs.TranscriptIDs()
+		return nil
+	}
+	links, err := p.hooks.Tickets(p.ctx)
+	if err != nil {
+		return fmt.Errorf("recheck ticket links: %w", err)
+	}
+	p.links = links
+	return nil
+}
+
+func (p *scanPass) beforeRemoveOutside(item *Candidate, protected *string) error {
+	if err := p.refreshOutsideLinks(); err != nil {
+		*protected = "сомнение: ошибка чтения ссылок: " + err.Error()
+		return ErrCandidateProtected
+	}
+	targets, err := collectProcTargets(p.ctx, p.hooks.ProcRoot, filepath.Dir(p.cfg.Root), os.Getuid(), p.yield)
+	if err != nil {
+		if errors.Is(err, ErrWindowEnded) || errors.Is(err, ErrYield) || errors.Is(err, context.Canceled) {
+			return err
+		}
+		*protected = "сомнение: ошибка чтения /proc: " + err.Error()
+		return ErrCandidateProtected
+	}
+	latest, err := measureOutside(item.Path, targets, p.yield, p.ctx)
+	if err != nil {
+		return err
+	}
+	item.Bytes, item.Age = latest.Bytes, p.now.Sub(latest.Changed)
+	if latest.Busy {
+		*protected = "открытый файл или cwd живого процесса"
+		return ErrCandidateProtected
+	}
+	if item.Age < p.cfg.Age.D() {
+		*protected = "свежее порога"
+		return ErrCandidateProtected
+	}
+	if outsideTicketLinked(strings.ToLower(item.ID), p.links) {
+		*protected = "ссылка из открытого тикета"
+		return ErrCandidateProtected
+	}
+	if !p.inside() {
+		return ErrWindowEnded
+	}
+	return nil
+}
+
 func (p *scanPass) revalidateAndAct(item *Candidate, id, project string) (bool, error) {
 	links, transcripts := p.links, p.transcripts
 	var err error
@@ -403,6 +613,7 @@ func (p *scanPass) revalidateAndAct(item *Candidate, id, project string) (bool, 
 			return false, fmt.Errorf("recheck ticket links: %w", err)
 		}
 	}
+	p.links, p.transcripts = links, transcripts
 	bytes, changed, err := p.measureCandidate(item.Path)
 	if err != nil {
 		return p.handleCandidateError(item, err, "повторная проверка возраста: ")
@@ -437,56 +648,69 @@ func (p *scanPass) revalidateAndAct(item *Candidate, id, project string) (bool, 
 	return false, nil
 }
 
-func (p *scanPass) handleCandidateError(item *Candidate, err error, reason string) (bool, error) {
-	if errors.Is(err, ErrWindowEnded) {
-		item.Reason = "ночное окно закончилось"
-		return true, nil
-	}
-	if errors.Is(err, ErrYield) {
-		return false, err
-	}
-	if errors.Is(err, ErrMountBoundary) {
-		item.Reason = "точка монтирования: " + err.Error()
-		return false, nil
-	}
-	item.Reason = reason + err.Error()
-	return false, nil
-}
-
-func (p *scanPass) scanOutside(report *Report) error {
-	parent := filepath.Dir(p.cfg.Root)
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		return fmt.Errorf("вне claude-1000: read parent: %w", err)
-	}
-	for _, entry := range entries {
-		if !p.inside() {
-			return ErrWindowEnded
-		}
-		if entry.Name() == filepath.Base(p.cfg.Root) {
-			continue
-		}
-		path := filepath.Join(parent, entry.Name())
-		bytes, changed, err := measure(path, p.yield, p.ctx)
-		item := Candidate{Path: path, Bytes: bytes}
-		if err != nil {
-			if errors.Is(err, ErrWindowEnded) {
-				return err
-			}
-			if errors.Is(err, ErrYield) {
-				return err
-			}
-			item.Reason = "ошибка обхода: " + err.Error()
-		} else {
-			item.Age, item.Reason = p.now.Sub(changed), "вне claude-1000"
-		}
-		report.Outside = append(report.Outside, item)
-	}
-	return nil
-}
-
 func removeSession(root, project, id string, yield func(context.Context) error, ctx context.Context) (result error) {
 	return removeSessionChecked(root, project, id, yield, ctx, nil)
+}
+
+// removeRootEntryChecked removes one direct child without following its name if it is a symlink.
+func removeRootEntryChecked(root, name string, yield func(context.Context) error, ctx context.Context, beforeRemove func() error) (result error) {
+	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW
+	rootFD, err := unix.Open(root, dirFlags, 0)
+	if err != nil {
+		return fmt.Errorf("open cleanup parent %s: %w", root, err)
+	}
+	defer func() {
+		if err := unix.Close(rootFD); err != nil {
+			result = errors.Join(result, fmt.Errorf("close cleanup parent %s: %w", root, err))
+		}
+	}()
+	var rootStat unix.Stat_t
+	if err := unix.Fstat(rootFD, &rootStat); err != nil {
+		return fmt.Errorf("stat cleanup parent %s: %w", root, err)
+	}
+	rootMountID, err := mountIDAt(rootFD, "", unix.AT_EMPTY_PATH)
+	if err != nil {
+		return fmt.Errorf("mount id cleanup parent %s: %w", root, err)
+	}
+	if err := yield(ctx); err != nil {
+		return err
+	}
+	var entry unix.Stat_t
+	if err := unix.Fstatat(rootFD, name, &entry, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return fmt.Errorf("stat outside entry %s: %w", name, err)
+	}
+	if crossesMount(rootStat.Dev, entry.Dev) {
+		return fmt.Errorf("%w: %s", ErrMountBoundary, name)
+	}
+	if err := verifyMountBoundaryAt(rootFD, name, unix.AT_SYMLINK_NOFOLLOW, name, rootMountID); err != nil {
+		return err
+	}
+	if entry.Mode&unix.S_IFMT == unix.S_IFDIR {
+		if err := preflightDirAt(rootFD, name, rootStat.Dev, rootMountID, yield, ctx); err != nil {
+			return err
+		}
+		if beforeRemove != nil {
+			if err := beforeRemove(); err != nil {
+				return err
+			}
+		}
+		return removeDirAt(rootFD, name, rootStat.Dev, rootMountID, yield, ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if beforeRemove != nil {
+		if err := beforeRemove(); err != nil {
+			return err
+		}
+	}
+	if err := yield(ctx); err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(rootFD, name, 0); err != nil {
+		return fmt.Errorf("unlink outside entry %s: %w", name, err)
+	}
+	return nil
 }
 
 func removeSessionChecked(root, project, id string, yield func(context.Context) error, ctx context.Context, beforeRemove func() error) (result error) {
@@ -770,4 +994,56 @@ func measure(root string, yield func(context.Context) error, ctx context.Context
 		return size, newest, fmt.Errorf("measure tree %s: %w", root, err)
 	}
 	return size, newest, nil
+}
+
+type outsideTree struct {
+	Bytes   int64
+	Changed time.Time
+	Busy    bool
+}
+
+func measureOutside(root string, targets procTargets, yield func(context.Context) error, ctx context.Context) (result outsideTree, retErr error) {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("walk %s: %w", path, walkErr)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if yield != nil {
+			if err := yield(ctx); err != nil {
+				return err
+			}
+		}
+		info, err := d.Info()
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", path, err)
+		}
+		changed := info.ModTime()
+		if ctime := statChangeTime(info); ctime.After(changed) {
+			changed = ctime
+		}
+		if changed.After(result.Changed) {
+			result.Changed = changed
+		}
+		if info.Mode().IsRegular() {
+			result.Bytes += info.Size()
+		}
+		if id, err := statxInode(path); err != nil {
+			return fmt.Errorf("statx %s: %w", path, err)
+		} else {
+			dev, ok := targets.MountDevices[id.MountID]
+			if !ok {
+				return fmt.Errorf("mount ID %d for tree entry %s is absent from self mountinfo: %w", id.MountID, path, errMountIDUnknown)
+			}
+			if _, watched := targets.Inodes[inodeKey{Dev: dev, Ino: id.Ino}]; watched {
+				result.Busy = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return result, fmt.Errorf("measure tree %s: %w", root, err)
+	}
+	return result, nil
 }

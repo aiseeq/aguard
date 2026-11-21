@@ -19,21 +19,24 @@ const home = "/home/u"
 
 func TestClaudeTmpDefaults(t *testing.T) {
 	c := Default(home).ClaudeTmp
-	if c.Mode != "log" || c.Age.D() != 7*24*time.Hour || c.Window != "02:00-05:00" {
+	if c.Mode != "log" || c.OutsideMode != "log" || c.Age.D() != 7*24*time.Hour || c.Window != "02:00-05:00" {
 		t.Fatalf("claude_tmp defaults: %+v", c)
 	}
 }
 
-func TestClaudeTmpAcceptsOnlyModeAndAge(t *testing.T) {
-	c, err := Load(write(t, "[claude_tmp]\nmode = \"act\"\nage = \"48h\"\n"), home, 1000)
+func TestClaudeTmpAcceptsModesAndAge(t *testing.T) {
+	c, err := Load(write(t, "[claude_tmp]\nmode = \"act\"\noutside_mode = \"log\"\nage = \"48h\"\n"), home, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ClaudeTmp.Mode != "act" || c.ClaudeTmp.Age.D() != 48*time.Hour || c.ClaudeTmp.Window != "02:00-05:00" {
+	if c.ClaudeTmp.Mode != "act" || c.ClaudeTmp.OutsideMode != "log" || c.ClaudeTmp.Age.D() != 48*time.Hour || c.ClaudeTmp.Window != "02:00-05:00" {
 		t.Fatalf("claude_tmp keys/default window: %+v", c.ClaudeTmp)
 	}
 	if _, err := Load(write(t, "[claude_tmp]\nwindow = \"01:00-02:00\"\n"), home, 1000); err == nil {
 		t.Fatal("unexpected claude_tmp.window key was accepted")
+	}
+	if _, err := Load(write(t, "[claude_tmp]\noutside_mode = \"delete\"\n"), home, 1000); err == nil {
+		t.Fatal("invalid outside_mode accepted")
 	}
 }
 

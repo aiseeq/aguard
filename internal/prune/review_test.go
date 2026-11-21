@@ -28,7 +28,7 @@ func TestPruneLeavesNonUUIDProjectDirectories(t *testing.T) {
 	if err := os.Chtimes(path, now.Add(-10*24*time.Hour), now.Add(-10*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	r := Run(context.Background(), c, baseHooks(now))
+	r := Run(context.Background(), c, baseHooks(t, now))
 	if r.Err != nil {
 		t.Fatal(r.Err)
 	}
@@ -43,7 +43,7 @@ func TestPruneLeavesNonUUIDProjectDirectories(t *testing.T) {
 	if err := os.Chtimes(foreignSession, now.Add(-10*24*time.Hour), now.Add(-10*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	r = Run(context.Background(), c, baseHooks(now))
+	r = Run(context.Background(), c, baseHooks(t, now))
 	if r.Err != nil {
 		t.Fatal(r.Err)
 	}
@@ -132,7 +132,7 @@ func TestTicketWalkSkipsVanishedFileButFailsOnBadRoot(t *testing.T) {
 	if err := os.WriteFile(badRoot, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := baseHooks(now)
+	h := baseHooks(t, now)
 	h.References = func(ctx context.Context, since time.Time, y func(context.Context) error) (*References, error) {
 		return NewReferences(ctx, c.Home, c.Projects, since, y)
 	}
@@ -158,7 +158,7 @@ func TestDanglingSymlinkTicketRootFailsClosed(t *testing.T) {
 
 func TestRunConvertsPanicToPassError(t *testing.T) {
 	c, now := world(t)
-	h := baseHooks(now)
+	h := baseHooks(t, now)
 	h.Live = func(context.Context) (map[string]bool, error) { panic("synthetic liveness failure") }
 	r := Run(context.Background(), c, h)
 	if r.Err == nil || !strings.Contains(r.Err.Error(), "synthetic liveness failure") {
@@ -254,7 +254,7 @@ func TestRemovalRejectsDifferentDeviceEntry(t *testing.T) {
 
 func TestRecheckAgeProtectsSessionWithNewFile(t *testing.T) {
 	c, now := world(t)
-	h := baseHooks(now)
+	h := baseHooks(t, now)
 	measurements := 0
 	h.Measure = func(_ context.Context, path string) (int64, time.Time, error) {
 		if strings.Contains(path, oldID) {
@@ -278,7 +278,7 @@ func TestRecheckAgeProtectsSessionWithNewFile(t *testing.T) {
 
 func TestLiveCheckIsLastCandidateRevalidation(t *testing.T) {
 	c, now := world(t)
-	h := baseHooks(now)
+	h := baseHooks(t, now)
 	var calls []string
 	h.Live = func(context.Context) (map[string]bool, error) {
 		calls = append(calls, "live")
@@ -326,7 +326,7 @@ func TestTicketStatusesProtectOnlyOpenCandidates(t *testing.T) {
 		}
 		writeTicket(t, filepath.Join(c.Home, "docs", "tasks"), item.id, item.status)
 	}
-	h := baseHooks(now)
+	h := baseHooks(t, now)
 	h.Live = func(context.Context) (map[string]bool, error) { return map[string]bool{}, nil }
 	h.Tickets = func(ctx context.Context) (map[string]bool, error) { return openTicketIDs(ctx, c.Home, nil) }
 	r := Run(context.Background(), c, h)
@@ -356,7 +356,7 @@ func TestOldTranscriptDoesNotProtectSession(t *testing.T) {
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
-	h := baseHooks(now)
+	h := baseHooks(t, now)
 	h.Live = func(context.Context) (map[string]bool, error) { return map[string]bool{}, nil }
 	h.References = func(ctx context.Context, since time.Time, y func(context.Context) error) (*References, error) {
 		return NewReferences(ctx, c.Home, c.Projects, since, y)
@@ -389,7 +389,7 @@ func TestRealMeasureUnreadableSubdirectorySkipsCandidate(t *testing.T) {
 	if _, _, err := measure(filepath.Join(c.Root, "-project", oldID), nil, t.Context()); err == nil {
 		t.Fatal("measure unexpectedly read an unreadable subtree")
 	}
-	r := Run(context.Background(), c, baseHooks(now))
+	r := Run(context.Background(), c, baseHooks(t, now))
 	if r.Err != nil {
 		t.Fatal(r.Err)
 	}
@@ -431,7 +431,7 @@ func TestTranscriptLineOver16MiBAndUUIDNoise(t *testing.T) {
 
 func TestReferencesRefreshTranscriptAppendBeforeDeletion(t *testing.T) {
 	c, now := world(t)
-	h := baseHooks(now)
+	h := baseHooks(t, now)
 	h.Live = func(context.Context) (map[string]bool, error) { return map[string]bool{}, nil }
 	h.References = func(ctx context.Context, since time.Time, y func(context.Context) error) (*References, error) {
 		path := filepath.Join(c.Projects, "p", "existing.jsonl")
@@ -519,7 +519,7 @@ func TestFreshOwnTranscriptFilenameProtectsSession(t *testing.T) {
 	if err := os.Chtimes(path, now, now); err != nil {
 		t.Fatal(err)
 	}
-	h := baseHooks(now)
+	h := baseHooks(t, now)
 	h.References = func(ctx context.Context, since time.Time, y func(context.Context) error) (*References, error) {
 		return NewReferences(ctx, c.Home, c.Projects, since, y)
 	}

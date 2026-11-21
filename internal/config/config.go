@@ -101,7 +101,7 @@ func Default(home string) Config {
 		Compact:    restart.DefaultCompact(),
 		Disk:       disk.Default(),
 		Btrfs:      btrfswatch.Default(),
-		ClaudeTmp:  prune.Config{Mode: prune.ModeLog, Age: policy.Duration(7 * 24 * time.Hour), Window: prune.DefaultWindow},
+		ClaudeTmp:  prune.Config{Mode: prune.ModeLog, OutsideMode: prune.ModeLog, Age: policy.Duration(7 * 24 * time.Hour), Window: prune.DefaultWindow},
 		Said:       said.Default(),
 		Bgtask:     bgtask.Default(),
 		Cpu:        cpuwatch.Default(home),
@@ -247,6 +247,9 @@ func (c *Config) finishRemaining(home string) error {
 func (c *Config) finishClaudeTmp(home string) error {
 	if c.ClaudeTmp.Mode != prune.ModeLog && c.ClaudeTmp.Mode != prune.ModeAct {
 		return fmt.Errorf("claude_tmp.mode = %q: log или act", c.ClaudeTmp.Mode)
+	}
+	if c.ClaudeTmp.OutsideMode != prune.ModeLog && c.ClaudeTmp.OutsideMode != prune.ModeAct {
+		return fmt.Errorf("claude_tmp.outside_mode = %q: log или act", c.ClaudeTmp.OutsideMode)
 	}
 	if c.ClaudeTmp.Age.D() < 24*time.Hour {
 		return errors.New("claude_tmp.age >= 24h")
