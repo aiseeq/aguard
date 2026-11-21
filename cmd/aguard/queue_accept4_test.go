@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -91,11 +92,19 @@ func (b *queueBench) breakTk(t *testing.T) {
 	b.c.Queue.Tk = broken
 }
 
+func ageQueueProjects(b *queueBench, at time.Time) {
+	for project, entry := range b.a.queueCache.Projects {
+		entry.ScannedAt = at
+		b.a.queueCache.Projects[project] = entry
+	}
+	b.a.queueCache.ScannedAt = at
+}
+
 // tk ls сломан, список устарел или папки изменились: письма идут по последнему удачному списку, а не останавливаются.
 func TestQueueTkFailUsesLastList(t *testing.T) {
 	for name, outdate := range map[string]func(*testing.T, *queueBench){
 		"кеш старше 10 мин": func(_ *testing.T, b *queueBench) {
-			b.a.queueCache.ScannedAt = time.Now().Add(-11 * time.Minute)
+			ageQueueProjects(b, time.Now().Add(-11*time.Minute))
 		},
 		"папка изменилась": func(t *testing.T, b *queueBench) {
 			name := filepath.Join(b.dir, "git", "p", "docs", "tasks", "20261104-1000-LOW-new.md")
@@ -124,6 +133,26 @@ func TestQueueTkFailUsesLastList(t *testing.T) {
 				t.Fatalf("нет предупреждения: %s", log)
 			}
 		})
+	}
+}
+
+// Смена Lead/таблицы владельцев требует нового полного списка, но ошибка tk не стирает последний удачный.
+func TestQueueTkFailAfterOwnersChangeUsesLastList(t *testing.T) {
+	b := newQueueBench(t, queueCritJSON, "[]")
+	now := time.Now()
+	previous, err := b.a.cachedQueueTickets(context.Background(), b.c, now)
+	if err != nil || len(previous) != 1 {
+		t.Fatalf("первый список: tickets=%+v err=%v", previous, err)
+	}
+	b.c.Lead = "new-lead"
+	b.breakTk(t)
+	log := b.captureLog()
+	got, err := b.a.cachedQueueTickets(context.Background(), b.c, now.Add(time.Minute))
+	if err != nil || !reflect.DeepEqual(got, previous) {
+		t.Fatalf("ошибка tk после смены владельцев потеряла прошлый список: tickets=%+v previous=%+v err=%v", got, previous, err)
+	}
+	if !strings.Contains(log.String(), "tk ls") {
+		t.Fatalf("при смене владельцев не попытались обновить список: %s", log)
 	}
 }
 
@@ -311,7 +340,7 @@ func TestQueueTkGarbageUsesLastList(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.c.Queue.Tk = garbage
-	b.a.queueCache.ScannedAt = time.Now().Add(-11 * time.Minute)
+	ageQueueProjects(b, time.Now().Add(-11*time.Minute))
 	if err := os.Remove(b.statePath()); err != nil {
 		t.Fatal(err)
 	}

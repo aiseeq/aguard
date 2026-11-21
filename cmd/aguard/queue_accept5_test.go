@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -121,6 +122,9 @@ func TestQueueGateOldFormatRewritten(t *testing.T) {
 
 func TestQueueTransfers(t *testing.T) {
 	b := newQueueBench(t, "[]", "[]")
+	if _, err := b.a.cachedQueueTickets(context.Background(), b.c, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	tasks := filepath.Join(b.dir, "git", "p", "docs", "tasks")
 	body := `{"at":"2026-11-04T10:00:00+01:00","slug":"x","stem":"20261104-1000-HIGH-x","back":"lead","key":"TRK-7","url":"https://x/TRK-7"}
 {"at":"2026-11-04T10:00:00+01:00","slug":"nb","stem":"20261104-1001-MED-nb","back":"","key":"TRK-8","url":"https://x/TRK-8"}
@@ -139,6 +143,14 @@ func TestQueueTransfers(t *testing.T) {
 	if len(got) != 3 || got[0].Key != "p/20261104-1000-x" || got[0].Back != "lead" || got[0].Transfer != "TRK-7 https://x/TRK-7" ||
 		got[0].Status != queue.StatusTransferred || got[0].Dir != filepath.Join(b.dir, "git", "p") || got[2].CancelAuthor != "other-author" {
 		t.Fatalf("%+v", got)
+	}
+	cached, err := b.a.cachedQueueTickets(context.Background(), b.c, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := b.a.queueTickets(context.Background(), b.c)
+	if err != nil || !reflect.DeepEqual(cached, full) || len(cached) != 3 {
+		t.Fatalf("переносы через проектный кеш: err=%v cached=%+v full=%+v", err, cached, full)
 	}
 }
 
@@ -189,6 +201,9 @@ func TestQueueWiring(t *testing.T) {
 // Файл переносов не прочитался: ошибка как у tk ls, список остаётся прошлым, отметки доставки не стираются и письма не повторяются.
 func TestQueueTransfersReadError(t *testing.T) {
 	b := newQueueBench(t, "[]", "[]")
+	if _, err := b.a.cachedQueueTickets(context.Background(), b.c, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(b.dir, "git", "p", "docs", "tasks", ".transferred.jsonl")
 	if err := os.Mkdir(path, 0o755); err != nil { // каталог вместо файла: ошибка чтения и у root
 		t.Fatal(err)
@@ -198,11 +213,20 @@ func TestQueueTransfersReadError(t *testing.T) {
 	if !errors.As(err, &listErr) {
 		t.Fatalf("ошибка: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "20261121-1200-HIGH-change.md"), []byte("change"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.a.cachedQueueTickets(context.Background(), b.c, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("ошибка переноса должна сохранить последний кеш: %v", err)
+	}
 }
 
 // Замороженный проект файл не читает, в том числе папка из dirs.
 func TestQueueTransfersSkip(t *testing.T) {
 	b := newQueueBench(t, "[]", "[]")
+	if _, err := b.a.cachedQueueTickets(context.Background(), b.c, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	line := `{"slug":"x","stem":"20261104-1100-HIGH-x","back":"lead","key":"TRK-7"}` + "\n"
 	path := filepath.Join(b.dir, "docs", "tasks", ".transferred.jsonl")
 	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
@@ -216,6 +240,18 @@ func TestQueueTransfersSkip(t *testing.T) {
 	got, err = b.a.queueTransfers(b.c, nil)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("skip: %+v %v", got, err)
+	}
+	cached, err := b.a.cachedQueueTickets(context.Background(), b.c, time.Now().Add(time.Minute))
+	if err != nil || len(cached) != 0 {
+		t.Fatalf("skip через кеш: %+v %v", cached, err)
+	}
+	table, err := b.a.namesTable("queue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected, err := b.a.queueTicketsProject(context.Background(), b.c, filepath.Join(b.dir, "docs"), table, []string{path})
+	if err != nil || len(projected) != 0 {
+		t.Fatalf("skip через новый путь проекта: %+v %v", projected, err)
 	}
 }
 
