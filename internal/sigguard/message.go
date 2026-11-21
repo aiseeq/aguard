@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"golang.org/x/sys/unix"
 )
 
@@ -42,7 +43,41 @@ func Message(g Group, workerID string) string {
 	if workerID != "" {
 		msg += fmt.Sprintf(" Задание worker %s.", workerID)
 	}
+	if hint := workerStopHint(g.Denies); hint != "" {
+		msg += "\n" + hint
+	}
 	return msg
+}
+
+func workerStopHint(denies []Deny) string {
+	for i := range denies {
+		d := &denies[i]
+		if d.Kind != "signal" {
+			continue
+		}
+		targetIDs := fighterJobIDs(d.TargetUnit)
+		if len(targetIDs) == 0 {
+			continue
+		}
+		targetID := targetIDs[0]
+		senderIDs := fighterJobIDs(d.Unit)
+		if len(senderIDs) > 0 && slices.Contains(senderIDs, targetID) {
+			continue
+		}
+		return fmt.Sprintf("Бойца снимает его мастер: `worker stop %s`; чужого бойца — `worker stop --other-master %s` по слову пользователя.", targetID, targetID)
+	}
+	return ""
+}
+
+func fighterJobIDs(unit string) []string {
+	unit = cpuwatch.UnescapeUnit(unit)
+	if !strings.HasSuffix(unit, ".service") {
+		return nil
+	}
+	if !strings.HasPrefix(unit, "worker-job-") && !strings.HasPrefix(unit, "worker-round-") {
+		return nil
+	}
+	return cpuwatch.JobIDs(unit)
 }
 
 type sigguardKindTotal struct {
@@ -153,11 +188,20 @@ func firstTarget(denies []Deny) string {
 }
 
 func targets(denies []Deny) string {
+	maxTargets := 0
+	count := 0
 	for i := range denies {
 		d := &denies[i]
 		if d.HasTargets {
-			return fmt.Sprintf("; разных целей %d", d.Targets)
+			count++
+			maxTargets = max(maxTargets, d.Targets)
 		}
+	}
+	if count > 1 {
+		return fmt.Sprintf("; разных целей не меньше %d", maxTargets)
+	}
+	if count == 1 {
+		return fmt.Sprintf("; разных целей %d", maxTargets)
 	}
 	return ""
 }
