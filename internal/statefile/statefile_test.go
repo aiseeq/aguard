@@ -42,15 +42,26 @@ func TestTornJournalTailIsDiscardedAndRepaired(t *testing.T) {
 }
 
 func TestCorruptCompleteJournalRecordIsError(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte(`{"value":1}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path+".journal", []byte("not-json\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(path); err == nil {
-		t.Fatal("Load accepted a corrupt complete journal record")
+	for name, record := range map[string]string{
+		"not-json":       "not-json\n",
+		"patch-mismatch": `{"merge":{"value":{"set":{"x":1}}}}` + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := os.WriteFile(path, []byte(`{"value":1}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path+".journal", []byte(record), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("Load accepted a corrupt complete journal record")
+			}
+			if !IsCorrupt(err) {
+				t.Fatalf("corrupt journal is not ErrCorrupt, so callers cannot reset it: %v", err)
+			}
+		})
 	}
 }
 

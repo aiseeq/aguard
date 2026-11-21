@@ -3,6 +3,7 @@ package restart
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -176,6 +177,74 @@ type transcriptScan struct {
 	requests       []RequestMark
 }
 
+// transcriptScanState is the versioned JSON representation used by the restart scan cache.
+// toolUse.wait не хранится: при загрузке он пересчитывается из input.command текущим waits.CommandHow,
+// поэтому смена akit не делает сохранённый разбор устаревшим (сторож scan_cache_version_test.go).
+type transcriptScanState struct {
+	Since          time.Time                         `json:"since"`
+	Uses           map[string]transcriptToolUseState `json:"uses"`
+	Pending        map[string]string                 `json:"pending"`
+	Tasks          map[string]string                 `json:"tasks"`
+	Agents         map[string]bool                   `json:"agents"`
+	Closed         map[string]bool                   `json:"closed"`
+	Expires        map[string]time.Time              `json:"expires"`
+	Crons          map[string]transcriptCronState    `json:"crons"`
+	OldCronDeletes map[string]struct{}               `json:"old_cron_deletes"`
+	Fired          map[string]bool                   `json:"fired"`
+	Wakeup         time.Time                         `json:"wakeup"`
+	UserAt         time.Time                         `json:"user_at"`
+	Context        contextFacts                      `json:"context"`
+	Requests       []RequestMark                     `json:"requests"`
+}
+
+type transcriptToolUseState struct {
+	Name  string    `json:"name"`
+	Input object    `json:"input"`
+	At    time.Time `json:"at"`
+}
+
+type transcriptCronState struct {
+	ID        string `json:"id"`
+	Cron      string `json:"cron"`
+	Prompt    string `json:"prompt"`
+	Recurring bool   `json:"recurring"`
+	Own       bool   `json:"own"`
+}
+
+func (s *transcriptScan) state() transcriptScanState {
+	uses := make(map[string]transcriptToolUseState, len(s.uses))
+	for id, use := range s.uses {
+		uses[id] = transcriptToolUseState{Name: use.name, Input: use.input, At: use.at}
+	}
+	crons := make(map[string]transcriptCronState, len(s.crons))
+	for id, cron := range s.crons {
+		crons[id] = transcriptCronState{ID: cron.ID, Cron: cron.Cron, Prompt: cron.Prompt, Recurring: cron.Recurring, Own: cron.Own}
+	}
+	return transcriptScanState{Since: s.since, Uses: uses, Pending: s.pending, Tasks: s.tasks, Agents: s.agents,
+		Closed: s.closed, Expires: s.expires, Crons: crons, OldCronDeletes: s.oldCronDeletes, Fired: s.fired,
+		Wakeup: s.wakeup, UserAt: s.userAt, Context: s.context, Requests: s.requests}
+}
+
+// commandWaits — вызов Bash, который ждёт (sleep, wfor и подобные): такой незакрытый вызов считается в PendingWaits.
+// Снимок разбора его не хранит, scanFromState зовёт заново.
+func commandWaits(name string, input object) bool {
+	return name == "Bash" && waits.CommandHow(input.str("command")) != ""
+}
+
+func scanFromState(s transcriptScanState) *transcriptScan {
+	uses := make(map[string]toolUse, len(s.Uses))
+	for id, use := range s.Uses {
+		uses[id] = toolUse{name: use.Name, input: use.Input, at: use.At, wait: commandWaits(use.Name, use.Input)}
+	}
+	crons := make(map[string]cronJob, len(s.Crons))
+	for id, cron := range s.Crons {
+		crons[id] = cronJob{ID: cron.ID, Cron: cron.Cron, Prompt: cron.Prompt, Recurring: cron.Recurring, Own: cron.Own}
+	}
+	return &transcriptScan{since: s.Since, uses: uses, pending: s.Pending, tasks: s.Tasks, agents: s.Agents,
+		closed: s.Closed, expires: s.Expires, crons: crons, oldCronDeletes: s.OldCronDeletes, fired: s.Fired,
+		wakeup: s.Wakeup, userAt: s.UserAt, context: s.Context, requests: s.Requests}
+}
+
 // scanTranscript разбирает транскрипт процесса, начавшегося в since; незакрытое на момент now — s.facts(now).
 // Последняя строка без перевода строки — недописанная запись живого файла: её разберёт следующая проверка.
 func scanTranscript(r io.Reader, since time.Time) (*transcriptScan, error) {
@@ -301,8 +370,7 @@ func (s *transcriptScan) calls(typ string, rec object, at time.Time) error {
 			if err != nil {
 				return err
 			}
-			cmd := input.str("command")
-			s.uses[b.ID] = toolUse{name: b.Name, input: input, at: at, wait: b.Name == "Bash" && waits.CommandHow(cmd) != ""}
+			s.uses[b.ID] = toolUse{name: b.Name, input: input, at: at, wait: commandWaits(b.Name, input)}
 			s.pending[b.ID] = b.Name
 		case typ == "user" && b.Type == "tool_result":
 			if err := s.result(b, rec["toolUseResult"]); err != nil {
@@ -650,6 +718,8 @@ type scanCache struct {
 	mtime       time.Time
 	since       time.Time
 	offset      int64 // конец разобранных целых строк
+	inode       uint64
+	prefixHash  [sha256.Size]byte
 	scan        *transcriptScan
 }
 
@@ -686,7 +756,19 @@ func (c *scanCache) read(file string, info os.FileInfo, since, now time.Time) (t
 		return transcriptFacts{}, fmt.Errorf("транскрипт: %w", err)
 	}
 	defer f.Close()
-	if !same || info.Size() < c.offset {
+	if same && (info.Size() < c.offset || info.ModTime().Before(c.mtime)) {
+		same = false
+	}
+	if same {
+		inode, prefixHash, err := transcriptPrefix(file, c.offset)
+		if err != nil {
+			return transcriptFacts{}, fmt.Errorf("транскрипт: отпечаток: %w", err)
+		}
+		if inode != c.inode || prefixHash != c.prefixHash {
+			same = false
+		}
+	}
+	if !same {
 		*c = scanCache{pathSession: c.pathSession, path: c.path, file: file, since: since, scan: newScan(since)}
 	} else if _, err := f.Seek(c.offset, io.SeekStart); err != nil {
 		c.scan = nil
@@ -699,5 +781,10 @@ func (c *scanCache) read(file string, info os.FileInfo, since, now time.Time) (t
 	}
 	c.offset += n
 	c.size, c.mtime = info.Size(), info.ModTime()
+	c.inode, c.prefixHash, err = transcriptPrefix(file, c.offset)
+	if err != nil {
+		c.scan = nil
+		return transcriptFacts{}, fmt.Errorf("транскрипт: отпечаток: %w", err)
+	}
 	return c.scan.facts(now), nil
 }

@@ -24,6 +24,8 @@ const (
 	maxCachedStates = 8
 )
 
+var ErrCorrupt = errors.New("corrupt statefile")
+
 // FileStamp identifies a file version across atomic replacements, including filesystems
 // where consecutive writes can have the same modification time.
 type FileStamp struct {
@@ -91,6 +93,31 @@ func Save(path string, state []byte) (result error) {
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	return saveLocked(path, state)
 }
+
+// Reset removes a corrupt snapshot and journal while holding the same interprocess lock as Load and Save.
+func Reset(path string) (result error) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open state lock for reset: %w", err)
+	}
+	defer func() { result = errors.Join(result, lock.Close()) }()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock state for reset: %w", err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	for _, file := range []string{path, path + ".journal"} {
+		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove corrupt state %s: %w", file, err)
+		}
+	}
+	loadedStates.Lock()
+	delete(loadedStates.byPath, path)
+	loadedStates.Unlock()
+	return nil
+}
+
+// IsCorrupt reports whether loading failed because the snapshot or a complete journal record is malformed.
+func IsCorrupt(err error) bool { return errors.Is(err, ErrCorrupt) }
 
 func saveLocked(path string, state []byte) (result error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
@@ -255,7 +282,7 @@ func readTree(path string) (*jsonNode, int64, error) {
 		return nil, 0, fmt.Errorf("read state snapshot %s: %w", path, err)
 	}
 	if !json.Valid(stateJSON) {
-		return nil, 0, fmt.Errorf("state snapshot %s: invalid JSON", path)
+		return nil, 0, fmt.Errorf("%w: state snapshot %s: invalid JSON", ErrCorrupt, path)
 	}
 	jpath := path + ".journal"
 	b, err := os.ReadFile(jpath)
@@ -274,10 +301,10 @@ func readTree(path string) (*jsonNode, int64, error) {
 		}
 		var p patch
 		if err := json.Unmarshal(b[:i], &p); err != nil {
-			return nil, end, fmt.Errorf("state journal %s: %w", jpath, err)
+			return nil, end, fmt.Errorf("%w: state journal %s: %w", ErrCorrupt, jpath, err)
 		}
 		if err := applyPatch(state, p); err != nil {
-			return nil, end, fmt.Errorf("state journal %s: %w", jpath, err)
+			return nil, end, fmt.Errorf("%w: state journal %s: %w", ErrCorrupt, jpath, err)
 		}
 		end += int64(i + 1)
 		b = b[i+1:]

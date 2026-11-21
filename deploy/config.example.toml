@@ -83,6 +83,7 @@ interval = "200ms"
 [restart]
 mode = "log"
 idle = "10m"
+scan_cache_interval = "5m" # интервал сохранения; statefile не добавляет запись, если данные не менялись
 # socket = "/run/user/1000/aguard/aguard.sock"
 # claude = "~/.local/bin/claude"
 # hook_states = "/run/user/1000/chooks/sessions"

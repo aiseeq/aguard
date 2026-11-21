@@ -19,10 +19,11 @@ const (
 
 // Config — раздел [restart] конфига aguard.
 type Config struct {
-	Mode   string          `toml:"mode"`
-	Idle   policy.Duration `toml:"idle"`   // сколько сессия должна простоять, чтобы её можно было перезапустить
-	Socket string          `toml:"socket"` // где aguard ждёт вопросы cl
-	Claude string          `toml:"claude"` // claude из PATH сессий: версию по этой ссылке запустит перезапуск
+	Mode              string          `toml:"mode"`
+	Idle              policy.Duration `toml:"idle"`                // сколько сессия должна простоять, чтобы её можно было перезапустить
+	ScanCacheInterval policy.Duration `toml:"scan_cache_interval"` // как часто сохранять разборы транскриптов
+	Socket            string          `toml:"socket"`              // где aguard ждёт вопросы cl
+	Claude            string          `toml:"claude"`              // claude из PATH сессий: версию по этой ссылке запустит перезапуск
 	// HookStates — состояния chooks (internal/core/state.go: $XDG_RUNTIME_DIR/chooks/sessions).
 	HookStates string `toml:"hook_states"`
 }
@@ -30,11 +31,12 @@ type Config struct {
 // Default — начальные значения: только журнал, без ролей. runtime — $XDG_RUNTIME_DIR.
 func Default(home, runtime string) Config {
 	return Config{
-		Mode:       ModeLog,
-		Idle:       policy.Duration(10 * time.Minute),
-		Socket:     filepath.Join(runtime, "aguard", "aguard.sock"),
-		Claude:     filepath.Join(home, ".local", "bin", "claude"),
-		HookStates: filepath.Join(runtime, "chooks", "sessions"),
+		Mode:              ModeLog,
+		Idle:              policy.Duration(10 * time.Minute),
+		ScanCacheInterval: policy.Duration(5 * time.Minute),
+		Socket:            filepath.Join(runtime, "aguard", "aguard.sock"),
+		Claude:            filepath.Join(home, ".local", "bin", "claude"),
+		HookStates:        filepath.Join(runtime, "chooks", "sessions"),
 	}
 }
 
@@ -45,6 +47,9 @@ func (c *Config) Validate(home string) error {
 	}
 	if c.Idle.D() < time.Minute {
 		return fmt.Errorf("restart.idle = %v: не меньше минуты", c.Idle.D())
+	}
+	if c.ScanCacheInterval.D() <= 0 {
+		return fmt.Errorf("restart.scan_cache_interval = %v: должен быть больше нуля", c.ScanCacheInterval.D())
 	}
 	if c.Socket == "" || c.Claude == "" || c.HookStates == "" {
 		return errors.New("restart: socket, claude и hook_states не могут быть пустыми")

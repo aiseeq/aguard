@@ -448,7 +448,7 @@ func (a *app) run(ctx context.Context) error {
 	defer signal.Stop(usr1)
 	signal.Notify(usr2, syscall.SIGUSR2)
 	defer signal.Stop(usr2)
-	for _, n := range []string{"orphans", "tmp", "memory", "ceiling", "waits", "agentwaits", "compact", "disk", "claude-tmp", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "sigguard", "activity"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "ceiling", "waits", "agentwaits", "compact", "disk", "claude-tmp", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "sigguard", "activity", "restart"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -456,6 +456,15 @@ func (a *app) run(ctx context.Context) error {
 	mw := memwatch.NewWatcher(a.reg)
 	defer a.closeWatcher(mw)
 	judge := restart.NewJudge(a.home) // общий разбор транскриптов для ответов cl и сжатия
+	initialCfg := config.Default(a.home)
+	if loadedCfg, err := a.config(); err != nil {
+		a.log.Warn("aguard restart: кеш будет сохраняться с интервалом по умолчанию", "err", err)
+	} else {
+		initialCfg = loadedCfg
+	}
+	if err := judge.LoadScanCache(filepath.Join(a.dir("restart"), "state.json"), time.Now()); err != nil {
+		a.log.Warn("aguard restart: кеш разбора не загружен", "err", err)
+	}
 	ws := a.watchers(mw, judge)
 	a.act = activity.New(a.dir("activity"), time.Now())
 	a.note("aguard", activity.KindStart, "", "", 0, "")
@@ -483,10 +492,32 @@ func (a *app) run(ctx context.Context) error {
 		wg.Go(func() { a.loop(ctx, w) }) //nolint:unbounded-goroutine-fanout // наблюдателей семь, список задан в watchers
 	}
 	wg.Go(func() { a.flushLoop(ctx) })
+	wg.Go(func() { a.restartScanCacheLoop(ctx, judge, initialCfg.Restart.ScanCacheInterval.D()) })
 	wg.Wait()
+	if err := judge.SaveScanCache(time.Now()); err != nil {
+		a.log.Error("aguard restart: кеш разбора не сохранён", "err", err)
+	}
 	a.flush() // остановка: несохранённое — в файл
 	a.logRunSummary(started)
 	return nil
+}
+
+func (a *app) restartScanCacheLoop(ctx context.Context, judge *restart.Judge, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := judge.SaveScanCache(time.Now()); err != nil {
+				a.log.Warn("aguard restart: кеш разбора не сохранён", "err", err)
+			}
+		}
+	}
 }
 
 // watchers — наблюдатели демона по кругу; каждому нужна строка в reportSpecs.
