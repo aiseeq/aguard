@@ -98,6 +98,7 @@ func runIOSampling(ctx context.Context, cfg iowatch.Config, roots iowatch.Roots,
 	if err != nil {
 		return err
 	}
+	detail.SetGraftHeavyDir(iowatch.GraftHeavyDir(record.RuntimeDir()))
 	detail.SetEvictorThresholds(cfg.EvictorSwapMin, cfg.EvictorAnonMin)
 	details := make(chan ioDetailResult, 4)
 	control := make(chan ioDetailChange, 1)

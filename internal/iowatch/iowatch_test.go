@@ -1756,6 +1756,132 @@ func TestMainProcFromMainCgroup(t *testing.T) {
 	}
 }
 
+func TestGraftParentChainCapturedFromDetails(t *testing.T) {
+	main := "/user.slice/app.slice/graft-heavy-4018124.scope"
+	chain := []Process{{PID: 80, PPID: 70, Comm: "bash", Cgroup: "/user.slice/agents.slice/agent-dream-master-12.scope"},
+		{PID: 70, PPID: 1, Comm: "claude", Cgroup: "/user.slice/agents.slice/agent-dream-master-12.scope"}}
+	steps := []Step{{Processes: []Process{
+		{PID: 4018124, PPID: 80, Comm: "graft", Cgroup: main},
+		{PID: 80, PPID: 70, Comm: "bash", Cgroup: "/user.slice/agents.slice/agent-other-master-12.scope"},
+	}, graftScopes: []GraftScope{{Path: main, ParentChain: chain}}}}
+	got := graftParentChain(main, steps)
+	if len(got) != 2 || got[0].PID != 80 || got[1].PID != 70 {
+		t.Fatalf("parent chain = %+v", got)
+	}
+	got[0].Cgroup = "changed"
+	if steps[0].graftScopes[0].ParentChain[0].Cgroup == "changed" {
+		t.Fatal("parent chain shares backing storage with detail record")
+	}
+	if got := graftParentChain("/user.slice/app.slice/graft-heavy-4018125.scope", steps); got != nil {
+		t.Fatalf("chain for unrecorded graft process = %+v", got)
+	}
+	// Process tops alone must not be used to reconstruct a chain: the scope owner is captured live once.
+	if got := graftParentChain(main, []Step{{Processes: steps[0].Processes}}); got != nil {
+		t.Fatalf("reconstructed chain from process tops: %+v", got)
+	}
+}
+
+func TestCaptureGraftScopeWhenChildHasIOButGraftIsNotTop(t *testing.T) {
+	fp := fakeProc{t: t, root: t.TempDir()}
+	const main = "/user.slice/agents.slice/agents-graft.slice/graft-heavy-4018124.scope"
+	fp.set(4018124, 80, 1, "graft", 0, 0, 0)
+	fp.set(80, 70, 2, "bash", 0, 0, 0)
+	fp.set(70, 1, 3, "claude", 0, 0, 0)
+	writeFile(t, filepath.Join(fp.root, "4018124", "cgroup"), "0::"+main+"\n")
+	writeFile(t, filepath.Join(fp.root, "80", "cgroup"), "0::/user.slice/agents.slice/agent-dream-master-70.scope\n")
+	writeFile(t, filepath.Join(fp.root, "70", "cgroup"), "0::/user.slice/agents.slice/agent-dream-master-70.scope\n")
+	graftDir := t.TempDir()
+	writeFile(t, filepath.Join(graftDir, "graft-heavy-4018124.scope"), "dream:exec:user-word\n")
+	r := &DetailReader{procRoot: fp.root, graftDir: graftDir, cgroups: &cgroupReader{leaves: []string{"user.slice/agents.slice/agents-graft.slice/graft-heavy-4018124.scope"},
+		graftLeaves: []string{main}}}
+	step := Step{Processes: []Process{{PID: 500, PPID: 4018124, Comm: "user-word", ReadBytes: 2 << 30, Cgroup: main},
+		{PID: 900, PPID: 1, Comm: "chrome", WriteBytes: 1 << 20, Cgroup: "/user.slice/app.slice/chrome.scope"}}}
+	if err := r.captureGraftScopes(&step); err != nil {
+		t.Fatal(err)
+	}
+	if len(step.graftScopes) != 1 || step.graftScopes[0].Kind != "dream:exec:user-word" || len(step.graftScopes[0].ParentChain) != 2 {
+		t.Fatalf("captured scope: %+v", step.graftScopes)
+	}
+	if chain := step.graftScopes[0].ParentChain; chain[0].PID != 80 || chain[1].PID != 70 || !strings.Contains(chain[0].Cgroup, "agent-dream-master") {
+		t.Fatalf("live parent chain: %+v", chain)
+	}
+	rec := NewRecorder(Default())
+	step.At = time.Now()
+	step.Cgroups = []Cgroup{{Path: main, ReadBytes: 2 << 30}}
+	rec.Detail(step)
+	c := Case{Start: step.At, End: step.At, DurMS: 3_000}
+	rec.finish(&c)
+	if c.Culprits == nil || c.Culprits.GraftKind != "dream:exec:user-word" || len(c.Culprits.ParentChain) != 2 {
+		t.Fatalf("recorded case missed discovered graft data: %+v", c.Culprits)
+	}
+	writeFile(t, filepath.Join(graftDir, "graft-heavy-4018124.scope"), "shop:test-unit\n")
+	if err := r.captureGraftScopes(&step); err != nil {
+		t.Fatal(err)
+	}
+	if got := step.graftScopes[len(step.graftScopes)-1].Kind; got != "dream:exec:user-word" {
+		t.Fatalf("scope cache reread kind after observation: %q", got)
+	}
+}
+
+func TestCaptureGraftScopesDropsCacheWhenScopeDisappears(t *testing.T) {
+	fp := fakeProc{t: t, root: t.TempDir()}
+	const main = "/user.slice/app.slice/graft-heavy-4018124.scope"
+	fp.set(4018124, 1, 1, "graft", 0, 0, 0)
+	writeFile(t, filepath.Join(fp.root, "4018124", "cgroup"), "0::"+main+"\n")
+	graftDir := t.TempDir()
+	writeFile(t, filepath.Join(graftDir, "graft-heavy-4018124.scope"), "dream:exec:user-word\n")
+	r := &DetailReader{procRoot: fp.root, graftDir: graftDir, graftSeen: map[string]GraftScope{},
+		cgroups: &cgroupReader{graftLeaves: []string{main}}}
+	var step Step
+	if err := r.captureGraftScopes(&step); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.graftSeen[main]; !ok {
+		t.Fatal("active scope missing from cache")
+	}
+	r.cgroups.graftLeaves = nil
+	step = Step{}
+	if err := r.captureGraftScopes(&step); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.graftSeen) != 0 || len(step.graftScopes) != 0 {
+		t.Fatalf("disappeared scope retained: cache=%v step=%+v", r.graftSeen, step.graftScopes)
+	}
+}
+
+func TestCgroupRefreshCachesGraftScopesFromLeaves(t *testing.T) {
+	root := t.TempDir()
+	main := filepath.Join(root, "user.slice", "app.slice", "graft-heavy-4018124.scope")
+	child := filepath.Join(main, "child")
+	if err := os.MkdirAll(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(child, "cgroup.procs"), "4018124\n")
+	r := newCgroupReader(root, nil)
+	defer r.close()
+	if err := r.refresh(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	want := "/user.slice/app.slice/graft-heavy-4018124.scope"
+	if len(r.graftLeaves) != 1 || r.graftLeaves[0] != want {
+		t.Fatalf("graft scopes cached at leaf refresh = %v, want [%s]", r.graftLeaves, want)
+	}
+}
+
+func TestFinishCopiesCapturedGraftMetadataIntoCase(t *testing.T) {
+	const main = "/user.slice/agents.slice/agents-graft.slice/graft-heavy-4018124.scope"
+	now := time.Now()
+	chain := []Process{{PID: 80, PPID: 70, Comm: "bash", Cgroup: "/user.slice/agents.slice/agent-dream-master-70.scope"}}
+	r := NewRecorder(Default())
+	r.ring.Add(Record{Kind: KindDetail, Step: Step{At: now, Processes: []Process{{PID: 500, PPID: 4018124, Comm: "user-word", ReadBytes: 2 << 30, Cgroup: main}},
+		Cgroups: []Cgroup{{Path: main, ReadBytes: 2 << 30}}, graftScopes: []GraftScope{{Path: main, Kind: "dream:exec:user-word", ParentChain: chain}}}})
+	c := Case{Start: now, End: now, DurMS: 3_000}
+	r.finish(&c)
+	if c.Culprits == nil || c.Culprits.Main != main || c.Culprits.GraftKind != "dream:exec:user-word" || len(c.Culprits.ParentChain) != 1 || c.Culprits.ParentChain[0].PID != 80 {
+		t.Fatalf("case graft metadata: %+v", c.Culprits)
+	}
+}
+
 // Простой памяти без обмена с диском — не тихий (синтетика тикета io-memory-only-quiet: 25 шагов по 100 мс, memory
 // full 2250 мс, обмен 0); записанный тихий случай 02.11 02:12:30 (1699 мс, io full 1104, memory full 523, чтение
 // 272 КиБ) — тихий, как был; граница — половина случая.

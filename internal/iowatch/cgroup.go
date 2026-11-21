@@ -29,18 +29,19 @@ const cgroupLeavesEvery = 10 * time.Second
 // Лист, созданный после прошлого обхода, получает счётчики целиком: они начинаются с нуля, а
 // короткий scope иначе не попал бы в итог совсем.
 type cgroupReader struct {
-	root       string
-	devices    []string // major:minor: диск и dm поверх него, см. blockDevices
-	leaves     []string
-	leavesAt   time.Time
-	inner      map[string]time.Time // внутренние папки (и корень) → время изменения при обходе
-	newEmpty   map[string]bool      // новые пустые листья прошлого обхода: процессы в них вот-вот перенесут
-	groups     map[string]*cgroupEntry
-	buf        []byte
-	ioScr      [][ioFields]int64
-	capFiles   map[string]*cachedFile       // io.max листьев и предков по пути от root
-	capPass    map[string]Cap               // потолок папки в текущем проходе
-	readStatus func(string) ([]byte, error) // replaceable in tests
+	root        string
+	devices     []string // major:minor: диск и dm поверх него, см. blockDevices
+	leaves      []string
+	graftLeaves []string // graft-heavy scopes; refreshed with leaves, not scanned on each detail pass
+	leavesAt    time.Time
+	inner       map[string]time.Time // внутренние папки (и корень) → время изменения при обходе
+	newEmpty    map[string]bool      // новые пустые листья прошлого обхода: процессы в них вот-вот перенесут
+	groups      map[string]*cgroupEntry
+	buf         []byte
+	ioScr       [][ioFields]int64
+	capFiles    map[string]*cachedFile       // io.max листьев и предков по пути от root
+	capPass     map[string]Cap               // потолок папки в текущем проходе
+	readStatus  func(string) ([]byte, error) // replaceable in tests
 }
 
 type cgroupEntry struct {
@@ -254,8 +255,14 @@ func (r *cgroupReader) refresh(now time.Time) error {
 		return fmt.Errorf("обойти cgroup %s: %w", r.root, err)
 	}
 	live := make(map[string]bool, len(tree.leaves))
+	graftLeaves := make([]string, 0)
+	graftSeen := make(map[string]bool)
 	for _, rel := range tree.leaves {
 		live[rel] = true
+		if path := graftScopePath("/" + strings.TrimPrefix(rel, "/")); path != "" && !graftSeen[path] {
+			graftSeen[path] = true
+			graftLeaves = append(graftLeaves, path)
+		}
 		if r.groups[rel] == nil {
 			base := filepath.Join(r.root, rel)
 			created, err := createdAfter(base, prev)
@@ -285,7 +292,7 @@ func (r *cgroupReader) refresh(now time.Time) error {
 		}
 	}
 	r.newEmpty = newEmpty
-	r.leaves, r.leavesAt, r.inner = tree.leaves, now, tree.inner
+	r.leaves, r.graftLeaves, r.leavesAt, r.inner = tree.leaves, graftLeaves, now, tree.inner
 	keep := make(map[string]bool, len(tree.leaves)+len(tree.inner))
 	for _, rel := range tree.leaves {
 		keep[rel] = true

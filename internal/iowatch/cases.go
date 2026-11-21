@@ -59,6 +59,31 @@ type Case struct {
 	OwnerOffline bool `json:"owner_offline,omitempty"`
 }
 
+// graftParentChain returns the live chain captured when a graft scope first appeared in a detail pass.
+func graftParentChain(main string, details []Step) []Process {
+	for i := len(details) - 1; i >= 0; i-- {
+		for j := range details[i].graftScopes {
+			if details[i].graftScopes[j].Path == main {
+				if len(details[i].graftScopes[j].ParentChain) > 0 {
+					return slices.Clone(details[i].graftScopes[j].ParentChain)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func graftKindForCase(main string, details []Step) string {
+	for i := len(details) - 1; i >= 0; i-- {
+		for j := range details[i].graftScopes {
+			if details[i].graftScopes[j].Path == main {
+				return details[i].graftScopes[j].Kind
+			}
+		}
+	}
+	return ""
+}
+
 // SudoInfo — команда, запущенная из root logind session.
 type SudoInfo struct {
 	Command    string    `json:"command"`
@@ -89,6 +114,8 @@ type Culprit struct {
 	ProcRead       []Ranked                  `json:"proc_read,omitempty"`
 	ProcMajflt     []Ranked                  `json:"proc_majflt,omitempty"`
 	ProcessDetails map[string]ProcessDetails `json:"process_details,omitempty"`
+	ParentChain    []Process                 `json:"parent_chain,omitempty"` // родители процесса graft-heavy на момент записи
+	GraftKind      string                    `json:"graft_kind,omitempty"`   // вид задачи graft при первом наблюдении scope
 	CgroupWrite    []Ranked                  `json:"cgroup_write,omitempty"`
 	CgroupRead     []Ranked                  `json:"cgroup_read,omitempty"`
 	CgroupSwapIn   []Ranked                  `json:"cgroup_swapin,omitempty"`
@@ -458,6 +485,8 @@ func (r *Recorder) finish(c *Case) {
 		CgroupWrite:    Rank(sum.CgroupWrite, caseTop), CgroupRead: Rank(sum.CgroupRead, caseTop),
 		CgroupSwapIn: Rank(sum.CgroupSwapIn, caseTop), CgroupIdle: Rank(sum.CgroupIdle, caseTop),
 		CgroupDirty: Rank(sum.CgroupDirty, caseTop), CgroupOwn: map[string]int64{}}
+	c.Culprits.ParentChain = graftParentChain(main, details)
+	c.Culprits.GraftKind = graftKindForCase(main, details)
 	c.Culprits.Foreign, _ = sum.ForeignOver(c.Culprits.Main)
 	firstInterval := r.cfg.Detail.D()
 	if len(details) > 0 {
