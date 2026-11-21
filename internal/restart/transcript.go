@@ -643,12 +643,35 @@ func ShortPrompt(s string) string { return short(s) }
 // scanCache — разбор транскрипта между проверками: транскрипт лида — десятки мегабайт, а проверка раз в минуту.
 // Файл не менялся — прошлый разбор; дописан — разбор продолжается с конца разобранного.
 type scanCache struct {
-	file   string
-	size   int64
-	mtime  time.Time
-	since  time.Time
-	offset int64 // конец разобранных целых строк
-	scan   *transcriptScan
+	pathSession string
+	path        string
+	file        string
+	size        int64
+	mtime       time.Time
+	since       time.Time
+	offset      int64 // конец разобранных целых строк
+	scan        *transcriptScan
+}
+
+// transcriptFile держит найденный путь для SessionID этой сессии. В обычном проходе нужен один stat;
+// новый SessionID или исчезнувший файл возвращает к полному поиску. Появившийся позднее второй файл с тем же
+// SessionID не обнаружится до смены ID или исчезновения закэшированного файла; принимаем это, поскольку дублей нет.
+func (c *scanCache) transcriptFile(p paths, sessionID string) (string, os.FileInfo, error) {
+	if c.pathSession == sessionID && c.path != "" {
+		info, err := os.Stat(c.path)
+		if err == nil {
+			return c.path, info, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", nil, fmt.Errorf("транскрипт: %w", err)
+		}
+	}
+	c.path, c.pathSession = "", sessionID
+	file, info, err := transcriptFile(p, sessionID)
+	if err == nil {
+		c.path = file
+	}
+	return file, info, err
 }
 
 // read — незакрытая работа по файлу транскрипта. Транскрипт только дописывается; файл стал короче разобранного
@@ -664,7 +687,7 @@ func (c *scanCache) read(file string, info os.FileInfo, since, now time.Time) (t
 	}
 	defer f.Close()
 	if !same || info.Size() < c.offset {
-		*c = scanCache{file: file, since: since, scan: newScan(since)}
+		*c = scanCache{pathSession: c.pathSession, path: c.path, file: file, since: since, scan: newScan(since)}
 	} else if _, err := f.Seek(c.offset, io.SeekStart); err != nil {
 		c.scan = nil
 		return transcriptFacts{}, fmt.Errorf("транскрипт: %w", err)

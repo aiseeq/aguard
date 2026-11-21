@@ -64,6 +64,7 @@ type facts struct {
 type paths struct {
 	sessions     string // реестр Claude Code
 	projects     string // транскрипты Claude Code
+	readDir      func(string) ([]os.DirEntry, error)
 	hookStates   string // состояния chooks (internal/core/state.go: $XDG_RUNTIME_DIR/chooks/sessions)
 	proc         string
 	scanChildren func(string, int) ([]string, error)
@@ -74,11 +75,14 @@ type paths struct {
 	tree func(dir string) ([]string, error)
 }
 
+func readProjectsDir(dir string) ([]os.DirEntry, error) { return os.ReadDir(dir) }
+
 // pathsFor — пути живой машины: реестр и транскрипты в home, остальное — из раздела [restart].
 func pathsFor(home string, cfg *Config) paths {
 	return paths{
 		sessions:   filepath.Join(home, ".claude", "sessions"),
 		projects:   filepath.Join(home, ".claude", "projects"),
+		readDir:    readProjectsDir,
 		hookStates: cfg.HookStates,
 		proc:       "/proc",
 		claude:     cfg.Claude,
@@ -178,7 +182,7 @@ func state(p paths, cache *scanCache, pid int, now time.Time, f *facts, children
 	}
 	f.HookState, f.HookTasks, f.HookWaits, f.HookAgents = hook.state, hook.tasks, hook.waits, hook.agents
 	latest = later(latest, hook.written)
-	transcript, info, err := transcriptFile(p, s.SessionID)
+	transcript, info, err := cache.transcriptFile(p, s.SessionID)
 	if err != nil {
 		fail(err)
 		return

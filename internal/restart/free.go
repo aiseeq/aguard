@@ -60,7 +60,7 @@ func (j *Judge) Free(cfg *Config, pid int, after time.Duration, now time.Time) (
 		f.Errors = append(f.Errors, err.Error())
 	}
 	f.HookState, f.HookTasks, f.HookWaits, f.HookAgents = h.state, h.tasks, h.waits, h.agents
-	file, info, err := transcriptFile(p, s.SessionID)
+	file, info, err := c.scan.transcriptFile(p, s.SessionID)
 	if errors.Is(err, os.ErrNotExist) {
 		f.TurnQuiet = now.Sub(time.UnixMilli(s.StartedAt))
 	} else if err != nil {
@@ -101,7 +101,11 @@ func (j *Judge) WakeFree(cfg *Config, pid int, after time.Duration, now time.Tim
 // Нет файла — os.ErrNotExist, отличимый от ошибки обхода папок. Сведения о файле — того же stat, что нашёл его:
 // второй stat открывал бы окно, где файл уже другой.
 func transcriptFile(p paths, sessionID string) (string, os.FileInfo, error) {
-	entries, err := os.ReadDir(p.projects)
+	readDir := p.readDir
+	if readDir == nil {
+		readDir = os.ReadDir
+	}
+	entries, err := readDir(p.projects)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil, os.ErrNotExist
 	}

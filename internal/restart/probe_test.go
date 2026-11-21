@@ -1,6 +1,8 @@
 package restart
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -169,6 +171,141 @@ func TestTranscriptFile(t *testing.T) {
 	if f, info, err := transcriptFile(p, "s1"); err != nil || f != filepath.Join(dir, "-home-u", "s1.jsonl") || info == nil || info.IsDir() {
 		t.Errorf("transcriptFile = %q %v", f, err)
 	}
+}
+
+func TestTranscriptPathCache(t *testing.T) {
+	dir := t.TempDir()
+	reads := 0
+	p := paths{projects: dir, readDir: func(path string) ([]os.DirEntry, error) {
+		reads++
+		return os.ReadDir(path)
+	}}
+	c := &scanCache{}
+	first := filepath.Join(dir, "project-a", "s1.jsonl")
+	second := filepath.Join(dir, "project-b", "s2.jsonl")
+	write(t, first, "")
+	write(t, second, "")
+	if got, _, err := c.transcriptFile(p, "s1"); err != nil || got != first {
+		t.Fatalf("first lookup = %q, %v", got, err)
+	}
+	if got, _, err := c.transcriptFile(p, "s1"); err != nil || got != first || reads != 1 {
+		t.Fatalf("cached lookup = %q, %v; ReadDir calls = %d", got, err, reads)
+	}
+	if got, _, err := c.transcriptFile(p, "s2"); err != nil || got != second || reads != 2 {
+		t.Fatalf("changed SessionID lookup = %q, %v; ReadDir calls = %d", got, err, reads)
+	}
+	if err := os.Remove(second); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.transcriptFile(p, "s2"); !errors.Is(err, os.ErrNotExist) || reads != 3 {
+		t.Fatalf("removed cached file lookup = %v; ReadDir calls = %d", err, reads)
+	}
+}
+
+// /clear меняет SessionID до первой записи нового транскрипта: прежний путь нельзя вернуть даже при повторном поиске.
+func TestRevClearBeforeFirstWrite(t *testing.T) {
+	dir := t.TempDir()
+	p := paths{projects: dir}
+	write(t, filepath.Join(dir, "pa", "s1.jsonl"), "")
+	c := &scanCache{}
+	if _, _, err := c.transcriptFile(p, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if f, _, err := c.transcriptFile(p, "s2"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("call %d: s2 = %q %v", i, f, err)
+		}
+	}
+}
+
+func TestTranscriptPathCacheAcceptsLateDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	reads := 0
+	p := paths{projects: dir, readDir: func(path string) ([]os.DirEntry, error) {
+		reads++
+		return os.ReadDir(path)
+	}}
+	first := filepath.Join(dir, "project-a", "s1.jsonl")
+	write(t, first, "")
+	c := &scanCache{}
+	if got, _, err := c.transcriptFile(p, "s1"); err != nil || got != first {
+		t.Fatalf("initial lookup = %q, %v", got, err)
+	}
+	write(t, filepath.Join(dir, "project-b", "s1.jsonl"), "duplicate")
+	if got, _, err := c.transcriptFile(p, "s1"); err != nil || got != first || reads != 1 {
+		t.Fatalf("cached lookup with late duplicate = %q, %v; ReadDir calls = %d", got, err, reads)
+	}
+}
+
+func TestJudgeTranscriptPathCache(t *testing.T) {
+	now := time.Now()
+	for _, flow := range []string{"Free", "Answer"} {
+		t.Run(flow, func(t *testing.T) {
+			w := newSessionWorld(t, worldTimes{now: now, turnAgo: 10 * time.Minute, ttyAgo: 20 * time.Minute})
+			w.link(t, 4242)
+			reads := 0
+			w.p.readDir = func(path string) ([]os.DirEntry, error) {
+				reads++
+				return os.ReadDir(path)
+			}
+			j := NewJudge(w.dir)
+			j.paths = &w.p
+			for range 2 {
+				switch flow {
+				case "Free":
+					if _, why := j.Free(&Config{}, 4242, 2*time.Minute, now); why == "ошибка чтения фактов" {
+						t.Fatal(why)
+					}
+				case "Answer":
+					req := NewRequest(4242, "x-master", "")
+					req.Stale = "test"
+					if got := j.Answer(&Config{}, &CompactConfig{}, req, now); got.Error != "" {
+						t.Fatal(got.Error)
+					}
+				}
+			}
+			if reads != 1 {
+				t.Fatalf("ReadDir calls after two %s calls = %d, want 1", flow, reads)
+			}
+		})
+	}
+}
+
+func BenchmarkTranscriptPath(b *testing.B) {
+	dir := b.TempDir()
+	for i := range 489 {
+		project := filepath.Join(dir, fmt.Sprintf("project-%03d", i))
+		if err := os.MkdirAll(project, 0o755); err != nil {
+			b.Fatal(err)
+		}
+	}
+	file := filepath.Join(dir, "project-488", "s1.jsonl")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		b.Fatal(err)
+	}
+	p := paths{projects: dir}
+	b.Run("before_full_search", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			if _, _, err := transcriptFile(p, "s1"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("after_cached_path", func(b *testing.B) {
+		cache := &scanCache{}
+		if _, _, err := cache.transcriptFile(p, "s1"); err != nil {
+			b.Fatal(err)
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			if _, _, err := cache.transcriptFile(p, "s1"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 // probe на подменённой сессии: сведения собраны из реестра, /proc, chooks, транскрипта и терминала, и решение
