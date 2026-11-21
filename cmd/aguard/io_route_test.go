@@ -294,6 +294,53 @@ func TestIOToolOwnerInTemporaryScope(t *testing.T) {
 	}
 }
 
+func TestIOToolOwnerSessionScopeUsesOwnerTicketWording(t *testing.T) {
+	c := ioroute.Case{Owner: "akit-master", TicketOwner: "akit-master"}
+	act := ioroute.Action{Why: ioroute.WhyVictim, Cases: []ioroute.Case{c}}
+	got := ioRouteLetter(act, nil, 0, nil)
+	if !strings.Contains(got, "ему тикет") || strings.Contains(got, "тикет — владельцу инструмента akit-master") {
+		t.Fatalf("письмо при Owner == TicketOwner: %q", got)
+	}
+}
+
+func TestIORouteNoOwnerLetterNamesToolTicketRecipient(t *testing.T) {
+	withTool := ioroute.Action{Why: ioroute.WhyNoOwner, Cases: []ioroute.Case{{TicketOwner: "akit-master"}}}
+	got := ioRouteLetter(withTool, nil, 0, nil)
+	want := "aguard io: вред сейчас, хозяина виновника нет; тикет — владельцу инструмента akit-master."
+	if got != want {
+		t.Fatalf("письмо без хозяина не назвало владельца тикета: %q", got)
+	}
+	withoutTool := ioroute.Action{Why: ioroute.WhyNoOwner, Cases: []ioroute.Case{{}}}
+	if got, want := ioRouteLetter(withoutTool, nil, 0, nil), "aguard io: вред сейчас, хозяина виновника нет."; got != want {
+		t.Fatalf("письмо без владельца инструмента изменилось: %q, want %q", got, want)
+	}
+}
+
+func TestIOWorkerOwnerCachesSessionDirectoryCheck(t *testing.T) {
+	dir := t.TempDir()
+	jobDir := filepath.Join(dir, "J")
+	if err := os.MkdirAll(jobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(jobDir, "job.json"), []byte(`{"id":"J","master":"akit-master","owner":{"name":"launcher-master"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	o := &ioOwnerFinder{jobs: &cpuwatch.Jobs{Dir: dir}, sessionExists: func(name string) bool {
+		checks++
+		return name == "akit-master"
+	}}
+	for i := range 2 {
+		owner, err := o.workerOwner("worker-job-J.service")
+		if err != nil || owner != "akit-master" {
+			t.Fatalf("случай %d: owner=%q err=%v", i, owner, err)
+		}
+	}
+	if checks != 1 {
+		t.Fatalf("папка сессии проверена %d раз, want 1", checks)
+	}
+}
+
 func TestIOClaudeVersionWithoutLeafUsesClaudeClass(t *testing.T) {
 	main := "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-shop-master-123.scope"
 	c := iowatch.Case{Culprits: &iowatch.Culprit{Main: main, MainProc: "2.1.328(485370)"}}

@@ -184,6 +184,33 @@ func TestTicketOwnerAfterLetterPause(t *testing.T) {
 	}
 }
 
+func TestTicketOwnerWithoutCgroupOwnerAfterLetterPause(t *testing.T) {
+	r := New(testConfig())
+	first := at(0, 12, "", "tl")
+	first.TicketOwner = "akit-master"
+	acts := r.Route(first, alive("akit-master", "lead"))
+	if tk := tickets(acts); len(tk) != 1 || tk[0].Owner != "akit-master" {
+		t.Fatalf("срочный случай без хозяина cgroup: %+v", acts)
+	}
+	if l := letters(acts); len(l) != 1 || l[0].To != "lead" || l[0].Why != WhyNoOwner {
+		t.Fatalf("первое письмо лиду: %+v", acts)
+	}
+
+	pending := at(1, 12, "", "tl")
+	pending.TicketOwner = "akit-master"
+	acts = r.Route(pending, alive("akit-master", "lead"))
+	if tk := tickets(acts); len(tk) != 1 || tk[0].Owner != "akit-master" {
+		t.Fatalf("случай в паузе не получил немедленный тикет: %+v", acts)
+	}
+	if len(letters(acts)) != 0 {
+		t.Fatalf("письмо лиду не отложено до конца паузы: %+v", acts)
+	}
+	acts = r.Tick(t0.Add(61 * time.Minute))
+	if tk := tickets(acts); len(tk) != 0 {
+		t.Fatalf("после паузы повторная заметка владельцу инструмента: %+v", acts)
+	}
+}
+
 // Серия: третий случай от 2 с за 15 мин — письмо; первые два — тикеты.
 func TestSeriesThirdLetter(t *testing.T) {
 	r := New(testConfig())
