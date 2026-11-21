@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -81,6 +83,9 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 		// Пересчёт старой записи оставляет отображаемое имя, если в журнале не было пути cgroup.
 		unit = cul.Main
 	}
+	if isGraftHeavy(cul.Main) {
+		return o.routeGraftHeavy(c)
+	}
 	_, fullRootPath := sessionCandidate(cul.Main)
 	if fullRootPath || (storedSessionRE.MatchString(cul.Main) && c.Sudo != nil) {
 		rc.Class, rc.Generic = "root", true
@@ -118,6 +123,61 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 		rc.TicketOwner = toolOwner
 	}
 	return rc, err
+}
+
+func (o *ioOwnerFinder) routeGraftHeavy(c *iowatch.Case) (ioroute.Case, error) {
+	cul := c.Culprits
+	rc := ioroute.Case{Start: c.Start, End: c.End, DurMS: c.DurMS, Text: ioCaseLine(c), Victim: c.PagingVictim()}
+	owner, err := o.graftHeavyOwner(cul)
+	if err != nil {
+		return rc, err
+	}
+	if owner == "" {
+		owner, err = o.byProcess(cul.ProcessDetails[cul.MainProc])
+	}
+	rc.Owner = owner
+	rc.Class = ticketClass(iowatch.CgroupName(cul.Main))
+	toolOwner := o.toolOwner(o.selectedProc(cul))
+	if owner != "" || toolOwner != "" {
+		rc.Class, rc.Generic = o.processClass(cul, rc.Class)
+		rc.TicketOwner = toolOwner
+	}
+	return rc, err
+}
+
+func isGraftHeavy(main string) bool {
+	base := filepath.Base(main)
+	return strings.HasPrefix(base, "graft-heavy-") && strings.HasSuffix(base, ".scope")
+}
+
+func (o *ioOwnerFinder) graftHeavyOwner(cul *iowatch.Culprit) (string, error) {
+	repo, _, hasKind := strings.Cut(cul.GraftKind, ":")
+	if hasKind && repo != "" && repo != "/" {
+		for _, dir := range []string{filepath.Join(o.home, "git", repo), filepath.Join(o.home, "work", repo)} {
+			if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+				continue
+			} else if err != nil {
+				return "", fmt.Errorf("папка репозитория %s: %w", dir, err)
+			}
+			owner, err := o.nameFor(dir)
+			if err != nil {
+				return "", err
+			}
+			if owner != "" {
+				return owner, nil
+			}
+		}
+	}
+	for _, parent := range cul.ParentChain {
+		if name, _, ok := proc.SessionScope(parent.Cgroup); ok {
+			return name, nil
+		}
+		unit := proc.ServiceUnit(parent.Cgroup)
+		if strings.HasPrefix(unit, "worker-") {
+			return o.workerOwner(unit)
+		}
+	}
+	return "", nil
 }
 
 func (o *ioOwnerFinder) selectedProc(c *iowatch.Culprit) string {

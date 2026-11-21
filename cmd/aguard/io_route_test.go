@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -373,6 +374,82 @@ func TestIOOwnerByProcess(t *testing.T) {
 	c.SwapIn, c.Culprits.MainWrite = 1<<20, 388<<20 // пишет больше, чем читает — не жертва при любой подкачке
 	if rc, _ := o.routeCase(&c); rc.Victim {
 		t.Errorf("пишущая главная — жертва: %+v", rc)
+	}
+}
+
+func TestIOOwnerGraftHeavyPriority(t *testing.T) {
+	a, _ := testIOApp(t)
+	repo := filepath.Join(a.home, "git", "dream")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(a.home, ".config", "cl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.home, ".config", "cl", "names.tsv"), []byte("~/git\tgit-master\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := iowatch.Default()
+	cfg.Lead = "lead"
+	o := a.ioOwners(&cfg)
+	const main = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-graft.slice/graft-heavy-4018124.scope"
+	parentSession := iowatch.Process{PID: 50, PPID: 60, Comm: "bash", Cgroup: "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-other-master-12.scope"}
+	parentWorker := iowatch.Process{PID: 70, PPID: 1, Comm: "worker", Cgroup: "/user.slice/user-1000.slice/user@1000.service/agents.slice/worker-job-J.service"}
+	jobDir := filepath.Join(a.home, ".local", "state", "worker", "J")
+	if err := os.MkdirAll(jobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeIOFile(t, filepath.Join(jobDir, "job.json"), `{"id":"J","master":"worker-master"}`)
+	for _, tc := range []struct {
+		name, kind, cwd, want string
+		chain                 []iowatch.Process
+	}{
+		{name: "repo from real graft kind without table row wins", kind: "dream:exec:user-word", chain: []iowatch.Process{parentSession}, want: "dream-master"},
+		{name: "missing repo directory continues to parent", kind: "shop:test-unit", chain: []iowatch.Process{parentSession}, want: "other-master"},
+		{name: "home-name repo without directory continues to parent", kind: "aisee:exec:user-word", chain: []iowatch.Process{parentSession}, want: "other-master"},
+		{name: "slash kind falls back to Claude parent", kind: "/:exec:user-word", chain: []iowatch.Process{parentSession}, want: "other-master"},
+		{name: "slash kind finds worker parent", kind: "/:exec:user-word", chain: []iowatch.Process{parentWorker}, want: "worker-master"},
+		{name: "no kind or parent uses byProcess", cwd: repo, want: "dream-master"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := iowatch.Case{Culprits: &iowatch.Culprit{Main: main, MainProc: "user-word(4018124)",
+				GraftKind: tc.kind, ProcessDetails: map[string]iowatch.ProcessDetails{"user-word(4018124)": {Cmdline: "user-word", CWD: tc.cwd}}, ParentChain: tc.chain}}
+			rc, err := o.routeCase(&c)
+			if err != nil || rc.Owner != tc.want {
+				t.Fatalf("route %+v, err=%v, want owner %s", rc, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestIOGraftHeavyScopeSuffixBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/user.slice/graft-heavy-12.scope", true},
+		{"/user.slice/graft-heavy-12.scope.extra", false},
+		{"/user.slice/graft-heavy-12", false},
+	} {
+		if got := isGraftHeavy(tc.path); got != tc.want {
+			t.Errorf("isGraftHeavy(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestIOOwnerGraftHeavyBrokenNamesTablePropagates(t *testing.T) {
+	a, _ := testIOApp(t)
+	repo := filepath.Join(a.home, "git", "dream")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := iowatch.Default()
+	cfg.Lead = "lead"
+	o := a.ioOwners(&cfg)
+	o.tableErr = errors.New("broken names table")
+	c := iowatch.Case{Culprits: &iowatch.Culprit{Main: "/user.slice/graft-heavy-4018124.scope", GraftKind: "dream:exec:user-word"}}
+	if _, err := o.routeCase(&c); err == nil || !strings.Contains(err.Error(), "broken names table") {
+		t.Fatalf("broken names table error = %v", err)
 	}
 }
 

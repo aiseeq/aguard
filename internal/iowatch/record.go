@@ -54,8 +54,17 @@ type Step struct {
 	GraftSliceMemKnown bool      `json:"graft_slice_mem_known,omitempty"`
 	Processes          []Process `json:"processes,omitempty"`
 	Cgroups            []Cgroup  `json:"cgroups,omitempty"`
-	memoryGroups       []evictors.Group
-	evictorRow         *evictors.Interval
+
+	graftScopes  []GraftScope // временные данные для обогащения сводки случая; не сериализуются
+	memoryGroups []evictors.Group
+	evictorRow   *evictors.Interval
+}
+
+// GraftScope сохраняется только в памяти между DetailReader и Recorder; в случай копируются kind и родители.
+type GraftScope struct {
+	Path        string    `json:"path"`
+	Kind        string    `json:"kind,omitempty"`
+	ParentChain []Process `json:"parent_chain,omitempty"`
 }
 
 // TakeEvictorInterval transfers the ephemeral interval to the in-memory aggregator.
