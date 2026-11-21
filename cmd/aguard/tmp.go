@@ -25,6 +25,7 @@ import (
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/aguard/internal/report"
+	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/akit/pressure"
 	"github.com/aiseeq/akit/session"
 )
@@ -66,13 +67,17 @@ func (a *app) tmpCmd(args []string) error {
 
 func (a *app) tmpStatePath() string { return filepath.Join(a.dir("tmp"), "state.json") }
 
-// snapshot — свежий снимок трекера: /run, а если его нет — диск.
-// Tracker.save создаёт State с Updated один раз на поколение и атомарно пишет /run, затем диск.
-// Их mtime может различаться внутри записи на несколько секунд, хотя Updated совпадает; сохраняем /run,
-// если разница меньше половины периода YoungEvery (минута). Если запись /run не удалась, а предыдущая успешная
-// была менее чем за 30 с до записи диска, /run может отставать до 30 с изменений; этот снимок будет выбран до
-// следующей записи диска, хотя HEAD по Updated выбрал бы диск. Ошибка чтения невыбранной копии теперь игнорируется.
+// snapshot возвращает свежий снимок слежения из памяти демона, а для отдельного CLI-процесса — из файлов.
 func (a *app) snapshot(cfg *policy.Config) (*record.State, error) {
+	if s := track.Snapshot(cfg.RunDir); s != nil {
+		if s.Updated.IsZero() {
+			return nil, errors.New("снимка слежения нет: проверьте aguard-track-helper и строки «слежение» в журнале aguard")
+		}
+		for _, p := range s.NoBorn {
+			a.warn("tmp", "запись снимка без born исключена из сводок", "path", p)
+		}
+		return s, nil
+	}
 	runPath := filepath.Join(cfg.RunDir, record.StateFile)
 	diskPath := filepath.Join(cfg.TrackDir, record.StateFile)
 	runInfo, runErr := os.Stat(runPath)

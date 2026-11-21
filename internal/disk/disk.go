@@ -105,7 +105,7 @@ func Default() Config {
 			"~/.cache/typescript", "~/.cache/JetBrains", "~/.cache/mozilla"},
 		Keep:     policy.Duration(60 * 24 * time.Hour),
 		TraceMin: 1 << 30,
-		Track:    []string{filepath.Join(record.TrackRunDir("track-home"), record.StateFile), "~/.local/state/aguard/track-home/" + record.StateFile},
+		Track:    []string{filepath.Join(record.TrackRunDir("track-home"), record.StateFile), filepath.Join("~/.local/state/aguard/track-home", record.StateFile)},
 		FreeMin:  defaultFreeMin, FreeMode: FreeAlert, FreeTell: []string{"git-admin"},
 		FastEvery:      policy.Duration(time.Hour),
 		ForecastWindow: policy.Duration(6 * time.Hour), ForecastRecent: policy.Duration(time.Hour),
@@ -127,6 +127,7 @@ func (c *Config) Validate(home string) error {
 	expand(c.Roots)
 	expand(c.Containers)
 	expand(c.Lasting)
+	expand(c.Track)
 	if err := c.validateTraces(home); err != nil {
 		return err
 	}
