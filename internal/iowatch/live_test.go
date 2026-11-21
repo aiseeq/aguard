@@ -110,8 +110,8 @@ func TestSeriesFoldsStepsIntoSeconds(t *testing.T) {
 		second.CPUSomeMS != 12 || second.RunnableMax != 12 {
 		t.Fatalf("секунда 1: %+v", second)
 	}
-	if size := unsafe.Sizeof(secondRow{}); size != 96 {
-		t.Fatalf("строка ряда %d байт, в доке — 96", size)
+	if size := unsafe.Sizeof(secondRow{}); size != 112 {
+		t.Fatalf("строка ряда %d байт, в доке — 112", size)
 	}
 }
 

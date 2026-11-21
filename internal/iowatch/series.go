@@ -30,10 +30,13 @@ type MachineSecond struct {
 	MemAvail           int64     `json:"mem_avail,omitempty"`       // байт
 	SwapUsed           int64     `json:"swap_used,omitempty"`       // байт
 	GraftSliceMem      int64     `json:"graft_slice_mem,omitempty"` // байт
+	BtrfsCommitCurMS   int64     `json:"btrfs_commit_cur_ms,omitempty"`
+	BtrfsCommits       int64     `json:"btrfs_commits,omitempty"`
+	BtrfsCommitLastMS  int64     `json:"btrfs_commit_last_ms,omitempty"`
 	GraftSliceMemKnown bool      `json:"-"`
 }
 
-// secondRow — секунда ряда в памяти: 96 байт с выравниванием (байты диска — int64, остальное — int32,
+// secondRow — секунда ряда в памяти: 112 байт с выравниванием (байты диска — int64, остальное — int32,
 // Dirty, Writeback, MemAvail, SwapUsed и graftSliceMem — КиБ).
 type secondRow struct {
 	at, readB, writeB                                             int64 // at — unix-секунды
@@ -41,6 +44,7 @@ type secondRow struct {
 	ioFull, ioSome, memFull, stall, wAwait, inflight              int32
 	flushes, swapIn, majflt, dirtyKiB, writebackKiB               int32
 	cpuSome, runnable, memAvailKiB, swapUsedKiB, graftSliceMemKiB int32
+	btrfsCommitCurMS, btrfsCommits, btrfsCommitLastMS             int32
 }
 
 // i32 — значение в int32 с насыщением: ряд не врёт знаком на редком выбросе.
@@ -55,6 +59,7 @@ func (r *secondRow) second() MachineSecond {
 	sec := MachineSecond{At: time.Unix(r.at, 0), IOFullMS: int64(r.ioFull), IOSomeMS: int64(r.ioSome), MemFullMS: int64(r.memFull),
 		StallMS: int64(r.stall), ReadB: r.readB, WriteB: r.writeB, WAwaitMS: int64(r.wAwait), InFlightMax: int64(r.inflight),
 		Flushes: int64(r.flushes), Dirty: int64(r.dirtyKiB) << 10, Writeback: int64(r.writebackKiB) << 10,
+		BtrfsCommitCurMS: int64(r.btrfsCommitCurMS), BtrfsCommits: int64(r.btrfsCommits), BtrfsCommitLastMS: int64(r.btrfsCommitLastMS),
 		SwapIn: int64(r.swapIn), Majflt: int64(r.majflt), CPUSomeMS: int64(r.cpuSome), RunnableMax: int64(r.runnable),
 		MemAvail: int64(r.memAvailKiB) << 10, SwapUsed: int64(r.swapUsedKiB) << 10, GraftSliceMem: graftBytes, GraftSliceMemKnown: known}
 	if r.vrateMin >= 0 {
@@ -78,6 +83,7 @@ func rowOf(s *MachineSecond) secondRow {
 		flushes: i32(s.Flushes), swapIn: i32(s.SwapIn), majflt: i32(s.Majflt), dirtyKiB: i32(s.Dirty >> 10),
 		writebackKiB: i32(s.Writeback >> 10), cpuSome: i32(s.CPUSomeMS), runnable: i32(s.RunnableMax),
 		memAvailKiB: i32(s.MemAvail >> 10), swapUsedKiB: i32(s.SwapUsed >> 10), graftSliceMemKiB: graftMem,
+		btrfsCommitCurMS: i32(s.BtrfsCommitCurMS), btrfsCommits: i32(s.BtrfsCommits), btrfsCommitLastMS: i32(s.BtrfsCommitLastMS),
 		vrateMin: -1, vrateLast: -1}
 	if s.VRateMin != nil {
 		row.vrateMin = i32(int64(math.Round(*s.VRateMin * 100)))
@@ -90,11 +96,12 @@ func rowOf(s *MachineSecond) secondRow {
 
 // secondAcc — идущая секунда: суммы быстрых шагов в их единицах.
 type secondAcc struct {
-	at                                               int64 // unix-секунды; 0 — секунды нет
-	ioFull, ioSome, memFull, cpuSome, stall          int64 // мкс
-	rd, wr, wms, wios, inflight, flush, swap, majflt int64
-	runnable                                         int64 // пик
-	vrateMin, vrateLast                              int32 // сотые доли процента; -1 — нет данных
+	at                                                int64 // unix-секунды; 0 — секунды нет
+	ioFull, ioSome, memFull, cpuSome, stall           int64 // мкс
+	rd, wr, wms, wios, inflight, flush, swap, majflt  int64
+	runnable                                          int64 // пик
+	vrateMin, vrateLast                               int32 // сотые доли процента; -1 — нет данных
+	btrfsCommitCurMS, btrfsCommits, btrfsCommitLastMS int32
 }
 
 // detailLast — последние значения детального прохода: идут в секунды, закрытые после него. Байты.
@@ -181,6 +188,9 @@ func (s *Series) step(st *Step, stallUS int64, interval time.Duration) {
 	c.flush += st.FIOS
 	c.swap += st.SwapIn
 	c.majflt += st.Majflt
+	c.btrfsCommitCurMS = max(c.btrfsCommitCurMS, i32(st.BtrfsCommitCurMS))
+	c.btrfsCommits = i32(int64(c.btrfsCommits) + st.BtrfsCommits)
+	c.btrfsCommitLastMS = max(c.btrfsCommitLastMS, i32(st.BtrfsCommitLastMS))
 }
 
 // acc выбирает секунду накопления, закрывая предыдущую при переходе.
@@ -207,7 +217,8 @@ func (s *Series) flush() {
 	s.push(secondRow{at: c.at, readB: c.rd, writeB: c.wr, vrateMin: c.vrateMin, vrateLast: c.vrateLast, ioFull: i32(c.ioFull / 1000), ioSome: i32(c.ioSome / 1000),
 		memFull: i32(c.memFull / 1000), stall: i32(c.stall / 1000), wAwait: i32(AwaitMS(c.wms, c.wios)), inflight: i32(c.inflight),
 		flushes: i32(c.flush), swapIn: i32(c.swap), majflt: i32(c.majflt), dirtyKiB: i32(d.dirty >> 10), writebackKiB: i32(d.writeback >> 10),
-		cpuSome: i32(c.cpuSome / 1000), runnable: i32(c.runnable), memAvailKiB: i32(d.memAvail >> 10), swapUsedKiB: i32(d.swapUsed >> 10), graftSliceMemKiB: rowGraftMemKiB(d)})
+		cpuSome: i32(c.cpuSome / 1000), runnable: i32(c.runnable), memAvailKiB: i32(d.memAvail >> 10), swapUsedKiB: i32(d.swapUsed >> 10), graftSliceMemKiB: rowGraftMemKiB(d),
+		btrfsCommitCurMS: c.btrfsCommitCurMS, btrfsCommits: c.btrfsCommits, btrfsCommitLastMS: c.btrfsCommitLastMS})
 	s.cur = secondAcc{}
 }
 

@@ -131,6 +131,9 @@ func TestBtrfsIntervalIndependentOfDisk(t *testing.T) {
 	if c.Disk.Interval.D() != 10*time.Minute || c.Btrfs.Interval.D() != time.Minute {
 		t.Fatalf("intervals not preserved: disk=%s btrfs=%s", c.Disk.Interval.D(), c.Btrfs.Interval.D())
 	}
+	if c.IO.BtrfsSysfsRoot != c.Btrfs.SysfsRoot || c.IO.BtrfsCommitReportMS != 2000 {
+		t.Fatalf("IO Btrfs config root/threshold = %q/%d", c.IO.BtrfsSysfsRoot, c.IO.BtrfsCommitReportMS)
+	}
 	if _, err := Load(write(t, "[btrfs]\ninterval = \"59s\"\n"), home, 1000); err == nil {
 		t.Fatal("btrfs interval below 1m accepted")
 	}

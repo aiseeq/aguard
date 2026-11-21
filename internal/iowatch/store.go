@@ -261,9 +261,17 @@ type Summary struct {
 	CappedIdleMS int64         `json:"capped_idle_ms"`
 	CappedWho    []RankedCases `json:"capped_who"`
 	// Waiting — случаи ожидания одной cgroup при низкой занятости устройства; не считаются фризами машины.
-	Waiting       int           `json:"waiting"`
-	WaitingIdleMS int64         `json:"waiting_idle_ms"`
-	WaitingWho    []RankedCases `json:"waiting_who"`
+	Waiting              int           `json:"waiting"`
+	WaitingIdleMS        int64         `json:"waiting_idle_ms"`
+	WaitingWho           []RankedCases `json:"waiting_who"`
+	BtrfsLongCommits     int           `json:"btrfs_long_commits,omitempty"`
+	BtrfsLongestCommitMS int64         `json:"btrfs_longest_commit_ms,omitempty"`
+	BtrfsOutsideCases    int           `json:"btrfs_outside_cases,omitempty"`
+	BtrfsCommitReportMS  int64         `json:"btrfs_commit_report_ms,omitempty"`
+	BtrfsLongestCommitAt time.Time     `json:"btrfs_longest_commit_at,omitzero"`
+	BtrfsHasData         bool          `json:"-"`
+	BtrfsUnavailable     string        `json:"btrfs_unavailable,omitempty"`
+	BtrfsWindow          string        `json:"btrfs_window,omitempty"`
 	// Coverage — за какую часть [Since, Until) замер шёл (Cover); `aguard io report` задаёт всегда.
 	Coverage *Coverage `json:"coverage,omitempty"`
 }
