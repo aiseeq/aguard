@@ -62,11 +62,7 @@ func (c *Config) Validate(home string) error {
 		return fmt.Errorf("queue.crit_copy_after > 0")
 	}
 	for _, ps := range [][]string{c.GitRoots, c.Dirs, c.Skip, c.RestCrit} {
-		for i := range ps {
-			if ps[i] = policy.ExpandHome(ps[i], home); ps[i] != "" {
-				ps[i] = filepath.Clean(ps[i]) // «/home/x/docs/» и «/home/x/docs» — один ключ проекта в кеше очереди
-			}
-		}
+		expandClean(ps, home)
 	}
 	for i, root := range c.RestCrit {
 		c.RestCrit[i] = filepath.Clean(root)
@@ -108,3 +104,12 @@ func (c *Config) Validate(home string) error {
 
 // Rest — дни отдыха после Validate; до него нулевое значение: дней отдыха нет.
 func (c *Config) Rest() Rest { return c.rest }
+
+// expandClean раскрывает ~ и чистит пути на месте: «/home/x/docs/» и «/home/x/docs» — один ключ проекта в кеше очереди.
+func expandClean(ps []string, home string) {
+	for i := range ps {
+		if ps[i] = policy.ExpandHome(ps[i], home); ps[i] != "" {
+			ps[i] = filepath.Clean(ps[i])
+		}
+	}
+}
