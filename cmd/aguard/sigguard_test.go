@@ -144,6 +144,103 @@ func TestSigguardMessageKilledAndSignalName(t *testing.T) {
 	}
 }
 
+func TestSigguardMessageTargetsAcrossRecordsUseMaximum(t *testing.T) {
+	for _, counts := range [][2]int{{1, 10}, {10, 1}} {
+		denies := []sigguard.Deny{
+			{Kind: "signal", Arg: "15", Count: 1, Comm: "bash", PID: 1, Unit: "agent-a.scope", Targets: counts[0], HasTargets: true},
+			{Kind: "signal", Arg: "15", Count: 1, Comm: "pkill", PID: 2, Unit: "agent-a.scope", Targets: counts[1], HasTargets: true},
+		}
+		m := sigguard.Message(sigguard.Group{Denies: denies}, "")
+		if !strings.Contains(m, "разных целей не меньше 10") {
+			t.Errorf("counts %v: group target maximum missing: %s", counts, m)
+		}
+	}
+}
+
+func TestSigguardMessageWorkerStopHint(t *testing.T) {
+	targetUnit := "worker-job-1120-1045-cl-trust-flaky.service"
+	workerID := "1120-1045-cl-trust-flaky"
+	baseDeny := sigguard.Deny{Kind: "signal", Arg: "15", Count: 1, Comm: "bash", PID: 1, Unit: "agent-master.scope", Target: 2, TargetComm: "sleep", TargetUnit: targetUnit}
+	t.Run("other worker", func(t *testing.T) {
+		m := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{baseDeny}}, "")
+		want := "Бойца снимает его мастер: `worker stop " + workerID + "`; чужого бойца — `worker stop --other-master " + workerID + "` по слову пользователя."
+		if !strings.HasSuffix(m, "\n"+want) {
+			t.Fatalf("worker stop hint missing at end: %s", m)
+		}
+	})
+	t.Run("non worker target", func(t *testing.T) {
+		for _, unit := range []string{"x.service", "worker-io-probe-1.scope", "worker-1120-1045-legacy.service"} {
+			t.Run(unit, func(t *testing.T) {
+				d := baseDeny
+				d.TargetUnit = unit
+				got := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}}, "")
+				if strings.Contains(got, "worker stop") {
+					t.Fatalf("non worker target got hint: %s", got)
+				}
+				if unit == "x.service" {
+					const want = "aguard: авария — agent-signal-guard отбил signal SIGTERM ×1; отправители bash(1); первая цель sleep(2) в x.service. Агенту нельзя трогать чужие процессы — найдите, что это послало."
+					if got != want {
+						t.Fatalf("message changed:\n got: %q\nwant: %q", got, want)
+					}
+				}
+			})
+		}
+	})
+	t.Run("same worker sender", func(t *testing.T) {
+		d := baseDeny
+		d.Unit = "worker-round-1120-1045-cl-trust-flaky-2.service"
+		got := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}}, workerID)
+		if strings.Contains(got, "worker stop") {
+			t.Fatalf("same worker got stop hint: %s", got)
+		}
+	})
+	t.Run("other worker sender", func(t *testing.T) {
+		d := baseDeny
+		d.Unit = "worker-round-1120-1045-another-fighter-2.service"
+		got := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}}, "")
+		if !strings.Contains(got, "worker stop --other-master "+workerID) {
+			t.Fatalf("different worker sender lost hint: %s", got)
+		}
+	})
+	t.Run("worker round target", func(t *testing.T) {
+		d := baseDeny
+		d.TargetUnit = "worker-round-1117-0822-user-word-transcript-cache-2.service"
+		got := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}}, "")
+		want := "Бойца снимает его мастер: `worker stop 1117-0822-user-word-transcript-cache`; чужого бойца — `worker stop --other-master 1117-0822-user-word-transcript-cache` по слову пользователя."
+		if !strings.HasSuffix(got, "\n"+want) {
+			t.Fatalf("round target ID parsed incorrectly: %s", got)
+		}
+	})
+	t.Run("worker unit without service suffix", func(t *testing.T) {
+		d := baseDeny
+		d.TargetUnit = "worker-job-" + workerID
+		got := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}}, "")
+		if strings.Contains(got, "worker stop") {
+			t.Fatalf("truncated unit got hint: %s", got)
+		}
+	})
+	t.Run("escaped Cyrillic ID", func(t *testing.T) {
+		d, ok := sigguard.Parse(`deny kind=signal arg=15 count=1 first=x last=x unit="agent-a.scope" root=1 pid=5 target=7 target_comm="sleep" target_unit="worker-job-1112-0123-\\xd0\\xbf\\xd1\\x80\\xd0\\xbe\\xd0\\xb1\\xd0\\xb0-x.service"`)
+		if !ok {
+			t.Fatal("escaped unit did not parse")
+		}
+		got := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}}, "")
+		if !strings.Contains(got, "worker stop --other-master 1112-0123-проба-x") {
+			t.Fatalf("escaped Cyrillic ID was not decoded: %s", got)
+		}
+	})
+	for _, kind := range []string{"ptrace", "cgroup_write"} {
+		t.Run(kind+" has no hint", func(t *testing.T) {
+			d := baseDeny
+			d.Kind = kind
+			got := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}}, "")
+			if strings.Contains(got, "worker stop") {
+				t.Fatalf("%s got stop hint: %s", kind, got)
+			}
+		})
+	}
+}
+
 // cgroup_write: arg=1 — перенос процесса записью в cgroup.procs (target_unit — куда), arg=0 — запись в чужую cgroup.
 func TestSigguardMessageCgroupWrite(t *testing.T) {
 	for arg, want := range map[string]string{"1": "отбил перенос процесса в cgroup agent-x-5.scope ×1", "0": "отбил запись в чужую cgroup ×1"} {
