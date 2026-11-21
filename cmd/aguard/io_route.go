@@ -36,6 +36,7 @@ type ioOwnerFinder struct {
 	tableErr      error                           // таблица битая и прошлой нет: хозяина по папке не назвать
 	sessions      func(id string) (string, error) // живая сессия по SessionID, "" — нет такой
 	sessionExists func(who string) bool           // результат той же проверки папки, что и у classTicket
+	sessionCache  map[string]bool                 // результат проверки папки на время жизни ioOwnerFinder
 }
 
 func (a *app) ioOwners(cfg *iowatch.Config) *ioOwnerFinder {
@@ -203,11 +204,23 @@ func (o *ioOwnerFinder) workerOwner(unit string) (string, error) {
 	owner := ""
 	if job != nil {
 		owner = job.Master
-		if owner != "" && job.Owner != nil && job.Owner.Name != "" && o.sessionExists != nil && !o.sessionExists(owner) {
+		if owner != "" && job.Owner != nil && job.Owner.Name != "" && o.sessionExists != nil && !o.hasSession(owner) {
 			owner = job.Owner.Name
 		}
 	}
 	return owner, nil
+}
+
+func (o *ioOwnerFinder) hasSession(who string) bool {
+	if o.sessionCache == nil {
+		o.sessionCache = make(map[string]bool)
+	}
+	if exists, ok := o.sessionCache[who]; ok {
+		return exists
+	}
+	exists := o.sessionExists != nil && o.sessionExists(who)
+	o.sessionCache[who] = exists
+	return exists
 }
 
 // sessionTmp — scratchpad сессии Claude Code: …/claude-tmp/claude-<uid>/<ключ проекта>/<SessionID>/.
@@ -413,7 +426,11 @@ func ioRouteLetter(act ioroute.Action, full []iowatch.Case, alertMin time.Durati
 		fmt.Fprintf(&b, "aguard io: вред сейчас; главная cgroup %s в основном читала при подкачке не меньше половины чтения — может быть жертвой вытеснения, %s, письмо тебе.\n",
 			act.Cases[0].Owner, ioTicketRecipient(act.Cases[0]))
 	case ioroute.WhyNoOwner:
-		b.WriteString("aguard io: вред сейчас, хозяина виновника нет.\n")
+		if len(act.Cases) == 0 || act.Cases[0].TicketOwner == "" {
+			b.WriteString("aguard io: вред сейчас, хозяина виновника нет.\n")
+		} else {
+			fmt.Fprintf(&b, "aguard io: вред сейчас, хозяина виновника нет; %s.\n", ioTicketRecipient(act.Cases[0]))
+		}
 	case ioroute.WhyAfter:
 		fmt.Fprintf(&b, "aguard io: вред идёт и после паузы писем — %d случаев.\n", len(act.Cases))
 	}

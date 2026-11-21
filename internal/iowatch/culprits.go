@@ -196,26 +196,47 @@ func (c *Culprits) MainProc(main string) string {
 	return best
 }
 
-// LeafProc — процесс с наибольшим I/O в main, если главный процесс — обёртка и лист набрал не меньше четверти
-// его I/O. Пусто означает оставить MainProc. Claude Code иногда сообщает версию вместо имени comm.
+// LeafProc — крупнейший экземпляр имени процесса с наибольшей суммой I/O в main, если главный процесс — обёртка
+// и сумма листа набрала не меньше четверти её I/O. Пусто означает оставить MainProc. Claude Code иногда сообщает
+// версию вместо имени comm.
 func (c *Culprits) LeafProc(main string, wrappers []string) string {
 	root := c.MainProc(main)
 	if root == "" || !isWrapper(ProcBase(root), wrappers) {
 		return ""
 	}
-	var best string
-	for name, value := range c.procIO {
+	type candidate struct {
+		total     int64
+		largest   string
+		largestIO int64
+	}
+	byBase := map[string]candidate{}
+	for _, name := range slices.Sorted(maps.Keys(c.procIO)) {
+		value := c.procIO[name]
 		if c.procCgroup[name] != main || value <= 0 || isWrapper(ProcBase(name), wrappers) {
 			continue
 		}
-		if best == "" || value > c.procIO[best] || value == c.procIO[best] && name < best {
-			best = name
+		base := ProcBase(name)
+		v := byBase[base]
+		v.total += value
+		if v.largest == "" || value > v.largestIO || value == v.largestIO && name < v.largest {
+			v.largest, v.largestIO = name, value
+		}
+		byBase[base] = v
+	}
+	var best string
+	var selected candidate
+	bases := slices.Sorted(maps.Keys(byBase))
+	for i := len(bases) - 1; i >= 0; i-- {
+		base := bases[i]
+		v := byBase[base]
+		if best == "" || v.total > selected.total || v.total == selected.total && base < best {
+			best, selected = base, v
 		}
 	}
-	if best == "" || c.procIO[best]*4 < c.procIO[root] {
+	if best == "" || selected.total*4 < c.procIO[root] {
 		return ""
 	}
-	return best
+	return selected.largest
 }
 
 func isWrapper(name string, wrappers []string) bool {
