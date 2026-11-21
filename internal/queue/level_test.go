@@ -79,3 +79,20 @@ func TestLevelConfig(t *testing.T) {
 		}
 	}
 }
+
+// Хвостовой «/» и «..» в путях очереди не дают второго ключа проекта: кеш очереди сверяет папку тикета с ним.
+func TestConfigValidateCleansPaths(t *testing.T) {
+	c := Default("/h")
+	c.GitRoots = []string{"/h/git/", "~/work/"}
+	c.Dirs = []string{"/h/docs/", "~/notes/../docs2"}
+	c.Skip = []string{"/h/git/old/"}
+	if err := c.Validate("/h"); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"/h/git", "/h/work"}, {"/h/docs", "/h/docs2"}, {"/h/git/old"}}
+	for i, got := range [][]string{c.GitRoots, c.Dirs, c.Skip} {
+		if !slices.Equal(got, want[i]) {
+			t.Errorf("paths %d = %q, want %q", i, got, want[i])
+		}
+	}
+}

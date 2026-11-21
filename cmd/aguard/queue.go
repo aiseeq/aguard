@@ -67,7 +67,15 @@ type queueTicketCache struct {
 	Tickets     []queue.Ticket
 	Fingerprint string
 	ScannedAt   time.Time
+	OwnersKey   string
 	Loaded      bool
+	Projects    map[string]queueProjectCache
+}
+
+type queueProjectCache struct {
+	Fingerprint string
+	ScannedAt   time.Time
+	Tickets     []queue.Ticket
 }
 
 // queueListError — tk ls не дал список: упал или ответил не JSON. Остальные ошибки прохода (таблица имён) — не про список.
@@ -390,25 +398,131 @@ func (a *app) cachedQueueTickets(ctx context.Context, c *config.Config, now time
 	if err != nil {
 		return nil, fmt.Errorf("папки задач: %w", err)
 	}
-	fingerprint, err := queue.Fingerprint(dirs)
-	if err != nil {
-		return nil, fmt.Errorf("отпечаток папок: %w", err)
-	}
 	cache := &a.queueCache
-	if cache.Loaded && cache.Fingerprint == fingerprint && now.Sub(cache.ScannedAt) < 10*time.Minute {
-		return cache.Tickets, nil
-	}
-	tickets, err := a.queueTickets(ctx, c)
+	table, err := a.namesTable("queue")
 	if err != nil {
-		var listErr queueListError
-		if cache.Loaded && errors.As(err, &listErr) {
-			a.warn("queue", "tk ls", "err", err)
-			return cache.Tickets, nil
-		}
 		return nil, err
 	}
-	cache.Tickets, cache.Fingerprint, cache.ScannedAt, cache.Loaded = tickets, fingerprint, now, true
+	ownersKey, err := queueOwnersKey(c, table)
+	if err != nil {
+		return nil, err
+	}
+	ownersChanged := cache.Loaded && cache.OwnersKey != ownersKey
+	projects, changed, topologyChanged, err := queueProjectChanges(dirs, &c.Queue, cache)
+	if err != nil {
+		return nil, err
+	}
+	fullScanDue := !cache.Loaded || ownersChanged || queueProjectsExpired(projects, cache.Projects, now)
+	if fullScanDue {
+		tickets, err := a.queueTicketsWithTable(ctx, c, table)
+		if err != nil {
+			var listErr queueListError
+			if cache.Loaded && errors.As(err, &listErr) {
+				a.warn("queue", "tk ls", "err", err)
+				return cache.Tickets, nil
+			}
+			return nil, err
+		}
+		projects = queueCacheProjects(projects, tickets, now)
+		cache.Tickets, cache.ScannedAt, cache.OwnersKey, cache.Loaded, cache.Projects = tickets, now, ownersKey, true, projects
+		return tickets, nil
+	}
+	if len(changed) == 0 && cache.Loaded && !topologyChanged {
+		return cache.Tickets, nil
+	}
+	for _, project := range changed {
+		tickets, err := a.queueTicketsProject(ctx, c, project, table, dirs)
+		if err != nil {
+			var listErr queueListError
+			if cache.Loaded && errors.As(err, &listErr) {
+				a.warn("queue", "tk ls", "err", err)
+				return cache.Tickets, nil
+			}
+			return nil, err
+		}
+		entry := projects[project]
+		entry.Tickets, entry.ScannedAt = tickets, now
+		projects[project] = entry
+	}
+	tickets := queueProjectTickets(projects)
+	cache.Tickets, cache.ScannedAt, cache.OwnersKey, cache.Loaded, cache.Projects = tickets, now, ownersKey, true, projects
 	return tickets, nil
+}
+
+// queueProjectTickets supplies the user-visible order after project slices are combined.
+func queueProjectTickets(projects map[string]queueProjectCache) []queue.Ticket {
+	var tickets []queue.Ticket
+	for _, entry := range projects {
+		tickets = append(tickets, entry.Tickets...)
+	}
+	sort.Slice(tickets, func(i, j int) bool { return tickets[i].Key < tickets[j].Key })
+	return tickets
+}
+
+func queueOwnersKey(c *config.Config, table map[string]string) (string, error) {
+	data, err := json.Marshal(struct {
+		Lead   string            `json:"lead"`
+		Admins map[string]string `json:"admins"`
+		Names  map[string]string `json:"names"`
+	}{c.Lead, c.Admins, table})
+	return string(data), err
+}
+
+func queueProjectsExpired(current, previous map[string]queueProjectCache, now time.Time) bool {
+	for project := range current {
+		if old, ok := previous[project]; ok && now.Sub(old.ScannedAt) >= 10*time.Minute {
+			return true
+		}
+	}
+	return false
+}
+
+func queueCacheProjects(projects map[string]queueProjectCache, tickets []queue.Ticket, now time.Time) map[string]queueProjectCache {
+	for project, entry := range projects {
+		entry.Tickets = nil
+		projects[project] = entry
+	}
+	for i := range tickets {
+		entry, ok := projects[tickets[i].Dir]
+		if !ok {
+			continue
+		}
+		entry.Tickets = append(entry.Tickets, tickets[i])
+		entry.ScannedAt = now
+		projects[tickets[i].Dir] = entry
+	}
+	for project, entry := range projects {
+		entry.ScannedAt = now
+		projects[project] = entry
+	}
+	return projects
+}
+
+func queueProjectChanges(dirs []string, cfg *queue.Config, cache *queueTicketCache) (map[string]queueProjectCache, []string, bool, error) {
+	projects := make(map[string]queueProjectCache, len(dirs))
+	changed := make([]string, 0, len(dirs))
+	seen := make(map[string]bool, len(dirs))
+	for _, tasks := range dirs {
+		project := queueTasksProject(tasks, cfg.Dirs)
+		if seen[project] {
+			continue
+		}
+		seen[project] = true
+		fingerprint, err := queue.Fingerprint([]string{tasks})
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("отпечаток папок: %w", err)
+		}
+		previous, ok := cache.Projects[project]
+		if !ok || previous.Fingerprint != fingerprint {
+			changed = append(changed, project)
+			projects[project] = queueProjectCache{Fingerprint: fingerprint}
+		} else {
+			projects[project] = previous
+		}
+	}
+	slices.Sort(changed)
+	topologyChanged := len(cache.Projects) != len(projects)
+	return projects, changed, topologyChanged, nil
 }
 
 // queueJudge — судья свободы сессии: restart.Judge, в тестах подставной.
@@ -572,36 +686,64 @@ func queueFingerprintDirs(cfg *queue.Config) ([]string, error) {
 		skip[filepath.Clean(p)] = true
 	}
 	var dirs []string
-	add := func(p string) {
-		p = filepath.Clean(p)
-		if !skip[p] {
-			dirs = append(dirs, p)
+	add := func(project, tasks string) {
+		project, tasks = filepath.Clean(project), filepath.Clean(tasks)
+		if !skip[project] && !skip[tasks] {
+			dirs = append(dirs, tasks)
 		}
 	}
 	for _, root := range cfg.GitRoots {
-		add(filepath.Join(root, "docs", "tasks"))
-		entries, err := os.ReadDir(root)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		repos, err := queueTaskRepos(root)
+		if err != nil {
 			return nil, err
 		}
-		for _, ent := range entries {
-			if ent.IsDir() {
-				project := filepath.Join(root, ent.Name())
-				if !skip[filepath.Clean(project)] {
-					add(filepath.Join(project, "docs", "tasks"))
-				}
-			}
+		for _, project := range repos {
+			add(project, filepath.Join(project, "docs", "tasks"))
 		}
 	}
 	for _, dir := range cfg.Dirs {
 		tasks := filepath.Join(dir, "docs", "tasks")
 		if st, err := os.Stat(tasks); err == nil && st.IsDir() {
-			add(tasks)
+			add(dir, tasks)
 		} else {
-			add(filepath.Join(dir, "tasks"))
+			add(dir, filepath.Join(dir, "tasks"))
 		}
 	}
 	return dirs, nil
+}
+
+// queueTaskRepos mirrors tk taskRepos(root, root): root and direct child directories with docs/tasks,
+// excluding a .git marker that is not itself a directory.
+func queueTaskRepos(root string) ([]string, error) {
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return []string{root}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("чтение корня задач %s: %w", root, err)
+	}
+	candidates := []string{root}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			candidates = append(candidates, filepath.Join(root, entry.Name()))
+		}
+	}
+	var repos []string
+	for _, project := range candidates {
+		gitInfo, err := os.Lstat(filepath.Join(project, ".git"))
+		if err == nil && !gitInfo.IsDir() {
+			continue
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("проверка .git в %s: %w", project, err)
+		}
+		if _, err := os.Stat(filepath.Join(project, "docs", "tasks")); err == nil {
+			repos = append(repos, project)
+		} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+			return nil, fmt.Errorf("проверка docs/tasks в %s: %w", project, err)
+		}
+	}
+	return repos, nil
 }
 
 func queueKey(project, slug, path string) string {
@@ -649,11 +791,15 @@ func queueOwners(dir, home, lead string, table, admins map[string]string) (maste
 }
 
 func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticket, error) {
-	cfg := &c.Queue
 	table, err := a.namesTable("queue")
 	if err != nil {
 		return nil, err
 	}
+	return a.queueTicketsWithTable(ctx, c, table)
+}
+
+func (a *app) queueTicketsWithTable(ctx context.Context, c *config.Config, table map[string]string) ([]queue.Ticket, error) {
+	cfg := &c.Queue
 	var out []queue.Ticket
 	read := func(root string, rootMode bool) error {
 		args := []string{"ls", "--json", "--all"}
@@ -673,34 +819,9 @@ func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticke
 			return queueListError{err: fmt.Errorf("%s: разбор: %w", root, e)}
 		}
 		for i := range raw {
-			r := &raw[i]
-			project := root
-			if r.Repo != "" && r.Repo != filepath.Base(root) {
-				project = filepath.Join(root, r.Repo)
+			if ticket, ok := a.queueTicketFromJSON(c, root, rootMode, &raw[i], table); ok {
+				out = append(out, ticket)
 			}
-			project = filepath.Clean(project)
-			if slices.Contains(cfg.Skip, project) {
-				continue
-			}
-			key := queueKey(filepath.Base(project), r.Slug, r.Path)
-			if key == "" {
-				a.warn("queue", "имя файла тикета", "path", r.Path)
-				continue
-			}
-			created, parseErr := time.ParseInLocation("20060102-1504", filepath.Base(r.Path)[:13], time.Local)
-			if parseErr != nil {
-				a.warn("queue", "имя файла тикета", "path", r.Path, "err", parseErr)
-				continue
-			}
-			master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
-			ticketPath, pathErr := queueTicketPath(project, rootMode, r.Path)
-			if pathErr != nil {
-				a.warn("queue", "папка тикета", "project", project, "err", pathErr)
-				ticketPath = filepath.Join("docs", "tasks", filepath.Base(filepath.FromSlash(r.Path)))
-			}
-			actorNotes := a.queueActorNotes(r)
-			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Path: ticketPath, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Journal: r.Journal,
-				MasterNote: actorNotes[master], ActorNotes: actorNotes})
 		}
 		return nil
 	}
@@ -721,6 +842,63 @@ func (a *app) queueTickets(ctx context.Context, c *config.Config) ([]queue.Ticke
 	out = append(out, transfers...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
+}
+
+// queueTicketsProject reads one project in place; its filesystem fingerprint is maintained independently.
+func (a *app) queueTicketsProject(ctx context.Context, c *config.Config, project string, table map[string]string, taskDirs []string) ([]queue.Ticket, error) {
+	args := []string{"ls", "--json", "--all"}
+	cmd := exec.CommandContext(ctx, c.Queue.Tk, args...)
+	cmd.Dir = project
+	b, err := cmd.Output()
+	if err != nil {
+		return nil, queueListError{err: fmt.Errorf("%s: %w", project, err)}
+	}
+	var raw []queueTicketJSON
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, queueListError{err: fmt.Errorf("%s: разбор: %w", project, err)}
+	}
+	var tickets []queue.Ticket
+	for i := range raw {
+		if ticket, ok := a.queueTicketFromJSON(c, project, false, &raw[i], table); ok {
+			tickets = append(tickets, ticket)
+		}
+	}
+	transfers, err := a.queueTransfersProject(c, table, project, taskDirs)
+	if err != nil {
+		return nil, queueListError{err: err}
+	}
+	tickets = append(tickets, transfers...)
+	return tickets, nil
+}
+
+func (a *app) queueTicketFromJSON(c *config.Config, root string, rootMode bool, r *queueTicketJSON, table map[string]string) (queue.Ticket, bool) {
+	project := root
+	if r.Repo != "" && r.Repo != filepath.Base(root) {
+		project = filepath.Join(root, r.Repo)
+	}
+	project = filepath.Clean(project)
+	if slices.Contains(c.Queue.Skip, project) {
+		return queue.Ticket{}, false
+	}
+	key := queueKey(filepath.Base(project), r.Slug, r.Path)
+	if key == "" {
+		a.warn("queue", "имя файла тикета", "path", r.Path)
+		return queue.Ticket{}, false
+	}
+	created, err := time.ParseInLocation("20060102-1504", filepath.Base(r.Path)[:13], time.Local)
+	if err != nil {
+		a.warn("queue", "имя файла тикета", "path", r.Path, "err", err)
+		return queue.Ticket{}, false
+	}
+	master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
+	ticketPath, err := queueTicketPath(project, rootMode, r.Path)
+	if err != nil {
+		a.warn("queue", "папка тикета", "project", project, "err", err)
+		ticketPath = filepath.Join("docs", "tasks", filepath.Base(filepath.FromSlash(r.Path)))
+	}
+	actorNotes := a.queueActorNotes(r)
+	return queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Path: ticketPath, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Journal: r.Journal,
+		MasterNote: actorNotes[master], ActorNotes: actorNotes}, true
 }
 
 func queueTicketPath(project string, rootMode bool, tkPath string) (string, error) {
@@ -769,19 +947,49 @@ func (a *app) queueTransfers(c *config.Config, table map[string]string) ([]queue
 			return nil, err
 		}
 		for _, line := range lines {
-			key := queueKey(filepath.Base(project), line.Slug, line.Stem)
-			if key == "" {
-				a.warn("queue", "строка переноса", "stem", line.Stem)
-				continue
+			if ticket, ok := a.queueTransferTicket(c, project, line, table); ok {
+				out = append(out, ticket)
 			}
-			master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
-			transfer := strings.TrimSpace(line.Key + " " + line.URL)
-			out = append(out, queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: line.Slug, Status: queue.StatusTransferred,
-				Back: line.Back, Master: master, Admin: admin, Transfer: transfer, CancelAuthor: line.By, CancelJournalRead: true,
-				CancelReason: "перенос во внешний трекер " + transfer})
 		}
 	}
 	return out, nil
+}
+
+func (a *app) queueTransfersProject(c *config.Config, table map[string]string, project string, dirs []string) ([]queue.Ticket, error) {
+	for _, skip := range c.Queue.Skip {
+		if filepath.Clean(skip) == filepath.Clean(project) {
+			return nil, nil
+		}
+	}
+	var out []queue.Ticket
+	for _, tasks := range dirs {
+		if queueTasksProject(tasks, c.Queue.Dirs) != project {
+			continue
+		}
+		lines, err := a.readQueueTransfers(filepath.Join(tasks, ".transferred.jsonl"))
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range lines {
+			if ticket, ok := a.queueTransferTicket(c, project, line, table); ok {
+				out = append(out, ticket)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (a *app) queueTransferTicket(c *config.Config, project string, line queueTransferLine, table map[string]string) (queue.Ticket, bool) {
+	key := queueKey(filepath.Base(project), line.Slug, line.Stem)
+	if key == "" {
+		a.warn("queue", "строка переноса", "stem", line.Stem)
+		return queue.Ticket{}, false
+	}
+	master, admin := queueOwners(project, a.home, c.Lead, table, c.Admins)
+	transfer := strings.TrimSpace(line.Key + " " + line.URL)
+	return queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Slug: line.Slug, Status: queue.StatusTransferred,
+		Back: line.Back, Master: master, Admin: admin, Transfer: transfer, CancelAuthor: line.By, CancelJournalRead: true,
+		CancelReason: "перенос во внешний трекер " + transfer}, true
 }
 
 // queueTasksProject — папка проекта по папке тикетов: <проект>/docs/tasks, у папок из dirs — <папка>/tasks.

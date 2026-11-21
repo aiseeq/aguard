@@ -686,21 +686,31 @@ func TestQueueNoticesPassesBootTimeIntoView(t *testing.T) {
 	a.namesMem.table = map[string]string{}
 	boot := time.Date(2026, 11, 13, 8, 0, 0, 0, time.Local)
 	a.bootTime = func() (time.Time, error) { return boot, nil }
-	queueCfg := queue.Config{}
-	dirs, err := queueFingerprintDirs(&queueCfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fingerprint, err := queue.Fingerprint(dirs)
-	if err != nil {
+	queueCfg := queue.Config{Dirs: []string{a.home}}
+	if err := os.MkdirAll(filepath.Join(a.home, "docs", "tasks"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	now := boot.Add(10 * time.Minute)
 	ticket := queue.Ticket{Key: "p/task", Project: "p", Slug: "task", Dir: filepath.Join(a.home, "p"), Title: "missing master", Prio: "HIGH", Status: "открыт", Master: "gone"}
-	a.queueCache = queueTicketCache{Loaded: true, Fingerprint: fingerprint, ScannedAt: now, Tickets: []queue.Ticket{ticket}}
-	cfg := &config.Config{}
+	cfg := &config.Config{Lead: "lead"}
 	cfg.Queue.Mode = queue.ModeOn
 	cfg.Queue.BootGrace = policy.Duration(time.Hour)
+	cfg.Queue.Dirs = queueCfg.Dirs
+	tasks := filepath.Join(a.home, "docs", "tasks")
+	fingerprint, err := queue.Fingerprint([]string{tasks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, err := a.namesTable("queue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownersKey, err := queueOwnersKey(cfg, table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := queueProjectCache{Fingerprint: fingerprint, ScannedAt: now, Tickets: []queue.Ticket{ticket}}
+	a.queueCache = queueTicketCache{Loaded: true, OwnersKey: ownersKey, ScannedAt: now, Tickets: []queue.Ticket{ticket}, Projects: map[string]queueProjectCache{a.home: project}}
 	if err := os.MkdirAll(a.dir("queue"), 0o700); err != nil {
 		t.Fatal(err)
 	}

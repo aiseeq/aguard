@@ -63,7 +63,9 @@ func (c *Config) Validate(home string) error {
 	}
 	for _, ps := range [][]string{c.GitRoots, c.Dirs, c.Skip, c.RestCrit} {
 		for i := range ps {
-			ps[i] = policy.ExpandHome(ps[i], home)
+			if ps[i] = policy.ExpandHome(ps[i], home); ps[i] != "" {
+				ps[i] = filepath.Clean(ps[i]) // «/home/x/docs/» и «/home/x/docs» — один ключ проекта в кеше очереди
+			}
 		}
 	}
 	for i, root := range c.RestCrit {
