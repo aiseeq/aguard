@@ -4,6 +4,8 @@ graft: '>=2.45.0'
 # go fix -diff ./... идёт после go vet с его окружением: модернизаторы тулчейна не оставляют правок.
 go_fix:
   enabled: true
+# staticcheck SA валит гейт только на строках, изменённых относительно HEAD (graft v2.136.0, тикет staticcheck-enable).
+staticcheck: {enabled: true}
 
 tasks:
   test:
