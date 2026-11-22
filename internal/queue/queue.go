@@ -748,7 +748,9 @@ func (s *State) cancelNotices(t Ticket, st *ticketState, v View) []Notice {
 		st.CancelLost = true
 		return []Notice{notice(t, v, KindCancelLost, "", line)}
 	}
-	if alive(v, to) && v.Free != nil && v.Free(to) {
+	// Отмена нужна именно занятому: пока он работает, он может запустить бойца по отменённому тикету.
+	// Сообщение сессии доходит и в занятую сессию, поэтому Free здесь не ждём (cancel-letter-not-wait-free).
+	if alive(v, to) {
 		return []Notice{notice(t, v, KindCancel, to, line)}
 	}
 	return nil

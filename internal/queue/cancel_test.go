@@ -324,26 +324,26 @@ func TestCancelWaitsThroughProjectRest(t *testing.T) {
 	}
 }
 
-func TestCancelWaitsForExecutorAndReportsExpiredDelivery(t *testing.T) {
+func TestCancelReachesBusyExecutorAndReportsExpiredDelivery(t *testing.T) {
 	w := newWorld(ModeOn)
-	w.live["executor-a"] = true
+	w.live["executor-a"], w.free["executor-a"] = true, false
 	s := seeded(w)
 	tk := cancelTicket()
 	step(s, []Ticket{tk}, w)
 	tk.Status, tk.CancelAuthor, tk.CancelJournalRead = "отклонён", "executor-b", true
-	if ns := step(s, []Ticket{tk}, w); has(ns, KindCancel, "executor-a") {
-		t.Fatalf("занятому не отправлять: %+v", ns)
-	}
-	w.live["executor-a"], w.free["executor-a"] = true, true
 	if ns := step(s, []Ticket{tk}, w); !has(ns, KindCancel, "executor-a") {
-		t.Fatalf("дождаться свободного исполнителя: %+v", ns)
+		t.Fatalf("занятому исполнителю отмена уходит на первом проходе: %+v", ns)
+	}
+	if ns := step(s, []Ticket{tk}, w); has(ns, KindCancel, "executor-a") {
+		t.Fatalf("отмену не повторять: %+v", ns)
 	}
 
 	s2 := seeded(w)
 	tk2 := cancelTicket()
 	step(s2, []Ticket{tk2}, w)
 	tk2.Status, tk2.CancelAuthor, tk2.CancelJournalRead = "отклонён", "executor-b", true
-	w.live["executor-a"], w.free["executor-a"] = false, false
+	// Ни исполнителя, ни мастера в сети: письму некуда уйти, через 7 суток — KindCancelLost.
+	w.live["executor-a"], w.free["executor-a"], w.live["m-master"] = false, false, false
 	step(s2, []Ticket{tk2}, w)
 	w.now = w.now.Add(7 * 24 * time.Hour)
 	if ns := step(s2, []Ticket{tk2}, w); !has(ns, KindCancelLost, "") {
