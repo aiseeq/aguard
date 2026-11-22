@@ -279,7 +279,7 @@ func TestFrozenDeadMasterNonworkingTicketRemainsSkipped(t *testing.T) {
 
 func TestDeadExecutorFallsBackToProjectMaster(t *testing.T) {
 	w := newWorld(ModeOn)
-	w.live["project-master"], w.free["project-master"] = true, true
+	w.live["project-master"], w.free["project-master"] = true, false // занятый мастер тоже получает отмену сразу
 	s := seeded(w)
 	tk := cancelTicket()
 	tk.Master, tk.Executor = "project-master", "dead-executor"
