@@ -145,7 +145,7 @@ func killedMessage(denies []Deny) string {
 	for i := range denies {
 		d := &denies[i]
 		if d.Killed {
-			return fmt.Sprintf("ядро убило %s(%d) SIGKILL после %d чужих целей (код 137 — у этого процесса, а не у всей команды агента); ", d.Comm, d.PID, d.Targets)
+			return fmt.Sprintf("ядро убило %s(%d) SIGKILL после %d чужих целей (код 137 — у этого процесса); ", d.Comm, d.PID, d.Targets)
 		}
 	}
 	return ""

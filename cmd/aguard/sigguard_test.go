@@ -137,13 +137,13 @@ func TestRouteSigguardTruncatedUnit(t *testing.T) {
 func TestSigguardMessageKilledAndSignalName(t *testing.T) {
 	d := sigguard.Deny{Kind: "signal", Arg: "15", Count: 10, Comm: "python3", PID: 2267720, PPID: 1, Pcomm: "bash", Unit: "agent-a-1.scope", Target: 9, TargetComm: "sh", TargetUnit: "x.service", Targets: 10, HasTargets: true, Killed: true}
 	m := sigguard.Message(sigguard.Group{Denies: []sigguard.Deny{d}, Count: 10, Lines: 1}, "")
-	for _, part := range []string{"aguard: авария — ядро убило python3(2267720) SIGKILL после 10 чужих целей (код 137 — у этого процесса, а не у всей команды агента)", "signal SIGTERM", "разных целей 10", "родитель bash(1)"} {
+	for _, part := range []string{"aguard: авария — ядро убило python3(2267720) SIGKILL после 10 чужих целей (код 137 — у этого процесса)", "signal SIGTERM", "разных целей 10", "родитель bash(1)"} {
 		if !strings.Contains(m, part) {
 			t.Errorf("message missing %q: %s", part, m)
 		}
 	}
-	// Звено цепочки через «;» убито, хвост команды выполнился (20.11 10:51:28, tl 91b9cfcc:299): письмо не утверждает, что упала вся команда.
-	if strings.Contains(m, "команда агента упала") {
+	// Звено цепочки через «;» убито, хвост команды выполнился (20.11 10:51:28, tl 91b9cfcc:299), а последнее звено валит и всю команду: письмо о команде целиком ничего не утверждает.
+	if strings.Contains(m, "команда агента упала") || strings.Contains(m, "всей команды") || strings.Contains(m, "вся команда") {
 		t.Errorf("message claims the whole agent command failed: %s", m)
 	}
 }
