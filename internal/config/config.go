@@ -23,6 +23,7 @@ import (
 	"github.com/aiseeq/aguard/internal/disk"
 	"github.com/aiseeq/aguard/internal/guiwatch"
 	"github.com/aiseeq/aguard/internal/iowatch"
+	"github.com/aiseeq/aguard/internal/liveness"
 	"github.com/aiseeq/aguard/internal/memwatch"
 	"github.com/aiseeq/aguard/internal/night"
 	"github.com/aiseeq/aguard/internal/orphans"
@@ -64,6 +65,7 @@ type Config struct {
 	Codex     codexwatch.Config     `toml:"codex"`      // недельный лимит Codex: письмо лиду перед досрочным 100% и при нём
 	Queue     queue.Config          `toml:"queue"`
 	Night     night.Config          `toml:"night"` // Сон, Дайджест и окна доверия
+	Liveness  liveness.Config       `toml:"liveness"`
 	Sigguard  sigguard.Config       `toml:"sigguard"`
 	Ceiling   ceilingwatch.Config   `toml:"ceiling"`
 	Quiet     QuietConfig           `toml:"quiet"`
@@ -111,6 +113,7 @@ func Default(home string) Config {
 		Codex:      codexwatch.Default(home),
 		Queue:      queue.Default(home),
 		Night:      night.Default(home),
+		Liveness:   liveness.Default(),
 		Sigguard:   sigguard.Default(),
 		Ceiling:    ceilingwatch.Default(),
 		Quiet:      QuietConfig{AfterBoot: policy.Duration(45 * time.Minute)},
@@ -177,6 +180,7 @@ func (c *Config) finish(home string, uid int) error {
 	c.Remote.Lead, c.Remote.SendAuth = c.Lead, c.SendAuth
 	c.Codex.Lead, c.Codex.SendAuth = c.Lead, c.SendAuth
 	c.Night.Lead, c.Night.SendAuth = c.Lead, c.SendAuth
+	c.Liveness.Lead, c.Liveness.SendAuth = c.Lead, c.SendAuth
 	c.Sigguard.Lead, c.Sigguard.SendAuth = c.Lead, c.SendAuth
 	if err := c.Orphans.Compile(home); err != nil {
 		return fmt.Errorf("orphans: %w", err)
@@ -234,6 +238,9 @@ func (c *Config) finishRemaining(home string) error {
 		return err
 	}
 	if err := c.Night.Validate(home); err != nil {
+		return err
+	}
+	if err := c.Liveness.Validate(home); err != nil {
 		return err
 	}
 	if err := c.Sigguard.Validate(); err != nil {

@@ -102,8 +102,9 @@ type app struct {
 	ceilingJournalSource func(context.Context, string, time.Time) ([]oomVictim, time.Time, error)
 	ceilingNoticeSend    func(ceiling.State, []oomVictim, int64, int64, int64, map[string]session.Info, error) error
 	cfgPath              string
-	stateDir             string          // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
-	nightSent            nightState      // отправленное ночным сторожем; nil — ещё не прочитано из state.json
+	stateDir             string     // ~/.local/state/aguard: у каждого наблюдателя своя подпапка
+	nightSent            nightState // отправленное ночным сторожем; nil — ещё не прочитано из state.json
+	livenessSend         func(string, string, string) error
 	nightLogged          map[string]bool // mode=log: ключи, о которых уже написал «написал бы»
 	nightFb              fallbackState   // запуски запасного Сна; nil — ещё не прочитано из fallback.json
 	units                unitRunner      // запуск запасного Сна отдельным unit; nil — запасной Сон не запускается (ошибка)
@@ -260,6 +261,8 @@ func (a *app) dispatchLate(ctx context.Context, cmd string, args []string) error
 		return a.queueCmd(ctx, args)
 	case "night":
 		return a.nightCmd(args)
+	case "liveness":
+		return a.livenessCmd(args)
 	case "report":
 		return a.reportCmd(args)
 	case "limit-reset-check":
@@ -295,6 +298,7 @@ func usage() {
   aguard gui watch -for 10s [-dir папка] [-pid имя=PID]… | report [-since 24h] [-json] [-dir папка]
   aguard io import [-dir папка] [-remove] [-out файл]   снимки событий прежнего наблюдателя — в сводки, при остановленной службе
   aguard night tick [-dry-run]
+  aguard liveness tick [-dry-run]
   aguard codex tick [-dry-run] | approve --account work|personal --said '<реплика>'
   aguard quiet [on --until время --why текст --by имя | off]
   aguard queue tick [-dry-run] | report [-since 168h] [-json]
@@ -448,7 +452,7 @@ func (a *app) run(ctx context.Context) error {
 	defer signal.Stop(usr1)
 	signal.Notify(usr2, syscall.SIGUSR2)
 	defer signal.Stop(usr2)
-	for _, n := range []string{"orphans", "tmp", "memory", "ceiling", "waits", "agentwaits", "compact", "disk", "claude-tmp", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "sigguard", "activity", "restart"} {
+	for _, n := range []string{"orphans", "tmp", "memory", "ceiling", "waits", "agentwaits", "compact", "disk", "claude-tmp", "said", "bgtask", "cpu", "io", "gui", "remote", "codex", "queue", "night", "liveness", "sigguard", "activity", "restart"} {
 		if err := os.MkdirAll(a.dir(n), 0o700); err != nil {
 			return fmt.Errorf("папка состояния: %w", err)
 		}
@@ -555,6 +559,8 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return c.Queue.Interval.D() }},
 		{"night", func(_ context.Context, c *config.Config) error { return a.nightRound(&c.Night, false) },
 			func(c *config.Config) time.Duration { return c.Night.Interval.D() }},
+		{"liveness", func(_ context.Context, c *config.Config) error { return a.livenessRound(&c.Liveness, false) },
+			func(c *config.Config) time.Duration { return c.Liveness.Interval.D() }},
 	}
 }
 

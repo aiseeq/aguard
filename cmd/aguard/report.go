@@ -130,6 +130,7 @@ func (a *app) reportSpecs(cfg *config.Config) []activity.Spec {
 		{Name: "codex", Mode: cfg.Codex.Mode, Looped: cfg.Codex.Mode != "off"},
 		{Name: "queue", Mode: cfg.Queue.Mode, Looped: cfg.Queue.Mode != "off"},
 		{Name: "night", Mode: cfg.Night.Mode, Looped: cfg.Night.Mode != "off"},
+		{Name: "liveness", Mode: cfg.Liveness.Mode, Looped: cfg.Liveness.Mode != "off"},
 		{Name: "sigguard", Mode: cfg.Sigguard.Mode, Looped: true},
 	}
 }

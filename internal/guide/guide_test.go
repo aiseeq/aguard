@@ -220,7 +220,7 @@ func TestLetterRegistryMatchesSendCalls(t *testing.T) {
 	}
 	used := map[string]bool{}
 	calledMaps := map[string]bool{}
-	mapFns := map[string]bool{"queueGuideKind": true, "ioGuideKind": true, "nightGuideKind": true, "codexGuideKind": true, "remoteGuideKind": true, "bgtaskGuideKind": true, "sigguardGuideKind": true, "claudeTmpGuideKind": true, "btrfsGuideKind": true}
+	mapFns := map[string]bool{"queueGuideKind": true, "ioGuideKind": true, "nightGuideKind": true, "codexGuideKind": true, "remoteGuideKind": true, "bgtaskGuideKind": true, "sigguardGuideKind": true, "claudeTmpGuideKind": true, "btrfsGuideKind": true, "livenessGuideKind": true}
 	for _, path := range goFiles(t, filepath.Join(root, "cmd", "aguard"), false) {
 		file := parseFile(t, fset, path)
 		enclosing := ""
@@ -404,7 +404,7 @@ func isSendFunction(name string) bool {
 }
 
 func TestGuideHasAllObserverSections(t *testing.T) {
-	want := []string{"bgtask", "remote", "orphans", "night", "disk", "disk, track", "names_table", "io_route", "codex", "tmp", "cpu", "ceiling", "sigguard", "said", "queue", "claude-tmp", "btrfs"}
+	want := []string{"bgtask", "remote", "orphans", "night", "disk", "disk, track", "names_table", "io_route", "codex", "tmp", "cpu", "ceiling", "sigguard", "said", "queue", "claude-tmp", "btrfs", "liveness"}
 	seen := map[string]bool{}
 	for _, x := range Letters() {
 		seen[x.Observer] = true
