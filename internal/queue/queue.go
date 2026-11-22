@@ -288,6 +288,7 @@ type ticketState struct {
 	Closed            time.Time `json:"closed,omitzero"`
 	BackSent          bool      `json:"back_sent,omitempty"`
 	BackLost          bool      `json:"back_lost,omitempty"`
+	Gone              time.Time `json:"gone,omitzero"` // учтённый закрытый тикет пропал из прохода: состояние держится goneKeep, чтобы при возвращении «закрыт» не ушло повторно
 	Executor          string    `json:"executor,omitempty"`
 	Working           bool      `json:"working,omitempty"`
 	CancelAt          time.Time `json:"cancel_at,omitzero"`
@@ -353,7 +354,7 @@ func (s *State) Step(ts []Ticket, v View) []Notice {
 	s.Seeded = true
 	out = append(out, s.wakeNotices(ts, v, out)...)
 	out = append(out, s.adminWakeNotices(ts, v, out)...)
-	s.cleanup(active)
+	s.cleanup(active, v.Now)
 	return out
 }
 
@@ -400,6 +401,9 @@ func (s *State) prepareTicket(t Ticket, v View, seeded bool, active map[string]b
 		return nil, false
 	}
 	active[t.Key] = true
+	if st != nil {
+		st.Gone = time.Time{}
+	}
 	if st == nil {
 		st = &ticketState{Prio: t.Prio, Seen: v.Now}
 		s.Tickets[t.Key] = st
@@ -775,9 +779,21 @@ func cancelLine(t Ticket) string {
 	return fmt.Sprintf("aguard: отменён %s/%s — %s; бойцов по нему остановить", t.Project, t.Slug, reason)
 }
 
-func (s *State) cleanup(active map[string]bool) {
-	for key := range s.Tickets {
-		if !active[key] {
+// goneKeep — сколько держится состояние учтённого закрытого тикета, пропавшего из прохода (папка временно не читается, архив и обратно, сбой tk ls).
+const goneKeep = 30 * 24 * time.Hour
+
+func (s *State) cleanup(active map[string]bool, now time.Time) {
+	for key, st := range s.Tickets {
+		if active[key] {
+			continue
+		}
+		if !st.BackSent && !st.BackLost {
+			delete(s.Tickets, key)
+			continue
+		}
+		if st.Gone.IsZero() {
+			st.Gone, st.Notes = now, nil // отложенные строки журнала пропавшему тикету не дописать: «не найден» каждый проход, как прежде — со стёртым состоянием
+		} else if now.Sub(st.Gone) >= goneKeep {
 			delete(s.Tickets, key)
 		}
 	}

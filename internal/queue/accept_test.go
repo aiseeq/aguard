@@ -532,3 +532,103 @@ func TestNormPrio(t *testing.T) {
 		}
 	}
 }
+
+// Учтённый закрытый тикет пропал из прохода (папка не читалась, tk ls сбоил) и вернулся: «закрыт» второй раз не идёт.
+// Случай 22.11: /home/aisee/docs/tasks выпали из вывода tk с 03:49 до 19:27, в 19:52 лиду ушли 9 повторных «закрыт».
+func TestBackNotResentAfterTicketReturns(t *testing.T) {
+	for _, seededClose := range []bool{false, true} {
+		w := newWorld(ModeOn)
+		w.live["c-master"], w.free["c-master"] = true, true
+		tk := tick("MED", "открыт")
+		tk.Back = "c-master"
+		var s *State
+		if seededClose {
+			tk.Status = "готово"
+			s = &State{}
+			step(s, []Ticket{tk}, w) // закрыт до наблюдателя: учтён посевом
+		} else {
+			s = seeded(w)
+			step(s, []Ticket{tk}, w)
+			tk.Status = "готово"
+			if ns := step(s, []Ticket{tk}, w); !has(ns, KindBack, "c-master") {
+				t.Fatalf("свежее закрытие даёт письмо: %+v", ns)
+			}
+		}
+		other := tick("MED", "открыт")
+		other.Key, other.Slug = "m/other", "other"
+		w.now = w.now.Add(time.Hour)
+		step(s, []Ticket{other}, w) // тикет пропал из прохода
+		w.now = w.now.Add(16 * time.Hour)
+		step(s, []Ticket{other}, w)
+		if ns := step(s, []Ticket{tk, other}, w); has(ns, KindBack, "c-master") {
+			t.Fatalf("seeded=%v: вернувшийся закрытый тикет не шлёт «закрыт» повторно: %+v", seededClose, ns)
+		}
+	}
+}
+
+// Пропавший учтённый тикет держится goneKeep, потом состояние убирается: state.json не растёт от архива и удалённых.
+func TestBackGoneStateExpires(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.live["c-master"], w.free["c-master"] = true, true
+	s := seeded(w)
+	tk := tick("MED", "готово")
+	tk.Back = "c-master"
+	step(s, []Ticket{tk}, w)
+	step(s, nil, w)
+	if s.Tickets[tk.Key] == nil {
+		t.Fatal("учтённый пропавший тикет держится")
+	}
+	w.now = w.now.Add(goneKeep - time.Minute)
+	step(s, nil, w)
+	if s.Tickets[tk.Key] == nil {
+		t.Fatal("до срока держится")
+	}
+	w.now = w.now.Add(2 * time.Minute)
+	step(s, nil, w)
+	if s.Tickets[tk.Key] != nil {
+		t.Fatal("после срока убран")
+	}
+	open := tick("HIGH", "открыт")
+	open.Key = "m/open"
+	step(s, []Ticket{open}, w)
+	if s.Tickets[open.Key] == nil {
+		t.Fatal("HIGH открыт учитывается")
+	}
+	step(s, nil, w)
+	if s.Tickets[open.Key] != nil {
+		t.Fatal("неучтённый пропавший — сразу, как прежде")
+	}
+	// Учтён как потерянный (BackLost): после пропажи и возврата ни «закрыт», ни повторной строки о потере.
+	lost := tick("MED", "готово")
+	lost.Key, lost.Back = "m/lost", "busy-master"
+	w.live["busy-master"] = true
+	step(s, []Ticket{lost}, w)
+	w.now = w.now.Add(7*24*time.Hour + time.Minute)
+	if ns := step(s, []Ticket{lost}, w); !has(ns, KindBackLost, "") {
+		t.Fatalf("потеря через 7 суток: %+v", ns)
+	}
+	step(s, nil, w)
+	w.free["busy-master"] = true
+	if ns := step(s, []Ticket{lost}, w); has(ns, KindBack, "busy-master") || has(ns, KindBackLost, "") {
+		t.Fatalf("потерянный после возврата молчит: %+v", ns)
+	}
+	// Отложенные строки журнала пропавшего тикета снимаются вместе с пропажей.
+	s.Tickets[lost.Key].Notes = []string{"строка"}
+	step(s, nil, w)
+	if len(s.Tickets[lost.Key].Notes) != 0 {
+		t.Fatal("отложенные строки пропавшего сняты")
+	}
+	// Вернулся и снова пропал позже срока от первой пропажи: срок считается от последней пропажи.
+	tk2 := tick("MED", "готово")
+	tk2.Key, tk2.Back = "m/again", "c-master"
+	step(s, []Ticket{tk2}, w)
+	step(s, nil, w)
+	w.now = w.now.Add(time.Hour)
+	step(s, []Ticket{tk2}, w)
+	w.now = w.now.Add(goneKeep)
+	step(s, []Ticket{tk2}, w)
+	step(s, nil, w)
+	if s.Tickets[tk2.Key] == nil {
+		t.Fatal("возвращение сбрасывает отметку пропажи")
+	}
+}
