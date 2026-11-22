@@ -138,14 +138,14 @@ func TestStateWhy(t *testing.T) {
 
 // Усилие модели не ниже high: low, medium и пустое (умолчание CLI) — отказ на загрузке (пользователь 22.11 23:39).
 func TestValidateEffortAtLeastHigh(t *testing.T) {
-	for _, e := range []string{"", "low", "medium", "minimal", "HIGH"} {
+	for _, e := range []string{"", "low", "medium", "minimal", "HIGH", "max"} {
 		c := Default()
 		c.Effort = e
 		if err := c.Validate(t.TempDir()); err == nil {
 			t.Errorf("effort %q принят", e)
 		}
 	}
-	for _, e := range []string{"high", "xhigh", "max"} {
+	for _, e := range []string{"high", "xhigh"} {
 		c := Default()
 		c.Effort = e
 		if err := c.Validate(t.TempDir()); err != nil {

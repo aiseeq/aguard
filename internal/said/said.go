@@ -39,7 +39,7 @@ type Config struct {
 	// Names — сессии, чьи реплики размечаются (шаблоны path.Match по имени сессии).
 	Names   []string        `toml:"names"`
 	Model   string          `toml:"model"`  // имя из ~/.config/models/approved
-	Effort  string          `toml:"effort"` // усилие рассуждения: high, xhigh или max — ниже high нельзя (общий CLAUDE.md, пользователь 22.11 23:39)
+	Effort  string          `toml:"effort"` // усилие рассуждения: high или xhigh — ниже high нельзя (общий CLAUDE.md, пользователь 22.11 23:39), выше xhigh тоже (worker-model/opencode.md)
 	Timeout policy.Duration `toml:"timeout"`
 	File    string          `toml:"file"` // указатель сказанного
 	// Context — сколько знаков конца сообщения агента дать модели как «в ответ на».
@@ -78,9 +78,9 @@ func (c *Config) Validate(home string) error {
 		return fmt.Errorf("said.mode = %q: off, log или write", c.Mode)
 	}
 	switch c.Effort {
-	case "high", "xhigh", "max":
+	case "high", "xhigh":
 	default: // пусто — умолчание CLI, оно бывает ниже high
-		return fmt.Errorf("said.effort = %q: high, xhigh или max — усилие модели не ниже high (пользователь 22.11 23:39)", c.Effort)
+		return fmt.Errorf("said.effort = %q: high или xhigh — усилие модели не ниже high (пользователь 22.11 23:39) и не выше xhigh", c.Effort)
 	}
 	if c.Interval.D() < 10*time.Second || c.Timeout.D() < 10*time.Second || c.Pause.D() < c.Interval.D() ||
 		c.Keep.D() < 24*time.Hour {
