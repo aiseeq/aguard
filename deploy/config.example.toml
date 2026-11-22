@@ -379,8 +379,8 @@ also_to = ["git-admin"]
 mode = "log" # off | log | alert
 interval = "1m"
 [[liveness.watch]]
-name = "chload"
-path = "~/.local/state/akit/chload/state.json"
+name = "tlfeed"
+path = "~/.local/state/akit/tlfeed/state.json"
 max_age = "10m"
 grace = "2m"
 to = ["aguard-master", "akit-master"]

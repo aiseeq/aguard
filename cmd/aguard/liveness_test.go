@@ -27,7 +27,7 @@ func TestLivenessRoundLifecycle(t *testing.T) {
 	makeApp := func() *app {
 		return &app{home: base, stateDir: filepath.Join(base, "aguard"), now: func() time.Time { return now }, livenessSend: func(to, msg, kind string) error { sent = append(sent, kind+":"+to); return nil }}
 	}
-	cfg := liveness.Config{Mode: liveness.ModeAlert, Interval: policy.Duration(60 * time.Second), Watch: []liveness.Watch{{Name: "chload", Path: statePath, MaxAge: policy.Duration(10 * time.Minute), Grace: policy.Duration(2 * time.Minute), To: []string{"aguard-master", "akit-master"}}}}
+	cfg := liveness.Config{Mode: liveness.ModeAlert, Interval: policy.Duration(60 * time.Second), Watch: []liveness.Watch{{Name: "tlfeed", Path: statePath, MaxAge: policy.Duration(10 * time.Minute), Grace: policy.Duration(2 * time.Minute), To: []string{"aguard-master", "akit-master"}}}}
 	write := func(heartbeat time.Time, lag int64) {
 		t.Helper()
 		b, _ := json.Marshal(liveness.State{Heartbeat: heartbeat, LastRowAt: heartbeat, LagBytes: lag, PID: 1})
