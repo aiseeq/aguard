@@ -62,7 +62,7 @@ func TestRemoteRoundQueuedNotBroken(t *testing.T) {
 func TestRemoteOwnerByProjectWhenEventHasNoWorker(t *testing.T) {
 	dir := t.TempDir()
 	project := "/home/aisee/.cache/worktrees/akit/page-shot-fonts-upd"
-	id := "1115-2252-page-shot-fonts-upd"
+	id := time.Now().Format("0102-1504") + "-page-shot-fonts-upd" // свежий номер: ByDir берёт задания последних семи суток (фиксированный 1115-2252 упал 23.11)
 	jobDir := filepath.Join(dir, ".local", "state", "worker", id)
 	if err := os.MkdirAll(jobDir, 0o700); err != nil {
 		t.Fatal(err)

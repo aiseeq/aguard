@@ -39,7 +39,7 @@ type Config struct {
 	// Names — сессии, чьи реплики размечаются (шаблоны path.Match по имени сессии).
 	Names   []string        `toml:"names"`
 	Model   string          `toml:"model"`  // имя из ~/.config/models/approved
-	Effort  string          `toml:"effort"` // усилие рассуждения
+	Effort  string          `toml:"effort"` // усилие рассуждения: high, xhigh или max — ниже high нельзя (общий CLAUDE.md, пользователь 22.11 23:39)
 	Timeout policy.Duration `toml:"timeout"`
 	File    string          `toml:"file"` // указатель сказанного
 	// Context — сколько знаков конца сообщения агента дать модели как «в ответ на».
@@ -64,7 +64,7 @@ const defaultContext = 800
 func Default() Config {
 	return Config{
 		Mode: ModeLog, Interval: policy.Duration(time.Minute), Names: []string{"lead", "*-admin", "*-master"},
-		Model: "luna", Effort: "low", Timeout: policy.Duration(2 * time.Minute), File: "~/.claude/said.tsv",
+		Model: "luna", Effort: "high", Timeout: policy.Duration(2 * time.Minute), File: "~/.claude/said.tsv",
 		Context: defaultContext, Candidates: 8, Retries: 3, Batch: 20, Pause: policy.Duration(15 * time.Minute),
 		Ceiling: 90, Stall: policy.Duration(6 * time.Hour), Keep: policy.Duration(60 * 24 * time.Hour),
 	}
@@ -76,6 +76,11 @@ func (c *Config) Validate(home string) error {
 	case ModeOff, ModeLog, ModeWrite:
 	default:
 		return fmt.Errorf("said.mode = %q: off, log или write", c.Mode)
+	}
+	switch c.Effort {
+	case "high", "xhigh", "max":
+	default: // пусто — умолчание CLI, оно бывает ниже high
+		return fmt.Errorf("said.effort = %q: high, xhigh или max — усилие модели не ниже high (пользователь 22.11 23:39)", c.Effort)
 	}
 	if c.Interval.D() < 10*time.Second || c.Timeout.D() < 10*time.Second || c.Pause.D() < c.Interval.D() ||
 		c.Keep.D() < 24*time.Hour {
