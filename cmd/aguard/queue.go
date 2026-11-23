@@ -38,6 +38,10 @@ type queueTicketJSON struct {
 	Journal  bool   `json:"journal"`
 	// Actors — время последней записи журнала по авторам, «2006-01-02 15:04» местного (akit tk v1.47.0).
 	Actors map[string]string `json:"actors"`
+	// BlockedBy — тикеты, поставленные перед этим (tk set --blocks): имя той же папки или git/<проект>/<имя>.
+	BlockedBy []string `json:"blocked_by"`
+	Overdue   bool     `json:"overdue"`
+	Due       string   `json:"due"` // срок «ждёт», если tk его разобрал
 }
 
 func (a *app) queueCmd(ctx context.Context, args []string) error {
@@ -898,7 +902,7 @@ func (a *app) queueTicketFromJSON(c *config.Config, root string, rootMode bool, 
 	}
 	actorNotes := a.queueActorNotes(r)
 	return queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Path: ticketPath, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Journal: r.Journal,
-		MasterNote: actorNotes[master], ActorNotes: actorNotes}, true
+		MasterNote: actorNotes[master], ActorNotes: actorNotes, BlockedBy: r.BlockedBy, Overdue: r.Overdue, WaitDue: r.Due != ""}, true
 }
 
 func queueTicketPath(project string, rootMode bool, tkPath string) (string, error) {

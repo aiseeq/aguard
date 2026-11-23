@@ -219,6 +219,11 @@ type Ticket struct {
 	// ActorNotes — время последней записи каждого автора журнала из tk ls --json: свежая запись живого автора
 	// (adminFreshActorNote) держит тикет от предложения админу, пока автор ставит задачу.
 	ActorNotes map[string]time.Time
+	// BlockedBy — тикеты, которые мастер поставил перед этим (tk set X --blocks Y, tk ls --json blocked_by): имя тикета
+	// той же папки или git/<проект>/<имя> другой; очередь опознаёт только первые.
+	BlockedBy []string
+	Overdue   bool // «ждёт», и срок ожидания прошёл (tk ls --json overdue)
+	WaitDue   bool // у «ждёт» есть разбираемый срок (tk ls --json due); без срока overdue всегда false
 }
 
 const (
@@ -259,6 +264,7 @@ type View struct {
 	Rest                 Rest // дни отдыха папок: из строк идут только CRIT
 
 	restingSessions map[string]bool // сессии этих папок в такой день, считает Step
+	movingBlockers  map[string]bool // папка + "\x00" + имя тикета, который движется (blockerMoving); считает Step
 }
 
 func (v View) bootGrace() bool {
@@ -351,6 +357,7 @@ func (s *State) init() {
 func (s *State) Step(ts []Ticket, v View) []Notice {
 	s.init()
 	v.restingSessions = restingSessions(ts, v)
+	v.movingBlockers = movingBlockers(ts, v)
 	s.captureTransfers(ts, v.Now)
 	var out []Notice
 	wasSeed := s.Seeded
@@ -427,6 +434,42 @@ func (s *State) prepareTicket(t Ticket, v View, seeded bool, active map[string]b
 
 func ticketWorking(t Ticket) bool {
 	return (t.Status == "в работе" || t.Status == "ждёт" && t.Executor != "") && !t.Journal
+}
+
+func movingBlockers(ts []Ticket, v View) map[string]bool {
+	out := map[string]bool{}
+	for i := range ts {
+		if blockerMoving(ts[i], v) {
+			out[ts[i].Dir+"\x00"+ts[i].Slug] = true
+		}
+	}
+	return out
+}
+
+// blockerMoving — тикет, который держит зависимый не зря: «в работе» у живого исполнителя или «ждёт» внешнего до срока.
+// Исполнитель умер, срока нет или он прошёл, тикет открыт, закрыт или журнальный — блокер встал, письмо по зависимому идёт.
+func blockerMoving(t Ticket, v View) bool {
+	if t.Journal {
+		return false
+	}
+	switch t.Status {
+	case "в работе":
+		return alive(v, t.Executor)
+	case "ждёт":
+		return t.WaitDue && !t.Overdue // ожидание без срока держало бы зависимый вечно
+	}
+	return false
+}
+
+// blockedByMoving — мастер поставил перед тикетом другой (tk set X --blocks Y), и тот движется: тикет ждёт его по
+// tk guide, это не «не взят». Блокер из другой папки tk пишет как git/<проект>/<имя> — с ним письмо идёт, как раньше.
+func blockedByMoving(t Ticket, v View) bool {
+	for _, b := range t.BlockedBy {
+		if v.movingBlockers[t.Dir+"\x00"+b] {
+			return true
+		}
+	}
+	return false
 }
 
 func resetCancelOnReopen(st *ticketState, t Ticket, working bool) {
@@ -725,7 +768,7 @@ func (s *State) highNotices(t Ticket, st *ticketState, v View) []Notice {
 		line := fmt.Sprintf("aguard: HIGH %s/%s — %s. tk next", t.Project, t.Slug, t.Title)
 		out = append(out, notice(t, v, KindHigh, t.Master, line))
 	}
-	if age >= highWait && !t.Started && !masterNoted(t, v.Now) {
+	if age >= highWait && !t.Started && !masterNoted(t, v.Now) && !blockedByMoving(t, v) {
 		out = append(out, s.highAdminNotice(t, st, v, "не взят за 4 ч, мастер "+t.Master)...)
 	}
 	return out

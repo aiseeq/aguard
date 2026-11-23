@@ -697,3 +697,17 @@ func TestQueueJournalReadDoesNotMutateTicketCache(t *testing.T) {
 		t.Fatalf("чтение журнала изменило кеш: %+v", cached)
 	}
 }
+
+// Связь «заблокирован» (tk ls --json, blocked_by) доходит до очереди: по ней письмо админу «не взят» ждёт блокер в работе.
+func TestQueueTicketBlockedBy(t *testing.T) {
+	list := `[{"repo":"p","slug":"c","status":"открыт","prio":"HIGH","title":"t","blocked_by":["d"],"due":"2026-11-30T10:00:00+01:00","path":"docs/tasks/20261103-1205-HIGH-c.md"},` +
+		`{"repo":"p","slug":"d","status":"ждёт","prio":"MED","title":"t","executor":"p-master","overdue":true,"due":"2026-11-03T13:00:00+01:00","path":"docs/tasks/20261103-1206-MED-d.md"}]`
+	b := newQueueBench(t, list, "[]")
+	ts, err := b.a.queueTickets(context.Background(), b.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ts) != 2 || len(ts[0].BlockedBy) != 1 || ts[0].BlockedBy[0] != "d" || ts[1].BlockedBy != nil || ts[0].Overdue || !ts[1].Overdue || !ts[0].WaitDue || !ts[1].WaitDue {
+		t.Fatalf("%+v", ts)
+	}
+}
