@@ -517,7 +517,8 @@ func underRoot(dir, root string) bool {
 // где строка переноса появилась впервые, и хранятся до прихода задачи. Состояния не было (тикет MED, демон без
 // прошлого) — задача идёт как новая: дубль дешевле потерянного письма.
 func (s *State) captureTransfers(ts []Ticket, now time.Time) {
-	for _, t := range ts {
+	for i := range ts {
+		t := &ts[i]
 		if t.Status != StatusTransferred {
 			continue
 		}
@@ -843,8 +844,8 @@ func cancelLine(t Ticket) string {
 const goneKeep = 30 * 24 * time.Hour
 
 func (s *State) cleanup(active map[string]bool, now time.Time) {
-	for ext, m := range s.Transferred {
-		if now.Sub(m.At) >= transferKeep {
+	for ext := range s.Transferred {
+		if now.Sub(s.Transferred[ext].At) >= transferKeep {
 			delete(s.Transferred, ext)
 		}
 	}
