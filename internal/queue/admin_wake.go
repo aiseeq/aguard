@@ -95,7 +95,7 @@ func (s *State) adminOffer(p Ticket, v View, byKey map[string]Ticket) (Notice, b
 			return Notice{}, false
 		}
 	}
-	if restingDir(p.Dir, v) && NormPrio(first.Prio) != "CRIT" {
+	if restingDir(p.Dir, v) && !restOpen(first) {
 		return Notice{}, false
 	}
 	serious := v.Serious != nil && v.Serious(p.Project)

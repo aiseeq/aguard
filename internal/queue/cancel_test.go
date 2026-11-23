@@ -324,6 +324,22 @@ func TestCancelWaitsThroughProjectRest(t *testing.T) {
 	}
 }
 
+// Снятый вопрос пользователю (q-…) в день отдыха — письмо исполнителю сразу: карточка вопроса уже в доке.
+func TestCancelQuestionInRestGoes(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.now = at("2026-11-07T10:00:00+01:00")
+	w.rest = cyRest("/h/work")
+	w.live["executor-a"], w.free["executor-a"] = true, true
+	s := seeded(w)
+	tk := cancelTicket()
+	tk.Dir, tk.Slug = "/h/work", "q-release-tree"
+	step(s, []Ticket{tk}, w)
+	tk.Status, tk.CancelAuthor, tk.CancelJournalRead = "отклонён", "executor-b", true
+	if ns := step(s, []Ticket{tk}, w); !has(ns, KindCancel, "executor-a") {
+		t.Fatalf("снятый вопрос в день отдыха — письмо сразу: %+v", ns)
+	}
+}
+
 func TestCancelReachesBusyExecutorAndReportsExpiredDelivery(t *testing.T) {
 	w := newWorld(ModeOn)
 	w.live["executor-a"], w.free["executor-a"] = true, false

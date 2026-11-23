@@ -343,6 +343,17 @@ func TestWakeNoMasterWeekendOnlyCrit(t *testing.T) {
 	}
 }
 
+func TestWakeNoMasterWeekendQuestion(t *testing.T) {
+	w := freezeWorld()
+	w.ts[0].Master = ""
+	w.view.Now = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w.view.Rest = cyRest("/p")
+	w.first.Slug = "q-release-tree"
+	if ns := w.step(); !has(ns, KindWakeAdmin, "admin") {
+		t.Fatal(ns)
+	}
+}
+
 func TestWakeNoMasterFirstTakenSkipped(t *testing.T) {
 	w := freezeWorld()
 	w.ts[0].Master = ""

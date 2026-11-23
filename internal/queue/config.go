@@ -22,7 +22,7 @@ type Config struct {
 	Dirs          []string        `toml:"dirs"`
 	Skip          []string        `toml:"skip"`
 	// RestCrit — папки, где в дни отдыха (суббота, воскресенье, праздники RestHolidays; дата — в поясе RestZone) из
-	// новой работы идёт только CRIT: ворота, будильник и «HIGH не взят». Список — в конфиге машины.
+	// новой работы идёт только CRIT и вопросы пользователю q-… (restOpen): ворота, будильник и «HIGH не взят». Список — в конфиге машины.
 	RestCrit     []string `toml:"rest_crit"`
 	RestZone     string   `toml:"rest_zone"`
 	RestHolidays string   `toml:"rest_holidays"`

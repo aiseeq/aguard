@@ -161,6 +161,21 @@ func TestWakeWeekendOnlyCrit(t *testing.T) {
 		t.Fatal(ns)
 	}
 }
+
+// Вопрос пользователю (q-…) в день отдыха будит, как CRIT: ответ «а» на карточку 39 дока вопросов ~/work, 23.11.
+func TestWakeWeekendQuestion(t *testing.T) {
+	w := newWakeWorld()
+	w.view.Now = time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	w.view.Rest = cyRest("/p")
+	w.first.Slug = "q-release-tree"
+	if ns := w.step(); !has(ns, KindWake, "master") {
+		t.Fatal(ns)
+	}
+	w.first.Slug = "release-q-tree"
+	if ns := w.step(); has(ns, KindWake, "master") {
+		t.Fatal("q- не в начале имени — не вопрос", ns)
+	}
+}
 func TestWakeLogModeThenLive(t *testing.T) {
 	w := newWakeWorld()
 	live := false

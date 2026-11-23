@@ -91,7 +91,7 @@ func (s *State) wakeDecide(master, session string, first, project Ticket, v View
 	if first.Status == "в работе" && !strings.EqualFold(first.Executor, master) {
 		return Notice{}, false
 	}
-	if restingDir(first.Dir, v) && NormPrio(first.Prio) != "CRIT" {
+	if restingDir(first.Dir, v) && !restOpen(first) {
 		return Notice{}, false
 	}
 	serious := v.Serious != nil && v.Serious(first.Project)

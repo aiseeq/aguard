@@ -393,7 +393,7 @@ func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool
 		return s.critNotices(t, st, v)
 	}
 	if t.Prio == "HIGH" {
-		if t.Status == "открыт" && restingDir(t.Dir, v) {
+		if t.Status == "открыт" && restingDir(t.Dir, v) && !restOpen(t) {
 			st.Seen, st.Taken = v.Rest.End(v.Now), false // срок 4 ч пойдёт с первого рабочего дня; значение одно на цепочку дней отдыха, state.json не переписывается
 			return nil
 		}
@@ -547,6 +547,12 @@ func (s *State) dropFrozenWakes(t Ticket) {
 
 // restingDir — день отдыха, и папка проекта в queue.rest_crit.
 func restingDir(dir string, v View) bool { return v.Rest.Covers(dir, v.Now) }
+
+// restOpen — тикет, который в день отдыха идёт как в будний: CRIT и вопрос пользователю (q-…, dev-process masters.md):
+// вопрос мастера проходит ворота и в выходные — ответ «а» на карточку 39 дока вопросов ~/work, 23.11.
+func restOpen(t Ticket) bool {
+	return NormPrio(t.Prio) == "CRIT" || strings.HasPrefix(t.Slug, "q-")
+}
 
 func underRoot(dir, root string) bool {
 	return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
@@ -847,8 +853,9 @@ func (s *State) cancelNotices(t Ticket, st *ticketState, v View) []Notice {
 		return nil
 	}
 	line := cancelLine(t)
-	if v.restingSessions[to] || to != v.Lead && restingDir(t.Dir, v) {
+	if !restOpen(t) && (v.restingSessions[to] || to != v.Lead && restingDir(t.Dir, v)) {
 		// Отдыхающая сессия и проект на дне отдыха по проекту не работают; срок 7 суток переносится на конец отдыха, лиду — без ожидания.
+		// Снятый вопрос (q-…) идёт сразу: админ вносит его карточку в док и в выходной, снять её он должен тогда же.
 		st.CancelAt = v.Rest.End(v.Now)
 		return nil
 	}

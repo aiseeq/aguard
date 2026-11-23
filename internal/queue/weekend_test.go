@@ -54,6 +54,27 @@ func TestWeekendHighWaitsForMonday(t *testing.T) {
 	}
 }
 
+// Вопрос пользователю (q-…) HIGH в день отдыха — письмо сразу, как в будний: ответ «а» на карточку 39, 23.11.
+func TestWeekendHighQuestionGoes(t *testing.T) {
+	w := restWorld()
+	s := seeded(w)
+	q := inDir(tick("HIGH", "открыт"), restRoot+"/p")
+	q.Slug = "q-release-tree"
+	if ns := step(s, []Ticket{q}, w); !has(ns, KindHigh, "m-master") {
+		t.Fatalf("вопрос HIGH в выходной — письмо: %+v", ns)
+	}
+	w.live["git-admin"], w.free["git-admin"] = true, true
+	w.now = w.now.Add(4*time.Hour + time.Minute)
+	if ns := step(s, []Ticket{q}, w); !has(ns, KindHighAdmin, "git-admin") {
+		t.Fatalf("вопрос HIGH не взят за 4 ч в выходной — письмо админу: %+v", ns)
+	}
+	other := inDir(tick("HIGH", "открыт"), restRoot+"/p")
+	other.Key, other.Slug = "m/20261104-0951-quota-x", "quota-x"
+	if ns := step(s, []Ticket{q, other}, w); has(ns, KindHigh, "m-master") {
+		t.Fatalf("quota-x — не вопрос, ждёт понедельника: %+v", ns)
+	}
+}
+
 func TestWeekendOtherDirAsUsual(t *testing.T) {
 	for name, dir := range map[string]string{"другой корень": "/h/git/p", "похожее имя": restRoot + "-old/p"} {
 		w := restWorld()
