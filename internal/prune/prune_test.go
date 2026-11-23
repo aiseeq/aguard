@@ -1770,3 +1770,130 @@ func TestPruneStopsAtWindowEndAndYieldErrorPauses(t *testing.T) {
 		t.Fatalf("yield error did not pause safely: %+v", r)
 	}
 }
+
+// EINVAL на mountinfo — задача без пространств имён (завершается). Запись не держит, только если все потоки
+// зомби или исчезли; живой поток (главный после pthread_exit — зомби) или живое состояние — сомнение, как прежде.
+// Случай 23.11 02:16: один завершающийся pid сделал «сомнением» все 20 созревших записей вне claude-1000.
+func TestOutsideMountinfoEINVALOfExitedProcess(t *testing.T) {
+	cases := []struct {
+		name    string
+		threads map[string]string // tid → State; nil — каталога task нет (процесс убран)
+		deleted bool
+	}{
+		{"all-threads-zombie", map[string]string{"7916": "Z (zombie)", "7917": "X (dead)"}, true},
+		{"reaped-no-task-dir", nil, true},
+		{"zombie-leader-live-thread", map[string]string{"7916": "Z (zombie)", "7917": "S (sleeping)"}, false},
+		{"running", map[string]string{"7916": "R (running)"}, false},
+		{"state-missing", map[string]string{"7916": ""}, false},
+		{"task-dir-unreadable", map[string]string{"7916": "Z (zombie)"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, now := world(t)
+			c.Mode, c.OutsideMode = ModeAct, ModeAct
+			path := makeOutside(t, c, "einval-"+tc.name, now.Add(-10*24*time.Hour))
+			proc := emptyProcRoot(t)
+			base := addTestProc(t, proc, "7916", os.Getuid())
+			for tid, state := range tc.threads {
+				dir := filepath.Join(base, "task", tid)
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				body := "Name:\ttest\n"
+				if state != "" {
+					body += "State:\t" + state + "\n"
+				}
+				if err := os.WriteFile(filepath.Join(dir, "status"), []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.name == "task-dir-unreadable" {
+				oldDir := readProcDir
+				readProcDir = func(p string) ([]os.DirEntry, error) {
+					if p == filepath.Join(base, "task") {
+						return nil, syscall.EIO
+					}
+					return oldDir(p)
+				}
+				defer func() { readProcDir = oldDir }()
+			}
+			old := openMountInfo
+			openMountInfo = func(p string) (*os.File, error) {
+				if p == filepath.Join(base, "mountinfo") {
+					return nil, syscall.EINVAL
+				}
+				return old(p)
+			}
+			defer func() { openMountInfo = old }()
+			h := outsideHooks(baseHooks(t, now), now)
+			h.ProcRoot = proc
+			r := Run(context.Background(), c, h)
+			if r.Err != nil {
+				t.Fatal(r.Err)
+			}
+			if exists(t, path) == tc.deleted {
+				t.Fatalf("удалена=%v, хотим %v; причина %q", !exists(t, path), tc.deleted, outsideReasonFor(r.Outside, path))
+			}
+			if tc.name == "task-dir-unreadable" && !strings.Contains(outsideReasonFor(r.Outside, path), "read threads") {
+				t.Fatalf("причина %q, хотим ошибку чтения task/", outsideReasonFor(r.Outside, path))
+			}
+			if !tc.deleted && !strings.Contains(outsideReasonFor(r.Outside, path), "сомнение: ошибка чтения /proc") {
+				t.Fatalf("причина %q, хотим сомнение /proc", outsideReasonFor(r.Outside, path))
+			}
+		})
+	}
+}
+
+// Гонка exec: первый обход task/ видит зомби-главного и уже ушедший поток (de_thread поменял tid), второй —
+// живой процесс под тем же pid. Запись остаётся под сомнением.
+func TestOutsideMountinfoEINVALExecRace(t *testing.T) {
+	c, now := world(t)
+	c.Mode, c.OutsideMode = ModeAct, ModeAct
+	path := makeOutside(t, c, "einval-exec-race", now.Add(-10*24*time.Hour))
+	proc := emptyProcRoot(t)
+	base := addTestProc(t, proc, "7916", os.Getuid())
+	if err := os.MkdirAll(filepath.Join(base, "task", "7916"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "task", "7916", "status"), []byte("State:\tZ (zombie)\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reads, raceAt := 0, 1 // с какого чтения status под pid живёт бывший t2
+	oldFile := readProcFile
+	readProcFile = func(p string) ([]byte, error) {
+		if p == filepath.Join(base, "task", "7916", "status") {
+			reads++
+			if reads > raceAt {
+				return []byte("State:\tS (sleeping)\n"), nil // после exec под pid живёт бывший t2
+			}
+		}
+		return oldFile(p)
+	}
+	defer func() { readProcFile = oldFile }()
+	old := openMountInfo
+	openMountInfo = func(p string) (*os.File, error) {
+		if p == filepath.Join(base, "mountinfo") {
+			return nil, syscall.EINVAL
+		}
+		return old(p)
+	}
+	defer func() { openMountInfo = old }()
+	if exited, err := processSurelyExited(base); err != nil || exited {
+		t.Fatal("гонка exec: второй проход видит живой поток, процесс не завершён")
+	}
+	// В Run решение принимает повторная проверка перед удалением (scanOutside — чтения 1–2, beforeRemoveOutside — 3–4):
+	// гонка во втором проходе повторной проверки. Один проход вместо двух прочёл бы там Z и удалил запись.
+	reads, raceAt = 0, 3
+	h := outsideHooks(baseHooks(t, now), now)
+	h.ProcRoot = proc
+	r := Run(context.Background(), c, h)
+	if r.Err != nil {
+		t.Fatal(r.Err)
+	}
+	if !exists(t, path) {
+		t.Fatal("гонка exec: запись живого процесса удалена")
+	}
+	if got := outsideReasonFor(r.Outside, path); !strings.Contains(got, "сомнение: ошибка чтения /proc") {
+		t.Fatalf("причина %q, хотим сомнение /proc", got)
+	}
+}

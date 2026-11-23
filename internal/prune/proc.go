@@ -140,6 +140,58 @@ func collectProcTargets(ctx context.Context, procRoot, scopeRoot string, uid int
 	return targets, nil
 }
 
+// processExited — процесс исчез или все его потоки (/proc/<pid>/task/*) в State Z (зомби) или X (умер).
+// Смотрятся все потоки: главный поток после pthread_exit — зомби, а живые потоки держат общую таблицу файлов.
+// Любая другая ошибка чтения возвращается: вызывающий оставляет сомнение и пишет её в причину.
+func processExited(base string) (bool, error) {
+	tasks, err := readProcDir(filepath.Join(base, "task"))
+	if gone(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read threads %s: %w", base, err)
+	}
+	for _, t := range tasks {
+		exited, err := taskExited(filepath.Join(base, "task", t.Name(), "status"))
+		if gone(err) {
+			continue
+		}
+		if err != nil {
+			return false, fmt.Errorf("read thread %s/task/%s: %w", base, t.Name(), err)
+		}
+		if !exited {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// processSurelyExited — processExited в двух проходах подряд (гонка exec и нового потока, см. collectProcessTargets).
+func processSurelyExited(base string) (bool, error) {
+	for range 2 {
+		if exited, err := processExited(base); err != nil || !exited {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+func gone(err error) bool { return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) }
+
+func taskExited(statusPath string) (bool, error) {
+	status, err := readProcFile(statusPath)
+	if err != nil {
+		return false, err
+	}
+	for line := range strings.SplitSeq(string(status), "\n") {
+		if state, ok := strings.CutPrefix(line, "State:"); ok {
+			state = strings.TrimSpace(state)
+			return strings.HasPrefix(state, "Z") || strings.HasPrefix(state, "X"), nil
+		}
+	}
+	return false, errors.New("state field is missing")
+}
+
 func statusUID(status []byte) (int, error) {
 	for line := range strings.SplitSeq(string(status), "\n") {
 		if !strings.HasPrefix(line, "Uid:") {
@@ -162,6 +214,22 @@ func collectProcessTargets(ctx context.Context, base, scopeRoot string, targets 
 	processMountInfo := filepath.Join(base, "mountinfo")
 	processDevices, err := readMountDevices(ctx, processMountInfo, yield)
 	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if errors.Is(err, syscall.EINVAL) {
+		exited, xerr := processSurelyExited(base)
+		if xerr != nil {
+			return fmt.Errorf("read process mountinfo %s: %w; %w", base, err, xerr)
+		}
+		if !exited {
+			return fmt.Errorf("read process mountinfo %s: %w", base, err)
+		}
+		// Ядро отдаёт EINVAL на mountinfo (fs/proc_namespace.c, mounts_open_common), когда задачи нет или у главного
+		// потока nsproxy уже NULL: в do_exit exit_files и exit_fs идут раньше exit_nsproxy_namespaces (v7.2).
+		// Держать запись такому процессу нечем, если завершились все потоки. Проверка дважды: между чтением task/
+		// и status поток может сделать exec (de_thread меняет tid с главным) или породить новый поток — второй
+		// проход тогда видит живой поток.
+		// Случай 23.11 02:16: один такой pid сделал «сомнением» все 20 созревших записей вне claude-1000.
 		return nil
 	}
 	if isProcInvisible(err) {
