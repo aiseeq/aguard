@@ -329,6 +329,9 @@ type State struct {
 	Wakes        map[string]Wake           `json:"wakes,omitempty"`
 	ProjectWakes map[string]ProjectWake    `json:"project_wakes,omitempty"`
 	External     map[string][]ExternalTask `json:"external,omitempty"` // папка проекта → последний ответ трекера
+	// Transferred — внешняя задача (проект/ключ трекера) → отметки писем тикета, перенесённого в неё tk transfer,
+	// снятые при первом появлении строки переноса; живут transferKeep.
+	Transferred map[string]TransferMarks `json:"transferred,omitempty"`
 }
 
 func (s *State) init() {
@@ -341,10 +344,14 @@ func (s *State) init() {
 	if s.ProjectWakes == nil {
 		s.ProjectWakes = map[string]ProjectWake{}
 	}
+	if s.Transferred == nil {
+		s.Transferred = map[string]TransferMarks{}
+	}
 }
 func (s *State) Step(ts []Ticket, v View) []Notice {
 	s.init()
 	v.restingSessions = restingSessions(ts, v)
+	s.captureTransfers(ts, v.Now)
 	var out []Notice
 	wasSeed := s.Seeded
 	active := map[string]bool{}
@@ -409,6 +416,9 @@ func (s *State) prepareTicket(t Ticket, v View, seeded bool, active map[string]b
 		s.Tickets[t.Key] = st
 		if !seeded && seedTicket(t, st, v.Now) {
 			return st, false
+		}
+		if m, ok := s.Transferred[t.Key]; t.External && ok {
+			m.inherit(st)
 		}
 	}
 	rememberExecutor(st, t)
@@ -497,6 +507,56 @@ func restingDir(dir string, v View) bool { return v.Rest.Covers(dir, v.Now) }
 
 func underRoot(dir, root string) bool {
 	return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
+}
+
+// captureTransfers — внешние задачи, в которые перенесены тикеты: строка .transferred.jsonl даёт тикет со статусом
+// «перенесён» и Transfer «<ключ трекера> <адрес>». Случай 23.11: HIGH рабочего проекта перенесён в Jira, и его задача
+// пришла из tk external под ключом трекера как новая — мастеру ушло повторное первое письмо HIGH.
+// Задача приходит из трекера проходом позже (опрос раз в 5 мин), а к тому времени закрытый CRIT теряет отметку
+// (resetCritAttempt), а перенос без заказчика — всё состояние (cleanup). Поэтому отметки снимаются в начале прохода,
+// где строка переноса появилась впервые, и хранятся до прихода задачи. Состояния не было (тикет MED, демон без
+// прошлого) — задача идёт как новая: дубль дешевле потерянного письма.
+func (s *State) captureTransfers(ts []Ticket, now time.Time) {
+	for _, t := range ts {
+		if t.Status != StatusTransferred {
+			continue
+		}
+		key, _, _ := strings.Cut(t.Transfer, " ")
+		ext := t.Project + "/" + key
+		src := s.Tickets[t.Key]
+		if key == "" || src == nil || src.Prio == "" {
+			// Приоритет у состояния — только от местного тикета, до первого прохода с переносом: у строки переноса его нет,
+			// и resetCritAttempt выравнивает Prio. Так снимок берётся один раз, а вечные строки .transferred.jsonl карту не растят.
+			continue
+		}
+		s.Transferred[ext] = TransferMarks{At: now, Seen: src.Seen, Taken: src.Taken, High: src.High, Admin: src.Admin,
+			Crit: src.Crit, CritTo: src.CritTo, CritCopy: src.CritCopy}
+	}
+}
+
+// transferKeep — сколько хранятся отметки перенесённого тикета: задача трекера приходит за минуты, запас — на сбой трекера.
+const transferKeep = 7 * 24 * time.Hour
+
+// TransferMarks — отметки писем перенесённого тикета: внешняя задача продолжает ту же работу.
+type TransferMarks struct {
+	At       time.Time `json:"at"`
+	Seen     time.Time `json:"seen,omitzero"`
+	Taken    bool      `json:"taken,omitempty"`
+	High     mark      `json:"high,omitzero"`
+	Admin    mark      `json:"admin,omitzero"`
+	Crit     mark      `json:"crit,omitzero"`
+	CritTo   string    `json:"crit_to,omitempty"`
+	CritCopy mark      `json:"crit_copy,omitzero"`
+}
+
+// inherit — новая внешняя задача берёт отметки перенесённого тикета. Чего у тикета не было (письмо ждало свободного
+// мастера, тикет был не HIGH), то у задачи пойдёт как у новой.
+func (m TransferMarks) inherit(st *ticketState) {
+	if !m.Seen.IsZero() {
+		st.Seen = m.Seen
+	}
+	st.Taken, st.High, st.Admin = m.Taken, m.High, m.Admin
+	st.Crit, st.CritTo, st.CritCopy = m.Crit, m.CritTo, m.CritCopy
 }
 
 // restingSessions — мастера и админы папок в день отдыха: строка о закрытом им ждёт первого рабочего дня. Лиду идёт всегда.
@@ -783,6 +843,11 @@ func cancelLine(t Ticket) string {
 const goneKeep = 30 * 24 * time.Hour
 
 func (s *State) cleanup(active map[string]bool, now time.Time) {
+	for ext, m := range s.Transferred {
+		if now.Sub(m.At) >= transferKeep {
+			delete(s.Transferred, ext)
+		}
+	}
 	for key, st := range s.Tickets {
 		if active[key] {
 			continue

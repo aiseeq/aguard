@@ -152,3 +152,161 @@ func TestKeepExternal(t *testing.T) {
 		t.Fatalf("%+v", s.External)
 	}
 }
+
+// tk transfer перенёс тикет во внешний трекер: задача приходит под ключом трекера, но это та же работа — отметки писем
+// она берёт у перенесённого тикета. Порядок как в работе: проход с местным тикетом, проход с одной строкой переноса
+// (приоритета у неё нет), затем задача из трекера. Письма, которого у тикета не было, задача шлёт как новая. Случай 23.11.
+func TestExternalTransferredInheritsMarks(t *testing.T) {
+	moved := func(prio, back string) (Ticket, Ticket) {
+		local := tick(prio, "открыт")
+		gone := local
+		gone.Prio, gone.Status, gone.Back, gone.Transfer = "", StatusTransferred, back, "TRK-1 https://tracker/TRK-1"
+		return local, gone
+	}
+	ext := func(prio string) Ticket { return extTicket(prio, "To Do") }
+	keyed := func(ns []Notice, key, kind string) bool {
+		for _, n := range ns {
+			if n.Key == key && n.Kind == kind {
+				return true
+			}
+		}
+		return false
+	}
+	// transfer — проход с одной строкой переноса, затем проход с задачей; возвращает письма второго.
+	transfer := func(s *State, w *world, gone Ticket, rest ...Ticket) []Notice {
+		w.now = w.now.Add(time.Minute)
+		step(s, []Ticket{gone}, w)
+		w.now = w.now.Add(5 * time.Minute)
+		return step(s, append([]Ticket{gone}, rest...), w)
+	}
+	for _, back := range []string{"c-master", ""} {
+		t.Run("high-sent/back="+back, func(t *testing.T) {
+			w := newWorld(ModeOn)
+			w.free["m-master"] = true
+			s := seeded(w)
+			local, gone := moved("HIGH", back)
+			if ns := step(s, []Ticket{local}, w); !keyed(ns, local.Key, KindHigh) {
+				t.Fatalf("местный HIGH — письмо: %+v", ns)
+			}
+			if ns := transfer(s, w, gone, ext("HIGH")); keyed(ns, "m/TRK-1", KindHigh) {
+				t.Fatalf("перенесённый HIGH — без повторного первого письма: %+v", ns)
+			}
+		})
+		t.Run("crit-sent/back="+back, func(t *testing.T) {
+			w := newWorld(ModeOn)
+			w.free["m-master"] = true
+			s := seeded(w)
+			local, gone := moved("CRIT", back)
+			if ns := step(s, []Ticket{local}, w); !keyed(ns, local.Key, KindCrit) {
+				t.Fatalf("местный CRIT — письмо: %+v", ns)
+			}
+			if ns := transfer(s, w, gone, ext("CRIT")); keyed(ns, "m/TRK-1", KindCrit) || keyed(ns, "m/TRK-1", KindCritCopy) {
+				t.Fatalf("перенесённый CRIT — без повтора: %+v", ns)
+			}
+		})
+	}
+	t.Run("high-waited-busy-master", func(t *testing.T) {
+		w := newWorld(ModeOn)
+		s := seeded(w)
+		local, gone := moved("HIGH", "")
+		if ns := step(s, []Ticket{local}, w); keyed(ns, local.Key, KindHigh) {
+			t.Fatalf("мастер занят — письмо ждёт: %+v", ns)
+		}
+		w.free["m-master"] = true
+		if ns := transfer(s, w, gone, ext("HIGH")); !keyed(ns, "m/TRK-1", KindHigh) {
+			t.Fatalf("письма не было — задача шлёт его: %+v", ns)
+		}
+	})
+	t.Run("admin-deadline", func(t *testing.T) {
+		w := newWorld(ModeOn)
+		w.free["m-master"], w.live["git-admin"], w.free["git-admin"] = true, true, true
+		s := seeded(w)
+		local, gone := moved("HIGH", "")
+		step(s, []Ticket{local}, w)
+		w.now = w.now.Add(highWait + time.Minute)
+		if ns := step(s, []Ticket{local}, w); !keyed(ns, local.Key, KindHighAdmin) {
+			t.Fatalf("местный HIGH не взят за срок — письмо админу: %+v", ns)
+		}
+		for _, n := range transfer(s, w, gone, ext("HIGH")) {
+			if n.Key == "m/TRK-1" {
+				t.Fatalf("после переноса админ второй раз не получает «не взят»: %+v", n)
+			}
+		}
+		// Срок админу идёт от местного тикета, а не от прихода задачи.
+		w2 := newWorld(ModeOn)
+		w2.free["m-master"], w2.live["git-admin"], w2.free["git-admin"] = true, true, true
+		s2 := seeded(w2)
+		step(s2, []Ticket{local}, w2)
+		start := w2.now
+		w2.now = w2.now.Add(time.Hour)
+		transfer(s2, w2, gone, ext("HIGH"))
+		w2.now = start.Add(highWait + time.Minute)
+		if ns := step(s2, []Ticket{gone, ext("HIGH")}, w2); !keyed(ns, "m/TRK-1", KindHighAdmin) {
+			t.Fatalf("срок от местного тикета — письмо админу: %+v", ns)
+		}
+	})
+	t.Run("taken-then-todo", func(t *testing.T) {
+		// Местный HIGH был в работе дольше срока: задача «To Do» начинает срок админу заново, а не шлёт «не взят» сразу.
+		w := newWorld(ModeOn)
+		w.free["m-master"], w.live["git-admin"], w.free["git-admin"] = true, true, true
+		s := seeded(w)
+		local, gone := moved("HIGH", "")
+		step(s, []Ticket{local}, w)
+		local.Status = "в работе"
+		w.now = w.now.Add(time.Minute)
+		step(s, []Ticket{local}, w)
+		w.now = w.now.Add(highWait + time.Hour)
+		step(s, []Ticket{local}, w)
+		if ns := transfer(s, w, gone, ext("HIGH")); keyed(ns, "m/TRK-1", KindHighAdmin) {
+			t.Fatalf("взятый тикет после переноса — без ложного «не взят»: %+v", ns)
+		}
+	})
+	t.Run("other-project-same-key", func(t *testing.T) {
+		w := newWorld(ModeOn)
+		w.free["m-master"], w.free["n-master"], w.live["n-master"] = true, true, true
+		s := seeded(w)
+		local, gone := moved("HIGH", "")
+		local.Key, local.Project, local.Dir, local.Master = "n/20261104-0950-x", "n", "/h/work/n", "n-master"
+		gone.Key, gone.Project, gone.Dir, gone.Master = local.Key, "n", "/h/work/n", "n-master"
+		if ns := step(s, []Ticket{local}, w); !keyed(ns, local.Key, KindHigh) {
+			t.Fatalf("местный HIGH в n — письмо: %+v", ns)
+		}
+		inN := extTask("HIGH", "To Do").Ticket("n", "/h/work/n", "n-master", "git-admin")
+		ns := transfer(s, w, gone, inN, ext("HIGH"))
+		if keyed(ns, "n/TRK-1", KindHigh) {
+			t.Fatalf("перенос в n — задача n/TRK-1 без повтора: %+v", ns)
+		}
+		if !keyed(ns, "m/TRK-1", KindHigh) {
+			t.Fatalf("тот же ключ в проекте m — новая задача: %+v", ns)
+		}
+	})
+	t.Run("no-transfer-line", func(t *testing.T) {
+		w := newWorld(ModeOn)
+		w.free["m-master"] = true
+		s := seeded(w)
+		if ns := step(s, []Ticket{ext("HIGH")}, w); !keyed(ns, "m/TRK-1", KindHigh) {
+			t.Fatalf("внешняя без переноса — письмо, как прежде: %+v", ns)
+		}
+	})
+	t.Run("marks-expire", func(t *testing.T) {
+		w := newWorld(ModeOn)
+		s := seeded(w)
+		local, gone := moved("HIGH", "c-master")
+		step(s, []Ticket{local}, w)
+		w.now = w.now.Add(time.Minute)
+		step(s, []Ticket{gone}, w)
+		if len(s.Transferred) != 1 {
+			t.Fatalf("строка переноса снята: %+v", s.Transferred)
+		}
+		w.now = w.now.Add(transferKeep + time.Minute)
+		step(s, []Ticket{gone}, w) // строка переноса вечная, состояние тикета (с заказчиком) живо
+		if len(s.Transferred) != 0 {
+			t.Fatalf("после transferKeep убрана: %+v", s.Transferred)
+		}
+		w.now = w.now.Add(time.Minute)
+		step(s, []Ticket{gone}, w)
+		if len(s.Transferred) != 0 {
+			t.Fatalf("не снята заново с состояния без приоритета: %+v", s.Transferred)
+		}
+	})
+}
