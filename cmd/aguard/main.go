@@ -38,7 +38,7 @@
 //     aguard waits tick [-dry-run] | report [-since 24h]
 //     aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время]
 //     aguard disk tick [-dry-run] | retro [-days 7] | traces [-all] | report [-since 168h]
-//     aguard said tick [-dry-run] | report [-since 168h]  разметка реплик, расход по суткам
+//     aguard said tick [-dry-run] | report [-since 168h] | status [-max 30m] [-json]  разметка реплик, расход по суткам, отставание
 //     aguard bgtask tick [-dry-run]                     забытые фоновые задачи: письмо владельцу
 //     aguard agentwaits tick [-dry-run] | report [-json] [-window week]  ожидания, которые агенты заводят сами
 //     aguard cpu tick [-dry-run]                        замер ноута и PC: готовые задачи по владельцам
@@ -287,6 +287,7 @@ func usage() {
   aguard compact tick [-dry-run] | report [-since 168h] [-json] [-at время RFC3339]   цена — % недели $100 Claude
   aguard disk tick [-dry-run] | retro [-days 7] | traces [-all] | report [-since 168h]
   aguard said tick [-dry-run] | report [-since 168h]   цена — % недели $100 по каждому поставщику
+  aguard said status [-max 30m] [-json]                 отставание said.tsv; код 3 — проход старше max или не было, режим не write, реплика ждёт дольше max, транскрипт не прочитан
   aguard bgtask tick [-dry-run]
   aguard agentwaits tick [-dry-run] | report [-json] [-window week]
   aguard cpu tick [-dry-run]

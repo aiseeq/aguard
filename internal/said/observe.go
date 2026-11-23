@@ -117,6 +117,11 @@ type State struct {
 	Skip      string    `json:"skip,omitempty"`
 	// Signal — когда лиду ушло письмо о простое.
 	Signal time.Time `json:"signal,omitzero"`
+	// Pass и Mode — последний проход, дошедший до записи состояния, и его режим; Unread — ошибка чтения части
+	// транскриптов в нём. По ним `aguard said status` видит стоящий демон, проход на ошибке и указатель, который не пишется.
+	Pass   time.Time `json:"pass,omitzero"`
+	Mode   string    `json:"mode,omitempty"`
+	Unread string    `json:"unread,omitempty"`
 }
 
 // Down — модель позвали, она не ответила: начало простоя и последняя ошибка, причины не звать больше нет.
@@ -147,6 +152,88 @@ func (st *State) Why() string {
 		parts = append(parts, "Последняя ошибка модели: "+st.DownErr)
 	}
 	return strings.Join(parts, " ")
+}
+
+// Lag — сколько указатель сказанного отстаёт от транскриптов: очередь неразмеченного и простой модели.
+type Lag struct {
+	Queue     int           `json:"queue"`
+	Oldest    time.Time     `json:"oldest,omitzero"` // время старейшей реплики в очереди
+	Behind    time.Duration `json:"behind_ns"`       // сколько она ждёт; 0 — очередь пуста
+	Pass      time.Time     `json:"pass"`            // последний проход; нулевой — прохода с записью не было; есть всегда: по нему читатель отличает ответ status от справки старого бинаря
+	Since     time.Duration `json:"since_pass_ns"`   // сколько с него прошло
+	Mode      string        `json:"mode,omitempty"`
+	Unread    string        `json:"unread,omitempty"`
+	DownSince time.Time     `json:"down_since,omitzero"`
+	Why       string        `json:"why,omitempty"`
+}
+
+// Lag — отставание на момент now по состоянию: очередь, последний проход, его режим и ошибки чтения.
+func (st *State) Lag(now time.Time) Lag {
+	l := Lag{Queue: len(st.Pending), Pass: st.Pass, Mode: st.Mode, Unread: st.Unread, DownSince: st.DownSince, Why: st.Why()}
+	for i := range st.Pending {
+		at := st.Pending[i].Event.At
+		if at.IsZero() {
+			continue // время реплики неизвестно — не старейшая
+		}
+		if l.Oldest.IsZero() || at.Before(l.Oldest) {
+			l.Oldest = at
+		}
+	}
+	if !l.Oldest.IsZero() && now.After(l.Oldest) {
+		l.Behind = now.Sub(l.Oldest)
+	}
+	if !l.Pass.IsZero() && now.After(l.Pass) {
+		l.Since = now.Sub(l.Pass)
+	}
+	return l
+}
+
+// Stale — почему указатель отстаёт больше max; пусто — не отстаёт или max не задан. Реплики, сказанные после
+// последнего прохода, в очереди ещё нет: стоящий проход — отставание само по себе.
+func (l Lag) Stale(max time.Duration) []string {
+	if max <= 0 {
+		return nil
+	}
+	var why []string
+	switch {
+	case l.Pass.IsZero():
+		why = append(why, "прохода с записью состояния не было")
+	case l.Since > max:
+		why = append(why, fmt.Sprintf("последний проход %s, %s назад", l.Pass.Local().Format("02.01 15:04"), l.Since.Round(time.Minute)))
+	}
+	if !l.Pass.IsZero() && l.Mode != ModeWrite {
+		why = append(why, fmt.Sprintf("режим %q: said.tsv не пишется", l.Mode))
+	}
+	if l.Behind > max {
+		why = append(why, fmt.Sprintf("реплика %s ждёт разметки %s", l.Oldest.Local().Format("02.01 15:04"), l.Behind.Round(time.Minute)))
+	}
+	if l.Unread != "" {
+		why = append(why, "часть транскриптов не прочиталась: "+l.Unread)
+	}
+	return why
+}
+
+func (l Lag) String() string {
+	s := "said: последний проход "
+	if l.Pass.IsZero() {
+		s += "неизвестен"
+	} else {
+		s += fmt.Sprintf("%s (%s назад, режим %s)", l.Pass.Local().Format("02.01 15:04:05"), l.Since.Round(time.Second), l.Mode)
+	}
+	if l.Queue == 0 {
+		return s + "; очередь пуста"
+	}
+	s += fmt.Sprintf("; в очереди %d", l.Queue)
+	if !l.Oldest.IsZero() {
+		s += fmt.Sprintf(", старейшая реплика %s ждёт %s", l.Oldest.Local().Format("02.01 15:04"), l.Behind.Round(time.Minute))
+	}
+	if !l.DownSince.IsZero() {
+		s += fmt.Sprintf("; модель не отвечает с %s", l.DownSince.Local().Format("02.01 15:04"))
+	}
+	if l.Why != "" {
+		s += ". " + l.Why
+	}
+	return s
 }
 
 // Answered — модель ответила: простоя нет.

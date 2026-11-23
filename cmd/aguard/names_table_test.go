@@ -207,8 +207,16 @@ func TestSaidRoundNamesCold(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "0123456789ab.jsonl"), []byte(line+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	statePath := filepath.Join(b.a.dir("said"), "state.json")
+	before, err := said.LoadState(statePath)
+	if err != nil || before.Pass.IsZero() {
+		t.Fatalf("первый проход без метки: %v %+v", err, before)
+	}
 	if err := round(); err == nil || !strings.Contains(err.Error(), "нужно «папка") {
 		t.Fatalf("said при холодном старте: %v", err)
+	}
+	if after, err := said.LoadState(statePath); err != nil || !after.Pass.Equal(before.Pass) {
+		t.Fatalf("проход на ошибке сдвинул метку прохода — said status не увидит стоящий указатель: %v %v → %v", err, before.Pass, after.Pass)
 	}
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)

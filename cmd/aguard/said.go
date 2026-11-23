@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,17 @@ func (a *app) saidNames(evs []said.Event) error {
 
 func (a *app) saidCmd(ctx context.Context, args []string) error {
 	cmd, rest := sub(args)
+	if cmd == "status" { // конфиг не нужен: режим и время прохода — в состоянии; битый конфиг (22.11 14:03) — тоже отставание
+		fl := flag.NewFlagSet("said status", flag.ContinueOnError)
+		maxLag := fl.Duration("max", 0, "код 3, если указатель отстаёт дольше: реплика ждёт разметки или прохода не было (0 — только вывод)")
+		asJSON := fl.Bool("json", false, "вывести JSON")
+		parse(fl, rest)
+		st, err := said.LoadState(filepath.Join(a.dir("said"), "state.json"))
+		if err != nil {
+			return err
+		}
+		return saidStatus(a.out, st.Lag(time.Now()), *maxLag, *asJSON)
+	}
 	cfg, err := a.config()
 	if err != nil {
 		return err
@@ -121,6 +133,10 @@ func (a *app) saidRound(ctx context.Context, c *config.Config, dry bool) error {
 		return err
 	}
 	cfg.Collect(st, evs)
+	st.Unread = ""
+	if err != nil {
+		st.Unread = err.Error()
+	}
 	if dry {
 		enc := json.NewEncoder(a.out)
 		for i := range st.Pending {
@@ -138,6 +154,9 @@ func (a *app) saidRound(ctx context.Context, c *config.Config, dry bool) error {
 	if err := store.Append(recs); err != nil {
 		return err
 	}
+	// Проход дошёл до записи: читатель said.tsv видит, что указатель живой. Время конца, не начала: до Batch вызовов
+	// модели по Timeout — десятки минут, и метка начала давала бы ложное «проход стоит».
+	st.Pass, st.Mode = time.Now(), cfg.Mode
 	// Сначала состояние: при несохранённом Signal письмо уходило бы каждый проход.
 	if err := st.Save(path); err != nil {
 		return err
@@ -293,6 +312,31 @@ func (a *app) saidAccounts(c *config.Config, st *said.State, now time.Time) (ok 
 		a.warn("said", "нет учётки с лимитом, очередь ждёт", "queue", len(st.Pending), "skipped", strings.Join(skipped, "; "))
 	}
 	return ok, skipped
+}
+
+// saidStatus — отставание указателя сказанного для читателя said.tsv (Сон перед сверкой решений): реплики пользователя,
+// ещё не размеченные моделью, в файле не видны. Код 3 — отставание больше max (случай 22–23.11: учётки модели без
+// лимита 12 ч, ночь Сна прошла по неполному said.tsv, тикет said-observer-gap-1122).
+func saidStatus(w io.Writer, lag said.Lag, maxLag time.Duration, asJSON bool) error {
+	why := lag.Stale(maxLag)
+	if asJSON {
+		out := struct {
+			said.Lag
+			Stale []string `json:"stale,omitempty"`
+		}{lag, why}
+		if err := json.NewEncoder(w).Encode(out); err != nil {
+			return err
+		}
+	} else {
+		fmt.Fprintln(w, lag.String())
+		for _, s := range why {
+			fmt.Fprintln(w, "отстаёт: "+s)
+		}
+	}
+	if len(why) > 0 {
+		return exitCode(3)
+	}
+	return nil
 }
 
 // saidStallRepeat — повтор письма о простое, пока модель не отвечает.
