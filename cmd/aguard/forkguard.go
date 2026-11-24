@@ -114,14 +114,9 @@ func ReadForkguardTree(root string, at time.Time) (forkguard.Sample, error) {
 	if err != nil {
 		return forkguard.Sample{}, err
 	}
-	// pids.peak — с ядра 6.x; нет файла — пик 0, замер идёт без него
-	var peak int64
-	if peakBytes, err := os.ReadFile(filepath.Join(root, "pids.peak")); err == nil {
-		if peak, err = strconv.ParseInt(strings.TrimSpace(string(peakBytes)), 10, 64); err != nil {
-			return forkguard.Sample{}, fmt.Errorf("parse slice pids.peak: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return forkguard.Sample{}, fmt.Errorf("read slice pids.peak: %w", err)
+	peak, err := readPidsPeak(root)
+	if err != nil {
+		return forkguard.Sample{}, err
 	}
 	s := forkguard.Sample{At: at, SliceCurrent: cur, SliceMax: max, SliceEventsMax: events, SlicePidsPeak: peak}
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
@@ -359,4 +354,20 @@ func parseForkProc(raw string) (forkProc, error) {
 		return forkProc{}, fmt.Errorf("parse proc stat start time: %w", err)
 	}
 	return forkProc{ppid: ppid, name: raw[i+1 : j], startTime: startTime}, nil
+}
+
+// readPidsPeak — pids.peak слайса (с ядра 6.x); нет файла — пик 0, замер идёт без него.
+func readPidsPeak(root string) (int64, error) {
+	b, err := os.ReadFile(filepath.Join(root, "pids.peak"))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read slice pids.peak: %w", err)
+	}
+	peak, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse slice pids.peak: %w", err)
+	}
+	return peak, nil
 }
