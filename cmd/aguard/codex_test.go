@@ -62,6 +62,24 @@ func TestCodexRoundRetriesUnsent(t *testing.T) {
 	}
 }
 
+func TestCodexReadAllMarksApprovalCheckUnavailable(t *testing.T) {
+	a, _, cfg := armedApp(t)
+	resetsAt := time.Now().Add(5 * 24 * time.Hour)
+	a.codexRead = func(_ context.Context, _, _ string, at time.Time) (codexwatch.Reading, error) {
+		return codexwatch.Reading{At: at, Used: 100, ResetsAt: resetsAt, Available: 1}, nil
+	}
+	want := fmt.Errorf("%w: tl: transcript: open /fixture/x.jsonl: permission denied", errTLUnavailable)
+	a.codexApproved = func(context.Context, string, time.Time) (string, error) { return "", want }
+
+	readings, failed, errs := a.codexReadAll(context.Background(), &cfg)
+	if len(errs) != 0 || len(failed) != 0 || len(readings) != 1 {
+		t.Fatalf("readings=%d failed=%v errors=%v", len(readings), failed, errs)
+	}
+	if readings[0].ArmUnavailable != want.Error() || readings[0].ArmRejected != "" {
+		t.Fatalf("ArmUnavailable=%q ArmRejected=%q, want unavailable %q and no rejection", readings[0].ArmUnavailable, readings[0].ArmRejected, want)
+	}
+}
+
 // Сквозной проход на подставном app-server (testdata/fake-codex): readCodex через akit/codexlimit, три окна —
 // быстрый расход (warn, затем full), медленный (уведомлений нет), без досрочного сброса (строка журнала).
 func TestCodexFakeAppServer(t *testing.T) {

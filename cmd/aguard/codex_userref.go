@@ -71,8 +71,8 @@ func userWords(ev userEvent) string {
 // errApprovalRejected — строка одобрения на окно есть, но не держится на реплике пользователя.
 var errApprovalRejected = errors.New("одобрение не принято")
 
-// errTLUnavailable — tl не ответил (таймаут, не запустился): строку не проверить на этом проходе, но это не отказ —
-// следующий проход проверит её заново, и лиду переписывать нечего.
+// errTLUnavailable — tl не ответил или дал сбой чтения транскрипта: строку не проверить на этом проходе, но это не
+// отказ — следующий проход проверит её заново, и лиду переписывать нечего.
 var errTLUnavailable = errors.New("tl не ответил")
 
 // checkCodexApproval — текст одобрения держится на реплике пользователя в одобряемом окне: есть цитата «…» не короче
@@ -194,9 +194,9 @@ func tlUserRef(ctx context.Context, ref string) (userEvent, error) {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ctx.Err() == nil && ee.Exited() {
 			stderr := strings.TrimSpace(string(ee.Stderr))
-			// Код 2 также означает ошибку чтения файла: `tl: read <path>: ...`; это не отказ строке.
-			if ee.ExitCode() == 2 && strings.HasPrefix(stderr, "tl: read ") {
-				return userEvent{}, fmt.Errorf("%w: tl: %s", errTLUnavailable, stderr)
+			// Код 2 и последняя диагностика tl о чтении означают сбой, а не отказ строке.
+			if ee.ExitCode() == 2 && tlReadFailure(stderr) {
+				return userEvent{}, fmt.Errorf("%w: %s", errTLUnavailable, stderr)
 			}
 			// Остальные ответы tl (1 — строки нет, 2 — сессия не найдена) — ответ о ссылке.
 			return userEvent{}, fmt.Errorf("tl: %w: %s", err, stderr)
@@ -204,6 +204,19 @@ func tlUserRef(ctx context.Context, ref string) (userEvent, error) {
 		return userEvent{}, fmt.Errorf("%w: %w", errTLUnavailable, err)
 	}
 	return parseTLEvent(string(out), ref)
+}
+
+// tlReadFailure — ошибка чтения по последней строке stderr от tl: перед ней могут быть предупреждения tl.
+func tlReadFailure(stderr string) bool {
+	last := ""
+	for line := range strings.SplitSeq(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "tl: ") {
+			last = line
+		}
+	}
+	return strings.HasPrefix(last, "tl: transcript: ") || strings.HasPrefix(last, "tl: transcript /") ||
+		strings.HasPrefix(last, "tl: read ")
 }
 
 // sameRef — та же строка той же сессии: tl печатает 8 знаков id, в ссылке их может быть больше.
