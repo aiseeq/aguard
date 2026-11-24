@@ -709,3 +709,40 @@ func TestSeededClosedTicketReturnsIneligible(t *testing.T) {
 		t.Fatalf("старое закрытие засеяно без обработки: state=%+v eligible=%v", st, eligible)
 	}
 }
+
+// Получатель доставки — не мастер проекта; он мёртв и отклонил тикет сам: мастеру проекта не писать.
+func TestDeliveredCancelledByDeadNonMasterRecipientIsSilent(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.live["m-master"] = true
+	tk := tick("MED", "отклонён")
+	tk.CancelAuthor, tk.CancelReason, tk.CancelJournalRead = "lead", "сам снял", true
+	s := seeded(w)
+	s.Confirm(Notice{Kind: KindCrit, Key: tk.Key, To: "lead", Serious: true}, w.view())
+	w.live["lead"] = false
+	if ns := step(s, []Ticket{tk}, w); has(ns, KindCancel, "m-master") {
+		t.Fatalf("получатель доставки отклонил сам — мастеру не писать: %+v", ns)
+	}
+}
+
+// Доставленный тикет взяли в работу, потом отклонил чужой: одно письмо об отмене (путь Working), не два.
+func TestDeliveredThenTakenCancelsOnce(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.live["m-master"] = true
+	tk := tick("MED", "открыт")
+	s := seeded(w)
+	s.Confirm(Notice{Kind: KindWake, Key: tk.Key, To: "m-master", Session: "session-1", Serious: true}, w.view())
+	tk.Status, tk.Executor = "в работе", "m-master"
+	step(s, []Ticket{tk}, w)
+	tk.Status, tk.CancelAuthor, tk.CancelReason, tk.CancelJournalRead = "отклонён", "other-author", "причина", true
+	cancels := 0
+	for range 3 {
+		for _, n := range step(s, []Ticket{tk}, w) {
+			if n.Kind == KindCancel {
+				cancels++
+			}
+		}
+	}
+	if cancels != 1 {
+		t.Fatalf("писем об отмене %d, нужно одно", cancels)
+	}
+}
