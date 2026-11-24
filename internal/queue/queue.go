@@ -297,8 +297,6 @@ type ticketState struct {
 	Gone              time.Time `json:"gone,omitzero"` // учтённый закрытый тикет пропал из прохода: состояние держится goneKeep, чтобы при возвращении «закрыт» не ушло повторно
 	Executor          string    `json:"executor,omitempty"`
 	Working           bool      `json:"working,omitempty"`
-	DeliveredTo       string    `json:"delivered_to,omitempty"`
-	DeliveredSession  string    `json:"delivered_session,omitempty"`
 	CancelAt          time.Time `json:"cancel_at,omitzero"`
 	CancelSent        bool      `json:"cancel_sent,omitempty"`
 	CancelLost        bool      `json:"cancel_lost,omitempty"`
@@ -331,9 +329,19 @@ type ProjectWake struct {
 	Mode   string    `json:"mode"`
 }
 
+type delivery struct {
+	To                string    `json:"to"`
+	At                time.Time `json:"at"`
+	CancelAt          time.Time `json:"cancel_at,omitzero"`
+	CancelJournalRead bool      `json:"cancel_journal_read,omitempty"`
+	CancelAuthor      string    `json:"cancel_author,omitempty"`
+	CancelReason      string    `json:"cancel_reason,omitempty"`
+}
+
 type State struct {
 	Seeded       bool                      `json:"seeded"`
 	Tickets      map[string]*ticketState   `json:"tickets,omitempty"`
+	Delivered    map[string]delivery       `json:"delivered,omitempty"`
 	Wakes        map[string]Wake           `json:"wakes,omitempty"`
 	ProjectWakes map[string]ProjectWake    `json:"project_wakes,omitempty"`
 	External     map[string][]ExternalTask `json:"external,omitempty"` // папка проекта → последний ответ трекера
@@ -345,6 +353,9 @@ type State struct {
 func (s *State) init() {
 	if s.Tickets == nil {
 		s.Tickets = map[string]*ticketState{}
+	}
+	if s.Delivered == nil {
+		s.Delivered = map[string]delivery{}
 	}
 	if s.Wakes == nil {
 		s.Wakes = map[string]Wake{}
@@ -365,13 +376,113 @@ func (s *State) Step(ts []Ticket, v View) []Notice {
 	wasSeed := s.Seeded
 	active := map[string]bool{}
 	for i := range ts {
+		out = append(out, s.stepDelivered(ts[i], v)...)
 		out = append(out, s.stepTicket(ts[i], v, wasSeed, active)...)
 	}
+	s.cleanupDelivered(ts)
 	s.Seeded = true
 	out = append(out, s.wakeNotices(ts, v, out)...)
 	out = append(out, s.adminWakeNotices(ts, v, out)...)
 	s.cleanup(active, v.Now)
 	return out
+}
+
+func (s *State) stepDelivered(t Ticket, v View) []Notice {
+	d, ok := s.Delivered[t.Key]
+	if !ok {
+		return nil
+	}
+	if ticketWorking(t) || s.Tickets[t.Key] != nil && s.Tickets[t.Key].Working {
+		s.dropDelivery(t.Key)
+		return nil
+	}
+	if t.Status == "открыт" && (!d.CancelAt.IsZero() || d.CancelJournalRead) {
+		s.dropDeliveryAndWake(t.Key)
+		return nil
+	}
+	if t.Status == "готово" {
+		s.dropDelivery(t.Key)
+		return nil
+	}
+	if !cancelStatus(t.Status) {
+		return nil
+	}
+	return s.cancelDelivered(t, d, v)
+}
+
+func (s *State) cancelDelivered(t Ticket, d delivery, v View) []Notice {
+	if t.Status == "отклонён" && !t.CancelJournalRead {
+		return nil
+	}
+	d.CancelJournalRead = t.CancelJournalRead
+	d.CancelAuthor, d.CancelReason = t.CancelAuthor, t.CancelReason
+	if d.CancelAt.IsZero() {
+		d.CancelAt = v.Now
+	}
+	if t.Status == StatusTransferred && t.CancelAuthor == "" {
+		s.dropDeliveryAndWake(t.Key)
+		return []Notice{notice(t, v, KindCancelUnknown, "", "перенесён, автор неизвестен — исполнителю не пишу")}
+	}
+	to := deliveryRecipient(t, d, v)
+	if deliverySelfCancelled(t.CancelAuthor, d, to) {
+		s.dropDeliveryAndWake(t.Key)
+		return nil
+	}
+	if deliveryRecipientResting(t, to, v) {
+		d.CancelAt = v.Rest.End(v.Now)
+		s.Delivered[t.Key] = d
+		return nil
+	}
+	if v.Now.Sub(d.CancelAt) >= 7*24*time.Hour {
+		s.dropDeliveryAndWake(t.Key)
+		return []Notice{notice(t, v, KindCancelLost, "", cancelLine(t))}
+	}
+	if alive(v, to) {
+		s.Delivered[t.Key] = d
+		return []Notice{notice(t, v, KindCancel, to, cancelLine(t))}
+	}
+	s.Delivered[t.Key] = d
+	return nil
+}
+
+func deliveryRecipient(t Ticket, d delivery, v View) string {
+	if alive(v, d.To) {
+		return d.To
+	}
+	return t.Master
+}
+
+func deliverySelfCancelled(author string, d delivery, to string) bool {
+	return author != "" && (strings.EqualFold(author, d.To) || strings.EqualFold(author, to))
+}
+
+func deliveryRecipientResting(t Ticket, to string, v View) bool {
+	return v.restingSessions[to] || to != v.Lead && restingDir(t.Dir, v)
+}
+
+func (s *State) dropDelivery(key string) {
+	delete(s.Delivered, key)
+}
+
+func (s *State) dropDeliveryAndWake(key string) {
+	s.dropDelivery(key)
+	for master, wake := range s.Wakes {
+		if wake.Ticket == key {
+			delete(s.Wakes, master)
+		}
+	}
+}
+
+func (s *State) cleanupDelivered(ts []Ticket) {
+	seen := make(map[string]bool, len(ts))
+	for i := range ts {
+		seen[ts[i].Key] = true
+	}
+	for key := range s.Delivered {
+		if !seen[key] {
+			delete(s.Delivered, key)
+		}
+	}
 }
 
 func (s *State) stepTicket(t Ticket, v View, seeded bool, active map[string]bool) []Notice {
@@ -478,21 +589,11 @@ func resetCancelOnReopen(st *ticketState, t Ticket, working bool) {
 	if st == nil {
 		return
 	}
-	reopening := st.CancelJournalRead || st.CancelSent || st.CancelLost
-	if working && st.DeliveredTo != "" {
-		// Once the ticket is taken, later cancellation belongs to its executor and the old wake mark is stale.
-		st.DeliveredTo, st.DeliveredSession = "", ""
-		st.High, st.Admin = mark{}, mark{}
-	}
 	if t.Status == "открыт" || working {
 		st.CancelSent, st.CancelLost = false, false
 		st.CancelAt = time.Time{}
 		st.CancelJournalRead, st.CancelAuthor, st.CancelReason = false, "", ""
 		st.Closed, st.BackSent, st.BackLost = time.Time{}, false, false
-		if reopening && (t.Status == "открыт" || working) {
-			st.DeliveredTo, st.DeliveredSession = "", ""
-			st.High, st.Admin = mark{}, mark{}
-		}
 	}
 	if !closed(t.Status) && !working {
 		st.Working = false
@@ -506,11 +607,10 @@ func (s *State) trackable(t Ticket, st *ticketState, v View, working bool) bool 
 			return false
 		}
 	}
-	delivered := st != nil && st.DeliveredTo != ""
-	if closed(t.Status) && t.Back == "" && !cancelStatus(t.Status) || !closed(t.Status) && !working && !delivered && t.Prio != "CRIT" && t.Prio != "HIGH" {
+	if closed(t.Status) && t.Back == "" && !cancelStatus(t.Status) || !closed(t.Status) && !working && t.Prio != "CRIT" && t.Prio != "HIGH" {
 		return false
 	}
-	if cancelStatus(t.Status) && t.Back == "" && (st == nil || !st.Working && st.DeliveredTo == "") {
+	if cancelStatus(t.Status) && t.Back == "" && (st == nil || !st.Working) {
 		return false // отклонён без заказчика и не из работы: запись не нужна (и отметка HIGH не держится до переоткрытия)
 	}
 	return true
@@ -531,20 +631,39 @@ func rememberExecutor(st *ticketState, t Ticket) {
 // NeedsCancelJournal reports a tracked rejection whose journal has not yet been read.
 func (s *State) NeedsCancelJournal(t Ticket) bool {
 	st := s.Tickets[t.Key]
-	return t.Status == "отклонён" && st != nil && (st.Working && st.Executor != "" || st.DeliveredTo != "") && !st.CancelSent && !st.CancelLost && !st.CancelJournalRead
+	if t.Status != "отклонён" {
+		return false
+	}
+	if st != nil && st.Working && st.Executor != "" {
+		return !st.CancelSent && !st.CancelLost && !st.CancelJournalRead
+	}
+	d, ok := s.Delivered[t.Key]
+	return ok && !d.CancelJournalRead
 }
 
 // CancelJournal returns the author and reason cached for a rejected ticket.
 func (s *State) CancelJournal(key string) (string, string, bool) {
 	st := s.Tickets[key]
-	if st == nil || !st.CancelJournalRead {
-		return "", "", false
+	if st != nil && st.Working && st.CancelJournalRead {
+		return st.CancelAuthor, st.CancelReason, true
 	}
-	return st.CancelAuthor, st.CancelReason, true
+	if d, ok := s.Delivered[key]; ok && d.CancelJournalRead {
+		return d.CancelAuthor, d.CancelReason, true
+	}
+	return "", "", false
 }
 
 // RememberCancelJournal stores the result, including an empty result after a parse error.
 func (s *State) RememberCancelJournal(key, author, reason string) {
+	if st := s.Tickets[key]; st != nil && st.Working {
+		st.CancelJournalRead, st.CancelAuthor, st.CancelReason = true, author, reason
+		return
+	}
+	if d, ok := s.Delivered[key]; ok {
+		d.CancelJournalRead, d.CancelAuthor, d.CancelReason = true, author, reason
+		s.Delivered[key] = d
+		return
+	}
 	if st := s.Tickets[key]; st != nil {
 		st.CancelJournalRead, st.CancelAuthor, st.CancelReason = true, author, reason
 	}
@@ -859,10 +978,6 @@ func (s *State) cancelNotices(t Ticket, st *ticketState, v View) []Notice {
 		st.CancelSent = true
 		return nil
 	}
-	if t.CancelAuthor != "" && !st.Working && strings.EqualFold(t.CancelAuthor, st.DeliveredTo) {
-		st.CancelSent = true
-		return nil
-	}
 	line := cancelLine(t)
 	if v.restingSessions[to] || to != v.Lead && restingDir(t.Dir, v) {
 		// Отдыхающая сессия и проект на дне отдыха по проекту не работают; срок 7 суток переносится на конец отдыха, лиду — без ожидания.
@@ -882,16 +997,10 @@ func (s *State) cancelNotices(t Ticket, st *ticketState, v View) []Notice {
 }
 
 func cancelPending(t Ticket, st *ticketState) bool {
-	return (st.Working && st.Executor != "" || st.DeliveredTo != "") && !st.CancelSent && !st.CancelLost && (t.Status != "отклонён" || t.CancelJournalRead)
+	return st.Working && st.Executor != "" && !st.CancelSent && !st.CancelLost && (t.Status != "отклонён" || t.CancelJournalRead)
 }
 
 func cancelRecipient(t Ticket, st *ticketState, v View) string {
-	if !st.Working && st.DeliveredTo != "" {
-		if alive(v, st.DeliveredTo) {
-			return st.DeliveredTo
-		}
-		return t.Master
-	}
 	if alive(v, st.Executor) {
 		return st.Executor
 	}
@@ -951,12 +1060,17 @@ func liveRecipient(v View, first, second, master string) string {
 	return ""
 }
 func (s *State) Confirm(n Notice, v View) {
+	s.confirm(n, v, true)
+}
+
+// ConfirmUnsent records a log-only notice without treating it as delivered.
+func (s *State) ConfirmUnsent(n Notice, v View) {
+	s.confirm(n, v, false)
+}
+
+func (s *State) confirm(n Notice, v View, sent bool) {
 	s.init()
 	st := s.Tickets[n.Key]
-	if st == nil && deliveredKind(n.Kind) && n.Serious && n.Key != "" {
-		st = &ticketState{Seen: v.Now}
-		s.Tickets[n.Key] = st
-	}
 	mode := ModeLog
 	if n.Serious {
 		mode = ModeOn
@@ -965,12 +1079,24 @@ func (s *State) Confirm(n Notice, v View) {
 	if st != nil {
 		confirmTicketNotice(st, n, v, m)
 	}
+	if sent && n.Serious {
+		if deliveredKind(n.Kind) && n.Key != "" {
+			if _, exists := s.Delivered[n.Key]; !exists {
+				s.Delivered[n.Key] = delivery{To: n.To, At: v.Now}
+			}
+		}
+		if n.Kind == KindCancel {
+			if _, ok := s.Delivered[n.Key]; ok {
+				s.dropDeliveryAndWake(n.Key)
+			}
+		}
+	}
 	confirmWakeNotice(s, n, v, mode)
 }
 
 func deliveredKind(kind string) bool {
 	switch kind {
-	case KindWake, KindHigh, KindCrit, KindCritCopy:
+	case KindWake, KindHigh, KindCrit:
 		return true
 	}
 	return false
@@ -978,9 +1104,6 @@ func deliveredKind(kind string) bool {
 
 func confirmTicketNotice(st *ticketState, n Notice, v View, m mark) {
 	confirmCancel(st, n.Kind)
-	if deliveredKind(n.Kind) && n.Serious {
-		st.DeliveredTo, st.DeliveredSession = n.To, n.Session
-	}
 	switch n.Kind {
 	case KindCrit:
 		st.Crit, st.CritTo = m, n.To
