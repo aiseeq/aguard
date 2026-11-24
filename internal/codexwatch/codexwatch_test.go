@@ -759,5 +759,11 @@ func TestReviewCodexWarnAndFullLetters(t *testing.T) {
 	if strings.Contains(got, "Строки «да» на это окно") {
 		t.Fatalf("письмо с отказом строки говорит, что строки нет:\n%s", got)
 	}
+	full.ArmRejected = ""
+	full.ArmUnavailable = "tl не ответил: tl: read /fixture/transcript.jsonl: permission denied"
+	got = fullText(full, planned.Sub(at))
+	if !strings.Contains(got, "Проверка строки «да» недоступна") || strings.Contains(got, "Строки «да» на это окно") {
+		t.Fatalf("журнал при недоступной проверке говорит, что строки нет:\n%s", got)
+	}
 
 }

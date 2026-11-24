@@ -222,9 +222,17 @@ func TestTLUserRefExitVersusTimeout(t *testing.T) {
 		}
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	write("echo 'no event' >&2; exit 1")
+	write("echo 'tl: no event at abcdef12:7 (service record, unparsable line or out of range)' >&1; exit 1")
 	if _, err := tlUserRef(context.Background(), "abcdef12:7"); err == nil || errors.Is(err, errTLUnavailable) {
 		t.Fatalf("код 1: %v, ждали ответ о ссылке", err)
+	}
+	write("echo 'tl: \"abcdef12\": no transcript with this id in the database' >&2; exit 2")
+	if _, err := tlUserRef(context.Background(), "abcdef12:7"); err == nil || errors.Is(err, errTLUnavailable) {
+		t.Fatalf("код 2, нет сессии: %v, ждали ответ о ссылке", err)
+	}
+	write("echo 'tl: read /fixture/transcript.jsonl: permission denied' >&2; exit 2")
+	if _, err := tlUserRef(context.Background(), "abcdef12:7"); !errors.Is(err, errTLUnavailable) {
+		t.Fatalf("код 2, ошибка чтения: %v, ждали errTLUnavailable", err)
 	}
 	write("exec sleep 5")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)

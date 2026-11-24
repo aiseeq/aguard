@@ -3,7 +3,6 @@ package main
 import (
 	"strings"
 
-	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/queue"
@@ -63,7 +62,7 @@ func sigguardGuideKind(unparsed bool) guide.Kind {
 	return "sigguard.denied"
 }
 
-func codexGuideKind(_ codexwatch.Kind) guide.Kind {
+func codexGuideKind() guide.Kind {
 	return "codex.rejected"
 }
 

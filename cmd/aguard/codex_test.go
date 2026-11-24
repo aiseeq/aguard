@@ -735,7 +735,8 @@ func TestCodexRejectedApprovalNamedInLetter(t *testing.T) {
 	}
 	msgs := leadLetters(got)
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "есть, но aguard её не принял") ||
-		!strings.Contains(msgs[0], "aguard codex approve") || !strings.Contains(logs.String(), "kind=codex.rejected") {
+		!strings.Contains(msgs[0], "aguard codex approve") || !strings.Contains(msgs[0], "учётка work") ||
+		strings.Contains(msgs[0], "Другие учётки") || !strings.Contains(logs.String(), "kind=codex.rejected") {
 		t.Fatalf("письмо rejected: %q", msgs)
 	}
 	out := logs.String()
