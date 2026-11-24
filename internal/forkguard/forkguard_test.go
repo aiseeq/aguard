@@ -325,7 +325,7 @@ func TestSliceAppearedAfterStartHasNoSeed(t *testing.T) {
 	e := New(testConfig())
 	at := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
 	e.Observe(Sample{At: at, SliceMissing: true})
-	r := e.Observe(Sample{At: at.Add(time.Second), Units: []Unit{{Name: "worker-job-1124-1200-x.service", Current: 4096, Max: 4096, EventsMax: 5}}, SliceCurrent: 4096})
+	r := e.Observe(Sample{At: at.Add(time.Second), Units: []Unit{{Name: "worker-job-1124-1200-x.service", Current: 100, Max: 100, EventsMax: 5}}, SliceCurrent: 100})
 	if len(r.Decisions) != 1 {
 		t.Fatalf("юнит в пределе при появлении слайса не дал решения: %+v", r)
 	}
