@@ -1,5 +1,5 @@
-// Package codexwatch — сторож недельного лимита Codex по каждой учётке отдельно (Account): письмо лиду за ~2 ч до 100%, когда 100% наступит раньше
-// планового сброса с простоем больше суток и есть досрочный сброс, и второе — при 100%. Без «да» на окно сброс не
+// Package codexwatch — сторож недельного лимита Codex по каждой учётке отдельно (Account): запись прогноза за ~2 ч до 100%, когда 100% наступит раньше
+// планового сброса с простоем больше суток и есть досрочный сброс, и запись при 100%. Без «да» на окно сброс не
 // делает: исполнитель досрочного сброса — aguard при 100%, если в файле одобрений есть строка «да»;
 // правило лида — skills/coordinator/SKILL.md, раздел «Лимиты и темп».
 //
@@ -56,7 +56,7 @@ type Config struct {
 	Interval policy.Duration `toml:"interval"` // шаг замера
 	Fast     policy.Duration `toml:"fast"`     // шаг у самых 100%: прогноз ближе Near или used ≥ 99
 	Near     policy.Duration `toml:"near"`     // прогноз 100% ближе этого — шаг Fast
-	Warn     policy.Duration `toml:"warn"`     // письмо 1: прогноз 100% ближе этого
+	Warn     policy.Duration `toml:"warn"`     // запись прогноза, если до 100% ближе этого
 	MinIdle  policy.Duration `toml:"min_idle"` // простой до планового сброса, с которого сброс стоит предлагать
 	Codex    string          `toml:"codex"`    // путь к codex (app-server)
 	// Accounts — не из файла: BurntSushi кладёт массив поверх умолчания, и незаданный approvals достался бы от другой учётки.
@@ -69,8 +69,8 @@ type Config struct {
 }
 
 // Default — шаг 10 мин: одно чтение ~1,5 с CPU и 230 МБ RSS на 8 с (замер 02.11), 144 в сутки; при темпе 02.11
-// (~4,5 %/ч) за шаг уходит меньше 1 %, письмо за 2 ч приходит с точностью ±10 мин. У самых 100% — шаг 2 мин:
-// письмо «100%» не позже 2 мин после него.
+// (~4,5 %/ч) за шаг уходит меньше 1 %, прогноз появляется за 2 ч с точностью ±10 мин. У самых 100% — шаг 2 мин:
+// запись о 100% появляется не позже 2 мин после него.
 func Default(home string) Config {
 	return Config{Mode: ModeAlert, Interval: policy.Duration(10 * time.Minute), Fast: policy.Duration(2 * time.Minute),
 		Near: policy.Duration(30 * time.Minute), Warn: policy.Duration(2 * time.Hour), MinIdle: policy.Duration(24 * time.Hour),
@@ -132,13 +132,14 @@ type Sample struct {
 type State struct {
 	ResetsAt time.Time `json:"resets_at"`
 	Samples  []Sample  `json:"samples"`
-	Warned   bool      `json:"warned"`           // письмо 1 ушло
-	Full     bool      `json:"full"`             // письмо «100%» ушло
-	Blocked  bool      `json:"blocked"`          // письмо «работа запрещена до 100%» ушло
+	Warned   bool      `json:"warned"`           // прогноз записан в журнал
+	Full     bool      `json:"full"`             // 100% записано в журнал
+	Blocked  bool      `json:"blocked"`          // запрет обычной работы записан в журнал
 	NoCredit bool      `json:"no_credit"`        // строка «сброса нет» записана
+	Rejected bool      `json:"rejected"`         // письмо об отклонённой строке «да» отправлено
 	Denied   bool      `json:"denied,omitempty"` // последний замер: обычная работа запрещена (said не берёт учётку)
 	Reset    Reset     `json:"reset"`            // взвод: ключ consume и исход в этом окне
-	// Pending — исходы взвода, ещё не доставленные лиду и в тикет; переживают смену окна.
+	// Pending — исходы взвода, ещё не записанные в тикет; переживают смену окна.
 	Pending []Delivery `json:"pending,omitempty"`
 }
 
@@ -177,13 +178,14 @@ func save(path string, v any) error {
 type Kind string
 
 const (
-	KindWarn     Kind = "warn"      // письмо 1: прогноз 100% близко
-	KindFull     Kind = "full"      // письмо: 100%
-	KindBlocked  Kind = "blocked"   // письмо: обычная работа запрещена, хотя не 100%
-	KindNoCredit Kind = "no_credit" // строка в журнал: досрочно кончится, но сброса нет
+	KindWarn     Kind = "warn"      // строка журнала: прогноз 100% близко
+	KindFull     Kind = "full"      // строка журнала: 100%
+	KindBlocked  Kind = "blocked"   // строка журнала: обычная работа запрещена, хотя не 100%
+	KindNoCredit Kind = "no_credit" // строка журнала: досрочно кончится, но сброса нет
+	KindRejected Kind = "rejected"  // письмо: строка «да» отклонена
 )
 
-// Notice — решение прохода: письмо лиду или строка журнала (KindNoCredit).
+// Notice — запись в журнал; KindRejected дополнительно требует письма лиду.
 type Notice struct {
 	Kind    Kind
 	Message string
@@ -200,6 +202,8 @@ func (s *State) Unsent(k Kind) {
 		s.Blocked = false
 	case KindNoCredit:
 		s.NoCredit = false
+	case KindRejected:
+		s.Rejected = false
 	}
 }
 
@@ -218,6 +222,10 @@ func (s *State) Apply(r Reading, c *Config) (Forecast, []Notice, bool) {
 	s.record(r)
 	f := s.forecast(r)
 	out, consume := s.decide(r, f, c)
+	if r.ArmRejected != "" && !s.Rejected {
+		s.Rejected = true
+		out = append([]Notice{{KindRejected, approvalTail(r)}}, out...)
+	}
 	for i := range out { // решение о сбросе — с запасом других учёток: простой этой не значит простой бойцов
 		out[i] = Notice{out[i].Kind, out[i].Message + r.Others}
 	}
@@ -256,7 +264,7 @@ func (s *State) record(r Reading) {
 	s.Samples = s.Samples[cut:]
 }
 
-// decide — письма прохода и нужен ли consume.
+// decide — уведомления прохода и нужен ли consume.
 func (s *State) decide(r Reading, f Forecast, c *Config) ([]Notice, bool) {
 	idle := r.ResetsAt.Sub(r.At)
 	var out []Notice
@@ -376,10 +384,9 @@ func warnText(r Reading, f Forecast) string {
 		"простой %s; досрочных сбросов доступно: %d.", who(r.Account), r.Used, f.Rate, local(f.At), local(r.ResetsAt),
 		days(r.ResetsAt.Sub(f.At)), r.Available)
 	if r.Armed != "" {
-		return head + fmt.Sprintf(" Сброс взведён («да» на окно: %s): consume при 100%% вызову я, исход пришлю; "+
-			"сам не вызывай.", r.Armed)
+		return head + fmt.Sprintf(" Сброс взведён («да» на окно: %s).", r.Armed)
 	}
-	return head + approvalTail(r) + " Письмо «100%» пришлю, когда дойдёт."
+	return head + approvalTail(r)
 }
 
 func fullFacts(r Reading, idle time.Duration) string {
@@ -390,24 +397,20 @@ func fullFacts(r Reading, idle time.Duration) string {
 func approvalTail(r Reading) string {
 	if r.ArmRejected != "" {
 		return fmt.Sprintf(" Строка «да» на это окно (плановый сброс %s) в файле одобрений %s есть, но aguard её не "+
-			"принял: %s. Пока строка не держится на реплике пользователя (цитата «…» из неё и ссылка tl на неё), "+
-			"aguard не сбросит. Если причина — сбой tl, строка проверяется заново на каждом проходе; иначе запись — "+
-			"`aguard codex approve` (coordinator, «Лимиты и темп»).",
+			"принял: %s. Перепишите строку через `aguard codex approve` по реплике пользователя (coordinator, «Лимиты и темп»).",
 			r.ResetsAt.Local().Format("02.01 15:04"), r.Account.Approvals, r.ArmRejected)
 	}
-	return fmt.Sprintf(" Строки «да» на это окно (плановый сброс %s) в файле одобрений %s нет — aguard не сбросит; "+
-		"появится — сбросит сам при 100%%, если до планового сброса больше суток. Действий не нужно: за лимитом следит "+
-		"пользователь, сброс ему не предлагать (coordinator, «Лимиты и темп»).",
+	return fmt.Sprintf(" Строки «да» на это окно (плановый сброс %s) в файле одобрений %s нет.",
 		r.ResetsAt.Local().Format("02.01 15:04"), r.Account.Approvals)
 }
 
 func fullText(r Reading, idle time.Duration) string {
 	facts := fullFacts(r, idle)
 	if r.Available == 0 && r.Armed != "" {
-		return facts + fmt.Sprintf(" Сброс взведён («да»: %s), consume не вызываю.", r.Armed)
+		return facts + fmt.Sprintf(" Сброс взведён («да»: %s).", r.Armed)
 	}
 	if r.Available == 0 {
-		return facts + " Свободных досрочных сбросов нет. Действий не нужно: сброс пользователю не предлагать."
+		return facts + " Свободных досрочных сбросов нет."
 	}
 	return facts + approvalTail(r)
 }

@@ -20,12 +20,11 @@ type Reset struct {
 	Spent   bool      `json:"spent,omitempty"`   // расход упал в том же resetsAt — окно сброшено: новые 100% — письмо, не consume
 }
 
-// Delivery — исход взвода к доставке: письмом лиду и строкой в тикет; каждое — до успеха.
+// Delivery — исход взвода к доставке в тикет.
 type Delivery struct {
-	Message string    `json:"message"` // письмо лиду
+	Message string    `json:"message"` // исход consume для журнала
 	Note    string    `json:"note"`    // строка в тикет: без дат — tk отвергает время позже записи
 	At      time.Time `json:"at"`
-	Lead    bool      `json:"lead,omitempty"`   // письмо ушло
 	Ticket  bool      `json:"ticket,omitempty"` // строка в тикет записана
 }
 
@@ -48,11 +47,11 @@ func (s *State) Done(outcome string, r Reading) {
 			outcomeWhat[outcome], s.Reset.Key, r.Armed)})
 }
 
-// Delivered убирает исходы, доставленные и лиду, и в тикет.
+// Delivered убирает исходы, записанные в тикет.
 func (s *State) Delivered() {
 	keep := s.Pending[:0]
 	for _, d := range s.Pending {
-		if !d.Lead || !d.Ticket {
+		if !d.Ticket {
 			keep = append(keep, d)
 		}
 	}
@@ -84,14 +83,14 @@ func outcomeText(outcome string, r Reading, key string) string {
 // spentText — чем израсходован взвод окна: нашим вызовом (исход или без ответа) или сбросом не через aguard.
 func spentText(r Reset) string {
 	if !r.Called {
-		return "Взвод этого окна уже израсходован: окно сбросили не через aguard; «да» на окно — один сброс, повтора не будет. Действий не нужно."
+		return "Взвод этого окна уже израсходован: окно сбросили не через aguard; «да» на окно — один сброс, повтора не будет."
 	}
 	outcome := r.Outcome
 	if outcome == "" {
 		outcome = "ответа не было"
 	}
 	return fmt.Sprintf("Взвод этого окна уже израсходован: outcome=%s, idempotencyKey %s; «да» на окно — один сброс, "+
-		"повтора не будет. Действий не нужно.", outcome, r.Key)
+		"повтора не будет.", outcome, r.Key)
 }
 
 func lostText(a Account, old, cur time.Time, wasUsed, used float64, key string) string {

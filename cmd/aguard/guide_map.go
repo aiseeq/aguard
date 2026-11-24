@@ -63,17 +63,8 @@ func sigguardGuideKind(unparsed bool) guide.Kind {
 	return "sigguard.denied"
 }
 
-func codexGuideKind(kind codexwatch.Kind) guide.Kind {
-	switch kind {
-	case codexwatch.KindWarn:
-		return "codex.warn"
-	case codexwatch.KindFull:
-		return "codex.full"
-	case codexwatch.KindBlocked:
-		return "codex.blocked"
-	default:
-		return "codex.other"
-	}
+func codexGuideKind(_ codexwatch.Kind) guide.Kind {
+	return "codex.rejected"
 }
 
 func remoteGuideKind(n remotebroken.Notice) guide.Kind {

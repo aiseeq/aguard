@@ -287,14 +287,8 @@ func TestGuideMapsCoverSourceValues(t *testing.T) {
 			t.Errorf("night key prefix %q has no dedicated guide entry (got %q)", prefix, kind)
 		}
 	}
-	for _, raw := range declaredStringConstants(t, filepath.Join(root, "internal/codexwatch"), "Kind") {
-		kind := codexGuideKind(codexwatch.Kind(raw))
-		if raw == string(codexwatch.KindNoCredit) { // только строка журнала, письма нет
-			continue
-		}
-		if _, ok := guide.Lookup(kind); !ok || kind == "codex.other" {
-			t.Errorf("codex %q has no dedicated guide entry (got %q)", raw, kind)
-		}
+	if kind := codexGuideKind(codexwatch.KindRejected); kind != "codex.rejected" {
+		t.Errorf("rejected guide kind = %q", kind)
 	}
 	for _, notice := range remoteNoticeSamples(t, root) {
 		kind := remoteGuideKind(notice)
@@ -302,7 +296,7 @@ func TestGuideMapsCoverSourceValues(t *testing.T) {
 			t.Errorf("remote %+v has no guide entry", notice)
 		}
 	}
-	if queueGuideKind("unknown") != "queue.other" || ioGuideKind("unknown") != "io.other" || nightGuideKind("unknown") != "night.other" || codexGuideKind("unknown") != "codex.other" || remoteGuideKind(remotebroken.Notice{}) != "remote.other" {
+	if queueGuideKind("unknown") != "queue.other" || ioGuideKind("unknown") != "io.other" || nightGuideKind("unknown") != "night.other" || codexGuideKind("unknown") != "codex.rejected" || remoteGuideKind(remotebroken.Notice{}) != "remote.other" {
 		t.Fatal("неизвестные значения должны оставаться страховкой *.other")
 	}
 }

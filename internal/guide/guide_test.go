@@ -194,11 +194,13 @@ func goTypePackages(t *testing.T, root string) ([]sourcePackage, map[string]stri
 }
 
 func TestCodexLetterNextText(t *testing.T) {
-	want := map[string]string{
-		"codex.warn": "действий не нужно: при строке «да» на окно aguard сам сбросит при 100%; сброс пользователю не предлагать",
-		"codex.full": "действий не нужно; сброс пользователю не предлагать",
-	}
+	want := map[string]string{"codex.rejected": "перепишите строку через `aguard codex approve` по реплике пользователя — coordinator, «Лимиты и темп»"}
+	removed := map[string]bool{"codex.warn": true, "codex.full": true, "codex.blocked": true, "codex.all_out": true,
+		"codex.other": true, "codex.outcome": true}
 	for _, letter := range Letters() {
+		if removed[string(letter.Kind)] {
+			t.Errorf("снятый вид письма остался в справочнике: %s", letter.Kind)
+		}
 		if next, ok := want[string(letter.Kind)]; ok {
 			if letter.Next != next {
 				t.Errorf("%s Next = %q, ожидалось %q", letter.Kind, letter.Next, next)

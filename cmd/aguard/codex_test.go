@@ -43,8 +43,9 @@ func TestCodexRoundRetriesUnsent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n := strings.Count(logs.String(), "письмо не отправлено"); n != 2 {
-		t.Fatalf("попыток письма %d, журнал:\n%s", n, logs.String())
+	if strings.Contains(logs.String(), "написал") || strings.Contains(logs.String(), "письмо не отправлено") ||
+		!strings.Contains(logs.String(), "недельный лимит Codex — 100%") {
+		t.Fatalf("события журнала или лишняя отправка:\n%s", logs.String())
 	}
 	cfg.Mode = codexwatch.ModeLog
 	for range 2 {
@@ -52,8 +53,8 @@ func TestCodexRoundRetriesUnsent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n := strings.Count(logs.String(), "написал бы"); n != 1 {
-		t.Fatalf("«написал бы» %d раз, журнал:\n%s", n, logs.String())
+	if strings.Contains(logs.String(), "написал бы") {
+		t.Fatalf("журнал mode=log не должен отмечать письмо:\n%s", logs.String())
 	}
 	if a.codexEvery(&cfg) != cfg.Interval.D() {
 		t.Fatalf("шаг после 100%%: %v", a.codexEvery(&cfg))
@@ -61,7 +62,7 @@ func TestCodexRoundRetriesUnsent(t *testing.T) {
 }
 
 // Сквозной проход на подставном app-server (testdata/fake-codex): readCodex через akit/codexlimit, три окна —
-// быстрый расход (письмо 1, затем «100%»), медленный (писем нет), без досрочного сброса (строка журнала, писем нет).
+// быстрый расход (warn, затем full), медленный (уведомлений нет), без досрочного сброса (строка журнала).
 func TestCodexFakeAppServer(t *testing.T) {
 	fake := fakeCodexPath(t)
 	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
@@ -73,9 +74,9 @@ func TestCodexFakeAppServer(t *testing.T) {
 		want    []string // строки журнала по порядку
 		absent  []string
 	}{
-		{"быстрый", 4.5, 1, []string{"написал бы", "100% около", "написал бы", "недельный лимит Codex — 100%"}, nil},
-		{"медленный", 0.3, 1, nil, []string{"написал бы", "досрочных сбросов нет"}},
-		{"без сброса", 4.5, 0, []string{"досрочных сбросов нет"}, []string{"написал бы"}},
+		{"быстрый", 4.5, 1, []string{"100% около", "недельный лимит Codex — 100%"}, nil},
+		{"медленный", 0.3, 1, nil, []string{"досрочных сбросов нет"}},
+		{"без сброса", 4.5, 0, []string{"досрочных сбросов нет"}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,8 +115,8 @@ func TestCodexFakeAppServer(t *testing.T) {
 					t.Fatalf("лишнее %q, журнал:\n%s", w, out)
 				}
 			}
-			if n := strings.Count(out, "написал бы"); n > 2 {
-				t.Fatalf("«написал бы» %d раз", n)
+			if strings.Contains(out, "написал бы") {
+				t.Fatalf("есть след отправки письма:\n%s", out)
 			}
 		})
 	}
@@ -147,13 +148,15 @@ func TestCodexWarnAndFullDelivered(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	msgs := leadLetters(got)
-	if len(msgs) != 2 || !strings.Contains(msgs[0], "100% около") || !strings.Contains(msgs[1], "недельный лимит Codex — 100%") {
-		t.Fatalf("письма лиду: %q, журнал:\n%s", msgs, logs.String())
+	if msgs := leadLetters(got); len(msgs) != 0 {
+		t.Fatalf("письма лиду: %q", msgs)
+	}
+	if !strings.Contains(logs.String(), "100% около") || !strings.Contains(logs.String(), "недельный лимит Codex — 100%") {
+		t.Fatalf("нет строк warn/full в журнале:\n%s", logs.String())
 	}
 }
 
-// Взвод есть, кредита нет: лиду — одно письмо «consume не вызываю», consume не зовётся.
+// Взвод есть, кредита нет: строка журнала, письма нет и consume не зовётся.
 func TestCodexArmedNoCreditDelivered(t *testing.T) {
 	a, logs, cfg := armedApp(t)
 	cfg.Mode, cfg.Codex = codexwatch.ModeAlert, fakeCodexPath(t)
@@ -171,9 +174,11 @@ func TestCodexArmedNoCreditDelivered(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	msgs := leadLetters(got)
-	if len(msgs) != 1 || !strings.Contains(msgs[0], "consume не вызываю") {
-		t.Fatalf("письма лиду: %q, журнал:\n%s", msgs, logs.String())
+	if msgs := leadLetters(got); len(msgs) != 0 {
+		t.Fatalf("письма лиду: %q", msgs)
+	}
+	if !strings.Contains(logs.String(), "недельный лимит Codex — 100%") {
+		t.Fatalf("нет строки журнала:\n%s", logs.String())
 	}
 }
 
@@ -224,9 +229,8 @@ func noArming(a *app) {
 	a.codexNote = func(context.Context, string, string, string, string) error { panic("тикет без взвода") }
 }
 
-// Взвод на подставном app-server: строка «да» на окно (секунды в файле — :00, у сервера — :23), при 100% — один
-// consume с ключом окна; первый вызов без ответа — повтор тем же ключом через fast; исход — строка в тикет; письмо
-// лиду не ушло (лида нет) — повтор письма, но не consume.
+// Взвод на подставном app-server: при 100% — один consume с ключом окна; первый вызов без ответа — повтор тем же
+// ключом через fast; исход записывается в тикет и журнал.
 func TestCodexArmedFakeAppServer(t *testing.T) {
 	fake := fakeCodexPath(t)
 	dir := t.TempDir()
@@ -297,8 +301,7 @@ func TestCodexArmedFakeAppServer(t *testing.T) {
 	if st.Reset.Outcome != "reset" || len(notes) != 1 || !strings.Contains(notes[0], "codex-limit-reset: aguard: consume") {
 		t.Fatalf("исход %q, тикет %q", st.Reset.Outcome, notes)
 	}
-	if len(st.Pending) != 1 || st.Pending[0].Lead || !st.Pending[0].Ticket ||
-		strings.Count(logs.String(), "исход не отправлен лиду") != 2 {
+	if len(st.Pending) != 0 || !strings.Contains(logs.String(), "outcome=reset") || strings.Contains(logs.String(), "письмо не отправлено") {
 		t.Fatalf("доставка: %+v\n%s", st.Pending, logs.String())
 	}
 }
@@ -437,21 +440,15 @@ func TestCodexOutcomeDelivered(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	select {
-	case msg := <-got:
-		if !strings.Contains(msg, "outcome=noCredit") || !strings.Contains(msg, "кредитов сброса нет") {
-			t.Fatalf("письмо лиду: %q", msg)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("письма лиду нет")
+	if msgs := leadLetters(got); len(msgs) != 0 {
+		t.Fatalf("письма лиду: %q", msgs)
 	}
 	st, err := codexwatch.LoadState(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// повторная проверка (мутация «письмо каждый проход» выживала): второй попытки письма нет — ни успешной, ни упавшей
-	if n := strings.Count(logs.String(), `msg="aguard codex: написал"`); n != 1 || strings.Contains(logs.String(), "исход не отправлен") {
-		t.Fatalf("писем лиду %d, журнал:\n%s", n, logs.String())
+	if !strings.Contains(logs.String(), "outcome=noCredit") || strings.Contains(logs.String(), `msg="aguard codex: написал"`) {
+		t.Fatalf("исход не записан в журнал или отправлено письмо:\n%s", logs.String())
 	}
 	if consumes != 1 || len(notes) != 2 || notes[0] != notes[1] || len(st.Pending) != 0 {
 		t.Fatalf("consume %d, тикет %q, к доставке %+v", consumes, notes, st.Pending)
@@ -632,7 +629,7 @@ func TestCodexAllOutOncePerTransition(t *testing.T) {
 	}
 }
 
-// «Все учётки без лимита» до живого лида: одно письмо на переход, повторный проход без перехода — без письма.
+// «Все учётки без лимита»: строка журнала на переход, повторный проход без перехода — без повторной строки.
 func TestCodexAllOutDelivered(t *testing.T) {
 	reset := time.Now().Add(5 * 24 * time.Hour)
 	a, logs, cfg := twoAccounts(t, nil)
@@ -652,14 +649,16 @@ func TestCodexAllOutDelivered(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	msgs := leadLetters(got)
-	if len(msgs) != 2 || !strings.Contains(msgs[0], "все учётки Codex без лимита") || !strings.Contains(msgs[1], "все учётки Codex без лимита") {
-		t.Fatalf("письма лиду: %q, журнал:\n%s", msgs, logs.String())
+	if msgs := leadLetters(got); len(msgs) != 0 {
+		t.Fatalf("письма лиду: %q", msgs)
+	}
+	if n := strings.Count(logs.String(), "все учётки Codex без лимита"); n != 2 {
+		t.Fatalf("строк all_out %d, журнал:\n%s", n, logs.String())
 	}
 }
 
-// Письмо лиду не ушло (лида нет): следующий проход пробует снова, а не молчит до следующего перехода.
-func TestCodexAllOutRetriedWhenUnsent(t *testing.T) {
+// All_out записывается один раз на переход; доставка письма не выполняется.
+func TestCodexAllOutNotRetriedAsLetter(t *testing.T) {
 	reset := time.Now().Add(5 * 24 * time.Hour)
 	a, logs, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
 		"work": limit(100, reset, 0), "personal": limit(100, reset, 0),
@@ -670,8 +669,8 @@ func TestCodexAllOutRetriedWhenUnsent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n := strings.Count(logs.String(), "kind=all_out"); n != 2 {
-		t.Fatalf("попыток письма %d, журнал:\n%s", n, logs.String())
+	if n := strings.Count(logs.String(), "все учётки Codex без лимита"); n != 1 || strings.Contains(logs.String(), "письмо не отправлено") {
+		t.Fatalf("строк all_out %d, журнал:\n%s", n, logs.String())
 	}
 }
 
@@ -719,7 +718,7 @@ func TestCodexRejectedApprovalNamedInLetter(t *testing.T) {
 		"work": limit(100, reset, 1), "personal": limit(100, reset, 1),
 	})
 	cfg.Mode = codexwatch.ModeAlert
-	liveLead(t, a)
+	got := liveLead(t, a)
 	a.codexApproved = func(_ context.Context, path string, _ time.Time) (string, error) {
 		if path == cfg.Accounts[0].Approvals {
 			return "", fmt.Errorf("%w: tl abcdef12:5 — реплика \"agent\", а не пользователя", errApprovalRejected)
@@ -733,11 +732,53 @@ func TestCodexRejectedApprovalNamedInLetter(t *testing.T) {
 	if err := a.codexRound(context.Background(), &cfg, false); err != nil {
 		t.Fatal(err)
 	}
+	msgs := leadLetters(got)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "есть, но aguard её не принял") ||
+		!strings.Contains(msgs[0], "aguard codex approve") || !strings.Contains(logs.String(), "kind=codex.rejected") {
+		t.Fatalf("письмо rejected: %q", msgs)
+	}
 	out := logs.String()
-	for _, want := range []string{"есть, но aguard её не принял: одобрение не принято: tl abcdef12:5", "не держится на реплике пользователя",
-		"Строки «да» на это окно", "файл одобрений не прочитан"} {
+	for _, want := range []string{"одобрение не принято: tl abcdef12:5", "файл одобрений не прочитан"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("нет %q в журнале:\n%s", want, out)
 		}
+	}
+}
+
+func TestCodexRejectedRetriesAfterFailedSendOncePerWindow(t *testing.T) {
+	reset := time.Now().Add(5 * 24 * time.Hour)
+	a, logs, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
+		"work": limit(100, reset, 1), "personal": limit(100, reset, 1),
+	})
+	cfg.Mode, cfg.Lead = codexwatch.ModeAlert, "missing"
+	a.codexApproved = func(_ context.Context, path string, _ time.Time) (string, error) {
+		if path == cfg.Accounts[0].Approvals {
+			return "", fmt.Errorf("%w: approval rejected", errApprovalRejected)
+		}
+		return "", nil
+	}
+	if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(a.dir("codex"), "work.json")
+	st, err := codexwatch.LoadState(statePath)
+	if err != nil || st.Rejected {
+		t.Fatalf("после неудачной отправки Rejected=%v, ошибка %v", st.Rejected, err)
+	}
+	got := liveLead(t, a)
+	cfg.Lead = "lead"
+	for range 2 {
+		if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	msgs := leadLetters(got)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "есть, но aguard её не принял") ||
+		!strings.Contains(logs.String(), "kind=codex.rejected") {
+		t.Fatalf("письма rejected после повтора: %q, журнал:\n%s", msgs, logs.String())
+	}
+	st, err = codexwatch.LoadState(statePath)
+	if err != nil || !st.Rejected {
+		t.Fatalf("после успешной отправки Rejected=%v, ошибка %v", st.Rejected, err)
 	}
 }

@@ -75,8 +75,7 @@ func kinds(g []got) string {
 	return strings.Join(b, " ")
 }
 
-// Быстрый расход 4,5 %/ч (как 02.11): письмо 1 — когда до 100% не больше 2 ч, но не раньше 2 ч 10 мин до него;
-// письмо «100%» — один раз; оба — по разу.
+// Быстрый расход 4,5 %/ч: строки warn/full появляются по одному разу в нужный момент.
 func TestFastBurnWarnThenFull(t *testing.T) {
 	var s State
 	c := cfg()
@@ -84,7 +83,7 @@ func TestFastBurnWarnThenFull(t *testing.T) {
 		r.Account = c.Accounts[0]
 	})
 	if len(g) != 2 || g[0].n.Kind != KindWarn || g[1].n.Kind != KindFull {
-		t.Fatalf("письма: %s", kinds(g))
+		t.Fatalf("уведомления: %s", kinds(g))
 	}
 	hit := t0.Add(time.Duration(30 / 4.5 * float64(time.Hour)))
 	if lead := hit.Sub(g[0].at); lead > 2*time.Hour+10*time.Minute || lead < 90*time.Minute {
@@ -103,8 +102,8 @@ func TestFastBurnWarnThenFull(t *testing.T) {
 			t.Fatalf("нет пути файла одобрений: %s", msg)
 		}
 	}
-	if !strings.Contains(g[0].n.Message, "coordinator, «Лимиты и темп»") ||
-		!strings.Contains(g[1].n.Message, "coordinator, «Лимиты и темп»") || strings.Contains(g[1].n.Message, "пора:") {
+	if strings.Contains(g[0].n.Message, "coordinator, «Лимиты и темп»") ||
+		strings.Contains(g[1].n.Message, "coordinator, «Лимиты и темп»") || strings.Contains(g[1].n.Message, "пора:") {
 		t.Fatalf("тексты:\n%s\n%s", g[0].n.Message, g[1].n.Message)
 	}
 }
@@ -297,7 +296,7 @@ func TestStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	s := State{ResetsAt: reset, Warned: true, Samples: []Sample{{t0, 91}},
 		Reset:   Reset{Key: "k", Called: true, Outcome: "reset", At: t0, Spent: true},
-		Pending: []Delivery{{Message: "m", Note: "n", At: t0, Lead: true}}}
+		Pending: []Delivery{{Message: "m", Note: "n", At: t0, Ticket: true}}}
 	if err := s.Save(path); err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +321,7 @@ func TestValidate(t *testing.T) {
 
 func armed(r *Reading) { r.Armed = "e7192203:278" }
 
-// Взвод: при 100% — consume вместо письма «пора», один раз в окне; письмо 1 говорит, что сброшу сам.
+// Взвод: при 100% — consume вместо уведомления full, один раз в окне; warn отмечает активный взвод.
 func TestArmedConsumesOnce(t *testing.T) {
 	var s State
 	g := feed(&s, cfg(), t0, t0.Add(8*time.Hour), 10*time.Minute, linear(70, t0, 4.5), armed)
@@ -335,7 +334,7 @@ func TestArmedConsumesOnce(t *testing.T) {
 	}
 }
 
-// Без взвода consume нет — только письма.
+// Без взвода consume нет — только уведомления журнала.
 func TestUnarmedNoConsume(t *testing.T) {
 	var s State
 	g := feed(&s, cfg(), t0, t0.Add(8*time.Hour), 10*time.Minute, linear(70, t0, 4.5), nil)
@@ -357,7 +356,7 @@ func TestArmedShortIdleNoConsume(t *testing.T) {
 	}
 }
 
-// Противник 2: взвод без кредита — письмо «100%, кредита нет», consume нет.
+// Взвод без кредита — строка full, consume нет.
 func TestArmedNoCreditLetter(t *testing.T) {
 	var s State
 	g := feed(&s, cfg(), t0, t0.Add(8*time.Hour), 10*time.Minute, linear(85, t0, 4.5), func(r *Reading) {
@@ -367,7 +366,7 @@ func TestArmedNoCreditLetter(t *testing.T) {
 		}
 	})
 	last := g[len(g)-1]
-	if strings.Contains(kinds(g), "consume") || last.n.Kind != KindFull || !strings.Contains(last.n.Message, "не вызываю") {
+	if strings.Contains(kinds(g), "consume") || last.n.Kind != KindFull || !strings.Contains(last.n.Message, "досрочных сбросов доступно: 0") {
 		t.Fatalf("решения: %s", kinds(g))
 	}
 }
@@ -411,7 +410,7 @@ func TestLostAnswerWindowChanged(t *testing.T) {
 
 // Противник 4: недоставленный исход переживает проходы и смену окна; уходит, когда доставлен и лиду, и в тикет.
 func TestPendingKeptUntilDelivered(t *testing.T) {
-	s := State{ResetsAt: reset, Pending: []Delivery{{Message: "m", Lead: true}}}
+	s := State{ResetsAt: reset, Pending: []Delivery{{Message: "m"}}}
 	s.Apply(Reading{At: t0, Used: 0, ResetsAt: t0.Add(7 * 24 * time.Hour), Allowed: true}, cfg())
 	s.Delivered()
 	if len(s.Pending) != 1 {
@@ -467,9 +466,9 @@ func TestNoSecondConsumeSameResetsAt(t *testing.T) {
 	if consume {
 		t.Fatal("второй consume по тому же «да»")
 	}
-	// повторная проверка: бойцы снова стоят — лиду письмо «100%, взвод израсходован», один раз
+	// повторная проверка: бойцы снова стоят — строка full «взвод израсходован», один раз
 	if len(ns) != 1 || ns[0].Kind != KindFull || !strings.Contains(ns[0].Message, "израсходован: outcome=reset") ||
-		!strings.Contains(ns[0].Message, "повтора не будет. Действий не нужно.") ||
+		!strings.Contains(ns[0].Message, "повтора не будет.") ||
 		strings.Contains(ns[0].Message, "aguard сбросит сам при 100%") {
 		t.Fatalf("письма при новых 100%%: %+v", ns)
 	}
@@ -606,12 +605,11 @@ func TestReviewCodexFullPendingLetter(t *testing.T) {
 	_, ns, _ := s.Apply(r, c)
 	want := "aguard codex: учётка work (CODEX_HOME=/home/u/.codex): недельный лимит Codex — 100%; " +
 		"плановый сброс " + local(planned) + ", простой " + days(planned.Sub(r.At)) + "; досрочных сбросов доступно: 1. " +
-		"Строки «да» на это окно (плановый сброс " + planned.Local().Format("02.01 15:04") + ") в файле одобрений /home/u/.claude/improve/state/codex-reset-approved.tsv нет — aguard не сбросит; " +
-		"появится — сбросит сам при 100%, если до планового сброса больше суток. Действий не нужно: за лимитом следит пользователь, " +
-		"сброс ему не предлагать (coordinator, «Лимиты и темп»). aguard уже вызывал consume в этом окне без ответа; " +
+		"Строки «да» на это окно (плановый сброс " + planned.Local().Format("02.01 15:04") + ") в файле одобрений /home/u/.claude/improve/state/codex-reset-approved.tsv нет. " +
+		"aguard уже вызывал consume в этом окне без ответа; " +
 		"при новой строке «да» aguard повторит вызов с тем же idempotencyKey fixture-key — второго кредита он не потратит."
 	if len(ns) != 1 || ns[0].Message != want {
-		t.Fatalf("письмо:\n%s\nожидалось:\n%s", message(ns), want)
+		t.Fatalf("уведомление:\n%s\nожидалось:\n%s", message(ns), want)
 	}
 }
 
@@ -635,7 +633,7 @@ func TestReviewCodexSpentLetter(t *testing.T) {
 	_, ns, _ := s.Apply(r, c)
 	want := "aguard codex: учётка work (CODEX_HOME=/home/u/.codex): недельный лимит Codex — 100%; " +
 		"плановый сброс " + local(planned) + ", простой " + days(planned.Sub(r.At)) + "; досрочных сбросов доступно: 1. " +
-		"Взвод этого окна уже израсходован: outcome=reset, idempotencyKey fixture-key; «да» на окно — один сброс, повтора не будет. Действий не нужно."
+		"Взвод этого окна уже израсходован: outcome=reset, idempotencyKey fixture-key; «да» на окно — один сброс, повтора не будет."
 	if len(ns) != 1 || ns[0].Message != want {
 		t.Fatalf("письмо:\n%s\nожидалось:\n%s", message(ns), want)
 	}
@@ -655,12 +653,12 @@ func TestReviewNoCreditFullLetters(t *testing.T) {
 		{
 			name: "без взвода",
 			r:    Reading{At: at, Used: 100, ResetsAt: planned, Account: acct},
-			want: base + " Свободных досрочных сбросов нет. Действий не нужно: сброс пользователю не предлагать.",
+			want: base + " Свободных досрочных сбросов нет.",
 		},
 		{
 			name: "взвод есть",
 			r:    Reading{At: at, Used: 100, ResetsAt: planned, Armed: "да на окно", Account: acct},
-			want: base + " Сброс взведён («да»: да на окно), consume не вызываю.",
+			want: base + " Сброс взведён («да»: да на окно).",
 		},
 	}
 	for _, tc := range cases {
@@ -687,12 +685,12 @@ func TestReviewSpentWithoutCallAndPendingOutcome(t *testing.T) {
 	}{
 		{
 			name:    "сбросили не через aguard",
-			wantEnd: "Взвод этого окна уже израсходован: окно сбросили не через aguard; «да» на окно — один сброс, повтора не будет. Действий не нужно.",
+			wantEnd: "Взвод этого окна уже израсходован: окно сбросили не через aguard; «да» на окно — один сброс, повтора не будет.",
 		},
 		{
 			name:    "вызов без ответа",
 			called:  true,
-			wantEnd: "Взвод этого окна уже израсходован: outcome=ответа не было, idempotencyKey fixture-key; «да» на окно — один сброс, повтора не будет. Действий не нужно.",
+			wantEnd: "Взвод этого окна уже израсходован: outcome=ответа не было, idempotencyKey fixture-key; «да» на окно — один сброс, повтора не будет.",
 		},
 	}
 	for _, tc := range cases {
@@ -735,11 +733,10 @@ func TestReviewCodexWarnAndFullLetters(t *testing.T) {
 	warn := Reading{At: at, Used: 91, ResetsAt: planned, Available: 2, Account: acct}
 	forecast := Forecast{Rate: 4.5, At: at.Add(2 * time.Hour)}
 	wantTail := " Строки «да» на это окно (плановый сброс " + planned.Local().Format("02.01 15:04") + ") в файле одобрений " + acct.Approvals +
-		" нет — aguard не сбросит; появится — сбросит сам при 100%, если до планового сброса больше суток. " +
-		"Действий не нужно: за лимитом следит пользователь, сброс ему не предлагать (coordinator, «Лимиты и темп»)."
+		" нет."
 	wantWarn := "aguard codex: учётка work (CODEX_HOME=/home/u/.codex): недельный лимит Codex — 91%, " +
 		"при темпе 4.5 %/ч 100% около " + local(forecast.At) + "; плановый сброс " + local(planned) + ", простой " + days(planned.Sub(forecast.At)) + "; " +
-		"досрочных сбросов доступно: 2." + wantTail + " Письмо «100%» пришлю, когда дойдёт."
+		"досрочных сбросов доступно: 2." + wantTail
 	if got := warnText(warn, forecast); got != wantWarn {
 		t.Fatalf("письмо 1:\n%s\nожидалось:\n%s", got, wantWarn)
 	}

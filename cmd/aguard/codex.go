@@ -303,7 +303,7 @@ func (a *app) codexRound(ctx context.Context, cfg *codexwatch.Config, dry bool) 
 		stale = stale || consumed
 	}
 	if !stale {
-		if err := a.codexFleet(cfg, readings, failed, dry); err != nil {
+		if err := a.codexFleet(readings, failed, dry); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -324,7 +324,7 @@ func (a *app) codexReadAll(ctx context.Context, cfg *codexwatch.Config) ([]codex
 		}
 		r.Account = acc
 		if r.Armed, err = a.codexApproved(ctx, acc.Approvals, r.ResetsAt); err != nil {
-			// явный отказ от взвода: без «да» consume не зовётся; строка есть, но не принята — причина идёт в письмо лиду
+			// явный отказ от взвода: без «да» consume не зовётся; причину отказа отправим отдельным уведомлением
 			what := "файл одобрений не прочитан — взвод не действует"
 			if errors.Is(err, errApprovalRejected) {
 				what = "строка «да» на окно не держится на реплике пользователя — взвод не действует"
@@ -338,8 +338,8 @@ func (a *app) codexReadAll(ctx context.Context, cfg *codexwatch.Config) ([]codex
 	return readings, failed, errs
 }
 
-// codexFleet — письмо «все учётки без лимита» при переходе; не ушло — следующий проход пробует снова.
-func (a *app) codexFleet(cfg *codexwatch.Config, readings []codexwatch.Reading, failed []string, dry bool) error {
+// codexFleet — строка журнала «все учётки без лимита» при переходе.
+func (a *app) codexFleet(readings []codexwatch.Reading, failed []string, dry bool) error {
 	path := filepath.Join(a.dir("codex"), "fleet.json")
 	fleet, err := codexwatch.LoadFleet(path)
 	if err != nil {
@@ -353,20 +353,13 @@ func (a *app) codexFleet(cfg *codexwatch.Config, readings []codexwatch.Reading, 
 		return nil
 	}
 	if msg != "" {
-		if err := a.codexSend(cfg, "codex.all_out", msg); err != nil {
-			if !a.quietFailure("codex", err) {
-				a.warn("codex", "письмо не отправлено", "session", cfg.Lead, "kind", "all_out", "err", err)
-				a.note("codex", "send_failed", "all_out", cfg.Lead, 1, "")
-			}
-			fleet.AllOut = false
-		} else {
-			a.note("codex", "sent", "all_out", cfg.Lead, 1, "")
-		}
+		a.log.Info(msg)
+		a.note("codex", "all_out", "", "", 0, "")
 	}
 	return fleet.Save(path)
 }
 
-// codexAccount — решение по одной учётке, при взводе — consume, письма и доставка исходов; true — решение было consume.
+// codexAccount — решение по учётке, при взводе — consume, журналирование и доставка исхода в тикет; true — consume.
 func (a *app) codexAccount(ctx context.Context, cfg *codexwatch.Config, r codexwatch.Reading, dry bool) (bool, error) {
 	statePath := filepath.Join(a.dir("codex"), r.Account.Name+".json")
 	st, err := codexwatch.LoadState(statePath)
@@ -394,13 +387,12 @@ func (a *app) codexAccount(ctx context.Context, cfg *codexwatch.Config, r codexw
 		}
 	}
 	for _, n := range notices {
-		if n.Kind == codexwatch.KindNoCredit { // сброса нет — лиду нечего делать: строка журнала, не письмо
-			a.log.Info("aguard codex: " + n.Message)
+		if n.Kind != codexwatch.KindRejected {
+			a.log.Info(n.Message)
 			a.note("codex", string(n.Kind), "", r.Account.Name, 0, "")
 			continue
 		}
 		kind := codexGuideKind(n.Kind)
-		a.warnOtherGuideInput(kind, string(n.Kind))
 		if err := a.codexSend(cfg, kind, n.Message); err != nil {
 			if a.quietFailure("codex", err) {
 				st.Unsent(n.Kind)
@@ -415,7 +407,7 @@ func (a *app) codexAccount(ctx context.Context, cfg *codexwatch.Config, r codexw
 		if cfg.Mode == codexwatch.ModeLog {
 			sent = "would_send"
 		}
-		a.note("codex", sent, string(n.Kind), cfg.Lead, 1, "")
+		a.note("codex", sent, string(n.Kind), r.Account.Name, 1, "")
 	}
 	a.codexDeliver(ctx, cfg, &st)
 	return consume, st.Save(statePath)
@@ -446,29 +438,22 @@ func (a *app) codexConsumeNow(ctx context.Context, cfg *codexwatch.Config, st *c
 	return nil
 }
 
-// codexDeliver — исходы взвода: письмо лиду и строка в тикет, каждое до успеха.
+// codexDeliver — исходы взвода: запись в тикет до успеха, строка журнала — один раз, когда исход записан.
 func (a *app) codexDeliver(ctx context.Context, cfg *codexwatch.Config, st *codexwatch.State) {
 	for i := range st.Pending {
 		d := &st.Pending[i]
-		if !d.Lead {
-			if err := a.codexSend(cfg, "codex.outcome", d.Message); err != nil {
-				if !a.quietFailure("codex", err) {
-					a.warn("codex", "исход не отправлен лиду", "err", err)
-				}
-			} else {
-				d.Lead = true
-			}
+		if d.Ticket {
+			continue
 		}
-		if !d.Ticket {
-			if cfg.Mode == codexwatch.ModeLog {
-				a.log.Info("aguard codex: записал бы в тикет", "ticket", cfg.Ticket, "note", d.Note)
-				d.Ticket = true
-			} else if err := a.codexNote(ctx, cfg.Tk, cfg.TicketRoot, cfg.Ticket, d.Note); err != nil {
-				a.warn("codex", "исход не записан в тикет", "ticket", cfg.Ticket, "err", err)
-			} else {
-				d.Ticket = true
-			}
+		if cfg.Mode == codexwatch.ModeLog {
+			a.log.Info("aguard codex: записал бы в тикет", "ticket", cfg.Ticket, "note", d.Note)
+		} else if err := a.codexNote(ctx, cfg.Tk, cfg.TicketRoot, cfg.Ticket, d.Note); err != nil {
+			a.warn("codex", "исход не записан в тикет", "ticket", cfg.Ticket, "err", err)
+			continue
 		}
+		d.Ticket = true
+		a.log.Info(d.Message)
+		a.note("codex", "outcome", "", "", 0, "")
 	}
 	st.Delivered()
 }
@@ -490,11 +475,11 @@ func (a *app) codexDry(r codexwatch.Reading, f codexwatch.Forecast, st *codexwat
 		fmt.Fprintf(a.out, "  consume: вызвал бы с ключом %s\n", st.Reset.Key)
 	}
 	for _, d := range st.Pending {
-		fmt.Fprintf(a.out, "  исход к доставке (лиду %v, в тикет %v): %s\n", d.Lead, d.Ticket, d.Message)
+		fmt.Fprintf(a.out, "  исход к записи в тикет (записан %v): %s\n", d.Ticket, d.Message)
 	}
 }
 
-// codexSend — письмо лиду; mode=log — строка «написал бы». Ошибка — письмо не ушло.
+// codexSend — письмо об отклонённой строке «да»; mode=log — строка «написал бы».
 func (a *app) codexSend(cfg *codexwatch.Config, kind guide.Kind, msg string) error {
 	if cfg.Mode == codexwatch.ModeLog {
 		a.log.Info("aguard codex: написал бы", "session", cfg.Lead, "msg", msg)
