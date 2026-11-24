@@ -614,11 +614,26 @@ func TestFreeTold(t *testing.T) {
 func TestLowFreeMessage(t *testing.T) {
 	c := Default()
 	c.FreeMin = 150 << 30
+	home := t.TempDir()
+	paths := []string{
+		filepath.Join(home, ".cache/go-build"),
+		filepath.Join(home, ".cache/glint"),
+		filepath.Join(home, ".local/state/x"),
+		filepath.Join(home, ".cache/small"),
+	}
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s := &State{Sizes: map[string][]Point{
-		"/h/.cache/go-build": {{Bytes: 300 << 30}}, "/h/.cache/glint": {{Bytes: 5 << 30}},
-		"/h/.local/state/x": {{Bytes: 1 << 30}}, "/h/.cache/small": {{Bytes: 1 << 20}},
+		paths[0]: {{Bytes: 300 << 30}}, paths[1]: {{Bytes: 5 << 30}},
+		paths[2]: {{Bytes: 1 << 30}}, paths[3]: {{Bytes: 1 << 20}},
 	}}
-	msg := s.LowFreeMessage(&c, 140<<30, "/h")
+	msg := s.LowFreeMessage(&c, 140<<30, home)
 	for _, want := range []string{"свободно 140", "порога 150", "~/.cache/go-build 300", "~/.cache/glint 5", "~/.local/state/x 1"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("в письме нет %q: %s", want, msg)
@@ -627,8 +642,39 @@ func TestLowFreeMessage(t *testing.T) {
 	if strings.Contains(msg, "small") {
 		t.Fatalf("в письме больше трёх записей: %s", msg)
 	}
-	if msg := (&State{}).LowFreeMessage(&c, 140<<30, "/h"); !strings.Contains(msg, "обхода записей ещё не было") {
+	if msg := (&State{}).LowFreeMessage(&c, 140<<30, home); !strings.Contains(msg, "обхода записей ещё не было") {
 		t.Fatalf("письмо без обхода: %s", msg)
+	}
+}
+
+func TestLowFreeMessageSkipsRemovedEntries(t *testing.T) {
+	c := Default()
+	home := t.TempDir()
+	paths := []string{
+		filepath.Join(home, "largest"),
+		filepath.Join(home, "next"),
+		filepath.Join(home, "third"),
+		filepath.Join(home, "fourth"),
+	}
+	s := &State{Sizes: make(map[string][]Point, len(paths))}
+	for i, path := range paths {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s.Sizes[path] = []Point{{Bytes: int64(4-i) << 30}}
+	}
+	if err := os.Remove(paths[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := s.LowFreeMessage(&c, 100<<30, home)
+	if strings.Contains(msg, "largest") {
+		t.Fatalf("удалённая запись попала в письмо: %s", msg)
+	}
+	for _, want := range []string{"~/next 3", "~/third 2", "~/fourth 1"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("в письме нет %q: %s", want, msg)
+		}
 	}
 }
 

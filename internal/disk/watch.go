@@ -154,6 +154,9 @@ func (s *State) LowFreeMessage(c *Config, free int64, home string) string {
 	var top []big
 	for path, pts := range s.Sizes {
 		if len(pts) > 0 {
+			if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
 			p := pts[len(pts)-1]
 			top = append(top, big{path: path, size: FormatBytes(p.Bytes, p.EncodedBytes), bytes: p.Bytes})
 		}
