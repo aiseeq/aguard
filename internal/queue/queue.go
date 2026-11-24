@@ -333,6 +333,7 @@ type delivery struct {
 	To                string    `json:"to"`
 	At                time.Time `json:"at"`
 	CancelAt          time.Time `json:"cancel_at,omitzero"`
+	CancelSent        bool      `json:"cancel_sent,omitempty"`
 	CancelJournalRead bool      `json:"cancel_journal_read,omitempty"`
 	CancelAuthor      string    `json:"cancel_author,omitempty"`
 	CancelReason      string    `json:"cancel_reason,omitempty"`
@@ -411,6 +412,9 @@ func (s *State) stepDelivered(t Ticket, v View) []Notice {
 }
 
 func (s *State) cancelDelivered(t Ticket, d delivery, v View) []Notice {
+	if d.CancelSent {
+		return nil
+	}
 	if t.Status == "отклонён" && !t.CancelJournalRead {
 		return nil
 	}
@@ -1116,9 +1120,14 @@ func (s *State) confirm(n Notice, v View, sent bool) {
 				s.Delivered[n.Key] = delivery{To: n.To, At: v.Now}
 			}
 		}
-		if n.Kind == KindCancel {
-			if _, ok := s.Delivered[n.Key]; ok {
+	}
+	if n.Kind == KindCancel && n.Key != "" {
+		if d, ok := s.Delivered[n.Key]; ok {
+			if sent {
 				s.dropDeliveryAndWake(n.Key)
+			} else {
+				d.CancelSent = true
+				s.Delivered[n.Key] = d
 			}
 		}
 	}

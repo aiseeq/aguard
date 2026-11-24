@@ -746,3 +746,91 @@ func TestDeliveredThenTakenCancelsOnce(t *testing.T) {
 		t.Fatalf("писем об отмене %d, нужно одно", cancels)
 	}
 }
+
+func TestLogOnlyDeliveredCancellationIsRecordedOnce(t *testing.T) {
+	w := newWorld(ModeOn)
+	tk := tick("MED", "открыт")
+	s := seeded(w)
+	s.Confirm(Notice{Kind: KindWake, Key: tk.Key, To: "m-master", Session: "session-1", Serious: true}, w.view())
+
+	w.mode = ModeLog
+	tk.Status, tk.CancelAuthor, tk.CancelReason, tk.CancelJournalRead = "отклонён", "other-author", "причина", true
+	cancels := 0
+	for range 3 {
+		for _, n := range s.Step([]Ticket{tk}, w.view()) {
+			if n.Kind == KindCancel {
+				cancels++
+				s.ConfirmUnsent(n, w.view())
+			}
+		}
+		w.now = w.now.Add(time.Minute)
+	}
+	if cancels != 1 {
+		t.Fatalf("логовых строк об отмене %d, нужно одну", cancels)
+	}
+	if d, ok := s.Delivered[tk.Key]; !ok || !d.CancelSent {
+		t.Fatalf("логовая отмена не помечена завершённой: %+v", s.Delivered[tk.Key])
+	}
+}
+
+func TestDeliveredReopenClearsUnsentCancellation(t *testing.T) {
+	w := newWorld(ModeOn)
+	tk := tick("MED", "отклонён")
+	tk.CancelAuthor, tk.CancelReason, tk.CancelJournalRead = "other-author", "причина", true
+	s := seeded(w)
+	s.Confirm(Notice{Kind: KindWake, Key: tk.Key, To: "m-master", Serious: true}, w.view())
+	ns := s.Step([]Ticket{tk}, w.view())
+	if !has(ns, KindCancel, "m-master") {
+		t.Fatalf("ожидается отмена доставленного тикета: %+v", ns)
+	}
+	s.ConfirmUnsent(ns[0], w.view())
+	if d, ok := s.Delivered[tk.Key]; !ok || !d.CancelSent {
+		t.Fatalf("неотправленная отмена должна остаться помеченной в доставке: %+v", s.Delivered[tk.Key])
+	}
+	tk.Status = "открыт"
+	s.Step([]Ticket{tk}, w.view())
+	if _, ok := s.Delivered[tk.Key]; ok {
+		t.Fatalf("переоткрытие не сняло доставку после неотправленной отмены: %+v", s.Delivered[tk.Key])
+	}
+}
+
+func TestDeliveredReadyClearsDelivery(t *testing.T) {
+	w := newWorld(ModeOn)
+	tk := tick("MED", "готово")
+	s := seeded(w)
+	s.Confirm(Notice{Kind: KindWake, Key: tk.Key, To: "m-master", Serious: true}, w.view())
+	s.Step([]Ticket{tk}, w.view())
+	if _, ok := s.Delivered[tk.Key]; ok {
+		t.Fatalf("готово не сняло доставку: %+v", s.Delivered[tk.Key])
+	}
+}
+
+func TestCleanupDeliveredRemovesMissingTicket(t *testing.T) {
+	s := State{Delivered: map[string]delivery{"m/missing": {To: "m-master"}}}
+	s.Step(nil, newWorld(ModeOn).view())
+	if _, ok := s.Delivered["m/missing"]; ok {
+		t.Fatalf("доставка пропавшего из прохода тикета осталась: %+v", s.Delivered)
+	}
+}
+
+func TestFirstDeliveredNoticeIsNotOverwritten(t *testing.T) {
+	w := newWorld(ModeOn)
+	s := State{}
+	firstAt := w.now
+	s.Confirm(Notice{Kind: KindWake, Key: "m/x", To: "first", Serious: true}, w.view())
+	w.now = w.now.Add(time.Minute)
+	s.Confirm(Notice{Kind: KindCrit, Key: "m/x", To: "second", Serious: true}, w.view())
+	d := s.Delivered["m/x"]
+	if d.To != "first" || !d.At.Equal(firstAt) {
+		t.Fatalf("первая доставка перезаписана: %+v", d)
+	}
+}
+
+func TestCritCopyAloneDoesNotCreateDelivery(t *testing.T) {
+	w := newWorld(ModeOn)
+	s := State{}
+	s.Confirm(Notice{Kind: KindCritCopy, Key: "m/x", To: "lead", Serious: true}, w.view())
+	if len(s.Delivered) != 0 {
+		t.Fatalf("crit_copy записан как доставка: %+v", s.Delivered)
+	}
+}
