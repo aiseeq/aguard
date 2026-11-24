@@ -75,7 +75,7 @@ func TestHighAdminBlockedByMoving(t *testing.T) {
 }
 
 func TestHighAdminCrossProjectBlockers(t *testing.T) {
-	home := "/home/test"
+	home := "/srv/u7"
 	makeWorld := func() *world {
 		w := newWorld(ModeOn)
 		w.home = home
@@ -109,7 +109,7 @@ func TestHighAdminCrossProjectBlockers(t *testing.T) {
 		if (admin.Kind == KindHighAdmin) != wantLetter {
 			t.Fatalf("письмо админу = %v, ждали %v: %+v", admin.Kind == KindHighAdmin, wantLetter, admin)
 		}
-		if wantLetter && strings.Contains(admin.Line, "не найдена") != wantMissing {
+		if wantLetter && strings.Contains(admin.Line, "связь "+ref+" не найдена") != wantMissing || !wantMissing && strings.Contains(admin.Line, "не найдена") {
 			t.Fatalf("строка письма = %q, пометка не найдена = %v", admin.Line, wantMissing)
 		}
 	}
@@ -121,9 +121,6 @@ func TestHighAdminCrossProjectBlockers(t *testing.T) {
 	})
 	t.Run("git не найден", func(t *testing.T) {
 		check(t, "git/other/slug-x", "", false, false, true, true)
-	})
-	t.Run("полное имя файла", func(t *testing.T) {
-		check(t, "git/other/20261124-1057-slug-x", "в работе", true, true, false, false)
 	})
 	if dir, id, ok := blockerLocation("work/project/task", Ticket{}, home); !ok || dir != home+"/work/project" || id != "task" {
 		t.Fatalf("work-ссылка разобрана как %q, %q, %v", dir, id, ok)

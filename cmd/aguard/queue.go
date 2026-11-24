@@ -38,7 +38,7 @@ type queueTicketJSON struct {
 	Journal  bool   `json:"journal"`
 	// Actors — время последней записи журнала по авторам, «2006-01-02 15:04» местного (akit tk v1.47.0).
 	Actors map[string]string `json:"actors"`
-	// BlockedBy — тикеты, поставленные перед этим (tk set --blocks): имя той же папки или git/<проект>/<имя>.
+	// BlockedBy — тикеты, поставленные перед этим (tk set --blocks): slug той же папки или git|work/<проект>/<slug>.
 	BlockedBy []string `json:"blocked_by"`
 	Overdue   bool     `json:"overdue"`
 	Due       string   `json:"due"` // срок «ждёт», если tk его разобрал

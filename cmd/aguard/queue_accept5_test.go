@@ -176,6 +176,9 @@ func TestQueueWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := queueView(b.c, nil, nil, time.Now(), b.a, nil, nil)
+	if v.Home == "" || v.Home != b.a.home {
+		t.Fatalf("View.Home = %q, демон %q: межпроектные блокеры не разберутся", v.Home, b.a.home)
+	}
 	if !slices.Equal(v.Rest.Roots, []string{"/h/work"}) || v.Rest.Zone.String() != "Europe/Nicosia" || len(v.Rest.Holidays) == 0 {
 		t.Fatalf("View: %+v", v)
 	}

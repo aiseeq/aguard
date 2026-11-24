@@ -264,8 +264,7 @@ type View struct {
 	Rest                 Rest // дни отдыха папок: из строк идут только CRIT
 
 	restingSessions map[string]bool // сессии этих папок в такой день, считает Step
-	movingBlockers  map[string]bool // папка + "\x00" + имя тикета, который движется (blockerMoving); считает Step
-	blockerTickets  map[string]bool // все распознанные имена блокеров из прохода
+	blockers        map[string]bool // папка + "\x00" + slug каждого тикета прохода → движется ли он (blockerMoving); считает Step
 }
 
 func (v View) bootGrace() bool {
@@ -371,8 +370,7 @@ func (s *State) init() {
 func (s *State) Step(ts []Ticket, v View) []Notice {
 	s.init()
 	v.restingSessions = restingSessions(ts, v)
-	v.movingBlockers = movingBlockers(ts, v)
-	v.blockerTickets = blockerTickets(ts)
+	v.blockers = blockers(ts, v)
 	s.captureTransfers(ts, v.Now)
 	var out []Notice
 	wasSeed := s.Seeded
@@ -551,26 +549,13 @@ func ticketWorking(t Ticket) bool {
 	return (t.Status == "в работе" || t.Status == "ждёт" && t.Executor != "") && !t.Journal
 }
 
-func movingBlockers(ts []Ticket, v View) map[string]bool {
-	out := map[string]bool{}
+// blockers — тикеты прохода как возможные блокеры: ключ есть — тикет найден, значение — движется ли. tk пишет в
+// «Заблокирован:» slug; один slug в папке бывает у двух тикетов (перенесённый и вернувшийся) — движение по любому.
+func blockers(ts []Ticket, v View) map[string]bool {
+	out := make(map[string]bool, len(ts))
 	for i := range ts {
-		if blockerMoving(ts[i], v) {
-			out[ts[i].Dir+"\x00"+ts[i].Slug] = true
-			if name := filepath.Base(ts[i].Key); name != "." && name != "/" {
-				out[ts[i].Dir+"\x00"+name] = true
-			}
-		}
-	}
-	return out
-}
-
-func blockerTickets(ts []Ticket) map[string]bool {
-	out := make(map[string]bool, len(ts)*2)
-	for i := range ts {
-		out[ts[i].Dir+"\x00"+ts[i].Slug] = true
-		if name := filepath.Base(ts[i].Key); name != "." && name != "/" {
-			out[ts[i].Dir+"\x00"+name] = true
-		}
+		k := ts[i].Dir + "\x00" + ts[i].Slug
+		out[k] = out[k] || blockerMoving(ts[i], v)
 	}
 	return out
 }
@@ -590,6 +575,8 @@ func blockerMoving(t Ticket, v View) bool {
 	return false
 }
 
+// blockerLocation — папка проекта и slug по ссылке «Заблокирован:»: slug своей папки или git|work/<проект>/<slug>
+// (разбор tk — akit cmd/tk/blocks.go, referenceLocation).
 func blockerLocation(ref string, t Ticket, home string) (string, string, bool) {
 	parts := strings.Split(ref, "/")
 	if len(parts) == 1 && parts[0] != "" {
@@ -601,20 +588,20 @@ func blockerLocation(ref string, t Ticket, home string) (string, string, bool) {
 	return filepath.Join(home, parts[0], parts[1]), parts[2], true
 }
 
-// blockedByMoving — найденный движущийся блокер означает, что тикет ждёт его; отсутствующая связь помечается в письме админу.
-func blockedByMoving(t Ticket, v View) (bool, []string) {
-	var missing []string
+// blockedByMoving — тикет ждёт найденный движущийся блокер (tk set X --blocks Y). Иначе — ссылки, которых нет в проходе
+// (опечатка, архив, проект вне наблюдения): письмо админу идёт с пометкой о них.
+func blockedByMoving(t Ticket, v View) (waiting bool, missing []string) {
 	for _, b := range t.BlockedBy {
 		dir, id, ok := blockerLocation(b, t, v.Home)
 		if !ok {
 			missing = append(missing, b)
 			continue
 		}
-		key := dir + "\x00" + id
-		if v.movingBlockers[key] {
+		moving, found := v.blockers[dir+"\x00"+id]
+		if moving {
 			return true, nil
 		}
-		if !v.blockerTickets[key] {
+		if !found {
 			missing = append(missing, b)
 		}
 	}
