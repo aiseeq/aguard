@@ -413,6 +413,10 @@ func (s *State) stepDelivered(t Ticket, v View) []Notice {
 
 func (s *State) cancelDelivered(t Ticket, d delivery, v View) []Notice {
 	if d.CancelSent {
+		if !d.CancelAt.IsZero() && v.Now.Sub(d.CancelAt) >= 7*24*time.Hour {
+			s.dropDeliveryAndWake(t.Key)
+			return []Notice{notice(t, v, KindCancelLost, "", cancelLine(t))}
+		}
 		return nil
 	}
 	if t.Status == "отклонён" && !t.CancelJournalRead {

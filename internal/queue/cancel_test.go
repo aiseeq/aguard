@@ -794,6 +794,52 @@ func TestDeliveredReopenClearsUnsentCancellation(t *testing.T) {
 	}
 }
 
+func TestDeliveredTransferredReopenAfterUnreadableCancelJournal(t *testing.T) {
+	w := newWorld(ModeOn)
+	tk := tick("MED", StatusTransferred)
+	s := seeded(w)
+	s.Delivered[tk.Key] = delivery{To: "m-master", CancelAt: w.now}
+	s.Wakes["m-master"] = Wake{Ticket: tk.Key, At: w.now, Session: "session-1"}
+
+	tk.Status, tk.CancelJournalRead = "открыт", false
+	ns := s.Step([]Ticket{tk}, w.view())
+	if len(ns) != 0 {
+		t.Fatalf("переоткрытие после переноса не должно отправлять уведомления: %+v", ns)
+	}
+	if _, ok := s.Delivered[tk.Key]; ok {
+		t.Fatalf("переоткрытие не сняло доставку: %+v", s.Delivered[tk.Key])
+	}
+	if _, ok := s.Wakes["m-master"]; ok {
+		t.Fatalf("переоткрытие не сняло будильник: %+v", s.Wakes["m-master"])
+	}
+}
+
+func TestLogOnlyDeliveredCancellationExpiresAfterSevenDays(t *testing.T) {
+	w := newWorld(ModeOn)
+	tk := tick("MED", "отклонён")
+	tk.CancelAuthor, tk.CancelReason, tk.CancelJournalRead = "other-author", "причина", true
+	s := seeded(w)
+	s.Confirm(Notice{Kind: KindWake, Key: tk.Key, To: "m-master", Serious: true}, w.view())
+
+	ns := s.Step([]Ticket{tk}, w.view())
+	if !has(ns, KindCancel, "m-master") {
+		t.Fatalf("ожидается отмена: %+v", ns)
+	}
+	s.ConfirmUnsent(ns[0], w.view())
+	d, ok := s.Delivered[tk.Key]
+	if !ok || !d.CancelSent || d.CancelAt.IsZero() {
+		t.Fatalf("логовая отмена должна хранить время и признак завершения: %+v", d)
+	}
+	w.now = d.CancelAt.Add(7 * 24 * time.Hour)
+	ns = s.Step([]Ticket{tk}, w.view())
+	if !has(ns, KindCancelLost, "") || has(ns, KindCancel, "m-master") {
+		t.Fatalf("логовая отмена должна завершиться cancel_lost без письма: %+v", ns)
+	}
+	if _, ok := s.Delivered[tk.Key]; ok {
+		t.Fatalf("просроченная доставка осталась в состоянии: %+v", s.Delivered[tk.Key])
+	}
+}
+
 func TestDeliveredReadyClearsDelivery(t *testing.T) {
 	w := newWorld(ModeOn)
 	tk := tick("MED", "готово")
