@@ -329,6 +329,7 @@ func (a *app) codexReadAll(ctx context.Context, cfg *codexwatch.Config) ([]codex
 			switch {
 			case errors.Is(err, errTLUnavailable):
 				what = "tl не ответил — строка «да» не проверена, взвод на этот проход не действует"
+				r.ArmUnavailable = err.Error()
 			case errors.Is(err, errApprovalRejected):
 				what = "строка «да» на окно не держится на реплике пользователя — взвод не действует"
 				r.ArmRejected = err.Error()
@@ -395,15 +396,15 @@ func (a *app) codexAccount(ctx context.Context, cfg *codexwatch.Config, r codexw
 			a.note("codex", codexNoteKind(n.Kind), "", r.Account.Name, 0, "")
 			continue
 		}
-		kind := codexGuideKind(n.Kind)
+		kind := codexGuideKind()
 		if err := a.codexSend(cfg, kind, n.Message); err != nil {
 			if a.quietFailure("codex", err) {
-				st.Unsent(n.Kind)
+				st.UnsentRejected()
 				continue
 			}
 			a.warn("codex", "письмо не отправлено", "account", r.Account.Name, "session", cfg.Lead, "kind", n.Kind, "err", err)
 			a.note("codex", "send_failed", string(n.Kind), cfg.Lead, 1, "")
-			st.Unsent(n.Kind)
+			st.UnsentRejected()
 			continue
 		}
 		sent := "sent"

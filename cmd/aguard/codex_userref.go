@@ -193,8 +193,13 @@ func tlUserRef(ctx context.Context, ref string) (userEvent, error) {
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ctx.Err() == nil && ee.Exited() {
-			// tl ответил кодом (1 — нет строки, 2 — нет сессии): это ответ о ссылке, не сбой
-			return userEvent{}, fmt.Errorf("tl: %w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+			stderr := strings.TrimSpace(string(ee.Stderr))
+			// Код 2 также означает ошибку чтения файла: `tl: read <path>: ...`; это не отказ строке.
+			if ee.ExitCode() == 2 && strings.HasPrefix(stderr, "tl: read ") {
+				return userEvent{}, fmt.Errorf("%w: tl: %s", errTLUnavailable, stderr)
+			}
+			// Остальные ответы tl (1 — строки нет, 2 — сессия не найдена) — ответ о ссылке.
+			return userEvent{}, fmt.Errorf("tl: %w: %s", err, stderr)
 		}
 		return userEvent{}, fmt.Errorf("%w: %w", errTLUnavailable, err)
 	}

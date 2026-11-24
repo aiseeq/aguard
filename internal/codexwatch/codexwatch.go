@@ -120,6 +120,8 @@ type Reading struct {
 	Armed     string    // «да» пользователя на это окно (источник из файла одобрений); пусто — не взведено
 	// ArmRejected — строка «да» на окно в файле есть, но не держится на реплике пользователя: причина отказа.
 	ArmRejected string
+	// ArmUnavailable — ссылка tl не проверена из-за сбоя tl; наличие строки неизвестно.
+	ArmUnavailable string
 }
 
 // Sample — замер в истории окна.
@@ -191,21 +193,8 @@ type Notice struct {
 	Message string
 }
 
-// Unsent снимает флаг письма, которое не ушло: следующий проход отправит его снова.
-func (s *State) Unsent(k Kind) {
-	switch k {
-	case KindWarn:
-		s.Warned = false
-	case KindFull:
-		s.Full = false
-	case KindBlocked:
-		s.Blocked = false
-	case KindNoCredit:
-		s.NoCredit = false
-	case KindRejected:
-		s.Rejected = false
-	}
-}
+// UnsentRejected снимает флаг письма rejected, которое не ушло: следующий проход отправит его снова.
+func (s *State) UnsentRejected() { s.Rejected = false }
 
 // Forecast — темп и прогноз 100% по истории окна.
 type Forecast struct {
@@ -416,6 +405,9 @@ func fullText(r Reading, idle time.Duration) string {
 	}
 	if r.Available == 0 {
 		return facts + " Свободных досрочных сбросов нет."
+	}
+	if r.ArmUnavailable != "" {
+		return facts + " Проверка строки «да» недоступна: " + r.ArmUnavailable + "."
 	}
 	return facts + approvalTail(r)
 }

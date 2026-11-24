@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/aguard/internal/guide"
 	"github.com/aiseeq/aguard/internal/ioroute"
 	"github.com/aiseeq/aguard/internal/remotebroken"
@@ -287,7 +286,7 @@ func TestGuideMapsCoverSourceValues(t *testing.T) {
 			t.Errorf("night key prefix %q has no dedicated guide entry (got %q)", prefix, kind)
 		}
 	}
-	if kind := codexGuideKind(codexwatch.KindRejected); kind != "codex.rejected" {
+	if kind := codexGuideKind(); kind != "codex.rejected" {
 		t.Errorf("rejected guide kind = %q", kind)
 	}
 	for _, notice := range remoteNoticeSamples(t, root) {
@@ -296,8 +295,11 @@ func TestGuideMapsCoverSourceValues(t *testing.T) {
 			t.Errorf("remote %+v has no guide entry", notice)
 		}
 	}
-	if queueGuideKind("unknown") != "queue.other" || ioGuideKind("unknown") != "io.other" || nightGuideKind("unknown") != "night.other" || codexGuideKind("unknown") != "codex.rejected" || remoteGuideKind(remotebroken.Notice{}) != "remote.other" {
+	if queueGuideKind("unknown") != "queue.other" || ioGuideKind("unknown") != "io.other" || nightGuideKind("unknown") != "night.other" || remoteGuideKind(remotebroken.Notice{}) != "remote.other" {
 		t.Fatal("неизвестные значения должны оставаться страховкой *.other")
+	}
+	if codexGuideKind() != "codex.rejected" {
+		t.Fatal("письмо Codex должно иметь вид codex.rejected")
 	}
 }
 
