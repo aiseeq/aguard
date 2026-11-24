@@ -297,6 +297,8 @@ type ticketState struct {
 	Gone              time.Time `json:"gone,omitzero"` // учтённый закрытый тикет пропал из прохода: состояние держится goneKeep, чтобы при возвращении «закрыт» не ушло повторно
 	Executor          string    `json:"executor,omitempty"`
 	Working           bool      `json:"working,omitempty"`
+	DeliveredTo       string    `json:"delivered_to,omitempty"`
+	DeliveredSession  string    `json:"delivered_session,omitempty"`
 	CancelAt          time.Time `json:"cancel_at,omitzero"`
 	CancelSent        bool      `json:"cancel_sent,omitempty"`
 	CancelLost        bool      `json:"cancel_lost,omitempty"`
@@ -476,11 +478,21 @@ func resetCancelOnReopen(st *ticketState, t Ticket, working bool) {
 	if st == nil {
 		return
 	}
+	reopening := st.CancelJournalRead || st.CancelSent || st.CancelLost
+	if working && st.DeliveredTo != "" {
+		// Once the ticket is taken, later cancellation belongs to its executor and the old wake mark is stale.
+		st.DeliveredTo, st.DeliveredSession = "", ""
+		st.High, st.Admin = mark{}, mark{}
+	}
 	if t.Status == "открыт" || working {
 		st.CancelSent, st.CancelLost = false, false
 		st.CancelAt = time.Time{}
 		st.CancelJournalRead, st.CancelAuthor, st.CancelReason = false, "", ""
 		st.Closed, st.BackSent, st.BackLost = time.Time{}, false, false
+		if reopening && (t.Status == "открыт" || working) {
+			st.DeliveredTo, st.DeliveredSession = "", ""
+			st.High, st.Admin = mark{}, mark{}
+		}
 	}
 	if !closed(t.Status) && !working {
 		st.Working = false
@@ -494,10 +506,11 @@ func (s *State) trackable(t Ticket, st *ticketState, v View, working bool) bool 
 			return false
 		}
 	}
-	if closed(t.Status) && t.Back == "" && !cancelStatus(t.Status) || !closed(t.Status) && !working && t.Prio != "CRIT" && t.Prio != "HIGH" {
+	delivered := st != nil && st.DeliveredTo != ""
+	if closed(t.Status) && t.Back == "" && !cancelStatus(t.Status) || !closed(t.Status) && !working && !delivered && t.Prio != "CRIT" && t.Prio != "HIGH" {
 		return false
 	}
-	if cancelStatus(t.Status) && t.Back == "" && (st == nil || !st.Working) {
+	if cancelStatus(t.Status) && t.Back == "" && (st == nil || !st.Working && st.DeliveredTo == "") {
 		return false // отклонён без заказчика и не из работы: запись не нужна (и отметка HIGH не держится до переоткрытия)
 	}
 	return true
@@ -518,7 +531,7 @@ func rememberExecutor(st *ticketState, t Ticket) {
 // NeedsCancelJournal reports a tracked rejection whose journal has not yet been read.
 func (s *State) NeedsCancelJournal(t Ticket) bool {
 	st := s.Tickets[t.Key]
-	return t.Status == "отклонён" && st != nil && st.Working && st.Executor != "" && !st.CancelSent && !st.CancelLost && !st.CancelJournalRead
+	return t.Status == "отклонён" && st != nil && (st.Working && st.Executor != "" || st.DeliveredTo != "") && !st.CancelSent && !st.CancelLost && !st.CancelJournalRead
 }
 
 // CancelJournal returns the author and reason cached for a rejected ticket.
@@ -846,6 +859,10 @@ func (s *State) cancelNotices(t Ticket, st *ticketState, v View) []Notice {
 		st.CancelSent = true
 		return nil
 	}
+	if t.CancelAuthor != "" && !st.Working && strings.EqualFold(t.CancelAuthor, st.DeliveredTo) {
+		st.CancelSent = true
+		return nil
+	}
 	line := cancelLine(t)
 	if v.restingSessions[to] || to != v.Lead && restingDir(t.Dir, v) {
 		// Отдыхающая сессия и проект на дне отдыха по проекту не работают; срок 7 суток переносится на конец отдыха, лиду — без ожидания.
@@ -865,10 +882,16 @@ func (s *State) cancelNotices(t Ticket, st *ticketState, v View) []Notice {
 }
 
 func cancelPending(t Ticket, st *ticketState) bool {
-	return st.Working && st.Executor != "" && !st.CancelSent && !st.CancelLost && (t.Status != "отклонён" || t.CancelJournalRead)
+	return (st.Working && st.Executor != "" || st.DeliveredTo != "") && !st.CancelSent && !st.CancelLost && (t.Status != "отклонён" || t.CancelJournalRead)
 }
 
 func cancelRecipient(t Ticket, st *ticketState, v View) string {
+	if !st.Working && st.DeliveredTo != "" {
+		if alive(v, st.DeliveredTo) {
+			return st.DeliveredTo
+		}
+		return t.Master
+	}
 	if alive(v, st.Executor) {
 		return st.Executor
 	}
@@ -930,40 +953,61 @@ func liveRecipient(v View, first, second, master string) string {
 func (s *State) Confirm(n Notice, v View) {
 	s.init()
 	st := s.Tickets[n.Key]
+	if st == nil && deliveredKind(n.Kind) && n.Serious && n.Key != "" {
+		st = &ticketState{Seen: v.Now}
+		s.Tickets[n.Key] = st
+	}
 	mode := ModeLog
 	if n.Serious {
 		mode = ModeOn
 	}
 	m := mark{At: v.Now, Mode: mode}
 	if st != nil {
-		confirmCancel(st, n.Kind)
-		switch n.Kind {
-		case KindCrit:
-			st.Crit = m
-			st.CritTo = n.To
-			if n.To == v.Lead {
-				st.CritCopy = m
-			}
-		case KindCritCopy:
+		confirmTicketNotice(st, n, v, m)
+	}
+	confirmWakeNotice(s, n, v, mode)
+}
+
+func deliveredKind(kind string) bool {
+	switch kind {
+	case KindWake, KindHigh, KindCrit, KindCritCopy:
+		return true
+	}
+	return false
+}
+
+func confirmTicketNotice(st *ticketState, n Notice, v View, m mark) {
+	confirmCancel(st, n.Kind)
+	if deliveredKind(n.Kind) && n.Serious {
+		st.DeliveredTo, st.DeliveredSession = n.To, n.Session
+	}
+	switch n.Kind {
+	case KindCrit:
+		st.Crit, st.CritTo = m, n.To
+		if n.To == v.Lead {
 			st.CritCopy = m
-		case KindHigh:
-			st.High = m
-		case KindHighAdmin:
-			st.Admin = m
-		case KindBack:
-			st.BackSent = true
 		}
-		if n.Serious && (n.Kind == KindCrit || n.Kind == KindHigh || n.Kind == KindHighAdmin) && !slices.Contains(st.Notes, n.Line) {
-			st.Notes = append(st.Notes, n.Line)
-		}
+	case KindCritCopy:
+		st.CritCopy = m
+	case KindHigh:
+		st.High = m
+	case KindHighAdmin:
+		st.Admin = m
+	case KindBack:
+		st.BackSent = true
 	}
-	if n.Kind == KindWakeAdmin {
+	if n.Serious && (n.Kind == KindCrit || n.Kind == KindHigh || n.Kind == KindHighAdmin) && !slices.Contains(st.Notes, n.Line) {
+		st.Notes = append(st.Notes, n.Line)
+	}
+}
+
+func confirmWakeNotice(s *State, n Notice, v View, mode string) {
+	switch n.Kind {
+	case KindWakeAdmin:
 		s.ProjectWakes[n.Dir] = ProjectWake{Ticket: n.Key, At: v.Now, Mode: mode}
-	}
-	if n.Kind == KindWake {
+	case KindWake:
 		s.Wakes[n.To] = Wake{Ticket: n.Key, At: v.Now, Mode: mode, Session: n.Session}
-	}
-	if n.Kind == KindWakeStuck {
+	case KindWakeStuck:
 		w := s.Wakes[n.Master]
 		if w.Ticket == n.Key && w.Session == n.Session {
 			w.Stuck = true
