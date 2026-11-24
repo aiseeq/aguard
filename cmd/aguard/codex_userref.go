@@ -140,7 +140,7 @@ func (c *approvalCache) checker(resolve userRefResolver) codexApprovals {
 // approvedCodexChecked — «да» на окно из файла одобрений, если оно держится на реплике пользователя; иначе пусто и
 // ошибка: errApprovalRejected — строка есть, но не принята (причина — в письме лиду), иначе — файл не прочитан.
 func approvedCodexChecked(ctx context.Context, cache *approvalCache, resolve userRefResolver, path string, resetsAt time.Time) (string, error) {
-	src, err := approvedCodex(ctx, path, resetsAt)
+	src, err := approvedCodex(path, resetsAt)
 	if err != nil || src == "" {
 		return "", err
 	}

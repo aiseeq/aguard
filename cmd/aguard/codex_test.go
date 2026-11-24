@@ -233,7 +233,7 @@ func TestCodexArmedFakeAppServer(t *testing.T) {
 	var logs strings.Builder
 	a := &app{home: dir, stateDir: filepath.Join(dir, "state"), uid: 1000,
 		reg: session.Registry{Dir: filepath.Join(dir, "sessions"), ProcRoot: dir}, log: slog.New(slog.NewTextHandler(&logs, nil)),
-		codexConsume: consumeCodex, codexApproved: approvedCodex}
+		codexConsume: consumeCodex, codexApproved: func(_ context.Context, path string, at time.Time) (string, error) { return approvedCodex(path, at) }}
 	if err := os.MkdirAll(a.dir("codex"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +474,7 @@ func TestApprovedCodexAcrossMinute(t *testing.T) {
 		{time.Date(2026, 11, 8, 14, 40, 0, 0, time.UTC), ""},
 		{time.Date(2026, 11, 8, 14, 38, 0, 0, time.UTC), ""},
 	} {
-		got, err := approvedCodex(context.Background(), path, c.at)
+		got, err := approvedCodex(path, c.at)
 		if err != nil {
 			t.Fatal(err)
 		}
