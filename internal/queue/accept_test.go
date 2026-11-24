@@ -40,6 +40,7 @@ func TestAccountsWindow(t *testing.T) {
 type world struct {
 	live, free map[string]bool
 	asked      map[string]int
+	home       string
 	mode       string
 	now        time.Time
 	BootAt     time.Time
@@ -57,7 +58,7 @@ func newWorld(mode string) *world {
 
 func (w *world) view() View {
 	return View{
-		Now: w.now, BootAt: w.BootAt, BootGrace: w.BootGrace, CritCopyAfter: 15 * time.Minute, Lead: "lead", Rest: w.rest,
+		Now: w.now, Home: w.home, BootAt: w.BootAt, BootGrace: w.BootGrace, CritCopyAfter: 15 * time.Minute, Lead: "lead", Rest: w.rest,
 		Serious: func(project string) bool { return w.mode == ModeOn },
 		Alive:   func(n string) bool { return w.live[n] },
 		Free:    func(n string) bool { w.asked[n]++; return w.free[n] },

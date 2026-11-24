@@ -219,8 +219,7 @@ type Ticket struct {
 	// ActorNotes — время последней записи каждого автора журнала из tk ls --json: свежая запись живого автора
 	// (adminFreshActorNote) держит тикет от предложения админу, пока автор ставит задачу.
 	ActorNotes map[string]time.Time
-	// BlockedBy — тикеты, которые мастер поставил перед этим (tk set X --blocks Y, tk ls --json blocked_by): имя тикета
-	// той же папки или git/<проект>/<имя> другой; очередь опознаёт только первые.
+	// BlockedBy — тикеты, которые мастер поставил перед этим (tk set X --blocks Y, tk ls --json blocked_by).
 	BlockedBy []string
 	Overdue   bool // «ждёт», и срок ожидания прошёл (tk ls --json overdue)
 	WaitDue   bool // у «ждёт» есть разбираемый срок (tk ls --json due); без срока overdue всегда false
@@ -246,6 +245,7 @@ const (
 
 type View struct {
 	Now                  time.Time
+	Home                 string
 	BootAt               time.Time
 	BootGrace            time.Duration
 	CritCopyAfter        time.Duration
@@ -265,6 +265,7 @@ type View struct {
 
 	restingSessions map[string]bool // сессии этих папок в такой день, считает Step
 	movingBlockers  map[string]bool // папка + "\x00" + имя тикета, который движется (blockerMoving); считает Step
+	blockerTickets  map[string]bool // все распознанные имена блокеров из прохода
 }
 
 func (v View) bootGrace() bool {
@@ -371,6 +372,7 @@ func (s *State) Step(ts []Ticket, v View) []Notice {
 	s.init()
 	v.restingSessions = restingSessions(ts, v)
 	v.movingBlockers = movingBlockers(ts, v)
+	v.blockerTickets = blockerTickets(ts)
 	s.captureTransfers(ts, v.Now)
 	var out []Notice
 	wasSeed := s.Seeded
@@ -554,6 +556,20 @@ func movingBlockers(ts []Ticket, v View) map[string]bool {
 	for i := range ts {
 		if blockerMoving(ts[i], v) {
 			out[ts[i].Dir+"\x00"+ts[i].Slug] = true
+			if name := filepath.Base(ts[i].Key); name != "." && name != "/" {
+				out[ts[i].Dir+"\x00"+name] = true
+			}
+		}
+	}
+	return out
+}
+
+func blockerTickets(ts []Ticket) map[string]bool {
+	out := make(map[string]bool, len(ts)*2)
+	for i := range ts {
+		out[ts[i].Dir+"\x00"+ts[i].Slug] = true
+		if name := filepath.Base(ts[i].Key); name != "." && name != "/" {
+			out[ts[i].Dir+"\x00"+name] = true
 		}
 	}
 	return out
@@ -574,15 +590,35 @@ func blockerMoving(t Ticket, v View) bool {
 	return false
 }
 
-// blockedByMoving — мастер поставил перед тикетом другой (tk set X --blocks Y), и тот движется: тикет ждёт его по
-// tk guide, это не «не взят». Блокер из другой папки tk пишет как git/<проект>/<имя> — с ним письмо идёт, как раньше.
-func blockedByMoving(t Ticket, v View) bool {
+func blockerLocation(ref string, t Ticket, home string) (string, string, bool) {
+	parts := strings.Split(ref, "/")
+	if len(parts) == 1 && parts[0] != "" {
+		return t.Dir, parts[0], true
+	}
+	if len(parts) != 3 || (parts[0] != "git" && parts[0] != "work") || parts[1] == "" || parts[2] == "" || home == "" || filepath.Base(parts[1]) != parts[1] || parts[1] == "." || parts[1] == ".." {
+		return "", "", false
+	}
+	return filepath.Join(home, parts[0], parts[1]), parts[2], true
+}
+
+// blockedByMoving — найденный движущийся блокер означает, что тикет ждёт его; отсутствующая связь помечается в письме админу.
+func blockedByMoving(t Ticket, v View) (bool, []string) {
+	var missing []string
 	for _, b := range t.BlockedBy {
-		if v.movingBlockers[t.Dir+"\x00"+b] {
-			return true
+		dir, id, ok := blockerLocation(b, t, v.Home)
+		if !ok {
+			missing = append(missing, b)
+			continue
+		}
+		key := dir + "\x00" + id
+		if v.movingBlockers[key] {
+			return true, nil
+		}
+		if !v.blockerTickets[key] {
+			missing = append(missing, b)
 		}
 	}
-	return false
+	return false, missing
 }
 
 func resetCancelOnReopen(st *ticketState, t Ticket, working bool) {
@@ -900,8 +936,16 @@ func (s *State) highNotices(t Ticket, st *ticketState, v View) []Notice {
 		line := fmt.Sprintf("aguard: HIGH %s/%s — %s. tk next", t.Project, t.Slug, t.Title)
 		out = append(out, notice(t, v, KindHigh, t.Master, line))
 	}
-	if age >= highWait && !t.Started && !masterNoted(t, v.Now) && !blockedByMoving(t, v) {
-		out = append(out, s.highAdminNotice(t, st, v, "не взят за 4 ч, мастер "+t.Master)...)
+	if age >= highWait && !t.Started && !masterNoted(t, v.Now) {
+		waiting, missing := blockedByMoving(t, v)
+		if !waiting {
+			var reason strings.Builder
+			reason.WriteString("не взят за 4 ч, мастер " + t.Master)
+			for _, ref := range missing {
+				reason.WriteString("; связь " + ref + " не найдена")
+			}
+			out = append(out, s.highAdminNotice(t, st, v, reason.String())...)
+		}
 	}
 	return out
 }

@@ -594,7 +594,7 @@ func queueView(c *config.Config, alive map[string]session.Info, judge queueJudge
 		}
 		return info.ModTime().After(at)
 	}
-	return queue.View{Now: now, Lead: c.Lead, Rest: cfg.Rest(), Log: a.log, CritCopyAfter: cfg.CritCopyAfter.D(),
+	return queue.View{Now: now, Home: a.home, Lead: c.Lead, Rest: cfg.Rest(), Log: a.log, CritCopyAfter: cfg.CritCopyAfter.D(),
 		Frozen:   func(dir string) (bool, error) { return frozen[filepath.Clean(dir)], frozenErr },
 		Projects: func() []queue.Ticket { return a.queueWakeProjects(c) },
 		Serious:  func(project string) bool { return slices.Contains(live, project) },
