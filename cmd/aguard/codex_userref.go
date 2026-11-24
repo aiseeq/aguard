@@ -71,6 +71,10 @@ func userWords(ev userEvent) string {
 // errApprovalRejected — строка одобрения на окно есть, но не держится на реплике пользователя.
 var errApprovalRejected = errors.New("одобрение не принято")
 
+// errTLUnavailable — tl не ответил (таймаут, не запустился): строку не проверить на этом проходе, но это не отказ —
+// следующий проход проверит её заново, и лиду переписывать нечего.
+var errTLUnavailable = errors.New("tl не ответил")
+
 // checkCodexApproval — текст одобрения держится на реплике пользователя в одобряемом окне: есть цитата «…» не короче
 // codexQuoteMin знаков и ссылка tl на реплику (user или ask), сказанную после начала окна (resetsAt − неделя) и не
 // позже now, и каждая цитата — из неё. Ссылок несколько (письмо лида и слово пользователя) — годится любая.
@@ -91,9 +95,13 @@ func checkCodexApproval(ctx context.Context, resolve userRefResolver, source str
 	}
 	start := resetsAt.Add(-codexWindow)
 	var why []string
+	var unavailable error
 	for _, ref := range refs {
 		ev, err := resolve(ctx, ref)
 		switch {
+		case errors.Is(err, errTLUnavailable):
+			unavailable = fmt.Errorf("ссылка tl %s: %w", ref, err)
+			continue
 		case err != nil:
 			why = append(why, fmt.Sprintf("ссылка tl %s: %v", ref, err))
 			continue
@@ -117,6 +125,9 @@ func checkCodexApproval(ctx context.Context, resolve userRefResolver, source str
 			return nil
 		}
 		why = append(why, fmt.Sprintf("цитаты «%s» нет в реплике tl %s", missing, ref))
+	}
+	if unavailable != nil { // непроверенная ссылка могла бы держать строку: отказа нет, повтор на следующем проходе
+		return unavailable
 	}
 	return errors.New(strings.Join(why, "; "))
 }
@@ -152,6 +163,9 @@ func approvedCodexChecked(ctx context.Context, cache *approvalCache, resolve use
 		return src, nil
 	}
 	if err := checkCodexApproval(ctx, resolve, src, resetsAt, time.Now()); err != nil {
+		if errors.Is(err, errTLUnavailable) {
+			return "", fmt.Errorf("окно %s: %w", resetsAt.Format(time.RFC3339), err)
+		}
 		return "", fmt.Errorf("%w: окно %s: %w", errApprovalRejected, resetsAt.Format(time.RFC3339), err)
 	}
 	cache.mu.Lock()
@@ -178,10 +192,11 @@ func tlUserRef(ctx context.Context, ref string) (userEvent, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if errors.As(err, &ee) && ctx.Err() == nil && ee.Exited() {
+			// tl ответил кодом (1 — нет строки, 2 — нет сессии): это ответ о ссылке, не сбой
 			return userEvent{}, fmt.Errorf("tl: %w: %s", err, strings.TrimSpace(string(ee.Stderr)))
 		}
-		return userEvent{}, fmt.Errorf("tl: %w", err)
+		return userEvent{}, fmt.Errorf("%w: %w", errTLUnavailable, err)
 	}
 	return parseTLEvent(string(out), ref)
 }

@@ -324,9 +324,12 @@ func (a *app) codexReadAll(ctx context.Context, cfg *codexwatch.Config) ([]codex
 		}
 		r.Account = acc
 		if r.Armed, err = a.codexApproved(ctx, acc.Approvals, r.ResetsAt); err != nil {
-			// явный отказ от взвода: без «да» consume не зовётся; причину отказа отправим отдельным уведомлением
+			// без «да» consume не зовётся; письмо лиду — только при отказе строке (ArmRejected): её перепишет он
 			what := "файл одобрений не прочитан — взвод не действует"
-			if errors.Is(err, errApprovalRejected) {
+			switch {
+			case errors.Is(err, errTLUnavailable):
+				what = "tl не ответил — строка «да» не проверена, взвод на этот проход не действует"
+			case errors.Is(err, errApprovalRejected):
 				what = "строка «да» на окно не держится на реплике пользователя — взвод не действует"
 				r.ArmRejected = err.Error()
 			}
@@ -389,7 +392,7 @@ func (a *app) codexAccount(ctx context.Context, cfg *codexwatch.Config, r codexw
 	for _, n := range notices {
 		if n.Kind != codexwatch.KindRejected {
 			a.log.Info(n.Message)
-			a.note("codex", string(n.Kind), "", r.Account.Name, 0, "")
+			a.note("codex", codexNoteKind(n.Kind), "", r.Account.Name, 0, "")
 			continue
 		}
 		kind := codexGuideKind(n.Kind)
@@ -411,6 +414,14 @@ func (a *app) codexAccount(ctx context.Context, cfg *codexwatch.Config, r codexw
 	}
 	a.codexDeliver(ctx, cfg, &st)
 	return consume, st.Save(statePath)
+}
+
+// codexNoteKind — вид строки учёта: прогноз 100% — «forecast», а не «warn», иначе отчёт считает его предупреждением демона.
+func codexNoteKind(k codexwatch.Kind) string {
+	if k == codexwatch.KindWarn {
+		return "forecast"
+	}
+	return string(k)
 }
 
 // codexConsumeNow — consume с ключом окна; false — ответа нет, повтор на следующем проходе. mode=log — только строка.

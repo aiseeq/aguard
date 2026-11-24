@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,5 +179,57 @@ func TestParseTLEvent(t *testing.T) {
 	}
 	if _, err := parseTLEvent("--- 99.99.2026 14:50:04 CET ff4b27b6:298 user\nx\n", "ff4b27b6:298"); err == nil {
 		t.Fatal("битое время принято")
+	}
+}
+
+// Сбой tl (таймаут, не запустился) — не отказ строке: письма лиду «перепишите строку» нет, следующий проход проверит
+// её заново; отказ по другой ссылке при непроверенной тоже не отказ — непроверенная могла бы строку держать.
+func TestApprovedCodexTLUnavailableNotRejected(t *testing.T) {
+	resetsAt := time.Now().Add(48 * time.Hour).Truncate(time.Second)
+	path := filepath.Join(t.TempDir(), "approved.tsv")
+	if err := os.WriteFile(path, []byte(resetsAt.Format(time.RFC3339)+"\t«сбрось при 100%» (tl 0badbad0:1, tl abcdef12:7)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	down := true
+	resolve := func(_ context.Context, ref string) (userEvent, error) {
+		switch {
+		case ref == "0badbad0:1":
+			return userEvent{}, errors.New("tl: exit status 1")
+		case down:
+			return userEvent{}, fmt.Errorf("%w: %w", errTLUnavailable, context.DeadlineExceeded)
+		}
+		return userEvent{At: time.Now().Add(-time.Hour), Role: "user", Text: "сбрось при 100%"}, nil
+	}
+	check := (&approvalCache{}).checker(resolve)
+	src, err := check(context.Background(), path, resetsAt)
+	if src != "" || err == nil || errors.Is(err, errApprovalRejected) || !errors.Is(err, errTLUnavailable) {
+		t.Fatalf("сбой tl: %q %v, ждали errTLUnavailable без отказа", src, err)
+	}
+	down = false
+	if src, err := check(context.Background(), path, resetsAt); err != nil || src == "" {
+		t.Fatalf("после сбоя tl строка не взвела: %q %v", src, err)
+	}
+}
+
+// tlUserRef: код выхода tl — ответ о ссылке (отказ), таймаут — сбой tl.
+func TestTLUserRefExitVersusTimeout(t *testing.T) {
+	dir := t.TempDir()
+	tl := filepath.Join(dir, "tl")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(tl, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	write("echo 'no event' >&2; exit 1")
+	if _, err := tlUserRef(context.Background(), "abcdef12:7"); err == nil || errors.Is(err, errTLUnavailable) {
+		t.Fatalf("код 1: %v, ждали ответ о ссылке", err)
+	}
+	write("exec sleep 5")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := tlUserRef(ctx, "abcdef12:7"); !errors.Is(err, errTLUnavailable) {
+		t.Fatalf("таймаут: %v, ждали errTLUnavailable", err)
 	}
 }

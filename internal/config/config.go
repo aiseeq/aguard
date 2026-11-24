@@ -62,7 +62,7 @@ type Config struct {
 	IO        iowatch.Config        `toml:"io"`         // телеметрия диска, свопа и фризов
 	GUI       guiwatch.Config       `toml:"gui"`        // потоки графического интерфейса
 	Remote    remotebroken.Config   `toml:"remote"`     // сломанный путь graft на PC: письмо владельцу и сводка лиду
-	Codex     codexwatch.Config     `toml:"codex"`      // недельный лимит Codex: письмо лиду перед досрочным 100% и при нём
+	Codex     codexwatch.Config     `toml:"codex"`      // недельный лимит Codex: журнал прогноза 100%, сброс по «да» на окно
 	Queue     queue.Config          `toml:"queue"`
 	Night     night.Config          `toml:"night"` // Сон, Дайджест и окна доверия
 	Liveness  liveness.Config       `toml:"liveness"`

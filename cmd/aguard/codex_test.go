@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aiseeq/aguard/internal/activity"
 	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/akit/session"
 )
@@ -780,5 +781,15 @@ func TestCodexRejectedRetriesAfterFailedSendOncePerWindow(t *testing.T) {
 	st, err = codexwatch.LoadState(statePath)
 	if err != nil || !st.Rejected {
 		t.Fatalf("после успешной отправки Rejected=%v, ошибка %v", st.Rejected, err)
+	}
+}
+
+// Строка учёта о прогнозе 100% не совпадает с видом предупреждения демона: отчёт иначе посчитал бы её сбоем.
+func TestCodexNoteKindForecastNotWarn(t *testing.T) {
+	if got := codexNoteKind(codexwatch.KindWarn); got == activity.KindWarn || got != "forecast" {
+		t.Fatalf("вид строки прогноза %q", got)
+	}
+	if got := codexNoteKind(codexwatch.KindFull); got != "full" {
+		t.Fatalf("вид строки 100%% %q", got)
 	}
 }

@@ -222,12 +222,12 @@ func (s *State) Apply(r Reading, c *Config) (Forecast, []Notice, bool) {
 	s.record(r)
 	f := s.forecast(r)
 	out, consume := s.decide(r, f, c)
-	if r.ArmRejected != "" && !s.Rejected {
-		s.Rejected = true
-		out = append([]Notice{{KindRejected, approvalTail(r)}}, out...)
-	}
 	for i := range out { // решение о сбросе — с запасом других учёток: простой этой не значит простой бойцов
 		out[i] = Notice{out[i].Kind, out[i].Message + r.Others}
+	}
+	if r.ArmRejected != "" && !s.Rejected { // письмо лиду — только о строке, без сведений о лимитах
+		s.Rejected = true
+		out = append([]Notice{{KindRejected, rejectedText(r)}}, out...)
 	}
 	return f, out, consume
 }
@@ -402,6 +402,11 @@ func approvalTail(r Reading) string {
 	}
 	return fmt.Sprintf(" Строки «да» на это окно (плановый сброс %s) в файле одобрений %s нет.",
 		r.ResetsAt.Local().Format("02.01 15:04"), r.Account.Approvals)
+}
+
+// rejectedText — письмо лиду: строку «да» учётки aguard не принял, её надо переписать.
+func rejectedText(r Reading) string {
+	return fmt.Sprintf("aguard codex: учётка %s:%s", r.Account.Name, approvalTail(r))
 }
 
 func fullText(r Reading, idle time.Duration) string {

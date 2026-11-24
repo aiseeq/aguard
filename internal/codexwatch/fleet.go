@@ -29,7 +29,7 @@ func (f *Fleet) Apply(rs []Reading, failed []string) string {
 			return ""
 		}
 	}
-	if f.AllOut || len(failed) > 0 || len(rs) < 2 { // одна учётка — не «все»: о ней говорят её письма
+	if f.AllOut || len(failed) > 0 || len(rs) < 2 { // одна учётка — не «все»: о ней говорят её строки журнала
 		return ""
 	}
 	f.AllOut = true
@@ -39,10 +39,10 @@ func (f *Fleet) Apply(rs []Reading, failed []string) string {
 		parts = append(parts, fmt.Sprintf("%s — плановый сброс %s, досрочных %d", r.Account.Name, local(r.ResetsAt), r.Available))
 	}
 	return "aguard codex: все учётки Codex без лимита: " + strings.Join(parts, "; ") +
-		". worker отказывает новым задачам моделей Codex (sol, terra, luna): задачу — бойцу Opus (Agent fighter)."
+		"."
 }
 
-// Others — запас других учёток для письма об учётке self; других нет — пусто.
+// Others — запас других учёток для строки журнала об учётке self; других нет — пусто.
 func Others(rs []Reading, failed []string, self string) string {
 	var parts []string
 	for i := range rs {
