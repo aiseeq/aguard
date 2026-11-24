@@ -488,24 +488,50 @@ func TestDeliveredWakeCancellationLifecycle(t *testing.T) {
 		t.Fatalf("будильник мастеру: %+v", ns)
 	}
 	s.Confirm(ns[0], view)
-	if st := s.Tickets[tk.Key]; st == nil || st.DeliveredTo != "m-master" || st.DeliveredSession != "session-1" {
-		t.Fatalf("подтверждённая доставка не сохранена: %+v", st)
+	if d, ok := s.Delivered[tk.Key]; !ok || d.To != "m-master" {
+		t.Fatalf("подтверждённая доставка не сохранена отдельно: %+v", s.Delivered)
+	}
+	if _, ok := s.Tickets[tk.Key]; ok {
+		t.Fatalf("будильник MED создал ticketState: %+v", s.Tickets[tk.Key])
 	}
 
 	rejected := tk
-	rejected.Status, rejected.CancelAuthor, rejected.CancelReason, rejected.CancelJournalRead = "отклонён", "other-author", "проверка причины", true
+	rejected.Status = "отклонён"
+	if !s.NeedsCancelJournal(rejected) {
+		t.Fatal("доставленный MED требует чтения журнала отклонения")
+	}
+	s.RememberCancelJournal(tk.Key, "other-author", "проверка причины")
+	author, reason, ok := s.CancelJournal(tk.Key)
+	if !ok || author != "other-author" || reason != "проверка причины" {
+		t.Fatalf("журнал доставки закеширован отдельно: %q %q %v", author, reason, ok)
+	}
+	rejected.CancelAuthor, rejected.CancelReason, rejected.CancelJournalRead = author, reason, true
 	view.Alive = func(name string) bool { return name == "m-master" }
 	ns = s.Step([]Ticket{rejected}, view)
 	if len(ns) != 1 || ns[0].Kind != KindCancel || ns[0].To != "m-master" || !strings.Contains(ns[0].Line, "проверка причины") {
 		t.Fatalf("отмена доставленного тикета мастеру: %+v", ns)
 	}
 	s.Confirm(ns[0], view)
+	view.Next = func(string, string) (Ticket, bool, error) { return Ticket{}, false, nil }
 	if ns := s.Step([]Ticket{rejected}, view); len(ns) != 0 {
 		t.Fatalf("повтор отмены: %+v", ns)
 	}
 }
 
-func TestDeliveredWakeCancellationByRecipientIsSilent(t *testing.T) {
+func TestLogOnlyWakeDoesNotCreateDelivery(t *testing.T) {
+	s := State{}
+	v := newWorld(ModeOn).view()
+	n := Notice{Kind: KindWake, Key: "m/x", To: "m-master", Session: "session-1", Serious: true}
+	s.ConfirmUnsent(n, v)
+	if len(s.Delivered) != 0 {
+		t.Fatalf("логовое письмо записано как доставленное: %+v", s.Delivered)
+	}
+	if s.Wakes["m-master"].Ticket != n.Key {
+		t.Fatalf("обычная wake-отметка не сохранена: %+v", s.Wakes)
+	}
+}
+
+func TestDeliveredWakeCancellationByDeadRecipientIsSilent(t *testing.T) {
 	w := newWorld(ModeOn)
 	w.live["m-master"], w.free["m-master"] = true, true
 	tk := tick("MED", "открыт")
@@ -517,9 +543,15 @@ func TestDeliveredWakeCancellationByRecipientIsSilent(t *testing.T) {
 	s := seeded(w)
 	ns := s.Step([]Ticket{tk}, view)
 	s.Confirm(ns[0], view)
+	w.live["m-master"] = false
 	tk.Status, tk.CancelAuthor, tk.CancelJournalRead = "отклонён", "m-master", true
+	view.Next = func(string, string) (Ticket, bool, error) { return Ticket{}, false, nil }
 	if ns := s.Step([]Ticket{tk}, view); has(ns, KindCancel, "m-master") {
-		t.Fatalf("сам отменил, письмо не нужно: %+v", ns)
+		t.Fatalf("мёртвый адресат сам отменил, мастеру писать нельзя: %+v", ns)
+	}
+	w.live["m-master"] = true
+	if ns := s.Step([]Ticket{tk}, w.view()); has(ns, KindCancel, "m-master") {
+		t.Fatalf("получатель доставки отклонил сам, мастеру не писать: %+v", ns)
 	}
 }
 
@@ -552,22 +584,38 @@ func TestUndeliveredOrNonFirstOpenTicketDoesNotNotifyOnRejection(t *testing.T) {
 	if !has(ns, KindWake, "m-master") {
 		t.Fatalf("ожидаемый неподтверждённый будильник: %+v", ns)
 	}
-	view.Alive = func(name string) bool { return name != "m-master" }
+	view.Alive = func(name string) bool { return name == "m-master" }
+	view.Next = func(string, string) (Ticket, bool, error) { return Ticket{}, false, nil }
 	if ns := unsent.Step([]Ticket{tk}, view); has(ns, KindCancel, "m-master") {
 		t.Fatalf("неподтверждённая доставка не должна уведомлять: %+v", ns)
 	}
 }
 
-func TestDeliveredCancellationFallsBackToProjectMaster(t *testing.T) {
+func TestCritCopyDoesNotChangeDeliveredRecipient(t *testing.T) {
 	w := newWorld(ModeOn)
 	tk := tick("MED", "отклонён")
 	tk.CancelAuthor, tk.CancelReason, tk.CancelJournalRead = "other-author", "причина", true
 	s := seeded(w)
-	notice := Notice{Kind: KindCritCopy, Key: tk.Key, To: "lead", Serious: true}
-	s.Confirm(notice, w.view())
+	view := w.view()
+	s.Confirm(Notice{Kind: KindCrit, Key: tk.Key, To: "m-master", Serious: true}, view)
+	s.Confirm(Notice{Kind: KindCritCopy, Key: tk.Key, To: "lead", Serious: true}, view)
+	if d := s.Delivered[tk.Key]; d.To != "m-master" {
+		t.Fatalf("копия лида перезаписала адресата: %+v", d)
+	}
+	if ns := step(s, []Ticket{tk}, w); !has(ns, KindCancel, "m-master") || has(ns, KindCancel, "lead") {
+		t.Fatalf("отмена должна идти мастеру, не лиду: %+v", ns)
+	}
+}
+
+func TestDeliveredCancellationFallsBackWhenRecipientDies(t *testing.T) {
+	w := newWorld(ModeOn)
+	tk := tick("MED", "отклонён")
+	tk.CancelAuthor, tk.CancelReason, tk.CancelJournalRead = "other-author", "причина", true
+	s := seeded(w)
+	s.Confirm(Notice{Kind: KindCrit, Key: tk.Key, To: "lead", Serious: true}, w.view())
 	w.live["lead"] = false
 	if ns := step(s, []Ticket{tk}, w); !has(ns, KindCancel, "m-master") {
-		t.Fatalf("мёртвый адресат будильника должен переключиться на мастера проекта: %+v", ns)
+		t.Fatalf("мертвый получатель должен переключиться на мастера проекта: %+v", ns)
 	}
 }
 
@@ -587,21 +635,40 @@ func TestDeliveredWakeIsClearedOnReopenAndCanNotifyAgain(t *testing.T) {
 	ns = s.Step([]Ticket{tk}, view)
 	s.Confirm(ns[0], view)
 	tk.Status = "открыт"
-	if ns := s.Step([]Ticket{tk}, view); len(ns) != 0 {
-		t.Fatalf("переоткрытие само по себе не отменяет будильник: %+v", ns)
+	if _, ok := s.Delivered[tk.Key]; ok {
+		t.Fatalf("переоткрытие сбросило доставку: %+v", s.Delivered[tk.Key])
 	}
-	if st := s.Tickets[tk.Key]; st != nil && st.DeliveredTo != "" {
-		t.Fatalf("переоткрытие сбросило доставку: %+v", st)
-	}
-	view.Session = func(string) string { return "session-2" }
 	ns = s.Step([]Ticket{tk}, view)
 	if !has(ns, KindWake, "m-master") {
-		t.Fatalf("новая сессия получает новый будильник: %+v", ns)
+		t.Fatalf("переоткрытие получает новый будильник в той же сессии: %+v", ns)
 	}
 	s.Confirm(ns[0], view)
+	view.Next = func(string, string) (Ticket, bool, error) { return Ticket{}, false, nil }
 	tk.Status, tk.CancelAuthor, tk.CancelJournalRead = "отклонён", "other-author", true
 	if ns := s.Step([]Ticket{tk}, view); !has(ns, KindCancel, "m-master") {
 		t.Fatalf("повторно отклонённый доставленный тикет уведомляет: %+v", ns)
+	}
+}
+
+func TestDeliveredMEDPromotedToHighStartsHighClockAtPromotion(t *testing.T) {
+	w := newWorld(ModeOn)
+	w.free["m-master"] = true
+	tk := tick("MED", "открыт")
+	tk.Dir = "/m"
+	view := w.view()
+	view.WakeFree = func(string) bool { return true }
+	view.Session = func(string) string { return "session-1" }
+	view.Next = func(string, string) (Ticket, bool, error) { return tk, true, nil }
+	s := seeded(w)
+	ns := s.Step([]Ticket{tk}, view)
+	if !has(ns, KindWake, "m-master") {
+		t.Fatalf("MED получил будильник: %+v", ns)
+	}
+	s.Confirm(ns[0], view)
+	w.now = w.now.Add(5 * time.Hour)
+	tk.Prio = "HIGH"
+	if ns := step(s, []Ticket{tk}, w); !has(ns, KindHigh, "m-master") || has(ns, KindHighAdmin, "git-admin") {
+		t.Fatalf("HIGH начинает отсчёт при повышении приоритета: %+v", ns)
 	}
 }
 

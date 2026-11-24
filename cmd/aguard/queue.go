@@ -617,7 +617,7 @@ func (a *app) deliverQueueNotices(c *config.Config, alive map[string]session.Inf
 	groups := map[string][]queue.Notice{}
 	for _, n := range notices {
 		if !n.Serious || cfg.Mode == queue.ModeLog {
-			state.Confirm(n, view)
+			state.ConfirmUnsent(n, view)
 			a.queueJournal(n, now)
 			a.log.Info("aguard queue: написал бы", "kind", n.Kind, "to", n.To, "key", n.Key, "line", n.Line)
 			a.note("queue", "would_send", n.Key, n.To, 1, "notice")
