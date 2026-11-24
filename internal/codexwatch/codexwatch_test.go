@@ -751,4 +751,16 @@ func TestReviewCodexWarnAndFullLetters(t *testing.T) {
 		t.Fatalf("письмо 100%%:\n%s\nожидалось:\n%s", got, wantFull)
 	}
 
+	// строка «да» есть, но не принята: письмо называет её и причину, а не «строки нет»
+	full.ArmRejected = "нет цитаты"
+	got := fullText(full, planned.Sub(at))
+	for _, want := range []string{"в файле одобрений " + acct.Approvals + " есть, но aguard её не принял: нет цитаты.", "aguard codex approve"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("письмо 100%% с отказом строки:\n%s\nнет %q", got, want)
+		}
+	}
+	if strings.Contains(got, "Строки «да» на это окно") {
+		t.Fatalf("письмо с отказом строки говорит, что строки нет:\n%s", got)
+	}
+
 }

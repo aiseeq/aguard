@@ -25,7 +25,7 @@ func TestCodexAccountsRetryOwnKeys(t *testing.T) {
 		"personal": limit(100, reset, 1),
 	})
 	cfg.Mode = codexwatch.ModeAlert
-	a.codexApproved = func(string, time.Time) (string, error) { return "да", nil }
+	a.codexApproved = func(context.Context, string, time.Time) (string, error) { return "да", nil }
 	a.codexNote = func(context.Context, string, string, string, string) error { return nil }
 	calls := map[string][]string{}
 	a.codexConsume = func(_ context.Context, _, home, key string) (string, error) {

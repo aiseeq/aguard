@@ -118,6 +118,8 @@ type Reading struct {
 	Allowed   bool      // ordinaryUsageAllowed
 	Available int       // доступных досрочных сбросов
 	Armed     string    // «да» пользователя на это окно (источник из файла одобрений); пусто — не взведено
+	// ArmRejected — строка «да» на окно в файле есть, но не держится на реплике пользователя: причина отказа.
+	ArmRejected string
 }
 
 // Sample — замер в истории окна.
@@ -386,6 +388,13 @@ func fullFacts(r Reading, idle time.Duration) string {
 }
 
 func approvalTail(r Reading) string {
+	if r.ArmRejected != "" {
+		return fmt.Sprintf(" Строка «да» на это окно (плановый сброс %s) в файле одобрений %s есть, но aguard её не "+
+			"принял: %s. Пока строка не держится на реплике пользователя (цитата «…» из неё и ссылка tl на неё), "+
+			"aguard не сбросит. Если причина — сбой tl, строка проверяется заново на каждом проходе; иначе запись — "+
+			"`aguard codex approve` (coordinator, «Лимиты и темп»).",
+			r.ResetsAt.Local().Format("02.01 15:04"), r.Account.Approvals, r.ArmRejected)
+	}
 	return fmt.Sprintf(" Строки «да» на это окно (плановый сброс %s) в файле одобрений %s нет — aguard не сбросит; "+
 		"появится — сбросит сам при 100%%, если до планового сброса больше суток. Действий не нужно: за лимитом следит "+
 		"пользователь, сброс ему не предлагать (coordinator, «Лимиты и темп»).",

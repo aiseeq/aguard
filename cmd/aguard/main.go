@@ -138,12 +138,13 @@ type app struct {
 	queueWorkers         func() ([]string, error)
 	namesMem             namesMemory // таблица имён cl: прошлая удачная и письмо лиду о битой
 
-	queueUnsaved       *queue.State   // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
-	codexStep          time.Duration  // шаг codex, выбранный прошлым проходом; 0 — interval
-	codexRead          codexReader    // замер лимита Codex; подменяется в тестах
-	codexConsume       codexConsumer  // досрочный сброс Codex; подменяется в тестах
-	codexApproved      codexApprovals // «да» на окно из файла одобрений
-	codexNote          codexNoter     // строка исхода в тикет
+	queueUnsaved       *queue.State    // прошлая запись state.json не удалась: отметки живут здесь, письма не повторяются
+	codexStep          time.Duration   // шаг codex, выбранный прошлым проходом; 0 — interval
+	codexRead          codexReader     // замер лимита Codex; подменяется в тестах
+	codexConsume       codexConsumer   // досрочный сброс Codex; подменяется в тестах
+	codexApproved      codexApprovals  // «да» на окно из файла одобрений
+	codexUserRef       userRefResolver // реплика по ссылке tl для approve; nil — tl
+	codexNote          codexNoter      // строка исхода в тикет
 	codexApprovalOpen  func(string, int, os.FileMode) (*os.File, error)
 	codexApprovalWrite func(*os.File, []byte) (int, error)
 	sigSource          sigguardSource
@@ -188,7 +189,7 @@ func main() {
 		units:         systemdUnits{},
 		codexRead:     readCodex,
 		codexConsume:  consumeCodex,
-		codexApproved: approvedCodex,
+		codexApproved: defaultCodexApprovals(),
 		codexNote:     noteTicket,
 	}
 	a.strayRead = a.readStrays

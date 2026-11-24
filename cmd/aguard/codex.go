@@ -30,7 +30,7 @@ type codexReader func(ctx context.Context, codex, home string, now time.Time) (c
 type codexConsumer func(ctx context.Context, codex, home, key string) (string, error)
 
 // codexApprovals — «да» пользователя на окно с плановым сбросом resetsAt из файла одобрений; "" — нет.
-type codexApprovals func(path string, resetsAt time.Time) (string, error)
+type codexApprovals func(ctx context.Context, path string, resetsAt time.Time) (string, error)
 
 // codexNoter — строка в тикет ~/git через tk.
 type codexNoter func(ctx context.Context, tk, root, ticket, text string) error
@@ -66,7 +66,7 @@ func consumeCodex(ctx context.Context, codex, home, key string) (string, error) 
 }
 
 // approvedCodex — «да» на окно: строка ближе codexlimit.ApprovalTolerance к resetsAt (akit/codexlimit, общий с dreamstats).
-func approvedCodex(path string, resetsAt time.Time) (string, error) {
+func approvedCodex(_ context.Context, path string, resetsAt time.Time) (string, error) {
 	ap, err := codexlimit.ReadApproved(path)
 	if err != nil {
 		return "", fmt.Errorf("одобрения сброса: %w", err)
@@ -134,6 +134,14 @@ func (a *app) codexApprove(ctx context.Context, cfg *codexwatch.Config, args []s
 	if !a.currentTime().Before(deadline) {
 		fmt.Fprintf(a.out, "до планового сброса меньше %s: aguard не сбросит; плановый сброс %s\n",
 			bgtask.Span(cfg.MinIdle.D()), r.ResetsAt.Format(time.RFC3339))
+		return resetRefused
+	}
+	resolve := a.codexUserRef
+	if resolve == nil {
+		resolve = tlUserRef
+	}
+	if err := checkCodexApproval(ctx, resolve, said, r.ResetsAt, a.currentTime()); err != nil {
+		fmt.Fprintf(os.Stderr, "aguard codex approve: %v\n", err)
 		return resetRefused
 	}
 	line := r.ResetsAt.Format(time.RFC3339) + "\t" + said
@@ -315,9 +323,14 @@ func (a *app) codexReadAll(ctx context.Context, cfg *codexwatch.Config) ([]codex
 			continue
 		}
 		r.Account = acc
-		if r.Armed, err = a.codexApproved(acc.Approvals, r.ResetsAt); err != nil {
-			// явный отказ от взвода: без «да» consume не зовётся, письма лиду идут как без взвода
-			a.warn("codex", "файл одобрений не прочитан — взвод не действует", "account", acc.Name, "file", acc.Approvals, "err", err)
+		if r.Armed, err = a.codexApproved(ctx, acc.Approvals, r.ResetsAt); err != nil {
+			// явный отказ от взвода: без «да» consume не зовётся; строка есть, но не принята — причина идёт в письмо лиду
+			what := "файл одобрений не прочитан — взвод не действует"
+			if errors.Is(err, errApprovalRejected) {
+				what = "строка «да» на окно не держится на реплике пользователя — взвод не действует"
+				r.ArmRejected = err.Error()
+			}
+			a.warn("codex", what, "account", acc.Name, "file", acc.Approvals, "err", err)
 			r.Armed = ""
 		}
 		readings = append(readings, r)

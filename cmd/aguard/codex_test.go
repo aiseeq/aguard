@@ -217,7 +217,7 @@ func leadLetters(got <-chan string) []string {
 
 // noArming — проход без взвода: одобрений нет, consume и тикет — ошибка теста.
 func noArming(a *app) {
-	a.codexApproved = func(string, time.Time) (string, error) { return "", nil }
+	a.codexApproved = func(context.Context, string, time.Time) (string, error) { return "", nil }
 	a.codexConsume = func(context.Context, string, string, string) (string, error) {
 		panic("consume без взвода")
 	}
@@ -331,7 +331,7 @@ func TestCodexDryRunNoSideEffects(t *testing.T) {
 		t.Fatal(err)
 	}
 	noArming(a)
-	a.codexApproved = func(string, time.Time) (string, error) { return "x", nil } // взведено, но dry не зовёт consume
+	a.codexApproved = func(context.Context, string, time.Time) (string, error) { return "x", nil } // взведено, но dry не зовёт consume
 	now := time.Now()
 	a.codexRead = func(_ context.Context, _, _ string, at time.Time) (codexwatch.Reading, error) {
 		return codexwatch.Reading{At: at, Used: 100, ResetsAt: now.Add(5 * 24 * time.Hour), Available: 1}, nil
@@ -371,7 +371,7 @@ func armedApp(t *testing.T) (*app, *strings.Builder, codexwatch.Config) {
 		t.Fatal(err)
 	}
 	noArming(a)
-	a.codexApproved = func(string, time.Time) (string, error) { return "e7192203:278", nil }
+	a.codexApproved = func(context.Context, string, time.Time) (string, error) { return "e7192203:278", nil }
 	resets := time.Now().Add(5 * 24 * time.Hour)
 	a.codexRead = func(_ context.Context, _, _ string, at time.Time) (codexwatch.Reading, error) {
 		return codexwatch.Reading{At: at, Used: 100, ResetsAt: resets, Available: 1}, nil
@@ -474,7 +474,7 @@ func TestApprovedCodexAcrossMinute(t *testing.T) {
 		{time.Date(2026, 11, 8, 14, 40, 0, 0, time.UTC), ""},
 		{time.Date(2026, 11, 8, 14, 38, 0, 0, time.UTC), ""},
 	} {
-		got, err := approvedCodex(path, c.at)
+		got, err := approvedCodex(context.Background(), path, c.at)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -497,7 +497,7 @@ func twoAccounts(t *testing.T, read map[string]func(time.Time) (codexwatch.Readi
 	a, logs, _ := armedApp(t)
 	cfg := codexwatch.Default(a.home)
 	cfg.Mode, cfg.Lead = codexwatch.ModeLog, "lead"
-	a.codexApproved = func(string, time.Time) (string, error) { return "", nil }
+	a.codexApproved = func(context.Context, string, time.Time) (string, error) { return "", nil }
 	a.codexRead = func(_ context.Context, _, home string, at time.Time) (codexwatch.Reading, error) {
 		for _, acc := range cfg.Accounts {
 			if acc.Home == home {
@@ -550,7 +550,7 @@ func TestCodexArmedOnlyOwnAccount(t *testing.T) {
 	cfg.Mode = codexwatch.ModeAlert
 	liveLead(t, a)
 	personal := cfg.Accounts[1]
-	a.codexApproved = func(path string, _ time.Time) (string, error) {
+	a.codexApproved = func(_ context.Context, path string, _ time.Time) (string, error) {
 		if path == personal.Approvals {
 			return "да на personal", nil
 		}
@@ -709,4 +709,35 @@ func consumeKey(t *testing.T, line string) string {
 		t.Fatalf("строка вызова consume: %v: %s", err, line)
 	}
 	return req.Params.Key
+}
+
+// Строка «да» есть, но не держится на реплике пользователя: consume не зовётся, письмо 100% называет отказ и причину,
+// а не «строки нет»; ошибка чтения файла — прежнее «строки нет».
+func TestCodexRejectedApprovalNamedInLetter(t *testing.T) {
+	reset := time.Now().Add(5 * 24 * time.Hour)
+	a, logs, cfg := twoAccounts(t, map[string]func(time.Time) (codexwatch.Reading, error){
+		"work": limit(100, reset, 1), "personal": limit(100, reset, 1),
+	})
+	cfg.Mode = codexwatch.ModeAlert
+	liveLead(t, a)
+	a.codexApproved = func(_ context.Context, path string, _ time.Time) (string, error) {
+		if path == cfg.Accounts[0].Approvals {
+			return "", fmt.Errorf("%w: tl abcdef12:5 — реплика \"agent\", а не пользователя", errApprovalRejected)
+		}
+		return "", fmt.Errorf("одобрения сброса: битая строка")
+	}
+	a.codexConsume = func(context.Context, string, string, string) (string, error) {
+		t.Fatal("consume при отклонённой строке")
+		return "", nil
+	}
+	if err := a.codexRound(context.Background(), &cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	out := logs.String()
+	for _, want := range []string{"есть, но aguard её не принял: одобрение не принято: tl abcdef12:5", "не держится на реплике пользователя",
+		"Строки «да» на это окно", "файл одобрений не прочитан"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("нет %q в журнале:\n%s", want, out)
+		}
+	}
 }

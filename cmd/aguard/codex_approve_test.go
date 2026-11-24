@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -18,7 +19,15 @@ import (
 	"github.com/aiseeq/akit/codexlimit"
 )
 
-const codexApproveSaid = "«сбрось при 100%» (2026-11-16 13:40 CET, tl abc)"
+const codexApproveSaid = "«сбрось при 100%» (2026-11-16 11:00 CET, tl abcdef12:5)"
+
+// fakeUserRef — реплика пользователя 16.11 10:00 UTC со словами одобрения; другие ссылки — ошибка.
+func fakeUserRef(_ context.Context, ref string) (userEvent, error) {
+	if ref != "abcdef12:5" {
+		return userEvent{}, fmt.Errorf("no event at %s", ref)
+	}
+	return userEvent{At: time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC), Role: "user", Text: "Сбрось при 100%, пожалуйста"}, nil
+}
 
 func TestCodexApproveWritesSelectedAccountAndRejectsRepeat(t *testing.T) {
 	home := t.TempDir()
@@ -26,7 +35,7 @@ func TestCodexApproveWritesSelectedAccountAndRejectsRepeat(t *testing.T) {
 	var out bytes.Buffer
 	a := &app{
 		home: home, cfgPath: config.Path(home), uid: os.Getuid(), out: &out,
-		now: func() time.Time { return at },
+		now: func() time.Time { return at }, codexUserRef: fakeUserRef,
 		codexRead: func(_ context.Context, _, codexHome string, now time.Time) (codexwatch.Reading, error) {
 			if codexHome != filepath.Join(home, ".codex-personal") || !now.Equal(at) {
 				t.Fatalf("codexRead home/time = %q/%s", codexHome, now)
@@ -102,7 +111,7 @@ func approveFixture(t *testing.T, now, resetsAt time.Time) (*app, *codexwatch.Co
 	accounts := codexwatch.Default(home).Accounts
 	cfg := &codexwatch.Config{Mode: codexwatch.ModeAlert, MinIdle: policy.Duration(24 * time.Hour), Accounts: accounts}
 	var out bytes.Buffer
-	a := &app{home: home, out: &out, now: func() time.Time { return now }}
+	a := &app{home: home, out: &out, now: func() time.Time { return now }, codexUserRef: fakeUserRef}
 	a.codexRead = func(context.Context, string, string, time.Time) (codexwatch.Reading, error) {
 		return codexwatch.Reading{ResetsAt: resetsAt}, nil
 	}

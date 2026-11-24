@@ -449,7 +449,7 @@ func TestLettersUseOnlyThreeQuietOutcomes(t *testing.T) {
 func TestOnlyApprovedDeliveryChannelsAndCommands(t *testing.T) {
 	root := moduleRoot(t)
 	allowedNet := map[string]bool{"internal/restart/serve.go": true, "internal/linesock/linesock.go": true, "internal/trackfd/trackfd.go": true}
-	commands := map[string]bool{"sh": true, "systemctl": true, "journalctl": true, "ssh": true, "git": true, "tmux": true, "systemd-run": true, "podman": true, "graft": true}
+	commands := map[string]bool{"sh": true, "systemctl": true, "journalctl": true, "ssh": true, "git": true, "tmux": true, "systemd-run": true, "podman": true, "graft": true, "tl": true}
 	variableCommands := map[string]string{
 		"cmd/cl/supervise.go:compactSession":             "configured systemd-run command",
 		"cmd/cl/supervise.go:start":                      "configured systemd-run command",
@@ -553,7 +553,7 @@ func TestInterruptionRegistryMatchesCode(t *testing.T) {
 		"child.timeout": {
 			"internal/guiwatch/watch.go:journalWindow", "internal/guiwatch/watch.go:kernelJournalWindow", "cmd/aguard/disk.go:diskFacts",
 			"cmd/aguard/ticket.go:findClassTicket", "cmd/aguard/ticket.go:tkRun", "cmd/aguard/codex.go:appServer",
-			"cmd/aguard/codex.go:noteTicket", "cmd/aguard/sigguard.go:startJournal", "cmd/aguard/ceiling.go:ceilingJournalCursor",
+			"cmd/aguard/codex.go:noteTicket", "cmd/aguard/codex_userref.go:tlUserRef", "cmd/aguard/sigguard.go:startJournal", "cmd/aguard/ceiling.go:ceilingJournalCursor",
 			"cmd/aguard/cpu.go:cpuRemote", "cmd/aguard/queue.go:queueTicketNote", "cmd/aguard/queue.go:queueTicketsWithTable", "cmd/aguard/queue.go:queueTicketsProject",
 			"cmd/aguard/queue_wake.go:nextForQueue", "cmd/aguard/queue_wake.go:workerOwners", "cmd/aguard/queue_external.go:readQueueExternal",
 			"cmd/aguard/cpu_stray.go:readStrays", "internal/orphans/stop.go:podmanStop",
