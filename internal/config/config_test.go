@@ -24,6 +24,17 @@ func TestForkguardRejectsActUntilStageTwo(t *testing.T) {
 	}
 }
 
+func TestLoadForkguardIgnoresOtherObserverSettings(t *testing.T) {
+	path := write(t, "[forkguard]\nmode = \"log\"\n[io]\ninterval = \"not-a-duration\"\n")
+	c, err := LoadForkguard(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Mode != "log" || c.Interval.D() != time.Second {
+		t.Fatalf("forkguard settings: %+v", c)
+	}
+}
+
 func TestClaudeTmpDefaults(t *testing.T) {
 	c := Default(home).ClaudeTmp
 	if c.Mode != "log" || c.OutsideMode != "log" || c.Age.D() != 7*24*time.Hour || c.Window != "02:00-05:00" {

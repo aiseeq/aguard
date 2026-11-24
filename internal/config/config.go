@@ -101,6 +101,26 @@ func (c ForkguardConfig) EngineConfig() forkguard.Config {
 	return forkguard.Config{Window: c.Window.D(), Hard: c.Hard, Floor: c.Floor, Rise: c.Rise, SliceWarn: c.SliceWarn}
 }
 
+// LoadForkguard reads only the forkguard table; unrelated observer settings cannot block its sampler.
+func LoadForkguard(path string) (ForkguardConfig, error) {
+	c := ForkguardConfig{Mode: "log", Interval: policy.Duration(time.Second), Window: policy.Duration(10 * time.Second), Hard: 3000, Floor: 1500, Rise: 1000, Slice: "agents.slice", SliceWarn: 80}
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return c, fmt.Errorf("config: %w", err)
+	}
+	if err == nil {
+		var partial struct {
+			Forkguard ForkguardConfig `toml:"forkguard"`
+		}
+		partial.Forkguard = c
+		if _, err := toml.Decode(string(b), &partial); err != nil {
+			return c, fmt.Errorf("%s [forkguard]: %w", path, err)
+		}
+		c = partial.Forkguard
+	}
+	return c, c.Validate()
+}
+
 // QuietConfig — окно тишины после загрузки машины.
 type QuietConfig struct {
 	AfterBoot policy.Duration `toml:"after_boot"`
