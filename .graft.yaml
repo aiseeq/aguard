@@ -35,10 +35,13 @@ tasks:
       - {install: bin/cl}
       - sh: ln -sfn ~/bin/cl ~/bin/cl-oom-prefix
       - sh: install -D -m 0644 deploy/aguard.service ~/.config/systemd/user/aguard.service
+      - sh: install -D -m 0644 deploy/aguard-forkguard.service ~/.config/systemd/user/aguard-forkguard.service
       - sh: install -D -m 0644 cmd/cl/agents.slice ~/.config/systemd/user/agents.slice
       - sh: '[ -f ~/.config/aguard/config.toml ] || install -D -m 0644 deploy/config.example.toml ~/.config/aguard/config.toml'
       - sh: '[ -f ~/.config/cl/config.json ] || install -D -m 0644 cmd/cl/config.json ~/.config/cl/config.json'
       - sh: systemctl --user daemon-reload && systemctl --user enable aguard.service && systemctl --user restart aguard.service
+      - sh: systemctl --user enable aguard-forkguard.service && systemctl --user restart aguard-forkguard.service
+      - sh: 'if ssh -o BatchMode=yes -o ConnectTimeout=10 pc ''mkdir -p ~/.config/systemd/user && cat > ~/.config/systemd/user/aguard-forkguard.service'' < deploy/aguard-forkguard.service && ssh -o BatchMode=yes -o ConnectTimeout=10 pc ''cat > ~/.config/systemd/user/agents.slice'' < cmd/cl/agents.slice && ssh -o BatchMode=yes -o ConnectTimeout=10 pc ''systemctl --user daemon-reload && systemctl --user enable aguard-forkguard.service && systemctl --user restart aguard-forkguard.service''; then :; else echo "warning: PC недоступен, aguard-forkguard и agents.slice на PC не обновлены" >&2; fi'
   # Один раз с отпечатком: помощник с дескрипторами root; им же снимаются старые root-службы, снимки переходят пользователю.
   # Проверка «aguard track check» идёт до снятия: не прошла — старые службы работают как работали. Дальше — обычный graft install.
   install-helper:

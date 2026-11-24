@@ -17,6 +17,13 @@ import (
 
 const home = "/home/u"
 
+func TestForkguardRejectsActUntilStageTwo(t *testing.T) {
+	_, err := Load(write(t, "[forkguard]\nmode = \"act\"\n"), home, 1000)
+	if err == nil || !strings.Contains(err.Error(), "act — этап 2") {
+		t.Fatalf("act error = %v", err)
+	}
+}
+
 func TestClaudeTmpDefaults(t *testing.T) {
 	c := Default(home).ClaudeTmp
 	if c.Mode != "log" || c.OutsideMode != "log" || c.Age.D() != 7*24*time.Hour || c.Window != "02:00-05:00" {

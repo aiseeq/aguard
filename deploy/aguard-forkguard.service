@@ -1,0 +1,15 @@
+[Unit]
+Description=aguard fork avalanche sampler
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/aguard forkguard run
+Restart=always
+RestartSec=5
+CPUWeight=1000
+MemoryMin=64M
+Environment=GOMAXPROCS=1
+
+[Install]
+WantedBy=default.target

@@ -260,6 +260,8 @@ func (a *app) dispatchLate(ctx context.Context, cmd string, args []string) error
 	switch cmd {
 	case "queue":
 		return a.queueCmd(ctx, args)
+	case "forkguard":
+		return a.forkguardCmd(ctx, args)
 	case "night":
 		return a.nightCmd(args)
 	case "liveness":
@@ -277,6 +279,7 @@ func (a *app) dispatchLate(ctx context.Context, cmd string, args []string) error
 func usage() {
 	fmt.Fprintln(os.Stderr, `использование:
   aguard run
+  aguard forkguard run [-for duration] | tick
   aguard guide [вид|наблюдатель]
   aguard orphans tick [-dry-run] [-min-dead 0s]
   aguard tmp tick [-dry-run] | report [-since 24h] | send-test [-to lead] [-dry-run]

@@ -4,6 +4,16 @@
 
 lead = "lead"          # имя сессии лида: верхняя ступень сводок
 
+[forkguard]
+mode = "log"
+interval = "1s"
+window = "10s"
+hard = 3000
+floor = 1500
+rise = 1000
+slice = "agents.slice"
+slice_warn = 80
+
 [quiet]
 after_boot = "45m" # автоматическая тишина после загрузки машины; 0 — отключить окно
 

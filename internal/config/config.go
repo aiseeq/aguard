@@ -21,6 +21,7 @@ import (
 	"github.com/aiseeq/aguard/internal/codexwatch"
 	"github.com/aiseeq/aguard/internal/cpuwatch"
 	"github.com/aiseeq/aguard/internal/disk"
+	"github.com/aiseeq/aguard/internal/forkguard"
 	"github.com/aiseeq/aguard/internal/guiwatch"
 	"github.com/aiseeq/aguard/internal/iowatch"
 	"github.com/aiseeq/aguard/internal/liveness"
@@ -69,6 +70,35 @@ type Config struct {
 	Sigguard  sigguard.Config       `toml:"sigguard"`
 	Ceiling   ceilingwatch.Config   `toml:"ceiling"`
 	Quiet     QuietConfig           `toml:"quiet"`
+	Forkguard ForkguardConfig       `toml:"forkguard"`
+}
+
+type ForkguardConfig struct {
+	Mode      string          `toml:"mode"`
+	Interval  policy.Duration `toml:"interval"`
+	Window    policy.Duration `toml:"window"`
+	Hard      int64           `toml:"hard"`
+	Floor     int64           `toml:"floor"`
+	Rise      int64           `toml:"rise"`
+	Slice     string          `toml:"slice"`
+	SliceWarn int64           `toml:"slice_warn"`
+}
+
+func (c ForkguardConfig) Validate() error {
+	if c.Mode == "act" {
+		return errors.New("act — этап 2")
+	}
+	if c.Mode != "log" {
+		return errors.New("forkguard.mode = log")
+	}
+	if c.Interval.D() <= 0 || c.Window.D() <= 0 || c.Hard <= 0 || c.Floor <= 0 || c.Rise <= 0 || c.Slice == "" || c.SliceWarn < 1 || c.SliceWarn > 100 {
+		return errors.New("forkguard: interval, window, hard, floor, rise, slice заданы; slice_warn от 1 до 100")
+	}
+	return nil
+}
+
+func (c ForkguardConfig) EngineConfig() forkguard.Config {
+	return forkguard.Config{Window: c.Window.D(), Hard: c.Hard, Floor: c.Floor, Rise: c.Rise, SliceWarn: c.SliceWarn}
 }
 
 // QuietConfig — окно тишины после загрузки машины.
@@ -117,6 +147,7 @@ func Default(home string) Config {
 		Sigguard:   sigguard.Default(),
 		Ceiling:    ceilingwatch.Default(),
 		Quiet:      QuietConfig{AfterBoot: policy.Duration(45 * time.Minute)},
+		Forkguard:  ForkguardConfig{Mode: "log", Interval: policy.Duration(time.Second), Window: policy.Duration(10 * time.Second), Hard: 3000, Floor: 1500, Rise: 1000, Slice: "agents.slice", SliceWarn: 80},
 	}
 }
 
@@ -213,6 +244,9 @@ func (c *Config) finish(home string, uid int) error {
 }
 
 func (c *Config) finishRemaining(home string) error {
+	if err := c.Forkguard.Validate(); err != nil {
+		return err
+	}
 	if err := c.Said.Validate(home); err != nil {
 		return err
 	}
