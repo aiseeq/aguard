@@ -325,7 +325,7 @@ func saidStatus(w io.Writer, lag said.Lag, maxLag time.Duration, asJSON bool) er
 			Stale []string `json:"stale,omitempty"`
 		}{lag, why}
 		if err := json.NewEncoder(w).Encode(out); err != nil {
-			return err
+			return fmt.Errorf("said status: вывод: %w", err)
 		}
 	} else {
 		fmt.Fprintln(w, lag.String())
