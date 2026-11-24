@@ -346,6 +346,23 @@ func TestQueueNextFieldsAndCacheAge(t *testing.T) {
 	}
 }
 
+func TestQueueWakeCandidatesUseNextRankAndCanTake(t *testing.T) {
+	a, _ := testIOApp(t)
+	tk := filepath.Join(a.home, "tk")
+	body := `[{"slug":"later","path":"docs/tasks/20261104-0950-later.md","status":"открыт","can_take":true,"next_rank":3},{"slug":"skip","path":"docs/tasks/20261104-0950-skip.md","status":"открыт","can_take":false,"next_rank":2},{"slug":"earlier","path":"docs/tasks/20261104-0950-earlier.md","status":"открыт","can_take":true,"next_rank":1,"blocked_by":["blocker"]}]`
+	if err := os.WriteFile(tk, []byte("#!/bin/sh\nprintf '%s\\n' '"+body+"'\nprintf '%s ' \"$@\" > "+filepath.Join(a.home, "args")+"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.wakeCandidates(context.Background(), tk, "master", a.home)
+	if err != nil || len(got) != 2 || got[0].Key != filepath.Base(a.home)+"/20261104-0950-earlier" || got[1].Key != filepath.Base(a.home)+"/20261104-0950-later" || len(got[0].BlockedBy) != 1 {
+		t.Fatalf("кандидаты: %+v, err=%v", got, err)
+	}
+	args, err := os.ReadFile(filepath.Join(a.home, "args"))
+	if err != nil || string(args) != "ls --json --by master " {
+		t.Fatalf("аргументы tk: %q, err=%v", args, err)
+	}
+}
+
 // «Написал бы» в log ставит отметку, иначе одна и та же строка писалась бы каждый проход.
 func TestQueueWakeLogModeMarks(t *testing.T) {
 	a, v, ts, received := wakeSocketWorld(t, false)

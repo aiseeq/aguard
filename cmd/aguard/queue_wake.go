@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +23,17 @@ type queueNextResult struct {
 	ticket queue.Ticket
 	found  bool
 	err    error
+}
+
+type queueWakeCandidateJSON struct {
+	Slug      string   `json:"slug"`
+	Path      string   `json:"path"`
+	Status    string   `json:"status"`
+	Executor  string   `json:"executor"`
+	Prio      string   `json:"prio"`
+	BlockedBy []string `json:"blocked_by"`
+	CanTake   bool     `json:"can_take"`
+	NextRank  *int     `json:"next_rank"`
 }
 
 // nextForWake спрашивает tk за мастера. Ответ, полученный до его хода, устарел:
@@ -64,14 +76,15 @@ func (a *app) nextForQueue(ctx context.Context, tk, master, dir, cacheKey string
 		return queue.Ticket{}, false, res.err
 	}
 	var raw struct {
-		Source   string `json:"source"`
-		Key      string `json:"key"`
-		Path     string `json:"path"`
-		Slug     string `json:"slug"`
-		Status   string `json:"status"`
-		Executor string `json:"executor"`
-		Prio     string `json:"prio"`
-		Waits    string `json:"waits"`
+		Source    string   `json:"source"`
+		Key       string   `json:"key"`
+		Path      string   `json:"path"`
+		Slug      string   `json:"slug"`
+		Status    string   `json:"status"`
+		Executor  string   `json:"executor"`
+		Prio      string   `json:"prio"`
+		Waits     string   `json:"waits"`
+		BlockedBy []string `json:"blocked_by"`
 	}
 	if err = json.Unmarshal(b, &raw); err != nil {
 		res.err = fmt.Errorf("tk next %s: %w", dir, err)
@@ -92,9 +105,55 @@ func (a *app) nextForQueue(ctx context.Context, tk, master, dir, cacheKey string
 		key += fmt.Sprintf("@wait-%08x", crc32.ChecksumIEEE([]byte(raw.Waits))) // от строки ожидания: due у «30m: …» плывёт
 	}
 	res.ticket = queue.WakeTicket(project, dir, key)
-	res.ticket.Status, res.ticket.Executor, res.ticket.Prio, res.ticket.Slug = raw.Status, raw.Executor, raw.Prio, raw.Slug
+	res.ticket.Status, res.ticket.Executor, res.ticket.Prio, res.ticket.Slug, res.ticket.BlockedBy = raw.Status, raw.Executor, raw.Prio, raw.Slug, raw.BlockedBy
 	res.found = true
 	return res.ticket, true, nil
+}
+
+// wakeCandidates запрашивает очередь целиком только когда первый тикет заблокирован.
+func (a *app) wakeCandidates(ctx context.Context, tk, master, dir string) ([]queue.Ticket, error) {
+	cmdCtx, cancel := context.WithTimeout(ctx, queueExternalTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cmdCtx, tk, "ls", "--json", "--by", master)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PATH="+filepath.Dir(tk)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.WaitDelay = queueExternalKillWait
+	b, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("tk ls %s: %w", dir, err)
+	}
+	var raw []queueWakeCandidateJSON
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, fmt.Errorf("tk ls %s: %w", dir, err)
+	}
+	slices.SortFunc(raw, func(a, b queueWakeCandidateJSON) int {
+		if a.NextRank == nil {
+			if b.NextRank == nil {
+				return 0
+			}
+			return 1
+		}
+		if b.NextRank == nil {
+			return -1
+		}
+		return *a.NextRank - *b.NextRank
+	})
+	project := filepath.Base(dir)
+	candidates := make([]queue.Ticket, 0, len(raw))
+	for _, item := range raw {
+		if !item.CanTake || item.NextRank == nil {
+			continue
+		}
+		key := queueKey(project, item.Slug, item.Path)
+		if key == "" {
+			continue
+		}
+		ticket := queue.WakeTicket(project, dir, key)
+		ticket.Slug, ticket.Status, ticket.Executor, ticket.Prio = item.Slug, item.Status, item.Executor, item.Prio
+		ticket.BlockedBy, ticket.CanTake = item.BlockedBy, item.CanTake
+		candidates = append(candidates, ticket)
+	}
+	return candidates, nil
 }
 
 func (a *app) workerOwners() (map[string]bool, error) {

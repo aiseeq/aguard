@@ -134,6 +134,51 @@ func TestWakeNewSessionLettersAgain(t *testing.T) {
 		t.Fatal(ns)
 	}
 }
+
+func TestWakeBlockedFirstIsNotWorkOrStuck(t *testing.T) {
+	w := newWakeWorld()
+	w.first.BlockedBy = []string{"blocker"}
+	w.ts = append(w.ts, Ticket{Key: "p/blocker", Project: "p", Dir: "/p", Slug: "blocker", Master: "master", Status: "открыт"})
+	if ns := w.step(); len(ns) != 0 || len(w.state.Wakes) != 0 {
+		t.Fatal("заблокированный тикет не будит", ns, w.state.Wakes)
+	}
+	w.state.Wakes["master"] = Wake{Ticket: w.first.Key, Session: w.session, At: w.view.Now.Add(-time.Hour)}
+	w.turn = true
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatal("заблокированный тикет не сообщает о вставшем", ns)
+	}
+}
+
+func TestWakeBlockedFirstClosedBlockerLetters(t *testing.T) {
+	w := newWakeWorld()
+	w.first.BlockedBy = []string{"blocker"}
+	w.ts = append(w.ts, Ticket{Key: "p/blocker", Project: "p", Dir: "/p", Slug: "blocker", Master: "master", Status: "готово"})
+	if ns := w.step(); !has(ns, KindWake, "master") {
+		t.Fatal("закрытый блокер не держит тикет", ns)
+	}
+}
+
+func TestWakeBlockedFirstSelectsNextTakeableCandidate(t *testing.T) {
+	w := newWakeWorld()
+	w.view.Home = "/home"
+	w.first.BlockedBy = []string{"work/other/project-blocker"}
+	w.ts = append(w.ts, Ticket{Key: "other/project-blocker", Project: "other", Dir: "/home/work/other", Slug: "project-blocker", Status: "открыт"})
+	free := Ticket{Key: "p/free", Project: "p", Dir: "/p", Slug: "free", Status: "открыт", CanTake: true}
+	w.view.WakeCandidates = func(string, string) ([]Ticket, error) {
+		return []Ticket{{Key: "p/not-takeable", CanTake: false}, free}, nil
+	}
+	if ns := w.step(); len(ns) != 1 || ns[0].Kind != KindWake || ns[0].Key != free.Key {
+		t.Fatal("письмо должно быть по свободному следующему тикету", ns)
+	}
+}
+
+func TestWakeBlockedByMissingLinkDoesNotBlock(t *testing.T) {
+	w := newWakeWorld()
+	w.first.BlockedBy = []string{"not-in-pass"}
+	if ns := w.step(); !has(ns, KindWake, "master") {
+		t.Fatal("ссылка без тикета прохода не держит", ns)
+	}
+}
 func TestWakeDeadProjectNone(t *testing.T) {
 	w := newWakeWorld()
 	w.view.Alive = func(string) bool { return false }

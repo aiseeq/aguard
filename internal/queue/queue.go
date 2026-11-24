@@ -221,6 +221,7 @@ type Ticket struct {
 	ActorNotes map[string]time.Time
 	// BlockedBy — тикеты, которые мастер поставил перед этим (tk set X --blocks Y, tk ls --json blocked_by).
 	BlockedBy []string
+	CanTake   bool // tk ls --json: тикет может взять мастер
 	Overdue   bool // «ждёт», и срок ожидания прошёл (tk ls --json overdue)
 	WaitDue   bool // у «ждёт» есть разбираемый срок (tk ls --json due); без срока overdue всегда false
 }
@@ -252,6 +253,7 @@ type View struct {
 	Lead                 string
 	Serious, Alive, Free func(string) bool
 	Next                 func(string, string) (Ticket, bool, error)
+	WakeCandidates       func(string, string) ([]Ticket, error)
 	Session              func(string) string
 	TurnAfter            func(string, time.Time) bool
 	WakeFree             func(string) bool

@@ -57,11 +57,57 @@ func (s *State) wakeNotices(ts []Ticket, v View, notices []Notice) []Notice {
 			delete(s.Wakes, master)
 			continue
 		}
+		if wakeBlocked(first, ts, v) {
+			if v.WakeCandidates == nil {
+				delete(s.Wakes, master)
+				continue
+			}
+			candidates, err := v.WakeCandidates(master, project.Dir)
+			if err != nil {
+				v.Log.Debug("aguard queue: список кандидатов мастера недоступен", "master", master, "err", err)
+				continue
+			}
+			first, found = wakeCandidate(candidates, ts, v)
+			if !found {
+				delete(s.Wakes, master)
+				continue
+			}
+		}
 		if n, ok := s.wakeDecide(master, session, first, project, v); ok {
 			out = append(out, n)
 		}
 	}
 	return out
+}
+
+// wakeBlocked проверяет, держит ли первый тикет найденная незакрытая задача этого прохода.
+func wakeBlocked(ticket Ticket, ts []Ticket, v View) bool {
+	for _, ref := range ticket.BlockedBy {
+		dir, slug, ok := blockerLocation(ref, ticket, v.Home)
+		if !ok {
+			continue
+		}
+		key := dir + "\x00" + slug
+		if _, found := v.blockers[key]; !found {
+			continue
+		}
+		for i := range ts {
+			if ts[i].Dir == dir && ts[i].Slug == slug && !closed(ts[i].Status) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// wakeCandidate выбирает первый по порядку tk next тикет, доступный мастеру и без незакрытых блокеров.
+func wakeCandidate(candidates, ts []Ticket, v View) (Ticket, bool) {
+	for _, candidate := range candidates {
+		if candidate.CanTake && !wakeBlocked(candidate, ts, v) {
+			return candidate, true
+		}
+	}
+	return Ticket{}, false
 }
 
 // wakeProject — папка, где мастер запустит tk next: иначе он увидит не ту очередь, о которой письмо.
