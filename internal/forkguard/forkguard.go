@@ -133,6 +133,7 @@ func (e *Engine) observeSlicePresence(s Sample, res *Result) {
 	} else {
 		if e.sliceKnown && e.sliceMissing {
 			res.Lines = append(res.Lines, "forkguard slice appeared")
+			e.seeded = true // слайс появился после старта: всё внутри новое, засева нет
 		}
 		e.sliceKnown, e.sliceMissing = true, false
 	}
@@ -218,9 +219,9 @@ func (e *Engine) observeSliceWarnings(s Sample, maxUnitGrowth int64, res *Result
 		res.Lines = append(res.Lines, fmt.Sprintf("forkguard slice warning: current=%d max=%d percent=%d", s.SliceCurrent, s.SliceMax, s.SliceCurrent*100/s.SliceMax))
 		e.sliceWarnAt = s.At
 	}
-	if len(e.sliceHistory) > 1 && s.At.Sub(e.aggregateWarnAt) >= time.Minute {
-		growth := s.SliceCurrent - e.sliceHistory[0].current
-		if growth >= e.cfg.Rise && growth > maxUnitGrowth {
+	if b, ok := growthBase(e.sliceHistory, s.At, e.cfg.Window); ok && s.At.Sub(e.aggregateWarnAt) >= time.Minute {
+		growth := s.SliceCurrent - b.current
+		if growth >= e.cfg.Rise && maxUnitGrowth < e.cfg.Rise { // ни один юнит в одиночку не дал rise
 			res.Lines = append(res.Lines, fmt.Sprintf("forkguard aggregate growth without one unit: rise=%d window=%s", growth, e.cfg.Window))
 			e.aggregateWarnAt = s.At
 		}
@@ -241,8 +242,8 @@ func (e *Engine) observeUnit(at time.Time, u Unit, lateUnit bool) (*Decision, in
 	}
 	st.history = appendWindow(st.history, point{at, u.Current, u.EventsMax}, at, 2*e.cfg.Window)
 	growth := int64(0)
-	if len(st.history) > 1 {
-		growth = max(0, u.Current-st.history[0].current)
+	if b, ok := growthBase(st.history, at, e.cfg.Window); ok {
+		growth = max(0, u.Current-b.current)
 	}
 	if growth >= e.cfg.Rise {
 		st.riseStreak++
@@ -278,6 +279,20 @@ func (e *Engine) observeUnit(at time.Time, u Unit, lateUnit bool) (*Decision, in
 	}
 	st.decided = true
 	return &Decision{Unit: u, Reason: reason, Would: Would(u.Name), Growth: growth}, growth, st.riseStreak
+}
+
+// growthBase — значение «окно назад»: самая новая точка не моложе window (после паузы опроса — старше, история хранится
+// 2×window); такой нет — самая старая. Одна точка — роста нет.
+func growthBase(h []point, now time.Time, window time.Duration) (point, bool) {
+	if len(h) < 2 {
+		return point{}, false
+	}
+	for j := len(h) - 2; j >= 0; j-- {
+		if now.Sub(h[j].at) >= window {
+			return h[j], true
+		}
+	}
+	return h[0], true
 }
 
 func appendWindow(h []point, p point, now time.Time, retention time.Duration) []point {

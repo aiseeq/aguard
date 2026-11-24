@@ -113,8 +113,15 @@ func LoadForkguard(path string) (ForkguardConfig, error) {
 			Forkguard ForkguardConfig `toml:"forkguard"`
 		}
 		partial.Forkguard = c
-		if _, err := toml.Decode(string(b), &partial); err != nil {
+		md, err := toml.Decode(string(b), &partial)
+		if err != nil {
 			return c, fmt.Errorf("%s [forkguard]: %w", path, err)
+		}
+		// опечатка в своём разделе — ошибка, как в общем конфиге; чужие разделы сторожа не касаются
+		for _, k := range md.Undecoded() {
+			if len(k) > 0 && k[0] == "forkguard" {
+				return c, fmt.Errorf("%s: неизвестный ключ %s", path, k.String())
+			}
 		}
 		c = partial.Forkguard
 	}

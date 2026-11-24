@@ -282,3 +282,51 @@ func TestOneDecisionForGrowingUnit(t *testing.T) {
 		t.Fatalf("second consecutive qualifying sample should decide: %+v", r)
 	}
 }
+
+// Рост считается за window, а не за всю историю (2×window): равномерные +60 в секунду 20 с — за 10 с только 600.
+func TestUniformRiseCountsOnlyWindow(t *testing.T) {
+	cfg := testConfig()
+	cfg.Floor = 100
+	e := New(cfg)
+	at := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	for i := 0; i <= 20; i++ {
+		n := int64(100 + 60*i)
+		r := e.Observe(Sample{At: at.Add(time.Duration(i) * time.Second), Units: []Unit{{Name: "graft-heavy-1.scope", Current: n}}, SliceCurrent: n})
+		if len(r.Decisions) != 0 {
+			t.Fatalf("решение на секунде %d при росте 600 за окно: %+v", i, r.Decisions)
+		}
+		for _, l := range r.Lines {
+			if strings.Contains(l, "aggregate") {
+				t.Fatalf("строка совокупного роста на секунде %d: %s", i, l)
+			}
+		}
+	}
+}
+
+// Один юнит дал рост ≥ rise, второй рядом подрос на 10 — это не «совокупный рост без одного юнита».
+func TestAggregateLineNotWhenOneUnitGivesRise(t *testing.T) {
+	cfg := testConfig()
+	cfg.Floor = 5000 // решения по (в) нет — смотрим только строку слайса
+	e := New(cfg)
+	at := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	for i := 0; i <= 10; i++ {
+		a, b := int64(100+120*i), int64(50+i)
+		r := e.Observe(Sample{At: at.Add(time.Duration(i) * time.Second), Units: []Unit{{Name: "graft-heavy-1.scope", Current: a}, {Name: "graft-heavy-2.scope", Current: b}}, SliceCurrent: a + b})
+		for _, l := range r.Lines {
+			if strings.Contains(l, "aggregate") {
+				t.Fatalf("строка совокупного роста при одном юните-виновнике (секунда %d): %s", i, l)
+			}
+		}
+	}
+}
+
+// Слайс появился после старта сторожа: юнит, сразу упёршийся в свой предел, — решение, не засев.
+func TestSliceAppearedAfterStartHasNoSeed(t *testing.T) {
+	e := New(testConfig())
+	at := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	e.Observe(Sample{At: at, SliceMissing: true})
+	r := e.Observe(Sample{At: at.Add(time.Second), Units: []Unit{{Name: "worker-job-1124-1200-x.service", Current: 4096, Max: 4096, EventsMax: 5}}, SliceCurrent: 4096})
+	if len(r.Decisions) != 1 {
+		t.Fatalf("юнит в пределе при появлении слайса не дал решения: %+v", r)
+	}
+}

@@ -144,3 +144,20 @@ func fakeForkStat(pid int, name string, ppid int, start uint64) string {
 	fields = append(fields, strconv.FormatUint(start, 10))
 	return strconv.Itoa(pid) + " (" + name + ") " + strings.Join(fields, " ")
 }
+
+// Ядро без pids.peak: замер идёт, пик 0.
+func TestSliceWithoutPidsPeak(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "agents.slice")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{"pids.current": "12", "pids.max": "max", "pids.events": "max 0\n"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := ReadForkguardTree(root, time.Now())
+	if err != nil || s.SliceCurrent != 12 || s.SlicePidsPeak != 0 {
+		t.Fatalf("без pids.peak: %+v %v", s, err)
+	}
+}

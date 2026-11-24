@@ -35,6 +35,13 @@ func TestLoadForkguardIgnoresOtherObserverSettings(t *testing.T) {
 	}
 }
 
+func TestLoadForkguardRejectsUnknownOwnKey(t *testing.T) {
+	path := write(t, "[forkguard]\nhrad = 100\n[io]\nunknown = 1\n")
+	if _, err := LoadForkguard(path); err == nil || !strings.Contains(err.Error(), "forkguard.hrad") {
+		t.Fatalf("опечатка в [forkguard]: %v", err)
+	}
+}
+
 func TestClaudeTmpDefaults(t *testing.T) {
 	c := Default(home).ClaudeTmp
 	if c.Mode != "log" || c.OutsideMode != "log" || c.Age.D() != 7*24*time.Hour || c.Window != "02:00-05:00" {
