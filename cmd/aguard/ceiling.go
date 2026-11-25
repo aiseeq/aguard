@@ -315,6 +315,8 @@ func parseCeilingValues(path, raw string) (map[string]int64, error) {
 	}
 	return v, nil
 }
+
+// setCeiling finishes an already-issued systemd property update during shutdown; WaitDelay bounds inherited pipes.
 func setCeiling(unit string, n int64) error {
 	cmd := exec.Command("systemctl", "--user", "set-property", "--runtime", unit, "MemoryMax="+strconv.FormatInt(n, 10))
 	cmd.WaitDelay = queueExternalKillWait

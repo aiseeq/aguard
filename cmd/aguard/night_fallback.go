@@ -60,6 +60,8 @@ type unitRunner interface {
 
 // systemdUnits — systemd-run --user: команда живёт отдельно от службы aguard (её перезапуск при `graft install` её не
 // трогает), bash -l — PATH и окружение профиля, как в консоли.
+// These short systemd requests finish during shutdown so started fallback units are recorded and cleaned consistently;
+// WaitDelay bounds any inherited pipes.
 type systemdUnits struct{}
 
 func (systemdUnits) start(unit, dir, cmd string) error {

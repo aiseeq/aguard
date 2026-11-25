@@ -403,6 +403,7 @@ func (s *systemdBenchScope) Close() error {
 	return s.cmd.Wait()
 }
 func (s *systemdBenchScope) Stop(ctx context.Context) error {
+	// Scope cleanup must still reach systemd after the caller is cancelled; WaitDelay bounds inherited pipes.
 	cmd := exec.CommandContext(context.WithoutCancel(ctx), "systemctl", "--user", "stop", s.unit+".scope")
 	cmd.WaitDelay = queueExternalKillWait
 	return cmd.Run()

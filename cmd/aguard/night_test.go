@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -17,6 +19,35 @@ import (
 	"github.com/aiseeq/aguard/internal/night"
 	"github.com/aiseeq/akit/session"
 )
+
+func TestNightCancelledPauseCheckDoesNotSendOrMarkDreamPause(t *testing.T) {
+	dir := t.TempDir()
+	pause := filepath.Join(dir, "night-paused")
+	if err := os.WriteFile(pause, []byte("dream-master: hold\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{home: dir, stateDir: filepath.Join(dir, "state"), log: slog.New(slog.NewTextHandler(io.Discard, nil)), units: &fakeUnits{}}
+	mail := liveLead(t, a)
+	cfg := night.Default(dir)
+	cfg.Mode, cfg.Lead = night.ModeAlert, "lead"
+	cfg.DreamBy, cfg.DreamFallbackBy = "00:00", pastFallbackBy()
+	cfg.DreamMarker, cfg.DreamPaused = filepath.Join(dir, "absent-marker"), pause
+	cfg.DreamPauseCheck = fakePauseCheck(t, dir, "legacy", 0)
+	cfg.DigestBy, cfg.DigestMarker = "23:59", filepath.Join(dir, "digest")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := a.nightRound(ctx, &cfg, false); err == nil {
+		t.Fatal("cancelled night pass succeeded")
+	}
+	select {
+	case got := <-mail:
+		t.Fatalf("cancelled pass sent mail: %q", got)
+	default:
+	}
+	if _, err := os.Stat(filepath.Join(a.stateDir, "night", "state.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancelled pass marked signal sent: %v", err)
+	}
+}
 
 func TestNightTrustReadsAppendedChunksEquivalentToFullLog(t *testing.T) {
 	home := t.TempDir()

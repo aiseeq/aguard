@@ -177,6 +177,8 @@ func (s *ioRecordSink) sampleErrAt(now time.Time, key string, err error) {
 	}
 }
 
+// ioSignal deliberately completes the systemd request after shutdown starts: dump/import must know whether
+// the service received the signal before returning. WaitDelay bounds inherited pipes.
 // ioSignal — сигнал службе aguard (0 — только проверка, что она запущена); служба не запущена — ошибка
 // errIONotRunning. Сигнал шлёт systemd, не этот процесс: agent-signal-guard отказывает агенту в kill(2)
 // чужому unit (тикет aguard-io-dump-signal-guard).

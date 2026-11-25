@@ -322,6 +322,9 @@ func (a *app) nightFacts(ctx context.Context, cfg *night.Config, now time.Time) 
 		holds, checkErr := nightPauseHolds(ctx, cfg, now)
 		facts.DreamPaused = holds || checkErr != nil // статус не получен — ночь держится, сигнал хозяевам Сна
 		if checkErr != nil {
+			if ctx.Err() != nil {
+				return night.Facts{}, fmt.Errorf("night: проверка паузы Сна отменена: %w", ctx.Err())
+			}
 			facts.DreamPauseErr = checkErr.Error()
 		}
 		if facts.DreamPaused {
