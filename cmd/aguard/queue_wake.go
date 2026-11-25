@@ -86,6 +86,15 @@ func (a *app) nextForQueue(ctx context.Context, tk, master, dir, cacheKey string
 		Prio      string   `json:"prio"`
 		Waits     string   `json:"waits"`
 		BlockedBy []string `json:"blocked_by"`
+		Also      *struct {
+			Source string `json:"source"`
+			Key    string `json:"key"`
+			Title  string `json:"title"`
+			Status string `json:"status"`
+			Prio   string `json:"prio"`
+			URL    string `json:"url"`
+			Closed bool   `json:"closed"`
+		} `json:"also"`
 	}
 	if err = json.Unmarshal(b, &raw); err != nil {
 		res.err = fmt.Errorf("tk next %s: %w", dir, err)
@@ -105,6 +114,16 @@ func (a *app) nextForQueue(ctx context.Context, tk, master, dir, cacheKey string
 	key = queueWaitKey(key, raw.Status, raw.Waits)
 	res.ticket = queue.WakeTicket(project, dir, key)
 	res.ticket.Status, res.ticket.Executor, res.ticket.Prio, res.ticket.Slug, res.ticket.BlockedBy = raw.Status, raw.Executor, raw.Prio, raw.Slug, raw.BlockedBy
+	if raw.Also != nil && raw.Also.Source == "external" && raw.Also.Key != "" {
+		status := raw.Also.Status
+		if raw.Also.Closed {
+			status = "готово"
+		}
+		also := queue.WakeTicket(project, dir, project+"/"+raw.Also.Key)
+		also.Slug, also.Title, also.Status, also.Prio, also.External = raw.Also.Key, raw.Also.Title, status, raw.Also.Prio, true
+		also.CanTake = !raw.Also.Closed
+		res.ticket.WakeAlso = &also
+	}
 	res.found = true
 	return res.ticket, true, nil
 }

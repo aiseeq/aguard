@@ -166,6 +166,42 @@ func TestWakeBlockedFirstWithoutCandidatesClearsWake(t *testing.T) {
 	}
 }
 
+func TestWakeBlockedFirstUsesExternalAlsoAfterLocalCandidates(t *testing.T) {
+	w := newWakeWorld()
+	w.view.Home = "/home"
+	w.first.BlockedBy = []string{"blocker"}
+	w.ts = append(w.ts, Ticket{Key: "p/blocker", Project: "p", Dir: "/p", Slug: "blocker", Master: "master", Status: "открыт"})
+	also := Ticket{Key: "p/JIRA-7", Project: "p", Dir: "/p", Slug: "JIRA-7", Status: "открыт", External: true, CanTake: true}
+	w.first.WakeAlso = &also
+	w.view.WakeCandidates = func(string, string) ([]Ticket, error) { return nil, nil }
+	ns := w.step()
+	if len(ns) != 1 || ns[0].Kind != KindWake || ns[0].Key != "p/JIRA-7" || !strings.Contains(ns[0].Line, "есть работа") {
+		t.Fatalf("письмо по also: %+v", ns)
+	}
+}
+
+func TestWakeBlockedFirstWithoutAlsoHasNoLetter(t *testing.T) {
+	w := newWakeWorld()
+	w.first.BlockedBy = []string{"blocker"}
+	w.ts = append(w.ts, Ticket{Key: "p/blocker", Project: "p", Dir: "/p", Slug: "blocker", Master: "master", Status: "открыт"})
+	w.view.WakeCandidates = func(string, string) ([]Ticket, error) { return nil, nil }
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatalf("без also письмо неожиданно создано: %+v", ns)
+	}
+}
+
+func TestWakeBlockedFirstSkipsClosedExternalAlso(t *testing.T) {
+	w := newWakeWorld()
+	w.first.BlockedBy = []string{"blocker"}
+	w.ts = append(w.ts, Ticket{Key: "p/blocker", Project: "p", Dir: "/p", Slug: "blocker", Master: "master", Status: "открыт"})
+	also := Ticket{Key: "p/JIRA-7", Status: "готово", External: true, CanTake: false}
+	w.first.WakeAlso = &also
+	w.view.WakeCandidates = func(string, string) ([]Ticket, error) { return nil, nil }
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatalf("закрытый also разбудил мастера: %+v", ns)
+	}
+}
+
 func TestWakeBlockedFirstClosedBlockerLetters(t *testing.T) {
 	w := newWakeWorld()
 	w.first.BlockedBy = []string{"blocker"}
