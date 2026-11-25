@@ -258,6 +258,128 @@ func TestSmallEntryDoesNotEscalateWhenAnotherEntryHoldsThreshold(t *testing.T) {
 			}
 		}
 	}
+	pressureGroups := c.Over(t0, c.Items([]record.Entry{small, big}, me), 0.5)
+	pressureSend, _ := c.Plan(t0, pressureGroups, live, &UserState{}, 0.5)
+	for i := range pressureSend {
+		if pressureSend[i].Target.Name == tShop.Name {
+			msg := c.Message(&pressureSend[i], t0, false)
+			if !strings.Contains(msg, "у владельца 21 ГБ·мин при пороге 6.0 ГБ·мин") {
+				t.Fatalf("порог под давлением в письме неверен: %s", msg)
+			}
+		}
+	}
+}
+
+func TestSmallEntryUsesTopRepeatThenEscalatesOneStep(t *testing.T) {
+	c := cfg()
+	c.Policy.BudgetGBM = 12
+	c.Policy.MinOwner = Size(1)
+	c.Escalation.After = 2
+	c.Escalation.TopRepeat = Duration(30 * time.Minute)
+	c.Escalation.Admins[home] = tAdmin.Name
+	creator := sess(11, "shop-master", home)
+	smallEntry := entry("/tmp/small-repeat", mib, 24*time.Hour, sessionOwner(creator, "go"))
+	groups := c.Over(t0, c.Items([]record.Entry{smallEntry, entry("/tmp/big-repeat", gib, 20*time.Minute,
+		sessionOwner(creator, "go"))}, me), 1)
+	live := newLive(tLead, tShop, tAdmin)
+	state := &UserState{}
+	sends := 0
+	for i := range 6 {
+		send, _ := c.Plan(t0.Add(time.Duration(i)*5*time.Minute), groups, live, state, 1)
+		for _, sum := range send {
+			for _, line := range sum.Lines {
+				if line.Item.Entry.Path == smallEntry.Path {
+					sends++
+					if sum.Target.Name != tShop.Name {
+						t.Fatalf("малая запись ушла %s", sum.Target.Name)
+					}
+				}
+			}
+		}
+	}
+	key := EntryKey(&Item{Entry: smallEntry})
+	if sends != 1 || state.Alerts[key].Sent != 0 {
+		t.Fatalf("уведомления/ступени малой записи = %d/%d, want 1/0", sends, state.Alerts[key].Sent)
+	}
+	for gi := range groups {
+		for ii := range groups[gi].Items {
+			if groups[gi].Items[ii].Entry.Path == smallEntry.Path {
+				groups[gi].Items[ii].HoldsThreshold = true
+			}
+		}
+	}
+	var sequence []string
+	for i := range 3 {
+		send, _ := c.Plan(t0.Add(31*time.Minute+time.Duration(i)*5*time.Minute), groups, live, state, 1)
+		for _, sum := range send {
+			for _, line := range sum.Lines {
+				if line.Item.Entry.Path == smallEntry.Path {
+					sequence = append(sequence, sum.Target.Name)
+				}
+			}
+		}
+	}
+	want := []string{tAdmin.Name, tAdmin.Name, tLead.Name}
+	if len(sequence) != len(want) {
+		t.Fatalf("после снятия удержания ступени = %v, want %v", sequence, want)
+	}
+	for i := range want {
+		if sequence[i] != want[i] {
+			t.Fatalf("после снятия удержания ступени = %v, want %v", sequence, want)
+		}
+	}
+}
+
+func TestThresholdHeldEntryUsesTopRepeatWithOtherCreatorAction(t *testing.T) {
+	c := cfg()
+	c.Policy.BudgetGBM = 12
+	c.Policy.MinOwner = Size(1)
+	c.Escalation.After = 1
+	c.Escalation.TopRepeat = Duration(30 * time.Minute)
+	owner := sessionOwner(sess(11, "shop-master", home), "go")
+	held := c.Items([]record.Entry{entry("/tmp/held-by-threshold", mib, 24*time.Hour, owner)}, me)[0]
+	held.ThresholdKnown, held.HoldsThreshold = true, false
+	anchor := c.Items([]record.Entry{entry("/tmp/creator-action", gib, time.Hour, owner)}, me)[0]
+	groups := []Group{{Items: []Item{held, anchor}}}
+	live := newLive(tLead, tShop, tAdmin)
+	heldState := &AlertState{}
+	state := &UserState{Alerts: map[string]*AlertState{EntryKey(&held): heldState}}
+	notices := 0
+	for i := range 2 {
+		state.Alerts[EntryKey(&anchor)] = &AlertState{}
+		send, _ := c.Plan(t0.Add(time.Duration(i)*5*time.Minute), groups, live, state, 1)
+		for _, sum := range send {
+			for _, line := range sum.Lines {
+				if line.Item.Entry.Path == held.Entry.Path {
+					notices++
+				}
+			}
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("удержанная запись отправлена %d раз при двух действиях создателю; want 1", notices)
+	}
+}
+
+func TestOverOrdersEqualMeasuresByPath(t *testing.T) {
+	c := cfg()
+	c.Policy.BudgetGBM = 1
+	c.Policy.MinOwner = Size(1)
+	owner := sessionOwner(sess(11, "shop-master", home), "go")
+	entries := []record.Entry{
+		entry("/tmp/z-equal", gib, time.Minute, owner),
+		entry("/tmp/a-equal", gib, time.Minute, owner),
+	}
+	groups := c.Over(t0, c.Items(entries, me), 1)
+	if len(groups) != 1 || len(groups[0].Items) != 2 {
+		t.Fatalf("Over groups = %+v, want one group with two entries", groups)
+	}
+	if got := groups[0].Items[0].Entry.Path; got != "/tmp/a-equal" {
+		t.Fatalf("первая запись при равной мере = %q, want /tmp/a-equal", got)
+	}
+	if got := groups[0].Items[1].Entry.Path; got != "/tmp/z-equal" {
+		t.Fatalf("вторая запись при равной мере = %q, want /tmp/z-equal", got)
+	}
 }
 
 func TestLiveCreatorProcessBlocksEscalation(t *testing.T) {
@@ -273,6 +395,24 @@ func TestLiveCreatorProcessBlocksEscalation(t *testing.T) {
 	send, _ := c.Plan(t0, []Group{{Items: []Item{it}}}, live, state, 1)
 	if len(send) != 1 || send[0].Target.Name != tShop.Name {
 		t.Fatalf("live creator process escalated: %v", targets(send))
+	}
+}
+
+func TestCreatorSessionProcessDoesNotBlockEscalation(t *testing.T) {
+	c := cfg()
+	c.Escalation.After = 1
+	c.Escalation.Admins[home] = tAdmin.Name
+	creator := sess(11, "shop-master", home)
+	it := c.Items([]record.Entry{entry("/tmp/session-creator", gib, time.Hour,
+		sessionOwner(creator, "go"))}, me)[0]
+	it.Entry.Owner.Proc.Pid = creator.Pid
+	it.Entry.Owner.Proc.Start = creator.ProcStart
+	live := newLive(tLead, tShop, tAdmin)
+	live.proc[creator.Pid] = creator.ProcStart
+	state := &UserState{Alerts: map[string]*AlertState{EntryKey(&it): {Sent: 1}}}
+	send, _ := c.Plan(t0, []Group{{Items: []Item{it}}}, live, state, 1)
+	if len(send) != 1 || send[0].Target.Name != tAdmin.Name {
+		t.Fatalf("процесс-сессия ошибочно удержал запись: %v", targets(send))
 	}
 }
 

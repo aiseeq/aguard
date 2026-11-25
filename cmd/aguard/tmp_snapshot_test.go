@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -293,6 +295,62 @@ func (l tmpPlanLive) ByName(name string) (policy.Target, bool) {
 
 func (tmpPlanLive) WorkerByUnit(string) (policy.WorkerJob, bool, error) {
 	return policy.WorkerJob{}, false, nil
+}
+
+func (tmpPlanLive) ProcAlive(int, string) bool { return false }
+
+func TestTmpLiveCreatorProcessBlocksEscalation(t *testing.T) {
+	child := exec.Command("sleep", "60")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = proc.StopChild(child.Process.Pid, 0, func() error {
+			return proc.SignalChild(child.Process.Pid, syscall.SIGKILL)
+		})
+		_ = child.Wait()
+	}()
+	creatorProc, err := proc.ReadStat("/proc", child.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creatorSession, err := proc.ReadStat("/proc", os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	creator := policy.Target{Name: "shop-master", Pid: os.Getpid(), Socket: "@no-send"}
+	admin := policy.Target{Name: "work-admin", Pid: 12, Socket: "@admin-no-send"}
+	lead := policy.Target{Name: "lead", Pid: 13, Socket: "@lead-no-send"}
+	reg := session.Registry{Dir: t.TempDir(), ProcRoot: "/proc"}
+	info, err := json.Marshal(session.Info{Pid: creator.Pid, ProcStart: creatorSession.Start,
+		Name: creator.Name, SocketPath: creator.Socket})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reg.Dir, fmt.Sprint(creator.Pid)+".json"), info, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live := &liveSessions{reg: reg, byName: map[string]session.Info{
+		admin.Name: {Name: admin.Name, SocketPath: admin.Socket},
+		lead.Name:  {Name: lead.Name, SocketPath: lead.Socket},
+	}}
+	c := policy.Default("/home/u")
+	c.Lead = lead.Name
+	c.Escalation.After = 1
+	c.Escalation.Admins["/home/u"] = admin.Name
+	it := policy.Item{Entry: record.Entry{Path: "/tmp/live-creator", Born: time.Now().Add(-time.Hour),
+		Bytes: 1 << 30, Owner: &record.Owner{
+			Proc: record.Proc{Pid: child.Process.Pid, Start: creatorProc.Start},
+			Session: &record.Session{Pid: creator.Pid, Name: creator.Name, Cwd: "/home/u",
+				ProcStart: creatorSession.Start},
+		}}, Class: policy.ClassSession}
+	state := &policy.UserState{Alerts: map[string]*policy.AlertState{
+		policy.EntryKey(&it): {Sent: 1},
+	}}
+	send, _ := c.Plan(time.Now(), []policy.Group{{Items: []policy.Item{it}}}, live, state, 1)
+	if len(send) != 1 || send[0].Target.Name != creator.Name {
+		t.Fatalf("живой процесс создателя поднят выше: %+v", send)
+	}
 }
 
 func TestPrintDryWorkerDeferredReasons(t *testing.T) {

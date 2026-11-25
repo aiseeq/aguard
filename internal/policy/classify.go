@@ -224,7 +224,13 @@ func (c *Config) Over(now time.Time, items []Item, factor float64) []Group {
 		if g.Bytes < int64(c.Policy.MinOwner) || g.GBMin < budget {
 			continue
 		}
-		sort.Slice(g.Items, func(i, j int) bool { return g.Items[i].GBMin(now) > g.Items[j].GBMin(now) })
+		sort.Slice(g.Items, func(i, j int) bool {
+			left, right := g.Items[i].GBMin(now), g.Items[j].GBMin(now)
+			if left != right {
+				return left > right
+			}
+			return g.Items[i].Entry.Path < g.Items[j].Entry.Path
+		})
 		cumulative := 0.0
 		for i := range g.Items {
 			g.Items[i].ThresholdKnown = true

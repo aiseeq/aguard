@@ -36,19 +36,16 @@ type Live interface {
 	ByName(name string) (Target, bool)
 	// WorkerByUnit — заказчик и состояние задания по unit создателя записи.
 	WorkerByUnit(unit string) (WorkerJob, bool, error)
-}
-
-// creatorProcessLive optionally checks a creator process by pid and start time.
-type creatorProcessLive interface {
 	ProcAlive(pid int, procStart string) bool
 }
 
 // AlertState — сколько сводок уже ушло о записи и кому последняя.
 type AlertState struct {
-	Sent       int       `json:"sent"`
-	LastTarget string    `json:"last_target"`
-	LastSent   time.Time `json:"last_sent"`
-	LastBytes  int64     `json:"last_bytes,omitempty"`
+	Sent          int       `json:"sent"`
+	LastTarget    string    `json:"last_target"`
+	LastSent      time.Time `json:"last_sent"`
+	LastBytes     int64     `json:"last_bytes,omitempty"`
+	HeldAtCreator bool      `json:"held_at_creator,omitempty"`
 }
 
 // LiveWorkerGrowth — размер должен вырасти в разы, чтобы повтор был полезен.
@@ -211,7 +208,7 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 	}
 	for i := range busy {
 		notice := &busy[i]
-		if hasActionLine(sendB.by[notice.target.Key()]) || notice.state.LastTarget != notice.target.Key() ||
+		if (notice.line.Item.Busy && hasActionLine(sendB.by[notice.target.Key()])) || notice.state.LastTarget != notice.target.Key() ||
 			notice.state.LastSent.IsZero() || now.Sub(notice.state.LastSent) >= c.Escalation.TopRepeat.D() {
 			sendB.add(notice.target, notice.line, time.Time{})
 			notice.state.LastTarget, notice.state.LastSent = notice.target.Key(), now
@@ -235,20 +232,46 @@ func (c *Config) planItem(now time.Time, it *Item, live Live, st *UserState, sen
 		st.Alerts[key] = as
 	}
 	idx := min(as.Sent/c.Escalation.After, len(steps)-1)
-	creatorProcAlive := false
-	if it.Entry.Owner != nil && it.Entry.Owner.Proc.Pid > 0 && it.Entry.Owner.Proc.Start != "" {
-		if checker, ok := live.(creatorProcessLive); ok {
-			creatorProcAlive = checker.ProcAlive(it.Entry.Owner.Proc.Pid, it.Entry.Owner.Proc.Start)
-		}
+	creatorProcAlive := creatorProcessAlive(it, live)
+	thresholdBlocked := it.ThresholdKnown && !it.HoldsThreshold
+	if it.Busy || creatorProcAlive || thresholdBlocked {
+		return c.planHeldItem(it, as, steps, cname, calive, creatorProcAlive, thresholdBlocked)
 	}
-	if it.Busy || creatorProcAlive || (it.ThresholdKnown && !it.HoldsThreshold && idx > 0) {
-		idx = 0 // занятая запись остаётся у создателя или первой ступени после него
+	return c.planUnheldItem(now, it, as, steps, cname, calive, idx, sendB, deferB)
+}
+
+func creatorProcessAlive(it *Item, live Live) bool {
+	if it.Entry.Owner == nil || it.Entry.Owner.Proc.Pid <= 0 || it.Entry.Owner.Proc.Start == "" {
+		return false
 	}
-	s := steps[idx]
+	if it.Entry.Owner.Session != nil && it.Entry.Owner.Proc.Pid == it.Entry.Owner.Session.Pid {
+		return false
+	}
+	return live.ProcAlive(it.Entry.Owner.Proc.Pid, it.Entry.Owner.Proc.Start)
+}
+
+func (c *Config) planHeldItem(it *Item, as *AlertState, steps []step, cname string,
+	calive bool, creatorProcAlive, thresholdBlocked bool) *busyNotice {
+	if (creatorProcAlive || thresholdBlocked) && steps[0].creator {
+		as.HeldAtCreator = true
+	}
+	s := steps[0] // занятая запись остаётся у создателя или первой ступени после него
 	line := Line{Item: *it, Rel: relation(it, s, calive), CreatorName: cname, Sent: as.Sent}
-	if it.Busy {
-		return &busyNotice{target: s.t, line: line, state: as}
+	return &busyNotice{target: s.t, line: line, state: as}
+}
+
+func (c *Config) planUnheldItem(now time.Time, it *Item, as *AlertState, steps []step, cname string,
+	calive bool, idx int, sendB, deferB *summaries) *busyNotice {
+	s := steps[idx]
+	// Запись, которую раньше удерживали у создателя, начинает эскалацию
+	// со следующей ступени после того, как блокировка снята.
+	if as.HeldAtCreator && as.Sent == 0 && as.LastTarget == steps[0].t.Key() && len(steps) > 1 {
+		idx = 1
+		as.Sent = c.Escalation.After
+		s = steps[idx]
 	}
+	as.HeldAtCreator = false
+	line := Line{Item: *it, Rel: relation(it, s, calive), CreatorName: cname, Sent: as.Sent}
 	if idx == len(steps)-1 && as.Sent >= c.Escalation.After && as.LastTarget == s.t.Key() &&
 		now.Sub(as.LastSent) < c.Escalation.TopRepeat.D() {
 		deferB.add(s.t, line, as.LastSent.Add(c.Escalation.TopRepeat.D())) // верхняя ступень уже знает

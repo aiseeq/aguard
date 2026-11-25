@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -14,7 +15,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/aiseeq/aguard/internal/record"
 	"github.com/aiseeq/akit/proc"
+	"golang.org/x/sys/unix"
 )
 
 func TestReadProcMatchesLiveProcesses(t *testing.T) {
@@ -30,6 +33,25 @@ func TestReadProcMatchesLiveProcesses(t *testing.T) {
 		if got != want {
 			t.Errorf("readProc(%d) = %+v, прежнее чтение = %+v", pid, got, want)
 		}
+	}
+}
+
+func TestResolveLiveOwnerRecordsCreatorStart(t *testing.T) {
+	pid := os.Getpid()
+	pidfd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(pidfd)
+	lg := slog.New(slog.DiscardHandler)
+	r := newResolver(newTombs(time.Minute, lg), lg)
+	o := &record.Owner{Proc: record.Proc{Pid: pid, UID: -1}}
+	st, err := r.live(o, pid, pidfd)
+	if err != nil {
+		t.Fatalf("live owner: %v", err)
+	}
+	if o.Proc.Start == "" || o.Proc.Start != st.Start {
+		t.Fatalf("creator start = %q, proc stat start = %q", o.Proc.Start, st.Start)
 	}
 }
 
