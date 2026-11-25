@@ -265,7 +265,7 @@ func (r *Resolver) live(o *record.Owner, pid, pidfd int) (proc.Stat, error) {
 	if err != nil {
 		return st, err
 	}
-	o.Proc = record.Proc{Pid: pid, Comm: d.comm, Args: d.args, Cwd: d.cwd, UID: d.uid, Cgroup: cg, State: record.ProcOK}
+	o.Proc = record.Proc{Pid: pid, Start: st.Start, Comm: d.comm, Args: d.args, Cwd: d.cwd, UID: d.uid, Cgroup: cg, State: record.ProcOK}
 	return st, nil
 }
 
