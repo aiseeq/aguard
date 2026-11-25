@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -132,15 +131,21 @@ func measure(path string, ino uint64, p *pacer) (usage, error) {
 	}
 	add(&st)
 	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-		if err := walk(path, st.Dev, add, p); err != nil {
+		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			return u, nil
+		}
+		if err := walkFD(fd, st.Dev, add, p); err != nil {
 			return u, err
 		}
 	}
 	return u, nil
 }
 
-func walk(dir string, dev uint64, add func(*unix.Stat_t), p *pacer) error {
-	ents, err := os.ReadDir(dir)
+func walkFD(fd int, dev uint64, add func(*unix.Stat_t), p *pacer) error {
+	dir := os.NewFile(uintptr(fd), "directory")
+	defer dir.Close()
+	ents, err := dir.ReadDir(-1)
 	if err != nil { //nolint:silent-error-handling // папку удалили во время замера: в размер идёт то, что успели обойти
 		return nil
 	}
@@ -152,14 +157,17 @@ func walk(dir string, dev uint64, add func(*unix.Stat_t), p *pacer) error {
 		if !continueWalk {
 			return nil // замер отменён
 		}
-		path := filepath.Join(dir, e.Name())
 		var st unix.Stat_t
-		if unix.Lstat(path, &st) != nil || st.Dev != dev {
+		if unix.Fstatat(fd, e.Name(), &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Dev != dev {
 			continue
 		}
 		add(&st)
 		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-			if err := walk(path, dev, add, p); err != nil {
+			child, err := unix.Openat(fd, e.Name(), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+			if err != nil {
+				continue
+			}
+			if err := walkFD(child, dev, add, p); err != nil {
 				return err
 			}
 		}

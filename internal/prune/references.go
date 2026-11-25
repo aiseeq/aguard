@@ -337,17 +337,21 @@ func scanFreshTranscript(ctx context.Context, path string, yield func(context.Co
 	}()
 	reader := bufio.NewReaderSize(in, 64*1024)
 	var carry []byte
+	buffer := make([]byte, 0, 64*1024+transcriptOverlap+1)
 	for {
 		chunk, readErr := reader.ReadSlice('\n')
 		if len(chunk) != 0 || errors.Is(readErr, io.EOF) {
-			buffer := make([]byte, 0, len(carry)+len(chunk))
+			buffer = buffer[:0]
 			buffer = append(buffer, carry...)
 			buffer = append(buffer, chunk...)
 			if errors.Is(readErr, io.EOF) {
 				buffer = append(buffer, '\n')
 			}
-			for _, match := range scratchpadIDRE.FindAllSubmatch(buffer, -1) {
-				ids[strings.ToLower(string(match[1]))] = true
+			for _, match := range scratchpadIDRE.FindAllSubmatchIndex(buffer, -1) {
+				id := string(buffer[match[2]:match[3]])
+				if !ids[id] {
+					ids[strings.ToLower(id)] = true
+				}
 			}
 			if len(buffer) > transcriptOverlap {
 				carry = append(carry[:0], buffer[len(buffer)-transcriptOverlap:]...)
