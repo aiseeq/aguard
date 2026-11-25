@@ -57,6 +57,7 @@ const (
 // Proc — процесс, создавший запись.
 type Proc struct {
 	Pid    int    `json:"pid"`
+	Start  string `json:"start,omitempty"` // поле 22 /proc/<pid>/stat: отличает переиспользованный pid
 	Comm   string `json:"comm,omitempty"`
 	Args   string `json:"args,omitempty"`
 	Cwd    string `json:"cwd,omitempty"`

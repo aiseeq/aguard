@@ -131,6 +131,10 @@ func (l *liveSessions) ByPid(pid int, procStart string) (policy.Target, bool) {
 	return policy.Target{Name: in.Name, Pid: in.Pid, Socket: in.SocketPath}, true
 }
 
+func (l *liveSessions) ProcAlive(pid int, procStart string) bool {
+	return l.reg.IsAlive(pid, procStart)
+}
+
 func (l *liveSessions) WorkerByUnit(unit string) (policy.WorkerJob, bool, error) {
 	job, err := l.jobs.ByUnit(unit)
 	if err != nil || job == nil {

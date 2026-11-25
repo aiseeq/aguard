@@ -138,6 +138,10 @@ func (c *Config) Message(s *Summary, now time.Time, test bool) string {
 		}
 		fmt.Fprintf(&b, ", возраст %s, мера %s ГБ·мин; создал: %s", HumanAge(now.Sub(e.Born)),
 			FormatGBMin(l.Item.GBMin(now)), CreatorText(e.Owner))
+		if l.Item.ThresholdKnown {
+			fmt.Fprintf(&b, "; у владельца %s ГБ·мин при пороге %s ГБ·мин",
+				FormatGBMin(l.Item.OwnerGBMin), FormatGBMin(l.Item.OwnerThresholdGBM))
+		}
 		if l.Item.Busy {
 			fmt.Fprintf(&b, "; занята: %s (pid %d)", l.Item.BusyCommand, l.Item.BusyPid)
 		}

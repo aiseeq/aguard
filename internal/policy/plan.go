@@ -38,6 +38,11 @@ type Live interface {
 	WorkerByUnit(unit string) (WorkerJob, bool, error)
 }
 
+// creatorProcessLive optionally checks a creator process by pid and start time.
+type creatorProcessLive interface {
+	ProcAlive(pid int, procStart string) bool
+}
+
 // AlertState — сколько сводок уже ушло о записи и кому последняя.
 type AlertState struct {
 	Sent       int       `json:"sent"`
@@ -114,6 +119,12 @@ type step struct {
 	creator bool
 }
 
+type busyNotice struct {
+	target Target
+	line   Line
+	state  *AlertState
+}
+
 // ladder — живые ступени для записи: сессия-создатель, админ её
 // пространства, лид. Не агенты и прочие — сразу лид.
 func (c *Config) ladder(it *Item, live Live) (steps []step, creatorName string, creatorAlive bool) {
@@ -186,11 +197,6 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 		st.Alerts = map[string]*AlertState{}
 	}
 	sendB, deferB := newSummaries(factor), newSummaries(factor)
-	type busyNotice struct {
-		target Target
-		line   Line
-		state  *AlertState
-	}
 	var busy []busyNotice
 	for _, g := range groups {
 		for i := range g.Items {
@@ -198,35 +204,9 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 			if it.WorkerLive {
 				continue
 			}
-			key := EntryKey(it)
-			steps, cname, calive := c.ladder(it, live)
-			if len(steps) == 0 {
-				continue // некому писать: ни создателя, ни лида
+			if notice := c.planItem(now, it, live, st, sendB, deferB); notice != nil {
+				busy = append(busy, *notice)
 			}
-			as := st.Alerts[key]
-			if as == nil {
-				as = &AlertState{}
-				st.Alerts[key] = as
-			}
-			idx := min(as.Sent/c.Escalation.After, len(steps)-1)
-			if it.Busy {
-				idx = 0 // занятая запись остаётся у создателя или первой ступени после него
-			}
-			s := steps[idx]
-			line := Line{Item: *it, Rel: relation(it, s, calive), CreatorName: cname, Sent: as.Sent}
-			if it.Busy {
-				busy = append(busy, busyNotice{target: s.t, line: line, state: as})
-				continue
-			}
-			if idx == len(steps)-1 && as.Sent >= c.Escalation.After && as.LastTarget == s.t.Key() &&
-				now.Sub(as.LastSent) < c.Escalation.TopRepeat.D() {
-				deferB.add(s.t, line, as.LastSent.Add(c.Escalation.TopRepeat.D())) // верхняя ступень уже знает
-				continue
-			}
-			sendB.add(s.t, line, time.Time{})
-			as.Sent++
-			as.LastTarget = s.t.Key()
-			as.LastSent = now
 		}
 	}
 	for i := range busy {
@@ -241,6 +221,44 @@ func (c *Config) Plan(now time.Time, groups []Group, live Live, st *UserState, f
 	}
 	c.planWorkerLive(now, groups, live, st, factor, sendB, deferB)
 	return sendB.list(now), deferB.list(now)
+}
+
+func (c *Config) planItem(now time.Time, it *Item, live Live, st *UserState, sendB, deferB *summaries) *busyNotice {
+	key := EntryKey(it)
+	steps, cname, calive := c.ladder(it, live)
+	if len(steps) == 0 {
+		return nil // некому писать: ни создателя, ни лида
+	}
+	as := st.Alerts[key]
+	if as == nil {
+		as = &AlertState{}
+		st.Alerts[key] = as
+	}
+	idx := min(as.Sent/c.Escalation.After, len(steps)-1)
+	creatorProcAlive := false
+	if it.Entry.Owner != nil && it.Entry.Owner.Proc.Pid > 0 && it.Entry.Owner.Proc.Start != "" {
+		if checker, ok := live.(creatorProcessLive); ok {
+			creatorProcAlive = checker.ProcAlive(it.Entry.Owner.Proc.Pid, it.Entry.Owner.Proc.Start)
+		}
+	}
+	if it.Busy || creatorProcAlive || (it.ThresholdKnown && !it.HoldsThreshold && idx > 0) {
+		idx = 0 // занятая запись остаётся у создателя или первой ступени после него
+	}
+	s := steps[idx]
+	line := Line{Item: *it, Rel: relation(it, s, calive), CreatorName: cname, Sent: as.Sent}
+	if it.Busy {
+		return &busyNotice{target: s.t, line: line, state: as}
+	}
+	if idx == len(steps)-1 && as.Sent >= c.Escalation.After && as.LastTarget == s.t.Key() &&
+		now.Sub(as.LastSent) < c.Escalation.TopRepeat.D() {
+		deferB.add(s.t, line, as.LastSent.Add(c.Escalation.TopRepeat.D())) // верхняя ступень уже знает
+		return nil
+	}
+	sendB.add(s.t, line, time.Time{})
+	as.Sent++
+	as.LastTarget = s.t.Key()
+	as.LastSent = now
+	return nil
 }
 
 // planWorkerLive — второй цикл видит уже собранные сводки со строками-действиями.

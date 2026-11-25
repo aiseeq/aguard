@@ -198,6 +198,7 @@ type fakeLive struct {
 	byPid  map[int]Target
 	byName map[string]Target
 	worker map[string]WorkerJob
+	proc   map[int]string
 }
 
 func (f *fakeLive) WorkerByUnit(unit string) (WorkerJob, bool, error) {
@@ -207,14 +208,72 @@ func (f *fakeLive) WorkerByUnit(unit string) (WorkerJob, bool, error) {
 
 func (f *fakeLive) ByPid(pid int, _ string) (Target, bool) { t, ok := f.byPid[pid]; return t, ok }
 func (f *fakeLive) ByName(n string) (Target, bool)         { t, ok := f.byName[n]; return t, ok }
+func (f *fakeLive) ProcAlive(pid int, start string) bool   { return f.proc[pid] == start && start != "" }
 
 func newLive(ts ...Target) *fakeLive {
-	f := &fakeLive{byPid: map[int]Target{}, byName: map[string]Target{}, worker: map[string]WorkerJob{}}
+	f := &fakeLive{byPid: map[int]Target{}, byName: map[string]Target{}, worker: map[string]WorkerJob{}, proc: map[int]string{}}
 	for _, t := range ts {
 		f.byPid[t.Pid] = t
 		f.byName[t.Name] = t
 	}
 	return f
+}
+
+func TestSmallEntryDoesNotEscalateWhenAnotherEntryHoldsThreshold(t *testing.T) {
+	c := cfg()
+	c.Policy.BudgetGBM = 12
+	c.Policy.MinOwner = Size(1)
+	c.Escalation.After = 1
+	c.Escalation.Admins[home] = tAdmin.Name
+	creator := sess(11, "shop-master", home)
+	big := entry("/tmp/big", gib, 20*time.Minute, sessionOwner(creator, "go"))
+	small := entry("/tmp/small", mib, 24*time.Hour, sessionOwner(creator, "go"))
+	groups := c.Over(t0, c.Items([]record.Entry{small, big}, me), 1)
+	if len(groups) != 1 || !groups[0].Items[0].HoldsThreshold || groups[0].Items[1].HoldsThreshold {
+		t.Fatalf("threshold holders = %+v", groups)
+	}
+	live := newLive(tLead, tShop, tAdmin)
+	state := &UserState{Alerts: map[string]*AlertState{}}
+	for _, it := range groups[0].Items {
+		state.Alerts[EntryKey(&it)] = &AlertState{Sent: 1}
+	}
+	send, _ := c.Plan(t0, groups, live, state, 1)
+	if len(send) != 2 {
+		t.Fatalf("send summaries = %v", targets(send))
+	}
+	got := map[string]string{}
+	for _, sum := range send {
+		for _, line := range sum.Lines {
+			got[line.Item.Entry.Path] = sum.Target.Name
+		}
+	}
+	if got["/tmp/big"] != tAdmin.Name || got["/tmp/small"] != tShop.Name {
+		t.Fatalf("entry destinations = %v", got)
+	}
+	for _, sum := range send {
+		if sum.Target.Name == tAdmin.Name {
+			msg := c.Message(&sum, t0, false)
+			if !strings.Contains(msg, "у владельца 21 ГБ·мин при пороге 12 ГБ·мин") {
+				t.Fatalf("owner measure absent from mail: %s", msg)
+			}
+		}
+	}
+}
+
+func TestLiveCreatorProcessBlocksEscalation(t *testing.T) {
+	c := cfg()
+	c.Escalation.After = 1
+	creator := sess(11, "shop-master", home)
+	it := c.Items([]record.Entry{entry("/tmp/live-creator", gib, time.Hour,
+		sessionOwner(creator, "go"))}, me)[0]
+	it.Entry.Owner.Proc.Start = "12345"
+	live := newLive(tLead, tShop, tAdmin)
+	live.proc[it.Entry.Owner.Proc.Pid] = it.Entry.Owner.Proc.Start
+	state := &UserState{Alerts: map[string]*AlertState{EntryKey(&it): {Sent: 1}}}
+	send, _ := c.Plan(t0, []Group{{Items: []Item{it}}}, live, state, 1)
+	if len(send) != 1 || send[0].Target.Name != tShop.Name {
+		t.Fatalf("live creator process escalated: %v", targets(send))
+	}
 }
 
 var (

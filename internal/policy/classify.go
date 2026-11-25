@@ -101,17 +101,21 @@ func (c *Config) fighter(o *record.Owner) string {
 
 // Item — живая запись с классом и ключом владельца.
 type Item struct {
-	Entry        record.Entry
-	Class        Class
-	Fighter      string
-	OwnerKey     string
-	WorkerMaster string
-	WorkerCwd    string
-	WorkerJobID  string
-	WorkerLive   bool
-	Busy         bool
-	BusyCommand  string
-	BusyPid      int
+	Entry             record.Entry
+	Class             Class
+	Fighter           string
+	OwnerKey          string
+	WorkerMaster      string
+	WorkerCwd         string
+	WorkerJobID       string
+	WorkerLive        bool
+	Busy              bool
+	BusyCommand       string
+	BusyPid           int
+	ThresholdKnown    bool
+	HoldsThreshold    bool
+	OwnerGBMin        float64
+	OwnerThresholdGBM float64
 }
 
 // GBMin — текущий размер записи, умноженный на её возраст.
@@ -221,6 +225,19 @@ func (c *Config) Over(now time.Time, items []Item, factor float64) []Group {
 			continue
 		}
 		sort.Slice(g.Items, func(i, j int) bool { return g.Items[i].GBMin(now) > g.Items[j].GBMin(now) })
+		cumulative := 0.0
+		for i := range g.Items {
+			g.Items[i].ThresholdKnown = true
+			g.Items[i].OwnerGBMin = g.GBMin
+			g.Items[i].OwnerThresholdGBM = budget
+			measure := g.Items[i].GBMin(now)
+			if cumulative < budget || measure >= budget {
+				g.Items[i].HoldsThreshold = true
+				if cumulative < budget {
+					cumulative += measure
+				}
+			}
+		}
 		out = append(out, *g)
 	}
 	sort.Slice(out, func(i, j int) bool {
