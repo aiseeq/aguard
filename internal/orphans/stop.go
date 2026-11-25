@@ -196,7 +196,9 @@ func podmanStop(ctx context.Context, id string, storage []string, wait time.Dura
 	defer cancel()
 	secs := strconv.Itoa(int(wait.Seconds()))
 	args := append(append([]string{}, storage...), "stop", "-t", secs, id)
-	out, err := exec.CommandContext(ctx, "podman", args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "podman", args...)
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.CombinedOutput()
 	res := strings.TrimSpace(string(out))
 	if err != nil {
 		return fmt.Sprintf("podman stop %s: ошибка %v: %s", ShortID(id), err, res)

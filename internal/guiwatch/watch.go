@@ -1590,6 +1590,7 @@ func journalWindow(ctx context.Context, start, end time.Time, journalDir, journa
 		}
 	}
 	cmd := exec.CommandContext(ctx, "journalctl", args...)
+	cmd.WaitDelay = 2 * time.Second
 	a, err := cmd.Output()
 	if err != nil {
 		a = []byte("journalctl user error: " + err.Error())
@@ -1627,7 +1628,9 @@ func kernelJournalWindow(ctx context.Context, from, to string, windowStart time.
 			args = append([]string{"--file=" + files[i]}, args...)
 		}
 	}
-	out, err := exec.CommandContext(ctx, "journalctl", args...).Output()
+	cmd := exec.CommandContext(ctx, "journalctl", args...)
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.Output()
 	if err != nil {
 		msg := "journalctl kernel error: " + err.Error()
 		if note != "" {

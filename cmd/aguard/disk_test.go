@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -20,10 +22,23 @@ import (
 	"github.com/aiseeq/aguard/internal/statefile"
 	"github.com/aiseeq/aguard/internal/track"
 	"github.com/aiseeq/aguard/internal/yield"
+	"github.com/aiseeq/akit/proc"
 	"github.com/aiseeq/akit/session"
 )
 
 func TestDiskFactsStopsWaitingForGrandchildStdoutOnCancel(t *testing.T) {
+	const helperEnv = "AGUARD_DISK_FACTS_DESCENDANT_HELPER"
+	if os.Getenv(helperEnv) != "1" {
+		helper := exec.Command(os.Args[0], "-test.run=^TestDiskFactsStopsWaitingForGrandchildStdoutOnCancel$")
+		helper.Env = append(os.Environ(), helperEnv+"=1")
+		if out, err := helper.CombinedOutput(); err != nil {
+			t.Fatalf("isolated subreaper test: %v\n%s", err, out)
+		}
+		return
+	}
+	if err := proc.BecomeChildSubreaper(); err != nil {
+		t.Fatal(err)
+	}
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	if err := os.Mkdir(repo, 0o700); err != nil {
@@ -39,12 +54,15 @@ func TestDiskFactsStopsWaitingForGrandchildStdoutOnCancel(t *testing.T) {
 	if out, err := exec.Command("git", "-C", repo, "worktree", "add", "--detach", entry).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v: %s", err, out)
 	}
+	if repos, err := disk.WorktreeRepos([]string{entry}); err != nil || len(repos) != 1 {
+		t.Fatalf("worktree repo discovery: %v, %v", repos, err)
+	}
 	bin := filepath.Join(tmp, "bin")
 	if err := os.Mkdir(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	marker := filepath.Join(tmp, "started")
-	graft := "#!/bin/sh\nsleep 60 & child=$!\n(sleep 1; kill \"$child\" 2>/dev/null) >/dev/null 2>&1 &\nprintf started > \"$GRAFT_TEST_MARKER\"\necho x\n"
+	marker := filepath.Join(tmp, "child.pid")
+	graft := "#!/bin/sh\nsleep 60 & child=$!\nprintf '%s\\n' \"$child\" > \"$GRAFT_TEST_MARKER\"\necho x\nwait \"$child\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "graft"), []byte(graft), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -55,14 +73,31 @@ func TestDiskFactsStopsWaitingForGrandchildStdoutOnCancel(t *testing.T) {
 	cfg := config.Default(tmp)
 	owners := &disk.Owners{Live: nil}
 	done := make(chan struct{})
+	var childPID int
+	cleanup := func() {
+		if childPID == 0 {
+			return
+		}
+		if _, err := proc.StopDescendants(0, syscall.SIGKILL); err != nil {
+			t.Errorf("stop test descendants: %v", err)
+		}
+		var status syscall.WaitStatus
+		_, _ = syscall.Wait4(childPID, &status, 0, nil)
+		childPID = 0
+	}
+	t.Cleanup(cleanup)
 	go func() {
 		defer close(done)
 		a := &app{home: tmp, stateDir: tmp, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 		a.diskFacts(ctx, &cfg, owners, []string{entry})
 	}()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, err := os.Stat(marker); err == nil {
+		if b, err := os.ReadFile(marker); err == nil {
+			childPID, err = strconv.Atoi(strings.TrimSpace(string(b)))
+			if err != nil {
+				t.Fatalf("invalid descendant PID: %q: %v", b, err)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -72,13 +107,24 @@ func TestDiskFactsStopsWaitingForGrandchildStdoutOnCancel(t *testing.T) {
 	}
 	started := time.Now()
 	cancel()
+	returned := false
 	select {
 	case <-done:
-		if elapsed := time.Since(started); elapsed > queueExternalKillWait+2*time.Second {
-			t.Fatalf("diskFacts returned after %s; limit is %s", elapsed, queueExternalKillWait+2*time.Second)
-		}
+		returned = true
 	case <-time.After(queueExternalKillWait + 2*time.Second):
-		t.Fatal("diskFacts kept waiting for grandchild stdout after cancellation")
+	}
+	resultTime := time.Since(started)
+	cleanup()
+	if !returned {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("diskFacts did not return after test descendant cleanup")
+		}
+		t.Fatalf("diskFacts kept waiting for grandchild stdout after cancellation (at least %s)", resultTime)
+	}
+	if resultTime > queueExternalKillWait+2*time.Second {
+		t.Fatalf("diskFacts returned after %s; limit is %s", resultTime, queueExternalKillWait+2*time.Second)
 	}
 }
 
