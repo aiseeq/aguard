@@ -51,7 +51,7 @@ func wakeSocketWorld(t *testing.T, worker bool) (*app, queue.View, []queue.Ticke
 	}
 	now := time.Now()
 	v := queue.View{Now: now, Lead: "lead", Serious: func(string) bool { return true }, Alive: func(string) bool { return true }, Free: func(string) bool { return true }, Session: func(string) string { return "session-1" }}
-	v.WakeFree = func(name string) bool { owners, err := a.workerOwners(); return err == nil && !owners[name] }
+	v.WakeFree = func(name string) bool { owners, err := a.workerOwners(t.Context()); return err == nil && !owners[name] }
 	v.Next = func(name, dir string) (queue.Ticket, bool, error) {
 		return a.nextForWake(context.Background(), tk, name, dir, now, func(time.Time) bool { return false })
 	}
@@ -286,7 +286,7 @@ func TestQueueViewWakeWiring(t *testing.T) {
 	alive := map[string]session.Info{"m": {Pid: 7, SessionID: "s1", Name: "m"}}
 	project := filepath.Join(b.dir, "git", "p")
 	view := func() queue.View {
-		return queueView(b.c, alive, fakeJudge{free: true, wakeFree: true}, time.Now(), b.a, map[string]bool{project: true}, nil)
+		return queueView(t.Context(), b.c, alive, fakeJudge{free: true, wakeFree: true}, time.Now(), b.a, map[string]bool{project: true}, nil)
 	}
 	if !view().WakeFree("m") {
 		t.Fatal("без бойца свободен")
@@ -441,7 +441,7 @@ func TestQueueViewAnswersAndErrors(t *testing.T) {
 	alive := map[string]session.Info{"m": {Pid: 7, SessionID: "s1", Name: "m", Cwd: project}}
 	now := time.Now()
 	view := func(at time.Time, frozenErr error) queue.View {
-		return queueView(b.c, alive, fakeJudge{free: true, wakeFree: true}, at, b.a, map[string]bool{}, frozenErr)
+		return queueView(t.Context(), b.c, alive, fakeJudge{free: true, wakeFree: true}, at, b.a, map[string]bool{}, frozenErr)
 	}
 	asked := func(at time.Time, want int) {
 		t.Helper()
@@ -549,7 +549,7 @@ func TestWorkerOwnersUnits(t *testing.T) {
 		return []string{"worker-settle.service", "worker-job-1113-0946-a.service", "worker-round-1111-2150-b-7.service",
 			"worker-job-1113-0950-c.service", "worker-job-1113-0999-missing.service"}, nil
 	}
-	owners, err := a.workerOwners()
+	owners, err := a.workerOwners(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}

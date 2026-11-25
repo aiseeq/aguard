@@ -278,7 +278,9 @@ func (a *app) readSudoJournal(ctx context.Context, timeout time.Duration, since,
 
 func readJournal(parent context.Context, timeout time.Duration, since, until string, filters ...string) ([]journalRecord, error) {
 	args := append([]string{"--no-pager", "-o", "json", "--since", since, "--until", until}, filters...)
-	b, err := exec.CommandContext(parent, "journalctl", args...).Output()
+	cmd := exec.CommandContext(parent, "journalctl", args...)
+	cmd.WaitDelay = queueExternalKillWait
+	b, err := cmd.Output()
 	if err != nil {
 		if parent.Err() != nil {
 			return nil, journalContextError(parent.Err(), timeout)

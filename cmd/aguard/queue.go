@@ -298,7 +298,7 @@ func (a *app) queueNotices(ctx context.Context, c *config.Config, judge *restart
 		a.warn("queue", "реестр сессий", "err", err)
 		return nil
 	}
-	view := queueView(c, alive, judge, now, a, frozen, frozenErr)
+	view := queueView(ctx, c, alive, judge, now, a, frozen, frozenErr)
 	a.queueBootGrace(&view, c.Queue.BootGrace.D())
 	notices := before.Step(tickets, view)
 	if dry {
@@ -535,7 +535,7 @@ type queueJudge interface {
 	WakeFree(cfg *restart.Config, pid int, after time.Duration, now time.Time) (bool, error)
 }
 
-func queueView(c *config.Config, alive map[string]session.Info, judge queueJudge, now time.Time, a *app, frozen map[string]bool, frozenErr error) queue.View {
+func queueView(ctx context.Context, c *config.Config, alive map[string]session.Info, judge queueJudge, now time.Time, a *app, frozen map[string]bool, frozenErr error) queue.View {
 	cfg := &c.Queue
 	live := slices.Clone(cfg.Live)
 	if cfg.Mode == queue.ModeLog {
@@ -560,7 +560,7 @@ func queueView(c *config.Config, alive map[string]session.Info, judge queueJudge
 	var workersRead bool
 	wakeFree := func(name string) bool {
 		if !workersRead {
-			owners, workerErr = a.workerOwners()
+			owners, workerErr = a.workerOwners(ctx)
 			workersRead = true
 			if workerErr != nil {
 				a.warn("queue", "список бойцов", "err", workerErr)
@@ -604,13 +604,13 @@ func queueView(c *config.Config, alive map[string]session.Info, judge queueJudge
 		TurnAfter: turnAfter,
 		AdminFor:  func(dir string) string { _, admin := orphans.LongestPrefix(c.Admins, dir); return admin },
 		AdminNext: func(name, dir string) (queue.Ticket, bool, error) {
-			return a.nextForAdmin(context.Background(), cfg.Tk, name, dir, now)
+			return a.nextForAdmin(ctx, cfg.Tk, name, dir, now)
 		},
 		Next: func(name, dir string) (queue.Ticket, bool, error) {
-			return a.nextForWake(context.Background(), cfg.Tk, name, dir, now, func(at time.Time) bool { return turnAfter(name, at) })
+			return a.nextForWake(ctx, cfg.Tk, name, dir, now, func(at time.Time) bool { return turnAfter(name, at) })
 		},
 		WakeCandidates: func(name, dir string) ([]queue.Ticket, error) {
-			candidates, err := a.wakeCandidates(context.Background(), cfg.Tk, name, dir)
+			candidates, err := a.wakeCandidates(ctx, cfg.Tk, name, dir)
 			if err != nil {
 				a.warn("queue", "tk ls (wake)", "err", err)
 			}
@@ -682,6 +682,7 @@ func (a *app) queueTicketNote(ctx context.Context, tk string, tickets []queue.Ti
 			return nil
 		}
 		cmd := exec.CommandContext(ctx, tk, "note", t.Slug, n.Line, "--by", "aguard")
+		cmd.WaitDelay = queueExternalKillWait
 		cmd.Dir = t.Dir
 		if output, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
@@ -818,6 +819,7 @@ func (a *app) queueTicketsWithTable(ctx context.Context, c *config.Config, table
 			args = append(args, "--root", root)
 		}
 		cmd := exec.CommandContext(ctx, cfg.Tk, args...)
+		cmd.WaitDelay = queueExternalKillWait
 		if !rootMode {
 			cmd.Dir = root
 		}
@@ -859,6 +861,7 @@ func (a *app) queueTicketsWithTable(ctx context.Context, c *config.Config, table
 func (a *app) queueTicketsProject(ctx context.Context, c *config.Config, project string, table map[string]string, taskDirs []string) ([]queue.Ticket, error) {
 	args := []string{"ls", "--json", "--all"}
 	cmd := exec.CommandContext(ctx, c.Queue.Tk, args...)
+	cmd.WaitDelay = queueExternalKillWait
 	cmd.Dir = project
 	b, err := cmd.Output()
 	if err != nil {

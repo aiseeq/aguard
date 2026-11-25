@@ -562,7 +562,7 @@ func (a *app) watchers(mw *memwatch.Watcher, judge *restart.Judge) []watcher {
 			func(c *config.Config) time.Duration { return a.codexEvery(&c.Codex) }},
 		{"queue", func(ctx context.Context, c *config.Config) error { return a.queueRound(ctx, c, judge, false) },
 			func(c *config.Config) time.Duration { return c.Queue.Interval.D() }},
-		{"night", func(_ context.Context, c *config.Config) error { return a.nightRound(&c.Night, false) },
+		{"night", func(ctx context.Context, c *config.Config) error { return a.nightRound(ctx, &c.Night, false) },
 			func(c *config.Config) time.Duration { return c.Night.Interval.D() }},
 		{"liveness", func(_ context.Context, c *config.Config) error { return a.livenessRound(&c.Liveness, false) },
 			func(c *config.Config) time.Duration { return c.Liveness.Interval.D() }},

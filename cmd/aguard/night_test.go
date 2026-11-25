@@ -148,7 +148,7 @@ func TestNightDryRunDoesNotWriteState(t *testing.T) {
 	cfg.DreamFallbackBy = pastFallbackBy()
 	cfg.DreamMarker = filepath.Join(dir, "absent")
 	cfg.DigestBy = "23:59"
-	if err := a.nightRound(&cfg, true); err != nil {
+	if err := a.nightRound(t.Context(), &cfg, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(a.stateDir, "night", "state.json")); !errors.Is(err, os.ErrNotExist) {
@@ -187,13 +187,13 @@ func TestNightPausedSilencesDreamAndFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := a.nightRound(&cfg, false); err != nil {
+		if err := a.nightRound(t.Context(), &cfg, false); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// перезапуск демона: новый app на том же состоянии — строка о снятом Сне не повторяется
 	restarted := &app{home: dir, stateDir: a.stateDir, log: a.log, units: units, reg: a.reg}
-	if err := restarted.nightRound(&cfg, false); err != nil {
+	if err := restarted.nightRound(t.Context(), &cfg, false); err != nil {
 		t.Fatal(err)
 	}
 	if len(units.started) != 0 {
@@ -234,7 +234,7 @@ func TestNightPausedSilencesFallbackStateLetter(t *testing.T) {
 	cfg.DreamPaused = pause
 	cfg.DreamPauseCheck = fakePauseCheck(t, dir, "legacy", 0)
 	cfg.DigestBy = "23:59"
-	if err := a.nightRound(&cfg, false); err != nil {
+	if err := a.nightRound(t.Context(), &cfg, false); err != nil {
 		t.Fatal(err)
 	}
 	if len(mail) != 0 {
@@ -254,7 +254,7 @@ func TestNightPausedStatErrorFailsRound(t *testing.T) {
 	if err := os.Chmod(restricted, 0); err != nil {
 		t.Fatal(err)
 	}
-	statErr := a.nightRound(&cfg, false)
+	statErr := a.nightRound(t.Context(), &cfg, false)
 	if err := os.Chmod(restricted, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestNightPausedStatErrorFailsRound(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg.DreamPaused = filepath.Join(blocker, "night-paused")
-		statErr = a.nightRound(&cfg, false)
+		statErr = a.nightRound(t.Context(), &cfg, false)
 	}
 	if statErr == nil || !strings.Contains(statErr.Error(), cfg.DreamPaused) {
 		t.Fatalf("ошибка прохода без пути паузы: %v", statErr)
@@ -301,7 +301,7 @@ func TestNightLogModeOncePerSignal(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if err := a.nightRound(&cfg, false); err != nil {
+		if err := a.nightRound(t.Context(), &cfg, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -410,7 +410,7 @@ func TestNightProbeLive(t *testing.T) {
 	cfg.DreamMarker = filepath.Join(dir, "absent")
 	cfg.DigestBy = "23:59"
 	cfg.DigestMarker = filepath.Join(dir, "absent-digest")
-	if err := a.nightRound(&cfg, false); err != nil {
+	if err := a.nightRound(t.Context(), &cfg, false); err != nil {
 		t.Fatal(err)
 	}
 	state, err := loadNightState(filepath.Join(a.stateDir, "night", "state.json"))
@@ -475,7 +475,7 @@ func TestNightAlertOnlySessionLetters(t *testing.T) {
 	if err := os.WriteFile(cfg.DigestMarker, []byte(now.Format("2006-01-02")+" "+now.AddDate(0, 0, 1).Format("2006-01-02")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.nightRound(&cfg, false); err != nil {
+	if err := a.nightRound(t.Context(), &cfg, false); err != nil {
 		t.Fatal(err)
 	}
 	if msg := <-got; !strings.Contains(msg, "Сон") {
@@ -527,7 +527,7 @@ func TestNightLogModeIgnoresBrokenState(t *testing.T) {
 		}
 		cfg.DigestMarker = filepath.Join(dir, "digest")
 		for range 2 {
-			if err := a.nightRound(&cfg, false); err != nil {
+			if err := a.nightRound(t.Context(), &cfg, false); err != nil {
 				t.Fatalf("пауза %v: %v", paused, err)
 			}
 		}
@@ -538,7 +538,7 @@ func TestNightLogModeIgnoresBrokenState(t *testing.T) {
 		if paused {
 			// перезапуск в режиме log: новый app на той же папке состояния — строки за дату больше нет
 			restarted := &app{home: dir, stateDir: stateDir, log: a.log, units: &fakeUnits{}}
-			if err := restarted.nightRound(&cfg, false); err != nil {
+			if err := restarted.nightRound(t.Context(), &cfg, false); err != nil {
 				t.Fatal(err)
 			}
 			if n := strings.Count(logs.String(), "aguard night: Сон снят"); n != 1 {
@@ -589,7 +589,7 @@ func TestNightPauseByDates(t *testing.T) {
 			cfg.DreamFallbackBy = pastFallbackBy()
 			cfg.DreamMarker, cfg.DreamPaused = filepath.Join(dir, "absent-marker"), pause
 			cfg.DreamPauseCheck = fakePauseCheck(t, dir, tc.answer, tc.code)
-			if err := a.nightRound(&cfg, false); err != nil {
+			if err := a.nightRound(t.Context(), &cfg, false); err != nil {
 				t.Fatal(err)
 			}
 			if got := len(units.started) == 1; got != tc.unit {

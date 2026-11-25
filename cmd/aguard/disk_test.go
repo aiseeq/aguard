@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +22,65 @@ import (
 	"github.com/aiseeq/aguard/internal/yield"
 	"github.com/aiseeq/akit/session"
 )
+
+func TestDiskFactsStopsWaitingForGrandchildStdoutOnCancel(t *testing.T) {
+	tmp := t.TempDir()
+	repo := filepath.Join(tmp, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "init", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "initial").CombinedOutput(); err != nil {
+		t.Fatalf("git initial commit: %v: %s", err, out)
+	}
+	entry := filepath.Join(repo, "worktree")
+	if out, err := exec.Command("git", "-C", repo, "worktree", "add", "--detach", entry).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v: %s", err, out)
+	}
+	bin := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(tmp, "started")
+	graft := "#!/bin/sh\nsleep 60 & child=$!\n(sleep 1; kill \"$child\" 2>/dev/null) >/dev/null 2>&1 &\nprintf started > \"$GRAFT_TEST_MARKER\"\necho x\n"
+	if err := os.WriteFile(filepath.Join(bin, "graft"), []byte(graft), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GRAFT_TEST_MARKER", marker)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	cfg := config.Default(tmp)
+	owners := &disk.Owners{Live: nil}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a := &app{home: tmp, stateDir: tmp, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		a.diskFacts(ctx, &cfg, owners, []string{entry})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("graft fake did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case <-done:
+		if elapsed := time.Since(started); elapsed > queueExternalKillWait+2*time.Second {
+			t.Fatalf("diskFacts returned after %s; limit is %s", elapsed, queueExternalKillWait+2*time.Second)
+		}
+	case <-time.After(queueExternalKillWait + 2*time.Second):
+		t.Fatal("diskFacts kept waiting for grandchild stdout after cancellation")
+	}
+}
 
 // Сигнал о свободном месте: отметки по адресатам — в free.json сразу после писем; дошедшему следующее через сутки,
 // недошедшему (сессии нет) — повтор через час (8e8571b).

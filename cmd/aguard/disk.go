@@ -211,7 +211,7 @@ func (a *app) diskRound(ctx context.Context, cfg *config.Config) error {
 		}
 	}
 	if usage != nil { // был обход: следы по свежим замерам
-		recs = append(recs, a.diskTraces(cfg, st, owners, now, free, usage)...)
+		recs = append(recs, a.diskTraces(ctx, cfg, st, owners, now, free, usage)...)
 	}
 	for i := range recs {
 		a.log.Info("aguard disk: " + recs[i].Line(a.home))
@@ -511,7 +511,7 @@ const graftTimeout = 2 * time.Minute
 
 // diskFacts — что известно о записях помимо замера: живые сессии, имена сессий по транскриптам (waits), создатели
 // по снимку слежения track-home, вердикты graft о worktree, время создания по statx.
-func (a *app) diskFacts(cfg *config.Config, owners *disk.Owners, list []string) *disk.Facts {
+func (a *app) diskFacts(ctx context.Context, cfg *config.Config, owners *disk.Owners, list []string) *disk.Facts {
 	f := &disk.Facts{Live: map[string]bool{}, Names: map[string]string{}, Created: map[string]disk.Creator{},
 		Verdicts: map[string]disk.Verdict{}}
 	for _, s := range owners.Live {
@@ -532,8 +532,9 @@ func (a *app) diskFacts(cfg *config.Config, owners *disk.Owners, list []string) 
 		a.warn("disk", "репозитории worktree", "err", err)
 	}
 	for _, repo := range slices.Sorted(maps.Keys(repos)) {
-		ctx, cancel := context.WithTimeout(context.Background(), graftTimeout)
-		cmd := exec.CommandContext(ctx, "graft", "worktree", "clean")
+		cmdCtx, cancel := context.WithTimeout(ctx, graftTimeout)
+		cmd := exec.CommandContext(cmdCtx, "graft", "worktree", "clean")
+		cmd.WaitDelay = queueExternalKillWait
 		cmd.Dir = repo
 		out, err := cmd.Output()
 		cancel()
@@ -603,10 +604,10 @@ func (a *app) diskCreators(cfg *config.Config, f *disk.Facts) {
 }
 
 // diskTraces — следы среди замеренных записей и записи журнала о них.
-func (a *app) diskTraces(cfg *config.Config, st *disk.State, owners *disk.Owners, now time.Time, free int64,
+func (a *app) diskTraces(ctx context.Context, cfg *config.Config, st *disk.State, owners *disk.Owners, now time.Time, free int64,
 	usage map[string]disk.Usage) []disk.Record {
 	list := slices.Sorted(maps.Keys(usage))
-	traces := cfg.Disk.FindTraces(now, list, usage, a.diskFacts(cfg, owners, list), owners.Of)
+	traces := cfg.Disk.FindTraces(now, list, usage, a.diskFacts(ctx, cfg, owners, list), owners.Of)
 	exists := func(path string) bool {
 		_, err := os.Lstat(path)
 		return !errors.Is(err, fs.ErrNotExist)
@@ -630,7 +631,7 @@ func (a *app) diskTracesNow(ctx context.Context, cfg *config.Config, all bool) e
 		return err
 	}
 	usage := cfg.Disk.MeasureAll(ctx, entries, nil)
-	traces := cfg.Disk.FindTraces(now, entries, usage, a.diskFacts(cfg, owners, entries), owners.Of)
+	traces := cfg.Disk.FindTraces(now, entries, usage, a.diskFacts(ctx, cfg, owners, entries), owners.Of)
 	var b strings.Builder
 	findings := cfg.Disk.Findings(now, traces)
 	for i := range findings {

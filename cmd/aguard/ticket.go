@@ -111,6 +111,7 @@ func findClassTicket(ctx context.Context, tk, dir, base string) (open, next, pre
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tk, "ls", "--all", "--slug", base, "--json")
+	cmd.WaitDelay = queueExternalKillWait
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
@@ -190,6 +191,7 @@ func tkRun(ctx context.Context, tk, dir string, stdin *strings.Reader, args ...s
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tk, args...)
+	cmd.WaitDelay = queueExternalKillWait
 	cmd.Dir = dir
 	if stdin != nil {
 		cmd.Stdin = stdin

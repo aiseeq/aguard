@@ -175,7 +175,7 @@ func TestQueueWiring(t *testing.T) {
 	if err := b.c.Queue.Validate("/h"); err != nil {
 		t.Fatal(err)
 	}
-	v := queueView(b.c, nil, nil, time.Now(), b.a, nil, nil)
+	v := queueView(t.Context(), b.c, nil, nil, time.Now(), b.a, nil, nil)
 	if v.Home == "" || v.Home != b.a.home {
 		t.Fatalf("View.Home = %q, демон %q: межпроектные блокеры не разберутся", v.Home, b.a.home)
 	}

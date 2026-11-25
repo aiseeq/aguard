@@ -38,6 +38,7 @@ type codexNoter func(ctx context.Context, tk, root, ticket, text string) error
 // appServer — `codex app-server` учётки home: без CODEX_HOME codex взял бы ~/.codex, чужой лимит и чужой кредит.
 func appServer(ctx context.Context, codex, home string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, codex, "app-server")
+	cmd.WaitDelay = queueExternalKillWait
 	cmd.Env = append(os.Environ(), "CODEX_HOME="+home)
 	return cmd
 }
@@ -80,6 +81,7 @@ func noteTicket(ctx context.Context, tk, root, ticket, text string) error {
 	ctx, cancel := context.WithTimeout(ctx, codexReadTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, tk, "note", ticket, text, "--by", "aguard")
+	cmd.WaitDelay = queueExternalKillWait
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tk note %s: %w: %s", ticket, err, out)
