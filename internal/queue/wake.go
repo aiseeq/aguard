@@ -110,6 +110,9 @@ func (s *State) wakeFree(master string, first, project Ticket, ts []Ticket, v Vi
 		}
 	}
 	free, found := wakeCandidate(candidates, ts, v)
+	if !found && first.WakeAlso != nil && first.WakeAlso.CanTake && !closed(first.WakeAlso.Status) {
+		free, found = *first.WakeAlso, true
+	}
 	if !found {
 		delete(s.Wakes, master)
 	}

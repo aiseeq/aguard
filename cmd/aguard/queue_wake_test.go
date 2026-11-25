@@ -347,6 +347,23 @@ func TestQueueNextFieldsAndCacheAge(t *testing.T) {
 	}
 }
 
+func TestQueueNextParsesExternalAlso(t *testing.T) {
+	a, _ := testIOApp(t)
+	tk := filepath.Join(a.home, "tk")
+	body := `{"source":"local","path":"docs/tasks/20261104-0950-first.md","slug":"first","status":"открыт","also":{"source":"external","key":"JIRA-7","title":"внешняя задача","status":"Open","prio":"HIGH","url":"https://jira.invalid/JIRA-7","closed":false}}`
+	if err := os.WriteFile(tk, []byte("#!/bin/sh\nprintf '%s\\n' '"+body+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	first, found, err := a.nextForQueue(context.Background(), tk, "m", a.home, "m", time.Now())
+	if err != nil || !found || first.WakeAlso == nil {
+		t.Fatalf("first=%+v found=%v err=%v", first, found, err)
+	}
+	got := first.WakeAlso
+	if got.Key != filepath.Base(a.home)+"/JIRA-7" || got.Project != filepath.Base(a.home) || got.Status != "Open" || got.Prio != "HIGH" || got.Title != "внешняя задача" || !got.External || !got.CanTake {
+		t.Fatalf("also: %+v", got)
+	}
+}
+
 func TestQueueWakeCandidatesUseNextRankAndCanTake(t *testing.T) {
 	a, _ := testIOApp(t)
 	tk := filepath.Join(a.home, "tk")
