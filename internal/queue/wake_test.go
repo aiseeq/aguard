@@ -190,15 +190,18 @@ func TestWakeBlockedFirstWithoutAlsoHasNoLetter(t *testing.T) {
 	}
 }
 
-func TestWakeBlockedFirstSkipsClosedExternalAlso(t *testing.T) {
+// Свободный локальный кандидат идёт раньше also: tk next ставит локальную группу выше внешней.
+func TestWakeBlockedFirstPrefersLocalCandidateOverAlso(t *testing.T) {
 	w := newWakeWorld()
+	w.view.Home = "/home"
 	w.first.BlockedBy = []string{"blocker"}
 	w.ts = append(w.ts, Ticket{Key: "p/blocker", Project: "p", Dir: "/p", Slug: "blocker", Master: "master", Status: "открыт"})
-	also := Ticket{Key: "p/JIRA-7", Status: "готово", External: true, CanTake: false}
+	also := Ticket{Key: "p/JIRA-7", Project: "p", Dir: "/p", Slug: "JIRA-7", Status: "открыт", External: true, CanTake: true}
 	w.first.WakeAlso = &also
-	w.view.WakeCandidates = func(string, string) ([]Ticket, error) { return nil, nil }
-	if ns := w.step(); len(ns) != 0 {
-		t.Fatalf("закрытый also разбудил мастера: %+v", ns)
+	free := Ticket{Key: "p/free", Project: "p", Dir: "/p", Slug: "free", Status: "открыт", CanTake: true}
+	w.view.WakeCandidates = func(string, string) ([]Ticket, error) { return []Ticket{free}, nil }
+	if ns := w.step(); len(ns) != 1 || ns[0].Kind != KindWake || ns[0].Key != free.Key {
+		t.Fatalf("письмо должно быть по локальному кандидату, не по also: %+v", ns)
 	}
 }
 

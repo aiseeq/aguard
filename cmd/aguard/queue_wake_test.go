@@ -347,10 +347,11 @@ func TestQueueNextFieldsAndCacheAge(t *testing.T) {
 	}
 }
 
+// closed — закрытые ворота очереди, общие с первым тикетом: also остаётся кандидатом, как и первый.
 func TestQueueNextParsesExternalAlso(t *testing.T) {
 	a, _ := testIOApp(t)
 	tk := filepath.Join(a.home, "tk")
-	body := `{"source":"local","path":"docs/tasks/20261104-0950-first.md","slug":"first","status":"открыт","also":{"source":"external","key":"JIRA-7","title":"внешняя задача","status":"Open","prio":"HIGH","url":"https://jira.invalid/JIRA-7","closed":false}}`
+	body := `{"source":"local","path":"docs/tasks/20261104-0950-first.md","slug":"first","status":"открыт","also":{"source":"external","key":"JIRA-7","title":"внешняя задача","status":"Open","prio":"HIGH","url":"https://jira.invalid/JIRA-7","closed":true}}`
 	if err := os.WriteFile(tk, []byte("#!/bin/sh\nprintf '%s\\n' '"+body+"'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}

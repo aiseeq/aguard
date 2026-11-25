@@ -95,7 +95,8 @@ func (s *State) wakeFirst(master string, project Ticket, ts []Ticket, v View) (T
 }
 
 // wakeFree — тикет, по которому будить мастера: первый, а если он заблокирован незакрытым тикетом — первый свободный
-// кандидат ниже. Свободного нет — запись о письме снята; сбой списка кандидатов — предупреждение уже записал источник
+// локальный кандидат ниже, за ним — первая задача внешнего источника из tk next (also: tk ставит локальную группу выше).
+// Свободного нет — запись о письме снята; сбой списка кандидатов — предупреждение уже записал источник
 // (cmd/aguard), запись не тронута.
 func (s *State) wakeFree(master string, first, project Ticket, ts []Ticket, v View) (Ticket, bool) {
 	if !wakeBlocked(first, ts, v) {
@@ -110,7 +111,7 @@ func (s *State) wakeFree(master string, first, project Ticket, ts []Ticket, v Vi
 		}
 	}
 	free, found := wakeCandidate(candidates, ts, v)
-	if !found && first.WakeAlso != nil && first.WakeAlso.CanTake && !closed(first.WakeAlso.Status) {
+	if !found && first.WakeAlso != nil {
 		free, found = *first.WakeAlso, true
 	}
 	if !found {
@@ -119,8 +120,8 @@ func (s *State) wakeFree(master string, first, project Ticket, ts []Ticket, v Vi
 	return free, found
 }
 
-// wakeCandidate выбирает первый доступный тикет из tk ls без незакрытых блокеров. Внешних задач Jira там нет:
-// если первый локальный тикет заблокирован, а ниже свободна задача Jira, письма не будет (тикет aguard wake-blocked-first-external).
+// wakeCandidate выбирает первый доступный тикет из tk ls без незакрытых блокеров. Внешних задач Jira в tk ls нет —
+// их берёт wakeFree из also ответа tk next.
 func wakeCandidate(candidates, ts []Ticket, v View) (Ticket, bool) {
 	for i := range candidates {
 		if candidates[i].CanTake && !wakeBlocked(candidates[i], ts, v) {
