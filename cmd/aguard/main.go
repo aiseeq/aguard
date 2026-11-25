@@ -263,7 +263,7 @@ func (a *app) dispatchLate(ctx context.Context, cmd string, args []string) error
 	case "forkguard":
 		return a.forkguardCmd(ctx, args)
 	case "night":
-		return a.nightCmd(args)
+		return a.nightCmd(ctx, args)
 	case "liveness":
 		return a.livenessCmd(args)
 	case "report":

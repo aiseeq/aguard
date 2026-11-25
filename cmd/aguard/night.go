@@ -77,7 +77,7 @@ func nightAddressees(to, own []string) []string {
 }
 
 // nightCmd — `aguard night tick [-dry-run]`.
-func (a *app) nightCmd(args []string) error {
+func (a *app) nightCmd(ctx context.Context, args []string) error {
 	cmd, rest := sub(args)
 	cfg, err := a.config()
 	if err != nil {
@@ -90,7 +90,7 @@ func (a *app) nightCmd(args []string) error {
 	fl := flag.NewFlagSet("night tick", flag.ContinueOnError)
 	dry := fl.Bool("dry-run", false, "показать сигналы, не отправлять и не сохранять")
 	parse(fl, rest)
-	return a.nightRound(context.Background(), &cfg.Night, *dry)
+	return a.nightRound(ctx, &cfg.Night, *dry)
 }
 
 // nightRound — один проход: факты, сигналы, доставка, состояние; dry и mode=log — только журнал «написал бы».
