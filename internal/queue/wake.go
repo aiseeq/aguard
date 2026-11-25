@@ -48,30 +48,9 @@ func (s *State) wakeNotices(ts []Ticket, v View, notices []Notice) []Notice {
 			cwd = v.Cwd(master)
 		}
 		project := wakeProject(masters[master], cwd)
-		first, found, err := v.Next(master, project.Dir)
-		if err != nil { // причину как предупреждение уже записал источник; запись о письме не трогаем
-			v.Log.Debug("aguard queue: мастер пропущен", "master", master, "err", err)
+		first, ok := s.wakeFirst(master, project, ts, v)
+		if !ok {
 			continue
-		}
-		if !found {
-			delete(s.Wakes, master)
-			continue
-		}
-		if wakeBlocked(first, ts, v) {
-			if v.WakeCandidates == nil {
-				delete(s.Wakes, master)
-				continue
-			}
-			candidates, err := v.WakeCandidates(master, project.Dir)
-			if err != nil { // предупреждение уже записал источник (cmd/aguard); запись о письме не трогаем
-				v.Log.Debug("aguard queue: кандидаты мастера недоступны", "master", master, "err", err)
-				continue
-			}
-			first, found = wakeCandidate(candidates, ts, v)
-			if !found {
-				delete(s.Wakes, master)
-				continue
-			}
 		}
 		if n, ok := s.wakeDecide(master, session, first, project, v); ok {
 			out = append(out, n)
@@ -98,6 +77,43 @@ func wakeBlocked(ticket Ticket, ts []Ticket, v View) bool {
 		}
 	}
 	return false
+}
+
+// wakeFirst — тикет, по которому будить мастера, или ничего. Нет работы — запись о письме снята; сбой источника —
+// причину как предупреждение уже записал источник, запись о письме не трогаем.
+func (s *State) wakeFirst(master string, project Ticket, ts []Ticket, v View) (Ticket, bool) {
+	first, found, err := v.Next(master, project.Dir)
+	if err != nil {
+		v.Log.Debug("aguard queue: мастер пропущен", "master", master, "err", err)
+		return Ticket{}, false
+	}
+	if !found {
+		delete(s.Wakes, master)
+		return Ticket{}, false
+	}
+	return s.wakeFree(master, first, project, ts, v)
+}
+
+// wakeFree — тикет, по которому будить мастера: первый, а если он заблокирован незакрытым тикетом — первый свободный
+// кандидат ниже. Свободного нет — запись о письме снята; сбой списка кандидатов — предупреждение уже записал источник
+// (cmd/aguard), запись не тронута.
+func (s *State) wakeFree(master string, first, project Ticket, ts []Ticket, v View) (Ticket, bool) {
+	if !wakeBlocked(first, ts, v) {
+		return first, true
+	}
+	var candidates []Ticket
+	if v.WakeCandidates != nil {
+		var err error
+		if candidates, err = v.WakeCandidates(master, project.Dir); err != nil {
+			v.Log.Debug("aguard queue: кандидаты мастера недоступны", "master", master, "err", err)
+			return first, false
+		}
+	}
+	free, found := wakeCandidate(candidates, ts, v)
+	if !found {
+		delete(s.Wakes, master)
+	}
+	return free, found
 }
 
 // wakeCandidate выбирает первый доступный тикет из tk ls без незакрытых блокеров. Внешних задач Jira там нет:

@@ -129,11 +129,12 @@ func (a *app) wakeCandidates(ctx context.Context, tk, master, dir string) ([]que
 	if err != nil {
 		return nil, fmt.Errorf("tk ls %s: %w", dir, err)
 	}
-	var raw []queueWakeCandidateJSON
+	var raw []*queueWakeCandidateJSON
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return nil, fmt.Errorf("tk ls %s: %w", dir, err)
 	}
-	slices.SortFunc(raw, func(a, b queueWakeCandidateJSON) int {
+	raw = slices.DeleteFunc(raw, func(c *queueWakeCandidateJSON) bool { return c == nil })
+	slices.SortFunc(raw, func(a, b *queueWakeCandidateJSON) int {
 		if a.NextRank == nil {
 			if b.NextRank == nil {
 				return 0
