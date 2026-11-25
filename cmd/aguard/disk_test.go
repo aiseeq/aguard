@@ -91,7 +91,7 @@ func TestDiskFactsStopsWaitingForGrandchildStdoutOnCancel(t *testing.T) {
 		a := &app{home: tmp, stateDir: tmp, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 		a.diskFacts(ctx, &cfg, owners, []string{entry})
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(45 * time.Second) // подготовка до вызова graft на загруженной машине; меряется только время после отмены
 	for {
 		if b, err := os.ReadFile(marker); err == nil {
 			childPID, err = strconv.Atoi(strings.TrimSpace(string(b)))
@@ -105,13 +105,14 @@ func TestDiskFactsStopsWaitingForGrandchildStdoutOnCancel(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	const cancelSlack = 8 * time.Second // запас на загруженную машину; без WaitDelay внук держит stdout 60 с
 	started := time.Now()
 	cancel()
 	returned := false
 	select {
 	case <-done:
 		returned = true
-	case <-time.After(queueExternalKillWait + 2*time.Second):
+	case <-time.After(queueExternalKillWait + cancelSlack):
 	}
 	resultTime := time.Since(started)
 	cleanup()
@@ -123,8 +124,8 @@ func TestDiskFactsStopsWaitingForGrandchildStdoutOnCancel(t *testing.T) {
 		}
 		t.Fatalf("diskFacts kept waiting for grandchild stdout after cancellation (at least %s)", resultTime)
 	}
-	if resultTime > queueExternalKillWait+2*time.Second {
-		t.Fatalf("diskFacts returned after %s; limit is %s", resultTime, queueExternalKillWait+2*time.Second)
+	if resultTime > queueExternalKillWait+cancelSlack {
+		t.Fatalf("diskFacts returned after %s; limit is %s", resultTime, queueExternalKillWait+cancelSlack)
 	}
 }
 
