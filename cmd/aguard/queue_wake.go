@@ -164,13 +164,15 @@ func (a *app) wakeCandidates(ctx context.Context, tk, master, dir string) ([]que
 	return candidates, nil
 }
 
-func (a *app) workerOwners() (map[string]bool, error) {
+func (a *app) workerOwners(ctx context.Context) (map[string]bool, error) {
 	list := a.queueWorkers
 	if list == nil {
 		list = func() ([]string, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
-			out, err := exec.CommandContext(ctx, "systemctl", "--user", "list-units", "--type=service", "--state=active", "--plain", "--no-legend", "--no-pager", "worker-*.service").Output()
+			cmd := exec.CommandContext(cmdCtx, "systemctl", "--user", "list-units", "--type=service", "--state=active", "--plain", "--no-legend", "--no-pager", "worker-*.service")
+			cmd.WaitDelay = queueExternalKillWait
+			out, err := cmd.Output()
 			if err != nil {
 				return nil, err
 			}

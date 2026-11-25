@@ -63,8 +63,10 @@ type unitRunner interface {
 type systemdUnits struct{}
 
 func (systemdUnits) start(unit, dir, cmd string) error {
-	out, err := exec.Command("systemd-run", "--user", "--unit="+unit, "--working-directory="+dir,
-		"-p", "RemainAfterExit=yes", "--", "bash", "-lc", cmd).CombinedOutput()
+	child := exec.Command("systemd-run", "--user", "--unit="+unit, "--working-directory="+dir,
+		"-p", "RemainAfterExit=yes", "--", "bash", "-lc", cmd)
+	child.WaitDelay = queueExternalKillWait
+	out, err := child.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemd-run %s: %w: %s", unit, err, strings.TrimSpace(string(out)))
 	}
@@ -72,8 +74,10 @@ func (systemdUnits) start(unit, dir, cmd string) error {
 }
 
 func (systemdUnits) status(unit string) (unitStatus, error) {
-	out, err := exec.Command("systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
-		"-p", "Result", "-p", "ExecMainStatus").Output()
+	cmd := exec.Command("systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState",
+		"-p", "Result", "-p", "ExecMainStatus")
+	cmd.WaitDelay = queueExternalKillWait
+	out, err := cmd.Output()
 	if err != nil {
 		return unitStatus{}, fmt.Errorf("systemctl show %s: %w", unit, err)
 	}
@@ -99,7 +103,9 @@ func (systemdUnits) status(unit string) (unitStatus, error) {
 }
 
 func (systemdUnits) tail(unit string) string {
-	out, err := exec.Command("journalctl", "--user", "-u", unit, "-n", "12", "-o", "cat", "--no-pager").Output()
+	cmd := exec.Command("journalctl", "--user", "-u", unit, "-n", "12", "-o", "cat", "--no-pager")
+	cmd.WaitDelay = queueExternalKillWait
+	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Sprintf("журнал unit не прочитан: %v", err)
 	}
@@ -110,7 +116,9 @@ func (systemdUnits) tail(unit string) string {
 // выгруженный (перезагрузка, снят руками) — не ошибка.
 func (systemdUnits) clean(unit string) error {
 	for _, verb := range []string{"stop", "reset-failed"} {
-		out, err := exec.Command("systemctl", "--user", verb, unit).CombinedOutput()
+		cmd := exec.Command("systemctl", "--user", verb, unit)
+		cmd.WaitDelay = queueExternalKillWait
+		out, err := cmd.CombinedOutput()
 		if err != nil && !strings.Contains(string(out), "not loaded") {
 			return fmt.Errorf("systemctl %s %s: %w: %s", verb, unit, err, strings.TrimSpace(string(out)))
 		}

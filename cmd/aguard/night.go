@@ -90,16 +90,16 @@ func (a *app) nightCmd(args []string) error {
 	fl := flag.NewFlagSet("night tick", flag.ContinueOnError)
 	dry := fl.Bool("dry-run", false, "показать сигналы, не отправлять и не сохранять")
 	parse(fl, rest)
-	return a.nightRound(&cfg.Night, *dry)
+	return a.nightRound(context.Background(), &cfg.Night, *dry)
 }
 
 // nightRound — один проход: факты, сигналы, доставка, состояние; dry и mode=log — только журнал «написал бы».
-func (a *app) nightRound(cfg *night.Config, dry bool) error {
+func (a *app) nightRound(ctx context.Context, cfg *night.Config, dry bool) error {
 	if cfg.Mode == night.ModeOff {
 		return nil
 	}
 	now := time.Now().In(time.Local)
-	facts, err := a.nightFacts(cfg, now)
+	facts, err := a.nightFacts(ctx, cfg, now)
 	if err != nil {
 		return err
 	}
@@ -305,7 +305,7 @@ func recentTrust(events []cllog.TrustEvent, now time.Time) int {
 }
 
 // nightFacts — маркеры Сна и Дайджеста и окна доверия из журнала cl; сбой чтения паузы прерывает проход.
-func (a *app) nightFacts(cfg *night.Config, now time.Time) (night.Facts, error) {
+func (a *app) nightFacts(ctx context.Context, cfg *night.Config, now time.Time) (night.Facts, error) {
 	facts := night.Facts{}
 	marker := night.DreamPath(*cfg, now)
 	_, err := os.Stat(marker)
@@ -319,7 +319,7 @@ func (a *app) nightFacts(cfg *night.Config, now time.Time) (night.Facts, error) 
 		if readErr != nil {
 			return night.Facts{}, fmt.Errorf("night: файл паузы Сна %s: %w", cfg.DreamPaused, readErr)
 		}
-		holds, checkErr := nightPauseHolds(cfg, now)
+		holds, checkErr := nightPauseHolds(ctx, cfg, now)
 		facts.DreamPaused = holds || checkErr != nil // статус не получен — ночь держится, сигнал хозяевам Сна
 		if checkErr != nil {
 			facts.DreamPauseErr = checkErr.Error()
@@ -459,12 +459,13 @@ func saveNightState(path string, state nightState) error {
 }
 
 // nightPauseHolds — статус паузы за ночь now от команды dream (night.dream_pause_check): ошибка — её код и stderr.
-func nightPauseHolds(cfg *night.Config, now time.Time) (bool, error) {
+func nightPauseHolds(parent context.Context, cfg *night.Config, now time.Time) (bool, error) {
 	args := night.PauseCommand(*cfg, now)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	var stderr strings.Builder
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.WaitDelay = queueExternalKillWait
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {

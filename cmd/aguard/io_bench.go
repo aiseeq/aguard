@@ -404,6 +404,7 @@ func (s *systemdBenchScope) Close() error {
 }
 func (s *systemdBenchScope) Stop(ctx context.Context) error {
 	cmd := exec.CommandContext(context.WithoutCancel(ctx), "systemctl", "--user", "stop", s.unit+".scope")
+	cmd.WaitDelay = queueExternalKillWait
 	return cmd.Run()
 }
 
@@ -797,6 +798,7 @@ func (c execBenchChild) Signal(sig os.Signal) error {
 
 func startBenchChild(args []string, stderr io.Writer) (benchChild, error) {
 	cmd := exec.Command(args[0], args[1:]...)
+	cmd.WaitDelay = queueExternalKillWait
 	cmd.Stdout, cmd.Stderr = stderr, stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("запустить дочернюю команду: %w", err)

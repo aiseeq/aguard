@@ -949,7 +949,7 @@ func TestQuietNightDoesNotWarnOrRecordEmailFailure(t *testing.T) {
 	if err := os.WriteFile(cfg.DigestMarker, []byte(time.Now().Format("2006-01-02")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.nightRound(&cfg, false); err != nil {
+	if err := a.nightRound(t.Context(), &cfg, false); err != nil {
 		t.Fatal(err)
 	}
 	assertQuietAccounting(t, a, log, "night")

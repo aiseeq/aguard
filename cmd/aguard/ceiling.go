@@ -317,6 +317,7 @@ func parseCeilingValues(path, raw string) (map[string]int64, error) {
 }
 func setCeiling(unit string, n int64) error {
 	cmd := exec.Command("systemctl", "--user", "set-property", "--runtime", unit, "MemoryMax="+strconv.FormatInt(n, 10))
+	cmd.WaitDelay = queueExternalKillWait
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemctl set-property: %w: %s", err, out)
@@ -727,7 +728,9 @@ func (a *app) ceilingJournalCursor(ctx context.Context, unit, cursor string, aft
 		args = append(args, "-n", "1")
 	}
 	args = append(args, "--show-cursor", "--no-pager", "-o", "json")
-	out, err := exec.CommandContext(ctx, "journalctl", args...).Output()
+	cmd := exec.CommandContext(ctx, "journalctl", args...)
+	cmd.WaitDelay = queueExternalKillWait
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, cursor, fmt.Errorf("journalctl -k: %w", err)
 	}

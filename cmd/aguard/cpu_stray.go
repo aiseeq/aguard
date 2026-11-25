@@ -33,6 +33,7 @@ func (a *app) readStrays(ctx context.Context, h *cpuHost) ([]byte, error) {
 		c = exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ControlMaster=auto",
 			"-o", "ControlPath="+filepath.Join(a.dir("cpu"), "ssh-%C"), "-o", "ControlPersist=10m", h.ssh, "sh", "-s")
 	}
+	c.WaitDelay = queueExternalKillWait
 	c.Stdin = strings.NewReader(cpuwatch.StrayScript)
 	out, err := c.Output()
 	if ee, ok := errors.AsType[*exec.ExitError](err); ok {

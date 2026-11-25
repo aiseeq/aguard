@@ -70,6 +70,7 @@ func (r *journalReader) Close() error {
 }
 func startJournal(ctx context.Context, args ...string) (io.ReadCloser, error) {
 	cmd := exec.CommandContext(ctx, "journalctl", args...)
+	cmd.WaitDelay = queueExternalKillWait
 	stderr := &bytes.Buffer{}
 	cmd.Stderr = stderr
 	stdout, err := cmd.StdoutPipe()

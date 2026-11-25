@@ -181,7 +181,9 @@ func (s *ioRecordSink) sampleErrAt(now time.Time, key string, err error) {
 // errIONotRunning. Сигнал шлёт systemd, не этот процесс: agent-signal-guard отказывает агенту в kill(2)
 // чужому unit (тикет aguard-io-dump-signal-guard).
 func ioSignal(sig syscall.Signal) error {
-	out, err := exec.Command("systemctl", "--user", "show", "-p", "MainPID", "--value", "aguard").Output()
+	cmd := exec.Command("systemctl", "--user", "show", "-p", "MainPID", "--value", "aguard")
+	cmd.WaitDelay = queueExternalKillWait
+	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("systemctl MainPID: %w", err)
 	}
@@ -193,8 +195,9 @@ func ioSignal(sig syscall.Signal) error {
 	if sig == 0 {
 		return nil
 	}
-	out, err = exec.Command("systemctl", "--user", "kill", "--kill-whom=main", "--signal="+unix.SignalName(sig),
-		"aguard.service").CombinedOutput()
+	cmd = exec.Command("systemctl", "--user", "kill", "--kill-whom=main", "--signal="+unix.SignalName(sig), "aguard.service")
+	cmd.WaitDelay = queueExternalKillWait
+	out, err = cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("сигнал службе %d: %w: %s", pid, err, strings.TrimSpace(string(out)))
 	}

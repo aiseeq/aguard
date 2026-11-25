@@ -257,6 +257,7 @@ func (a *app) cpuRemote(ctx context.Context, h *cpuHost, tasks bool) ([]cpuwatch
 	}
 	c := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ControlMaster=auto",
 		"-o", "ControlPath="+filepath.Join(a.dir("cpu"), "ssh-%C"), "-o", "ControlPersist=10m", h.ssh, "sh", "-s", arg)
+	c.WaitDelay = queueExternalKillWait
 	c.Stdin = strings.NewReader(cpuwatch.RemoteScript)
 	if err := os.MkdirAll(a.dir("cpu"), 0o700); err != nil { // у команды папку не завёл run
 		return nil, fmt.Errorf("папка состояния: %w", err)

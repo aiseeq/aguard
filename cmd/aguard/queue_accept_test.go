@@ -739,7 +739,7 @@ func TestQueueViewCritCopyAfter(t *testing.T) {
 	b := newQueueBench(t, "[]", "[]")
 	start := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
 	alive := map[string]session.Info{"glint-master": {}, "lead": {}}
-	v := queueView(b.c, alive, fakeJudge{}, start, b.a, nil, nil)
+	v := queueView(t.Context(), b.c, alive, fakeJudge{}, start, b.a, nil, nil)
 	s := &queue.State{}
 	ticket := queue.Ticket{Key: "glint/crit", Project: "glint", Slug: "crit", Prio: "CRIT", Status: "открыт", Master: "glint-master", Admin: "git-admin"}
 	confirm := func(ns []queue.Notice) {
