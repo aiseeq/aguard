@@ -100,11 +100,11 @@ func wakeBlocked(ticket Ticket, ts []Ticket, v View) bool {
 }
 
 // wakeCandidate выбирает первый доступный тикет из tk ls без незакрытых блокеров. Внешних задач Jira там нет:
-// если первый локальный тикет заблокирован, а ниже свободна задача Jira, письма не будет — тикет заведёт мастер.
+// если первый локальный тикет заблокирован, а ниже свободна задача Jira, письма не будет (тикет aguard wake-blocked-first-external).
 func wakeCandidate(candidates, ts []Ticket, v View) (Ticket, bool) {
-	for _, candidate := range candidates {
-		if candidate.CanTake && !wakeBlocked(candidate, ts, v) {
-			return candidate, true
+	for i := range candidates {
+		if candidates[i].CanTake && !wakeBlocked(candidates[i], ts, v) {
+			return candidates[i], true
 		}
 	}
 	return Ticket{}, false
