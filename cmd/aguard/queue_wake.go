@@ -31,6 +31,7 @@ type queueWakeCandidateJSON struct {
 	Status    string   `json:"status"`
 	Executor  string   `json:"executor"`
 	Prio      string   `json:"prio"`
+	Waits     string   `json:"waits"`
 	BlockedBy []string `json:"blocked_by"`
 	CanTake   bool     `json:"can_take"`
 	NextRank  *int     `json:"next_rank"`
@@ -101,13 +102,19 @@ func (a *app) nextForQueue(ctx context.Context, tk, master, dir, cacheKey string
 		a.warn("queue", "tk next", "err", res.err)
 		return queue.Ticket{}, false, res.err
 	}
-	if raw.Status == "ждёт" && raw.Waits != "" { // наступивший tk wait — новое событие: письмо, а не «встал» по старой отметке
-		key += fmt.Sprintf("@wait-%08x", crc32.ChecksumIEEE([]byte(raw.Waits))) // от строки ожидания: due у «30m: …» плывёт
-	}
+	key = queueWaitKey(key, raw.Status, raw.Waits)
 	res.ticket = queue.WakeTicket(project, dir, key)
 	res.ticket.Status, res.ticket.Executor, res.ticket.Prio, res.ticket.Slug, res.ticket.BlockedBy = raw.Status, raw.Executor, raw.Prio, raw.Slug, raw.BlockedBy
 	res.found = true
 	return res.ticket, true, nil
+}
+
+// queueWaitKey добавляет к ключу строку ожидания: срок «30m: …» меняется, а причина — постоянна.
+func queueWaitKey(key, status, waits string) string {
+	if status == "ждёт" && waits != "" {
+		key += fmt.Sprintf("@wait-%08x", crc32.ChecksumIEEE([]byte(waits)))
+	}
+	return key
 }
 
 // wakeCandidates запрашивает очередь целиком только когда первый тикет заблокирован.
@@ -144,7 +151,7 @@ func (a *app) wakeCandidates(ctx context.Context, tk, master, dir string) ([]que
 		if !item.CanTake || item.NextRank == nil {
 			continue
 		}
-		key := queueKey(project, item.Slug, item.Path)
+		key := queueWaitKey(queueKey(project, item.Slug, item.Path), item.Status, item.Waits)
 		if key == "" {
 			continue
 		}

@@ -64,7 +64,6 @@ func (s *State) wakeNotices(ts []Ticket, v View, notices []Notice) []Notice {
 			}
 			candidates, err := v.WakeCandidates(master, project.Dir)
 			if err != nil {
-				v.Log.Debug("aguard queue: список кандидатов мастера недоступен", "master", master, "err", err)
 				continue
 			}
 			first, found = wakeCandidate(candidates, ts, v)
@@ -100,7 +99,8 @@ func wakeBlocked(ticket Ticket, ts []Ticket, v View) bool {
 	return false
 }
 
-// wakeCandidate выбирает первый по порядку tk next тикет, доступный мастеру и без незакрытых блокеров.
+// wakeCandidate выбирает первый доступный тикет из tk ls без незакрытых блокеров. Внешних задач Jira там нет:
+// если первый локальный тикет заблокирован, а ниже свободна задача Jira, письма не будет — тикет заведёт мастер.
 func wakeCandidate(candidates, ts []Ticket, v View) (Ticket, bool) {
 	for _, candidate := range candidates {
 		if candidate.CanTake && !wakeBlocked(candidate, ts, v) {

@@ -610,7 +610,11 @@ func queueView(c *config.Config, alive map[string]session.Info, judge queueJudge
 			return a.nextForWake(context.Background(), cfg.Tk, name, dir, now, func(at time.Time) bool { return turnAfter(name, at) })
 		},
 		WakeCandidates: func(name, dir string) ([]queue.Ticket, error) {
-			return a.wakeCandidates(context.Background(), cfg.Tk, name, dir)
+			candidates, err := a.wakeCandidates(context.Background(), cfg.Tk, name, dir)
+			if err != nil {
+				a.warn("queue", "tk ls (wake)", "err", err)
+			}
+			return candidates, err
 		},
 	}
 }

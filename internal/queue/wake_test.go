@@ -138,14 +138,31 @@ func TestWakeNewSessionLettersAgain(t *testing.T) {
 func TestWakeBlockedFirstIsNotWorkOrStuck(t *testing.T) {
 	w := newWakeWorld()
 	w.first.BlockedBy = []string{"blocker"}
+	w.first.CanTake = true
 	w.ts = append(w.ts, Ticket{Key: "p/blocker", Project: "p", Dir: "/p", Slug: "blocker", Master: "master", Status: "открыт"})
-	if ns := w.step(); len(ns) != 0 || len(w.state.Wakes) != 0 {
-		t.Fatal("заблокированный тикет не будит", ns, w.state.Wakes)
-	}
+	w.view.WakeCandidates = func(string, string) ([]Ticket, error) { return []Ticket{w.first}, nil }
+	w.state.Wakes = map[string]Wake{}
 	w.state.Wakes["master"] = Wake{Ticket: w.first.Key, Session: w.session, At: w.view.Now.Add(-time.Hour)}
 	w.turn = true
 	if ns := w.step(); len(ns) != 0 {
-		t.Fatal("заблокированный тикет не сообщает о вставшем", ns)
+		t.Fatal("заблокированный тикет не будит", ns, w.state.Wakes)
+	}
+	if _, exists := w.state.Wakes["master"]; exists {
+		t.Fatal("запись старого будильника снята для заблокированного тикета", w.state.Wakes)
+	}
+}
+
+func TestWakeBlockedFirstWithoutCandidatesClearsWake(t *testing.T) {
+	w := newWakeWorld()
+	w.first.BlockedBy = []string{"blocker"}
+	w.ts = append(w.ts, Ticket{Key: "p/blocker", Project: "p", Dir: "/p", Slug: "blocker", Master: "master", Status: "открыт"})
+	w.state.Wakes = map[string]Wake{}
+	w.state.Wakes["master"] = Wake{Ticket: w.first.Key, Session: w.session, At: w.view.Now.Add(-time.Hour)}
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatal("заблокированный первый тикет не будит", ns)
+	}
+	if _, exists := w.state.Wakes["master"]; exists {
+		t.Fatal("запись будильника снята без списка кандидатов", w.state.Wakes)
 	}
 }
 
@@ -169,6 +186,21 @@ func TestWakeBlockedFirstSelectsNextTakeableCandidate(t *testing.T) {
 	}
 	if ns := w.step(); len(ns) != 1 || ns[0].Kind != KindWake || ns[0].Key != free.Key {
 		t.Fatal("письмо должно быть по свободному следующему тикету", ns)
+	}
+}
+
+func TestWakeBlockedFirstCrossProjectBlockerBlocks(t *testing.T) {
+	w := newWakeWorld()
+	w.view.Home = "/home"
+	w.first.BlockedBy = []string{"work/other/project-blocker"}
+	w.first.CanTake = true
+	w.ts = append(w.ts, Ticket{Key: "other/project-blocker", Project: "other", Dir: "/home/work/other", Slug: "project-blocker", Status: "открыт"})
+	w.view.WakeCandidates = func(string, string) ([]Ticket, error) { return []Ticket{w.first}, nil }
+	if ns := w.step(); len(ns) != 0 {
+		t.Fatal("открытый блокер из другого проекта удерживает первый тикет", ns)
+	}
+	if _, exists := w.state.Wakes["master"]; exists {
+		t.Fatal("запись будильника снята", w.state.Wakes)
 	}
 }
 
