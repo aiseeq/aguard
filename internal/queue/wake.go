@@ -63,7 +63,8 @@ func (s *State) wakeNotices(ts []Ticket, v View, notices []Notice) []Notice {
 				continue
 			}
 			candidates, err := v.WakeCandidates(master, project.Dir)
-			if err != nil {
+			if err != nil { // предупреждение уже записал источник (cmd/aguard); запись о письме не трогаем
+				v.Log.Debug("aguard queue: кандидаты мастера недоступны", "master", master, "err", err)
 				continue
 			}
 			first, found = wakeCandidate(candidates, ts, v)
