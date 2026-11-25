@@ -348,9 +348,8 @@ func scanFreshTranscript(ctx context.Context, path string, yield func(context.Co
 				buffer = append(buffer, '\n')
 			}
 			for _, match := range scratchpadIDRE.FindAllSubmatchIndex(buffer, -1) {
-				id := string(buffer[match[2]:match[3]])
-				if !ids[id] {
-					ids[strings.ToLower(id)] = true
+				if !ids[string(buffer[match[2]:match[3]])] {
+					ids[strings.ToLower(string(buffer[match[2]:match[3]]))] = true
 				}
 			}
 			if len(buffer) > transcriptOverlap {

@@ -132,7 +132,7 @@ func measure(path string, ino uint64, p *pacer) (usage, error) {
 	add(&st)
 	if st.Mode&unix.S_IFMT == unix.S_IFDIR {
 		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-		if err != nil {
+		if err != nil { //nolint:silent-error-handling // папку удалили или закрыли права во время замера: в размере — сама папка, как у нечитаемой вложенной
 			return u, nil
 		}
 		if err := walkFD(fd, st.Dev, add, p); err != nil {
@@ -145,11 +145,12 @@ func measure(path string, ino uint64, p *pacer) (usage, error) {
 func walkFD(fd int, dev uint64, add func(*unix.Stat_t), p *pacer) error {
 	dir := os.NewFile(uintptr(fd), "directory")
 	defer dir.Close()
-	ents, err := dir.ReadDir(-1)
+	ents, err := dir.Readdirnames(-1)
 	if err != nil { //nolint:silent-error-handling // папку удалили во время замера: в размер идёт то, что успели обойти
 		return nil
 	}
-	for _, e := range ents {
+	var st unix.Stat_t
+	for _, name := range ents {
 		continueWalk, err := p.step()
 		if err != nil {
 			return err
@@ -157,14 +158,13 @@ func walkFD(fd int, dev uint64, add func(*unix.Stat_t), p *pacer) error {
 		if !continueWalk {
 			return nil // замер отменён
 		}
-		var st unix.Stat_t
-		if unix.Fstatat(fd, e.Name(), &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Dev != dev {
+		if unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Dev != dev {
 			continue
 		}
 		add(&st)
 		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-			child, err := unix.Openat(fd, e.Name(), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-			if err != nil {
+			child, err := unix.Openat(fd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+			if err != nil { //nolint:silent-error-handling // вложенную папку удалили или она нечитаема: в размере — сама папка, без содержимого
 				continue
 			}
 			if err := walkFD(child, dev, add, p); err != nil {
