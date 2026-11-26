@@ -794,3 +794,51 @@ func TestIOBuiltToolOwnerKeepsJobAndRepoOwner(t *testing.T) {
 		}
 	}
 }
+
+// Служба без хозяина с собранным инструментом (graft в graft-gocache-trim.service) — класс по процессу, тикет
+// владельцу инструмента; сбой чтения bin живёт toolIndexLife и не обходит папки заново на каждый случай.
+func TestIOBuiltToolOwnerForServiceAndCachedFailure(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "git", "graft", "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "graft"), nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	main := "/user.slice/user-1000.slice/user@1000.service/app.slice/graft-gocache-trim.service"
+	c := iowatch.Case{Culprits: &iowatch.Culprit{Main: main, MainProc: "graft(1)"}}
+	o := &ioOwnerFinder{home: home, table: map[string]string{}}
+	rc, err := o.routeCase(&c)
+	if err != nil || rc.Owner != "" || rc.TicketOwner != "graft-master" || rc.Class != "graft" || rc.Generic {
+		t.Fatalf("служба: route %+v, err=%v, want owner=\"\" ticket_owner=graft-master class=graft generic=false", rc, err)
+	}
+	if err := os.Rename(filepath.Join(bin, "graft"), filepath.Join(bin, "graft.old")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := o.toolOwner("graft(1)"); got != "graft-master" || err != nil {
+		t.Fatalf("список не сохранён на toolIndexLife: %q, err=%v", got, err)
+	}
+	if err := os.Rename(filepath.Join(bin, "graft.old"), filepath.Join(bin, "graft")); err != nil {
+		t.Fatal(err)
+	}
+
+	locked := &ioOwnerFinder{home: home, table: map[string]string{}}
+	if err := os.Chmod(bin, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bin, 0o700) })
+	if got, err := locked.toolOwner("graft(1)"); got != "" || err == nil {
+		t.Fatalf("нечитаемый bin: %q, err=%v — want пусто и ошибку", got, err)
+	}
+	if err := os.Chmod(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := locked.toolOwner("graft(1)"); got != "" || err == nil {
+		t.Fatalf("сбой не сохранён на toolIndexLife: %q, err=%v", got, err)
+	}
+	locked.toolIndexAt = locked.toolIndexAt.Add(-toolIndexLife)
+	if got, err := locked.toolOwner("graft(1)"); got != "graft-master" || err != nil {
+		t.Fatalf("после toolIndexLife список не собран заново: %q, err=%v", got, err)
+	}
+}

@@ -42,6 +42,7 @@ type ioOwnerFinder struct {
 	sessionCache  map[string]bool                 // результат проверки папки на время жизни ioOwnerFinder
 	toolIndex     map[string][]string             // собранный инструмент → папки проектов (builtTools)
 	toolIndexAt   time.Time
+	toolIndexErr  error
 }
 
 func (a *app) ioOwners(cfg *iowatch.Config) *ioOwnerFinder {
@@ -252,19 +253,19 @@ func (o *ioOwnerFinder) builtToolOwner(base string) (string, error) {
 
 // builtTools — имя собранного инструмента → папки проектов, где он собран; список живёт toolIndexLife.
 func (o *ioOwnerFinder) builtTools() (map[string][]string, error) {
-	if o.toolIndex != nil && time.Since(o.toolIndexAt) < toolIndexLife {
-		return o.toolIndex, nil
+	if !o.toolIndexAt.IsZero() && time.Since(o.toolIndexAt) < toolIndexLife {
+		return o.toolIndex, o.toolIndexErr // сбой тоже живёт toolIndexLife: один нечитаемый bin не обходит все папки на каждый случай
 	}
 	index := map[string][]string{}
 	for _, root := range []string{filepath.Join(o.home, "git"), filepath.Join(o.home, "work")} {
 		projects, err := visibleDirs(root)
 		if err != nil {
-			return nil, err
+			return o.keepToolIndex(nil, err)
 		}
 		for _, project := range projects {
 			subs, err := visibleDirs(project)
 			if err != nil {
-				return nil, err
+				return o.keepToolIndex(nil, err)
 			}
 			bins := []string{filepath.Join(project, "bin")}
 			for _, sub := range subs {
@@ -272,13 +273,17 @@ func (o *ioOwnerFinder) builtTools() (map[string][]string, error) {
 			}
 			for _, bin := range bins {
 				if err := addBuiltTools(index, bin, project); err != nil {
-					return nil, err
+					return o.keepToolIndex(nil, err)
 				}
 			}
 		}
 	}
-	o.toolIndex, o.toolIndexAt = index, time.Now()
-	return index, nil
+	return o.keepToolIndex(index, nil)
+}
+
+func (o *ioOwnerFinder) keepToolIndex(index map[string][]string, err error) (map[string][]string, error) {
+	o.toolIndex, o.toolIndexErr, o.toolIndexAt = index, err, time.Now()
+	return index, err
 }
 
 // visibleDirs — папки внутри dir без скрытых (.venv, .git) и зависимостей (vendor, node_modules): их bin — чужие
