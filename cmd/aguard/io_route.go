@@ -221,7 +221,7 @@ func (o *ioOwnerFinder) toolOwnerRun(process, cmdline string) (string, error) {
 	if owner, ok := o.tools[base]; ok {
 		return owner, nil
 	}
-	if strings.HasSuffix(process, iowatch.ChildrenMark) || systemProgram(cmdline) {
+	if strings.HasSuffix(process, iowatch.ChildrenMark) || systemProgram(base, cmdline) {
 		return "", nil
 	}
 	return o.builtToolOwner(base)
@@ -233,10 +233,19 @@ func (o *ioOwnerFinder) toolOwnerOf(cul *iowatch.Culprit) (string, error) {
 	return o.toolOwnerRun(process, cul.ProcessDetails[process].Cmdline)
 }
 
-// systemProgram — программа запущена по системному пути (/usr/bin/lex — flex, а не ~/git/lex/bin/lex): тёзка
-// собранного инструмента, хозяина по месту сборки нет. ~/go/bin не отсекается: туда ставятся и наши инструменты.
-func systemProgram(cmdline string) bool {
+// systemProgram — процесс base запущен по системному пути (/usr/bin/lex — flex, а не ~/git/lex/bin/lex): тёзка
+// собранного инструмента, хозяина по месту сборки нет. Путь берётся из argv0, только если его имя — сам процесс (comm
+// обрезан до commMax): у скрипта с шебангом argv0 — интерпретатор (/bin/bash …/run.sh), а не он сам. /usr/local и
+// ~/go/bin не системные: туда ставятся и наши инструменты (aguard-track-helper, glint).
+func systemProgram(base, cmdline string) bool {
 	argv0, _, _ := strings.Cut(cmdline, " ")
+	name := filepath.Base(argv0)
+	if name != base && (len(base) != commMax || !strings.HasPrefix(name, base)) {
+		return false
+	}
+	if strings.HasPrefix(argv0, "/usr/local/") {
+		return false
+	}
 	for _, prefix := range []string{"/usr/", "/bin/", "/sbin/", "/opt/"} {
 		if strings.HasPrefix(argv0, prefix) {
 			return true

@@ -883,3 +883,55 @@ func TestIOBuiltToolOwnerEdges(t *testing.T) {
 		}
 	}
 }
+
+// Системный путь — только когда argv0 и есть процесс: /usr/local и ~/go/bin не системные, скрипт с шебангом
+// (argv0 — интерпретатор) идёт по месту сборки, путь листа берётся из его же командной строки; в службе системная
+// утилита оставляет класс службы, сбой поиска уходит наверх (ревью io-tool-owner-low 17:09).
+func TestIOSystemProgramByArgv0(t *testing.T) {
+	home := t.TempDir()
+	for _, path := range []string{
+		"git/lex/bin/lex", "git/aguard/bin/aguard-track-helper", "git/machine/laptop/bin/core-faults",
+		"git/b/bin/btool", "git/s/bin/stool", "git/o/bin/otool", "git/graft/bin/graft", "git/x/bin/systemd-tmpfiles",
+	} {
+		full := filepath.Join(home, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-dream-master-123.scope"
+	unit := "/user.slice/user-1000.slice/user@1000.service/app.slice/adream.service"
+	units := map[string]string{"adream.service": "dream-master"}
+	for _, tc := range []struct {
+		name, main, proc, cmdline, leaf, leafCmdline, ticketOwner, class string
+	}{
+		{"usr local", session, "aguard-track-he(1)", "/usr/local/bin/aguard-track-helper scan", "", "", "aguard-master", "aguard-track-he"},
+		{"shebang script", session, "core-faults(1)", "/bin/bash " + filepath.Join(home, "git/machine/laptop/bin/core-faults"), "", "", "machine-master", "core-faults"},
+		{"bin", session, "btool(1)", "/bin/btool", "", "", "", "btool"},
+		{"sbin", session, "stool(1)", "/sbin/stool", "", "", "", "stool"},
+		{"opt", session, "otool(1)", "/opt/x/bin/otool", "", "", "", "otool"},
+		{"go bin", session, "lex(1)", filepath.Join(home, "go/bin/lex"), "", "", "lex-master", "lex"},
+		{"build path", session, "lex(1)", filepath.Join(home, "git/lex/bin/lex"), "", "", "lex-master", "lex"},
+		{"leaf cmdline", session, "graft(1)", "graft gate", "lex(2)", "/usr/bin/lex scan.l", "", "lex"},
+		{"unit system util", unit, "journalctl(1)", "/usr/bin/journalctl -f", "", "", "", "adream"},
+		{"long system namesake", session, "systemd-tmpfile(1)", "/usr/bin/systemd-tmpfiles --clean", "", "", "", "systemd-tmpfile"},
+	} {
+		o := &ioOwnerFinder{home: home, table: map[string]string{}, units: units}
+		details := map[string]iowatch.ProcessDetails{tc.proc: {Cmdline: tc.cmdline}}
+		if tc.leaf != "" {
+			details[tc.leaf] = iowatch.ProcessDetails{Cmdline: tc.leafCmdline}
+		}
+		c := iowatch.Case{Culprits: &iowatch.Culprit{Main: tc.main, MainProc: tc.proc, MainLeafProc: tc.leaf, ProcessDetails: details}}
+		rc, err := o.routeCase(&c)
+		if err != nil || rc.Owner != "dream-master" || rc.TicketOwner != tc.ticketOwner || rc.Class != tc.class {
+			t.Fatalf("%s: route %+v, err=%v, want owner=dream-master ticket_owner=%q class=%s", tc.name, rc, err, tc.ticketOwner, tc.class)
+		}
+	}
+	broken := &ioOwnerFinder{home: home, tableErr: os.ErrNotExist, units: units}
+	c := iowatch.Case{Culprits: &iowatch.Culprit{Main: unit, MainProc: "graft(1)"}}
+	if rc, err := broken.routeCase(&c); err == nil || rc.Owner != "dream-master" || rc.TicketOwner != "" {
+		t.Fatalf("служба при битой таблице: %+v, err=%v — want хозяин службы, без владельца инструмента, с ошибкой", rc, err)
+	}
+}
