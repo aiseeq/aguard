@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -99,8 +100,9 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 	if name, _, ok := proc.SessionScope(cul.Main); ok {
 		rc.Class, rc.Generic = o.processClass(cul, "session")
 		rc.Owner = name
-		rc.TicketOwner = o.toolOwner(o.selectedProc(cul))
-		return rc, nil
+		var err error
+		rc.TicketOwner, err = o.toolOwner(o.selectedProc(cul))
+		return rc, err
 	}
 	if strings.HasPrefix(unit, "worker-") {
 		rc.Class, rc.Generic = o.processClass(cul, "worker")
@@ -109,8 +111,8 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 			return rc, err
 		}
 		rc.Owner = owner
-		rc.TicketOwner = o.toolOwner(o.selectedProc(cul))
-		return rc, nil
+		rc.TicketOwner, err = o.toolOwner(o.selectedProc(cul))
+		return rc, err
 	}
 	if owner, ok := o.units[unit]; ok {
 		rc.Class, rc.Owner = ticketClass(iowatch.CgroupName(cul.Main)), owner
@@ -119,12 +121,12 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 	rc.Class = ticketClass(iowatch.CgroupName(cul.Main))
 	owner, err := o.byProcess(cul.ProcessDetails[cul.MainProc])
 	rc.Owner = owner
-	toolOwner := o.toolOwner(o.selectedProc(cul))
+	toolOwner, toolErr := o.toolOwner(o.selectedProc(cul))
 	if owner != "" || toolOwner != "" {
 		rc.Class, rc.Generic = o.processClass(cul, rc.Class)
 		rc.TicketOwner = toolOwner
 	}
-	return rc, err
+	return rc, errors.Join(err, toolErr)
 }
 
 func (o *ioOwnerFinder) routeGraftHeavy(c *iowatch.Case) (ioroute.Case, error) {
@@ -139,12 +141,12 @@ func (o *ioOwnerFinder) routeGraftHeavy(c *iowatch.Case) (ioroute.Case, error) {
 	}
 	rc.Owner = owner
 	rc.Class = ticketClass(iowatch.CgroupName(cul.Main))
-	toolOwner := o.toolOwner(o.selectedProc(cul))
+	toolOwner, toolErr := o.toolOwner(o.selectedProc(cul))
 	if owner != "" || toolOwner != "" {
 		rc.Class, rc.Generic = o.processClass(cul, rc.Class)
 		rc.TicketOwner = toolOwner
 	}
-	return rc, err
+	return rc, errors.Join(err, toolErr)
 }
 
 func isGraftHeavy(main string) bool {
@@ -193,8 +195,53 @@ func (o *ioOwnerFinder) processClass(c *iowatch.Culprit, generic string) (string
 	return byProc(o.selectedProc(c), generic)
 }
 
-func (o *ioOwnerFinder) toolOwner(process string) string {
-	return o.tools[iowatch.ProcBase(process)]
+// toolOwner — сессия, которая чинит инструмент process: сначала [io] tools, затем проект, где инструмент собран.
+// Чужой инструмент в сессии (tl, graft, worker у dream-master) — тикет его хозяину, а не сессии, у которой он завис
+// (пользователь 26.11 13:34, тикет io-route-tool-owner); свой инструмент сессии даёт её же имя — тикет ей.
+func (o *ioOwnerFinder) toolOwner(process string) (string, error) {
+	base := iowatch.ProcBase(process)
+	if owner, ok := o.tools[base]; ok {
+		return owner, nil
+	}
+	return o.builtToolOwner(base)
+}
+
+// builtToolOwner — хозяин инструмента по месту сборки: ровно один проект ~/git/<p> с исполняемым bin/<имя> или
+// <подпапка>/bin/<имя> (llmark/tool/bin/worker). Системные утилиты (du, rg, bash) нигде не собраны — хозяина нет,
+// тикет остаётся сессии, чей код их звал. Два проекта с одним именем — хозяина нет: не гадаем. Таблица имён битая —
+// ошибка: случай идёт без владельца инструмента, а не мастеру по догадке.
+func (o *ioOwnerFinder) builtToolOwner(base string) (string, error) {
+	if base == "" || o.home == "" || strings.ContainsAny(base, `/\*?[`) {
+		return "", nil
+	}
+	root := filepath.Join(o.home, "git")
+	var projects []string
+	for _, pattern := range []string{filepath.Join(root, "*", "bin", base), filepath.Join(root, "*", "*", "bin", base)} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return "", fmt.Errorf("инструмент %s по месту сборки: %w", base, err)
+		}
+		for _, path := range matches {
+			st, err := os.Stat(path)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // исчез между Glob и Stat — инструмент там больше не собран
+			}
+			if err != nil {
+				return "", fmt.Errorf("инструмент %s по месту сборки: %w", base, err)
+			}
+			if !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
+				continue
+			}
+			project, _, _ := strings.Cut(strings.TrimPrefix(path, root+string(filepath.Separator)), string(filepath.Separator))
+			if !slices.Contains(projects, project) {
+				projects = append(projects, project)
+			}
+		}
+	}
+	if len(projects) != 1 {
+		return "", nil
+	}
+	return o.nameFor(filepath.Join(root, projects[0]))
 }
 
 func (o *ioOwnerFinder) workerOwner(unit string) (string, error) {

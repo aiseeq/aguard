@@ -682,3 +682,61 @@ func TestIOOwnerWorktreeTableAndErrors(t *testing.T) {
 		t.Fatalf("broken names table for plain cwd: err=%v", err)
 	}
 }
+
+// Чужой инструмент в сессии dream-master — тикет хозяину проекта, где инструмент собран; свой инструмент dream,
+// системная утилита, имя в двух проектах и неисполняемый файл — тикет сессии (тикет io-route-tool-owner).
+func TestIOToolOwnerByBuildProject(t *testing.T) {
+	home := t.TempDir()
+	for path, mode := range map[string]os.FileMode{
+		"git/graft/bin/graft":        0o755,
+		"git/llmark/tool/bin/worker": 0o755,
+		"git/dream/bin/adream":       0o755,
+		"git/a/bin/dup":              0o755,
+		"git/b/bin/dup":              0o755,
+		"git/akit/bin/notes":         0o644,
+	} {
+		full := filepath.Join(home, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, nil, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(home, "git", "akit", "bin", "tldir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	main := "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-dream-master-123.scope"
+	for _, tc := range []struct {
+		proc, want, letter string
+		tools              map[string]string
+	}{
+		{"graft(1)", "graft-master", "тикет — владельцу инструмента graft-master", nil},
+		{"worker(1)", "llmark-master", "тикет — владельцу инструмента llmark-master", nil},
+		{"adream(1)", "dream-master", "ему тикет", nil},
+		{"du(1)", "", "ему тикет", nil},
+		{"dup(1)", "", "ему тикет", nil},
+		{"notes(1)", "", "ему тикет", nil},
+		{"tldir(1)", "", "ему тикет", nil},
+		{"graft(1)", "other-master", "тикет — владельцу инструмента other-master", map[string]string{"graft": "other-master"}},
+	} {
+		o := &ioOwnerFinder{home: home, table: map[string]string{}, tools: tc.tools}
+		rc, err := o.routeCase(&iowatch.Case{Culprits: &iowatch.Culprit{Main: main, MainProc: tc.proc}})
+		if err != nil || rc.Owner != "dream-master" || rc.TicketOwner != tc.want {
+			t.Fatalf("%s: route %+v, err=%v, want owner=dream-master ticket_owner=%q", tc.proc, rc, err, tc.want)
+		}
+		if got := ioTicketRecipient(rc); got != tc.letter {
+			t.Fatalf("%s: адрес тикета %q, want %q", tc.proc, got, tc.letter)
+		}
+	}
+	broken := &ioOwnerFinder{home: home, tableErr: os.ErrNotExist}
+	if got, err := broken.toolOwner("graft(1)"); got != "" || err == nil {
+		t.Fatalf("битая таблица имён: владелец %q, err=%v, want пусто и ошибку", got, err)
+	}
+	if rc, err := broken.routeCase(&iowatch.Case{Culprits: &iowatch.Culprit{Main: main, MainProc: "graft(1)"}}); err == nil || rc.Owner != "dream-master" || rc.TicketOwner != "" {
+		t.Fatalf("битая таблица имён в маршруте: %+v, err=%v — want хозяин сессии, без владельца инструмента, с ошибкой", rc, err)
+	}
+	if got, err := broken.toolOwner("du(1)"); got != "" || err != nil {
+		t.Fatalf("системная утилита при битой таблице: %q, %v — want пусто без ошибки", got, err)
+	}
+}
