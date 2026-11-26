@@ -488,6 +488,7 @@ func (a *app) run(ctx context.Context) error {
 	wg.Go(func() { a.restartServe(ctx, judge) })
 	wg.Go(func() { a.ioLoop(ctx, usr2) })
 	wg.Go(func() { a.heapLoop(ctx, usr1) })
+	wg.Go(func() { a.hwmLoop(ctx, filepath.Join(procRoot, "self", "status")) })
 	wg.Go(func() { a.guiLoop(ctx) })
 	wg.Go(func() { a.sigguardLoop(ctx) })
 	wg.Go(func() { a.ceilingLoop(ctx) })
