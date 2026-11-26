@@ -688,12 +688,15 @@ func TestIOOwnerWorktreeTableAndErrors(t *testing.T) {
 func TestIOToolOwnerByBuildProject(t *testing.T) {
 	home := t.TempDir()
 	for path, mode := range map[string]os.FileMode{
-		"git/graft/bin/graft":        0o755,
-		"git/llmark/tool/bin/worker": 0o755,
-		"git/dream/bin/adream":       0o755,
-		"git/a/bin/dup":              0o755,
-		"git/b/bin/dup":              0o755,
-		"git/akit/bin/notes":         0o644,
+		"git/graft/bin/graft":              0o755,
+		"git/llmark/tool/bin/worker":       0o755,
+		"git/dream/bin/adream":             0o755,
+		"git/a/bin/dup":                    0o755,
+		"git/b/bin/dup":                    0o755,
+		"git/akit/bin/notes":               0o644,
+		"git/p/.venv/bin/python3":          0o755,
+		"git/akit/bin/claude-rules-export": 0o755,
+		"work/shop/bin/shoptool":           0o755,
 	} {
 		full := filepath.Join(home, path)
 		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
@@ -704,6 +707,12 @@ func TestIOToolOwnerByBuildProject(t *testing.T) {
 		}
 	}
 	if err := os.MkdirAll(filepath.Join(home, "git", "akit", "bin", "tldir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "git", "q", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/rg", filepath.Join(home, "git", "q", "bin", "rg")); err != nil {
 		t.Fatal(err)
 	}
 	main := "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-dream-master-123.scope"
@@ -718,6 +727,13 @@ func TestIOToolOwnerByBuildProject(t *testing.T) {
 		{"dup(1)", "", "ему тикет", nil},
 		{"notes(1)", "", "ему тикет", nil},
 		{"tldir(1)", "", "ему тикет", nil},
+		{"python3(1)", "", "ему тикет", nil},
+		{"rg(1)", "", "ему тикет", nil},
+		{"claude-rules-ex(1)", "akit-master", "тикет — владельцу инструмента akit-master", nil},
+		{"claude-rules(1)", "", "ему тикет", nil},
+		{"shoptool(1)", "shop-master", "тикет — владельцу инструмента shop-master", nil},
+		{"graft(1)+дети", "", "ему тикет", nil},
+		{"tl(1)+дети", "akit-master", "тикет — владельцу инструмента akit-master", map[string]string{"tl": "akit-master"}},
 		{"graft(1)", "other-master", "тикет — владельцу инструмента other-master", map[string]string{"graft": "other-master"}},
 	} {
 		o := &ioOwnerFinder{home: home, table: map[string]string{}, tools: tc.tools}
@@ -738,5 +754,43 @@ func TestIOToolOwnerByBuildProject(t *testing.T) {
 	}
 	if got, err := broken.toolOwner("du(1)"); got != "" || err != nil {
 		t.Fatalf("системная утилита при битой таблице: %q, %v — want пусто без ошибки", got, err)
+	}
+}
+
+// Запускатель с детьми в задании бойца и в graft-heavy — тикет хозяину задания и репозитория, а не владельцу
+// запускателя: дети — тесты и сборка проекта (ревью io-route-tool-owner, 19.11 14:39:39 и 22.11 12:57:00); I/O самого
+// worker — владельцу worker.
+func TestIOBuiltToolOwnerKeepsJobAndRepoOwner(t *testing.T) {
+	a, _ := testIOApp(t)
+	for _, dir := range []string{"git/llmark/tool/bin", "git/graft/bin", "git/store", "git/existing"} {
+		if err := os.MkdirAll(filepath.Join(a.home, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, bin := range []string{"git/llmark/tool/bin/worker", "git/graft/bin/graft"} {
+		if err := os.WriteFile(filepath.Join(a.home, bin), nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeIOFile(t, filepath.Join(a.home, ".config", "cl", "names.tsv"), filepath.Join(a.home, "git", "existing")+"\texisting-master\n")
+	writeIOFile(t, filepath.Join(a.home, ".local", "state", "worker", "J", "job.json"), `{"id":"J","master":"existing-master","owner":{"name":"launcher-master"}}`)
+	cfg := iowatch.Default()
+	cfg.Lead = "lead"
+	o := a.ioOwners(&cfg)
+	job := "/user.slice/user-1000.slice/user@1000.service/agents.slice/worker-job-J.service"
+	heavy := "/user.slice/user-1000.slice/user@1000.service/app.slice/graft-heavy-170987.scope"
+	for _, tc := range []struct {
+		main, kind, proc, owner, ticketOwner string
+	}{
+		{job, "", "worker(1)+дети", "existing-master", ""},
+		{job, "", "worker(1)", "existing-master", "llmark-master"},
+		{heavy, "store:exec:bash", "graft(1)+дети", "store-master", ""},
+		{heavy, "store:exec:bash", "graft(1)", "store-master", "graft-master"},
+	} {
+		c := iowatch.Case{Culprits: &iowatch.Culprit{Main: tc.main, GraftKind: tc.kind, MainProc: tc.proc}}
+		rc, err := o.routeCase(&c)
+		if err != nil || rc.Owner != tc.owner || rc.TicketOwner != tc.ticketOwner {
+			t.Fatalf("%s %s: route %+v, err=%v, want owner=%s ticket_owner=%q", tc.main, tc.proc, rc, err, tc.owner, tc.ticketOwner)
+		}
 	}
 }

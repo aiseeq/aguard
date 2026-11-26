@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aiseeq/aguard/internal/cpuwatch"
@@ -39,6 +40,8 @@ type ioOwnerFinder struct {
 	sessions      func(id string) (string, error) // живая сессия по SessionID, "" — нет такой
 	sessionExists func(who string) bool           // результат той же проверки папки, что и у classTicket
 	sessionCache  map[string]bool                 // результат проверки папки на время жизни ioOwnerFinder
+	toolIndex     map[string][]string             // собранный инструмент → папки проектов (builtTools)
+	toolIndexAt   time.Time
 }
 
 func (a *app) ioOwners(cfg *iowatch.Config) *ioOwnerFinder {
@@ -196,52 +199,132 @@ func (o *ioOwnerFinder) processClass(c *iowatch.Culprit, generic string) (string
 }
 
 // toolOwner — сессия, которая чинит инструмент process: сначала [io] tools, затем проект, где инструмент собран.
-// Чужой инструмент в сессии (tl, graft, worker у dream-master) — тикет его хозяину, а не сессии, у которой он завис
-// (пользователь 26.11 13:34, тикет io-route-tool-owner); свой инструмент сессии даёт её же имя — тикет ей.
+// Чужой инструмент в сессии (tl, graft, sub у dream-master) — тикет его хозяину, а не сессии, у которой он завис
+// (пользователь 26.11 13:34, тикет io-route-tool-owner); свой инструмент сессии даёт её же имя — тикет ей. По месту
+// сборки — только I/O самого процесса: с пометкой детей у запускателя (worker, graft gate, mut) это тесты и сборка
+// проекта, который его звал, — тикет хозяину задания, репозитория или сессии.
 func (o *ioOwnerFinder) toolOwner(process string) (string, error) {
 	base := iowatch.ProcBase(process)
 	if owner, ok := o.tools[base]; ok {
 		return owner, nil
 	}
+	if strings.HasSuffix(process, iowatch.ChildrenMark) {
+		return "", nil
+	}
 	return o.builtToolOwner(base)
 }
 
-// builtToolOwner — хозяин инструмента по месту сборки: ровно один проект ~/git/<p> с исполняемым bin/<имя> или
-// <подпапка>/bin/<имя> (llmark/tool/bin/worker). Системные утилиты (du, rg, bash) нигде не собраны — хозяина нет,
-// тикет остаётся сессии, чей код их звал. Два проекта с одним именем — хозяина нет: не гадаем. Таблица имён битая —
-// ошибка: случай идёт без владельца инструмента, а не мастеру по догадке.
+const (
+	commMax       = 15               // длина comm в ядре: длинное имя инструмента обрезано до неё
+	toolIndexLife = 10 * time.Minute // свежесть списка собранных инструментов
+)
+
+// builtToolOwner — хозяин инструмента по месту сборки: ровно один проект ~/git/<p> или ~/work/<p> с исполняемым
+// обычным файлом bin/<имя> или <подпапка>/bin/<имя> (llmark/tool/bin/worker); comm длиной commMax сверяется по началу
+// имени. Системные утилиты (du, rg, bash) нигде не собраны — хозяина нет, тикет остаётся сессии, чей код их звал. Два
+// проекта с одним именем — хозяина нет: не гадаем. Сбой чтения папок или битая таблица имён — ошибка: случай идёт без
+// владельца инструмента, а не мастеру по догадке.
 func (o *ioOwnerFinder) builtToolOwner(base string) (string, error) {
-	if base == "" || o.home == "" || strings.ContainsAny(base, `/\*?[`) {
+	if base == "" || o.home == "" {
 		return "", nil
 	}
-	root := filepath.Join(o.home, "git")
+	index, err := o.builtTools()
+	if err != nil {
+		return "", err
+	}
 	var projects []string
-	for _, pattern := range []string{filepath.Join(root, "*", "bin", base), filepath.Join(root, "*", "*", "bin", base)} {
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			return "", fmt.Errorf("инструмент %s по месту сборки: %w", base, err)
+	for _, name := range slices.Sorted(maps.Keys(index)) {
+		dirs := index[name]
+		if name != base && (len(base) != commMax || !strings.HasPrefix(name, base)) {
+			continue
 		}
-		for _, path := range matches {
-			st, err := os.Stat(path)
-			if errors.Is(err, fs.ErrNotExist) {
-				continue // исчез между Glob и Stat — инструмент там больше не собран
-			}
-			if err != nil {
-				return "", fmt.Errorf("инструмент %s по месту сборки: %w", base, err)
-			}
-			if !st.Mode().IsRegular() || st.Mode().Perm()&0o111 == 0 {
-				continue
-			}
-			project, _, _ := strings.Cut(strings.TrimPrefix(path, root+string(filepath.Separator)), string(filepath.Separator))
-			if !slices.Contains(projects, project) {
-				projects = append(projects, project)
+		for _, dir := range dirs {
+			if !slices.Contains(projects, dir) {
+				projects = append(projects, dir)
 			}
 		}
 	}
 	if len(projects) != 1 {
 		return "", nil
 	}
-	return o.nameFor(filepath.Join(root, projects[0]))
+	return o.nameFor(projects[0])
+}
+
+// builtTools — имя собранного инструмента → папки проектов, где он собран; список живёт toolIndexLife.
+func (o *ioOwnerFinder) builtTools() (map[string][]string, error) {
+	if o.toolIndex != nil && time.Since(o.toolIndexAt) < toolIndexLife {
+		return o.toolIndex, nil
+	}
+	index := map[string][]string{}
+	for _, root := range []string{filepath.Join(o.home, "git"), filepath.Join(o.home, "work")} {
+		projects, err := visibleDirs(root)
+		if err != nil {
+			return nil, err
+		}
+		for _, project := range projects {
+			subs, err := visibleDirs(project)
+			if err != nil {
+				return nil, err
+			}
+			bins := []string{filepath.Join(project, "bin")}
+			for _, sub := range subs {
+				bins = append(bins, filepath.Join(sub, "bin"))
+			}
+			for _, bin := range bins {
+				if err := addBuiltTools(index, bin, project); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	o.toolIndex, o.toolIndexAt = index, time.Now()
+	return index, nil
+}
+
+// visibleDirs — папки внутри dir без скрытых (.venv, .git) и зависимостей (vendor, node_modules): их bin — чужие
+// программы, а не инструменты проекта. Нет dir — пусто.
+func visibleDirs(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("собранные инструменты: %w", err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") && e.Name() != "vendor" && e.Name() != "node_modules" {
+			dirs = append(dirs, filepath.Join(dir, e.Name()))
+		}
+	}
+	return dirs, nil
+}
+
+// addBuiltTools — исполняемые обычные файлы bin в index; симлинк (bin/rg -> /usr/bin/rg) — не инструмент проекта.
+func addBuiltTools(index map[string][]string, bin, project string) error {
+	entries, err := os.ReadDir(bin)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("собранные инструменты: %w", err)
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		info, err := e.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // файл убрали между ReadDir и Info — там больше не собран
+		}
+		if err != nil {
+			return fmt.Errorf("собранные инструменты: %w", err)
+		}
+		if info.Mode().Perm()&0o111 != 0 {
+			index[e.Name()] = append(index[e.Name()], project)
+		}
+	}
+	return nil
 }
 
 func (o *ioOwnerFinder) workerOwner(unit string) (string, error) {
@@ -566,7 +649,7 @@ func (s *ioService) seedRoute(cfg iowatch.Config, now time.Time) {
 func (s *ioService) routeOne(c *iowatch.Case) {
 	rc, err := s.owners.routeCase(c)
 	if err != nil {
-		s.a.warn("io", "хозяин случая не найден, случай — как без хозяина", "err", err)
+		s.a.warn("io", "сбой поиска хозяина случая, маршрут — по найденному", "owner", rc.Owner, "ticket_owner", rc.TicketOwner, "err", err)
 	}
 	alive := s.aliveFunc()
 	c.OwnerOffline = rc.Owner != "" && !alive(rc.Owner)

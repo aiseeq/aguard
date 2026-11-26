@@ -119,6 +119,9 @@ func (c *Culprits) rememberCgroupPath(name, path string, value int64) {
 	}
 }
 
+// ChildrenMark — пометка в имени процесса: в его I/O за окно вошёл I/O ушедших детей.
+const ChildrenMark = "+дети"
+
 // processNames — имя каждого процесса окна: последний comm, «+дети», если хоть раз был Children.
 func processNames(details []Step) map[procID]string {
 	comm := map[procID]string{}
@@ -134,7 +137,7 @@ func processNames(details []Step) map[procID]string {
 	for id, name := range comm {
 		suffix := ""
 		if kids[id] {
-			suffix = "+дети"
+			suffix = ChildrenMark
 		}
 		names[id] = fmt.Sprintf("%s(%d)%s", name, id.pid, suffix)
 	}
