@@ -105,7 +105,7 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 		rc.Class, rc.Generic = o.processClass(cul, "session")
 		rc.Owner = name
 		var err error
-		rc.TicketOwner, err = o.toolOwner(o.selectedProc(cul))
+		rc.TicketOwner, err = o.toolOwnerOf(cul)
 		return rc, err
 	}
 	if strings.HasPrefix(unit, "worker-") {
@@ -115,17 +115,24 @@ func (o *ioOwnerFinder) routeCase(c *iowatch.Case) (ioroute.Case, error) {
 			return rc, err
 		}
 		rc.Owner = owner
-		rc.TicketOwner, err = o.toolOwner(o.selectedProc(cul))
+		rc.TicketOwner, err = o.toolOwnerOf(cul)
 		return rc, err
 	}
 	if owner, ok := o.units[unit]; ok {
+		// Служба хозяина ([io] owners) с чужим инструментом (tl, graft в adream.service) — тикет владельцу инструмента
+		// и класс по процессу; свой процесс службы — класс по службе, как раньше (io-tool-owner-low).
 		rc.Class, rc.Owner = ticketClass(iowatch.CgroupName(cul.Main)), owner
-		return rc, nil
+		toolOwner, err := o.toolOwnerOf(cul)
+		if toolOwner != "" && toolOwner != owner {
+			rc.Class, rc.Generic = o.processClass(cul, rc.Class)
+			rc.TicketOwner = toolOwner
+		}
+		return rc, err
 	}
 	rc.Class = ticketClass(iowatch.CgroupName(cul.Main))
 	owner, err := o.byProcess(cul.ProcessDetails[cul.MainProc])
 	rc.Owner = owner
-	toolOwner, toolErr := o.toolOwner(o.selectedProc(cul))
+	toolOwner, toolErr := o.toolOwnerOf(cul)
 	if owner != "" || toolOwner != "" {
 		rc.Class, rc.Generic = o.processClass(cul, rc.Class)
 		rc.TicketOwner = toolOwner
@@ -145,7 +152,7 @@ func (o *ioOwnerFinder) routeGraftHeavy(c *iowatch.Case) (ioroute.Case, error) {
 	}
 	rc.Owner = owner
 	rc.Class = ticketClass(iowatch.CgroupName(cul.Main))
-	toolOwner, toolErr := o.toolOwner(o.selectedProc(cul))
+	toolOwner, toolErr := o.toolOwnerOf(cul)
 	if owner != "" || toolOwner != "" {
 		rc.Class, rc.Generic = o.processClass(cul, rc.Class)
 		rc.TicketOwner = toolOwner
@@ -205,14 +212,37 @@ func (o *ioOwnerFinder) processClass(c *iowatch.Culprit, generic string) (string
 // сборки — только I/O самого процесса: с пометкой детей у запускателя (worker, graft gate, mut) это тесты и сборка
 // проекта, который его звал, — тикет хозяину задания, репозитория или сессии.
 func (o *ioOwnerFinder) toolOwner(process string) (string, error) {
+	return o.toolOwnerRun(process, "")
+}
+
+// toolOwnerRun — toolOwner с командной строкой процесса: тёзку по системному пути (systemProgram) не относит к проекту.
+func (o *ioOwnerFinder) toolOwnerRun(process, cmdline string) (string, error) {
 	base := iowatch.ProcBase(process)
 	if owner, ok := o.tools[base]; ok {
 		return owner, nil
 	}
-	if strings.HasSuffix(process, iowatch.ChildrenMark) {
+	if strings.HasSuffix(process, iowatch.ChildrenMark) || systemProgram(cmdline) {
 		return "", nil
 	}
 	return o.builtToolOwner(base)
+}
+
+// toolOwnerOf — владелец инструмента выбранного процесса виновника (лист, иначе главный) с его командной строкой.
+func (o *ioOwnerFinder) toolOwnerOf(cul *iowatch.Culprit) (string, error) {
+	process := o.selectedProc(cul)
+	return o.toolOwnerRun(process, cul.ProcessDetails[process].Cmdline)
+}
+
+// systemProgram — программа запущена по системному пути (/usr/bin/lex — flex, а не ~/git/lex/bin/lex): тёзка
+// собранного инструмента, хозяина по месту сборки нет. ~/go/bin не отсекается: туда ставятся и наши инструменты.
+func systemProgram(cmdline string) bool {
+	argv0, _, _ := strings.Cut(cmdline, " ")
+	for _, prefix := range []string{"/usr/", "/bin/", "/sbin/", "/opt/"} {
+		if strings.HasPrefix(argv0, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 const (

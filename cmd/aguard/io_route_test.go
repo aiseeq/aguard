@@ -842,3 +842,44 @@ func TestIOBuiltToolOwnerForServiceAndCachedFailure(t *testing.T) {
 		t.Fatalf("после toolIndexLife список не собран заново: %q, err=%v", got, err)
 	}
 }
+
+// Остаток ревью (io-tool-owner-low): тёзка по системному пути, служба хозяина с чужим инструментом, bin в vendor и
+// node_modules, два имени одного проекта с общим началом в 15 знаков, имя сессии по таблице имён.
+func TestIOBuiltToolOwnerEdges(t *testing.T) {
+	home := t.TempDir()
+	for _, path := range []string{
+		"git/lex/bin/lex", "git/graft/bin/graft", "git/dream/bin/dreamstats",
+		"git/v/vendor/bin/vtool", "git/v/node_modules/bin/ntool",
+		"git/akit/bin/claude-rules-export", "git/akit/bin/claude-rules-exporter",
+	} {
+		full := filepath.Join(home, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, nil, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := "/user.slice/user-1000.slice/user@1000.service/agents.slice/agent-dream-master-123.scope"
+	unit := "/user.slice/user-1000.slice/user@1000.service/app.slice/adream.service"
+	table := map[string]string{filepath.Join(home, "git", "graft"): "graft-admin"}
+	for _, tc := range []struct {
+		name, main, proc, cmdline, ticketOwner, class string
+	}{
+		{"system namesake", session, "lex(1)", "/usr/bin/lex scan.l", "", "lex"},
+		{"own lex", session, "lex(1)", filepath.Join(home, "bin", "lex") + " scan.l", "lex-master", "lex"},
+		{"unit with foreign tool", unit, "graft(1)", "graft gate", "graft-admin", "graft"},
+		{"unit own tool", unit, "dreamstats(1)", "dreamstats", "", "adream"},
+		{"vendor bin", session, "vtool(1)", "vtool", "", "vtool"},
+		{"node_modules bin", session, "ntool(1)", "ntool", "", "ntool"},
+		{"one project, two names by prefix", session, "claude-rules-ex(1)", "", "akit-master", "claude-rules-ex"},
+	} {
+		o := &ioOwnerFinder{home: home, table: table, units: map[string]string{"adream.service": "dream-master"}}
+		c := iowatch.Case{Culprits: &iowatch.Culprit{Main: tc.main, MainProc: tc.proc,
+			ProcessDetails: map[string]iowatch.ProcessDetails{tc.proc: {Cmdline: tc.cmdline}}}}
+		rc, err := o.routeCase(&c)
+		if err != nil || rc.Owner != "dream-master" || rc.TicketOwner != tc.ticketOwner || rc.Class != tc.class {
+			t.Fatalf("%s: route %+v, err=%v, want owner=dream-master ticket_owner=%q class=%s", tc.name, rc, err, tc.ticketOwner, tc.class)
+		}
+	}
+}
