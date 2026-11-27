@@ -1,0 +1,67 @@
+{
+  "phase": "готово",
+  "attempts": 1,
+  "thread": "01a21e06-9f3f-75a0-8987-0f7c6c1473a8",
+  "started": "2026-11-27T18:21:19.612126435+01:00",
+  "ended": "2026-11-27T18:27:22.822812284+01:00",
+  "accepted": true,
+  "outcome": "принято",
+  "admission": "резерв 0.5 ядра (p90 20 замеров ask:terra); допуск ноут свободен; ожидание нагрузки 2s; замок 0s; ждал: runnable 14 is at or above 12",
+  "admission_load_wait_ms": 2006,
+  "admission_lock_wait_ms": 0,
+  "price": {
+    "api_micro_usd": 245933,
+    "week_percent": 0.06558213333333333,
+    "tokens": {
+      "in": 61628,
+      "out": 7246,
+      "reason": 2543,
+      "cache_r": 2707200,
+      "cache_w": 0,
+      "steps": 48,
+      "known": true,
+      "parts": 1,
+      "missing": 0
+    },
+    "limit": {
+      "from": 45,
+      "to": 45,
+      "from_at": "2026-11-27T17:21:32.192Z",
+      "to_at": "2026-11-27T17:27:21.724Z",
+      "window_min": 10080,
+      "resets_at": 1796002856,
+      "plan": "prolite",
+      "known": true
+    },
+    "known": true
+  },
+  "answer": "- **MED — нулевой бюджет не ограничивает ожидание guard очереди.** [lock.go:197](/home/aisee/.cache/worktrees/graft/past-load-yield/internal/lock/lock.go:197), [lock.go:269](/home/aisee/.cache/worktrees/graft/past-load-yield/internal/lock/lock.go:269), [seat.go:123](/home/aisee/.cache/worktrees/graft/past-load-yield/internal/loadgate/seat.go:123). `Ticket.TryAcquire` ждёт `queueGuard` до отмены контекста, а при исчерпанном бюджете используется исходный контекст. Если другой процесс задержался с guard, задача тоже может ждать без ограничения бюджетом. Проба с занятым guard очереди load завершилась только по внешнему таймауту: `elapsed=300.864685ms … context deadline exceeded`. В отдельной пробе с занятым guard очереди settle через 100 мс задача всё ещё держала `load.lock`; отказ пришёл по внешнему таймауту через 300 мс. Значит, такое ожидание может задержать и остальные задачи load.\n\n- **LOW — тест обхода обычной головы нестабилен.** [yield_test.go:1173](/home/aisee/.cache/worktrees/graft/past-load-yield/internal/loadgate/yield_test.go:1173). Сигнал о начале ожидания и наличие билета ещё не означают, что обычная задача освободила замок. При `go test -count=8 … -run 'TestSpentPriority|…'` тест упал с `budget exhausted … queued behind graft ordinary … (write)`: приоритетная задача успела проверить ещё удерживаемый замок. Нужна синхронизация именно с освобождением замка.\n\nПроверка четырёх пунктов раунда 4: тесты свободного settle при нулевом бюджете, гонки постановки load и settle, обхода обычного билета и выбора priority-вида занятости прошли. Для каждого я сделал мутацию во временной копии: соответствующий тест упал. Выбор вида в `wouldWait` и `Ticket.AheadOf` также прошли выбранный прогон `-race -count=8`.\n\nТри запрошенные мутации очереди тоже обнаружены: без уступки упали оба приёмочных теста; без проверки головы первым допустился `ordinary`; без освобождения settle тест приоритетного settle завершился по таймауту. Выбранные тесты отмены, quiet, повторных уступок, падения и возврата на место прошли.\n\nПо чтению кода повторная проверка головы и запись резерва защищены `load.lock`; допуска двух задач по одному устаревшему резерву я не обнаружил. Совместимость с **работающим старым бинарником**, `GRAFT_ADMITTED` и ошибки освобождения на каждой границе отдельными пробами не проверены; полный прогон всех тестов не выполнялся.\n\n**Вердикт: не принимать** до устранения ожидания guard при нулевом бюджете и исправления нестабильного теста.",
+  "logged": "2026-11-27\task\task\topenai/gpt-6.1-terra\tревью\t1127-1821-ask-ревью\t1\tпринято\t6\t0.0656\tусилие high; сложность HUNT; worker 1127-1821-ask-ревью (codex, danger-full-access); 0.066% недели $100, used_percent 45→45\t",
+  "round_attempts": 1,
+  "price_total": {
+    "api_micro_usd": 245933,
+    "week_percent": 0.06558213333333333,
+    "tokens": {
+      "in": 61628,
+      "out": 7246,
+      "reason": 2543,
+      "cache_r": 2707200,
+      "cache_w": 0,
+      "steps": 48,
+      "known": true,
+      "parts": 1,
+      "missing": 0
+    },
+    "limit": {
+      "from": 45,
+      "to": 45,
+      "from_at": "2026-11-27T17:21:32.192Z",
+      "to_at": "2026-11-27T17:27:21.724Z",
+      "window_min": 10080,
+      "resets_at": 1796002856,
+      "plan": "prolite",
+      "known": true
+    },
+    "known": true
+  }
+}

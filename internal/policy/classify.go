@@ -159,6 +159,26 @@ func workerUnit(cgroup string) string {
 	return ""
 }
 
+func workerScopePid(cgroup string) int {
+	unit := filepath.Base(cgroup)
+	if !strings.HasPrefix(unit, "worker-io-") || !strings.HasSuffix(unit, ".scope") {
+		return 0
+	}
+	pidText := strings.TrimSuffix(strings.TrimPrefix(unit, "worker-io-"), ".scope")
+	pid := 0
+	for i := range pidText {
+		digit := int(pidText[i] - '0')
+		if digit < 0 || digit > 9 || pid > (int(^uint(0)>>1)-digit)/10 {
+			return 0
+		}
+		pid = pid*10 + digit
+	}
+	if pid == 0 {
+		return 0
+	}
+	return pid
+}
+
 // ResolveWorkerJobs определяет заказчика и живость задания до группировки по порогу.
 func ResolveWorkerJobs(items []Item, live Live) error {
 	var errs []error
@@ -168,12 +188,24 @@ func ResolveWorkerJobs(items []Item, live Live) error {
 			continue
 		}
 		unit := workerUnit(it.Entry.Owner.Proc.Cgroup)
-		if unit == "" {
+		pid := workerScopePid(it.Entry.Owner.Proc.Cgroup)
+		if unit == "" && pid == 0 {
 			continue
 		}
-		job, ok, err := live.WorkerByUnit(unit)
+		var job WorkerJob
+		var ok bool
+		var err error
+		if unit != "" {
+			job, ok, err = live.WorkerByUnit(unit)
+		} else {
+			job, ok, err = live.WorkerByPid(pid, it.Entry.Born)
+		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("unit %s: %w", unit, err))
+			label := unit
+			if label == "" {
+				label = fmt.Sprintf("worker-io-%d.scope", pid)
+			}
+			errs = append(errs, fmt.Errorf("%s: %w", label, err))
 			continue
 		}
 		if !ok || job.Master == "" {

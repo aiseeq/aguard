@@ -47,6 +47,8 @@ type Job struct {
 	Master  string    `json:"master"`
 	Unit    string    `json:"unit"` // unit бойца на ноуте без .service; повтор — <unit>-<n>.service
 	Created time.Time `json:"created"`
+	Pid     int       `json:"pid"` // процесс worker; Owner.Pid ниже — pid сессии-запускателя
+	Ended   time.Time `json:"-"`   // из status.json, отсутствует у незавершённого задания
 	// Owner — сессия, запустившая бойца (worker run); nil — задание старше поля.
 	Owner *JobOwner `json:"owner"`
 }
@@ -61,13 +63,147 @@ type JobOwner struct {
 
 // Jobs — задания worker по папке состояния; читаются по мере надобности.
 type Jobs struct {
-	Dir     string
-	Units   []string        // папки cgroup, где systemd держит unit бойцов (app.slice и agents.slice user@): живой unit — папка в одной из них
-	byID    map[string]*Job // nil — задания нет
-	all     []*Job          // живые задания папки, прочитанные ByTree
-	read    bool
-	byDir   map[string]*Job
-	dirRead bool
+	Dir          string
+	Units        []string        // папки cgroup, где systemd держит unit бойцов (app.slice и agents.slice user@): живой unit — папка в одной из них
+	ProcRoot     string          // /proc; пустое значение означает /proc
+	JobJSONReads int             // число прочитанных job.json (для диагностики стоимости поиска)
+	byID         map[string]*Job // nil — задания нет
+	all          []*Job          // живые задания папки, прочитанные ByTree
+	read         bool
+	byDir        map[string]*Job
+	dirRead      bool
+	byPid        map[int][]*Job
+	pidScanned   map[int]map[string]bool
+	jobDirs      []os.DirEntry
+	jobDirsRead  bool
+	jobDirsErr   error
+}
+
+// ByPidBorn ищет задания процесса worker, подходящие по времени рождения записи.
+// ReadDir выполняется один раз на Jobs; job.json читается только у папок в окне [born-7d, born].
+// Задание старше семи суток от born намеренно не находится и остаётся обычной записью для лида.
+func (j *Jobs) ByPidBorn(pid int, born time.Time) (*Job, error) {
+	if err := j.readPidJobDirs(); err != nil {
+		return nil, err
+	}
+	if j.pidScanned[pid] == nil {
+		j.pidScanned[pid] = map[string]bool{}
+	}
+	// Сбой чтения части кандидатов идёт в ответ вместе с найденным среди прочитанных.
+	err := j.scanPidCandidates(pid, born)
+	return j.bestPidJob(pid, born), err
+}
+
+func (j *Jobs) readPidJobDirs() error {
+	if j.byPid == nil {
+		j.byPid = map[int][]*Job{}
+		j.pidScanned = map[int]map[string]bool{}
+	}
+	if !j.jobDirsRead {
+		j.jobDirsRead = true
+		j.jobDirs, j.jobDirsErr = os.ReadDir(j.Dir)
+		if errors.Is(j.jobDirsErr, fs.ErrNotExist) {
+			j.jobDirsErr = nil
+		}
+	}
+	if j.jobDirsErr != nil {
+		return fmt.Errorf("задания worker: %w", j.jobDirsErr)
+	}
+	return nil
+}
+
+func (j *Jobs) scanPidCandidates(pid int, born time.Time) error {
+	var candidates []jobDirTime
+	for _, ent := range j.jobDirs {
+		if !ent.IsDir() {
+			continue
+		}
+		if created, ok := jobDirMinute(ent.Name(), born); ok && !created.After(born) && !created.Before(born.Add(-7*24*time.Hour)) && !j.pidScanned[pid][ent.Name()] {
+			candidates = append(candidates, jobDirTime{name: ent.Name(), created: created})
+		}
+	}
+	slices.SortFunc(candidates, func(a, b jobDirTime) int { return b.created.Compare(a.created) })
+	// Битое задание пропускается, а не обрывает поиск: остальные кандидаты читаются, сбой уходит в ответ.
+	var errs []error
+	for _, candidate := range candidates {
+		j.pidScanned[pid][candidate.name] = true
+		if _, cached := j.byID[candidate.name]; !cached {
+			j.JobJSONReads++
+		}
+		job, err := j.get(candidate.name) // общий кеш прохода: другой pid того же прохода не читает job.json заново
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if job == nil || job.Pid != pid {
+			continue
+		}
+		status, err := os.ReadFile(filepath.Join(j.Dir, candidate.name, "status.json"))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("статус задания worker %s: %w", candidate.name, err))
+			continue
+		}
+		if err == nil {
+			var v struct {
+				Ended time.Time `json:"ended"`
+			}
+			if err := json.Unmarshal(status, &v); err != nil {
+				errs = append(errs, fmt.Errorf("статус задания worker %s: %w", candidate.name, err))
+				continue
+			}
+			job.Ended = v.Ended
+		}
+		j.byPid[pid] = append(j.byPid[pid], job)
+	}
+	return errors.Join(errs...)
+}
+
+func (j *Jobs) bestPidJob(pid int, born time.Time) *Job {
+	var best *Job
+	for _, job := range j.byPid[pid] {
+		end := job.Ended
+		if end.IsZero() {
+			end = time.Now()
+		}
+		if !born.Before(job.Created) && !born.After(end) && (best == nil || job.Created.After(best.Created)) {
+			best = job
+		}
+	}
+	return best
+}
+
+type jobDirTime struct {
+	name    string
+	created time.Time
+}
+
+func jobDirMinute(name string, ref time.Time) (time.Time, bool) {
+	if len(name) < 10 || name[4] != '-' || name[9] != '-' {
+		return time.Time{}, false
+	}
+	for _, i := range []int{0, 1, 2, 3, 5, 6, 7, 8} {
+		if name[i] < '0' || name[i] > '9' {
+			return time.Time{}, false
+		}
+	}
+	month, err1 := strconv.Atoi(name[:2])
+	day, err2 := strconv.Atoi(name[2:4])
+	hour, err3 := strconv.Atoi(name[5:7])
+	minute, err4 := strconv.Atoi(name[7:9])
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		return time.Time{}, false
+	}
+	if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 {
+		return time.Time{}, false
+	}
+	created := time.Date(ref.Year(), time.Month(month), day, hour, minute, 0, 0, ref.Location())
+	if int(created.Month()) != month || created.Day() != day {
+		return time.Time{}, false
+	}
+	if created.After(ref) {
+		created = created.AddDate(-1, 0, 0)
+	}
+	return created, true
 }
 
 func (j *Jobs) get(id string) (*Job, error) {
@@ -188,6 +324,10 @@ const settleUnit = "worker-settle"
 // сначала имя целиком (у задания бывает число на конце: 1110-1118-2026-11-10), потом без хвоста -<n>. Не unit бойца
 // (нет префикса worker-, служба worker-settle) — nil.
 func JobIDs(unit string) []string {
+	// worker-io-<pid>.scope содержит pid процесса, а не id папки задания.
+	if strings.HasSuffix(unit, ".scope") {
+		return nil
+	}
 	unit = strings.TrimSuffix(UnescapeUnit(unit), ".service")
 	id, ok := strings.CutPrefix(unit, "worker-")
 	if !ok || unit == settleUnit || id == "" {

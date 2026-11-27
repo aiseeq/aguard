@@ -206,6 +206,10 @@ func (f *fakeLive) WorkerByUnit(unit string) (WorkerJob, bool, error) {
 	return j, ok, nil
 }
 
+func (f *fakeLive) WorkerByPid(int, time.Time) (WorkerJob, bool, error) {
+	return WorkerJob{}, false, nil
+}
+
 func (f *fakeLive) ByPid(pid int, _ string) (Target, bool) { t, ok := f.byPid[pid]; return t, ok }
 func (f *fakeLive) ByName(n string) (Target, bool)         { t, ok := f.byName[n]; return t, ok }
 func (f *fakeLive) ProcAlive(pid int, start string) bool   { return f.proc[pid] == start && start != "" }

@@ -311,5 +311,8 @@ func (l tmpInUseLive) ByName(name string) (policy.Target, bool) {
 func (tmpInUseLive) WorkerByUnit(string) (policy.WorkerJob, bool, error) {
 	return policy.WorkerJob{}, false, nil
 }
+func (tmpInUseLive) WorkerByPid(int, time.Time) (policy.WorkerJob, bool, error) {
+	return policy.WorkerJob{}, false, nil
+}
 
 func (tmpInUseLive) ProcAlive(int, string) bool { return false }

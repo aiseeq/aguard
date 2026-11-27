@@ -16,6 +16,27 @@ import (
 
 const userSlice = "/user.slice/user-1000.slice/user@1000.service"
 
+func TestWorkerScopeJobIDsDoesNotTreatScopeAsJob(t *testing.T) {
+	if got := JobIDs("worker-io-2230260.scope"); got != nil {
+		t.Fatalf("worker io scope became job id: %v", got)
+	}
+}
+
+func TestWorkerScopeReadsOnlyDateWindowCandidates(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"1120-1200-old", "1126-1200-in-window", "1127-1200-future"} {
+		write(t, filepath.Join(root, dir, "job.json"), `{"pid":8}`)
+	}
+	jobs := &Jobs{Dir: root}
+	born := time.Date(2026, 11, 27, 11, 0, 0, 0, time.UTC)
+	if _, err := jobs.ByPidBorn(7, born); err != nil {
+		t.Fatal(err)
+	}
+	if jobs.JobJSONReads != 2 {
+		t.Fatalf("прочитано job.json вне окна или пропущен кандидат: %d", jobs.JobJSONReads)
+	}
+}
+
 func write(t *testing.T, path, s string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -778,5 +799,37 @@ func TestRecentJobDirWindowAndYearBoundary(t *testing.T) {
 		if got := recentJobDir(name, now); got != want {
 			t.Errorf("recentJobDir(%q) = %v, хотим %v", name, got, want)
 		}
+	}
+}
+
+func TestWorkerScopeBrokenJobDoesNotHideMatch(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "1127-1830-broken", "job.json"), `{`)
+	write(t, filepath.Join(root, "1127-1821-ask", "job.json"),
+		`{"id":"1127-1821-ask","master":"ask","pid":7,"created":"2026-11-27T18:21:14+01:00"}`)
+	born := time.Date(2026, 11, 27, 18, 40, 0, 0, time.FixedZone("CET", 3600))
+	job, err := (&Jobs{Dir: root}).ByPidBorn(7, born)
+	if job == nil || job.ID != "1127-1821-ask" {
+		t.Fatalf("битое соседнее задание скрыло подходящее: job=%+v err=%v", job, err)
+	}
+	if err == nil {
+		t.Fatal("сбой чтения битого задания потерян")
+	}
+}
+
+func TestWorkerScopeSecondPidReusesReadJobs(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{"1127-1800-a", "1127-1810-b", "1127-1820-c"} {
+		write(t, filepath.Join(root, dir, "job.json"), `{"master":"m","pid":1,"created":"2026-11-27T18:00:00+01:00"}`)
+	}
+	jobs := &Jobs{Dir: root}
+	born := time.Date(2026, 11, 27, 18, 30, 0, 0, time.FixedZone("CET", 3600))
+	for _, pid := range []int{7, 8} {
+		if _, err := jobs.ByPidBorn(pid, born); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if jobs.JobJSONReads != 3 {
+		t.Fatalf("второй pid перечитал job.json: прочитано %d, папок 3", jobs.JobJSONReads)
 	}
 }

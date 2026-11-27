@@ -151,6 +151,29 @@ func (l *liveSessions) WorkerByUnit(unit string) (policy.WorkerJob, bool, error)
 	return policy.WorkerJob{ID: job.ID, Master: job.Master, Cwd: cwd, Live: unitLive}, true, nil
 }
 
+func (l *liveSessions) WorkerByPid(pid int, born time.Time) (policy.WorkerJob, bool, error) {
+	job, err := l.jobs.ByPidBorn(pid, born)
+	if job == nil {
+		return policy.WorkerJob{}, false, err
+	}
+	if err != nil { // задание нашлось среди прочитанных: сводка идёт заказчику, битые задания — в журнал
+		l.log.Warn("aguard tmp: задания worker по pid", "pid", pid, "err", err)
+	}
+	procRoot := l.jobs.ProcRoot
+	if procRoot == "" {
+		procRoot = "/proc"
+	}
+	comm, readErr := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "comm"))
+	// Без ended задание живо только пока pid существует и comm остаётся worker;
+	// иначе упавший worker без status.json навсегда отложил бы сводку.
+	jobLive := job.Ended.IsZero() && readErr == nil && strings.TrimSpace(string(comm)) == "worker"
+	cwd := ""
+	if in, ok := l.byName[job.Master]; ok {
+		cwd = in.Cwd
+	}
+	return policy.WorkerJob{ID: job.ID, Master: job.Master, Cwd: cwd, Live: jobLive}, true, nil
+}
+
 func (l *liveSessions) ByName(name string) (policy.Target, bool) {
 	in, ok := l.byName[name]
 	if !ok || in.SocketPath == "" {

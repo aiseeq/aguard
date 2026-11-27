@@ -1,0 +1,21 @@
+{
+  "id": "1127-1821-ask-ревью",
+  "accept": "",
+  "dir": "/home/aisee/.local/state/worker/1127-1821-ask-ревью",
+  "model": "terra",
+  "account": "personal",
+  "model_id": "gpt-6.1-terra",
+  "class": "ревью",
+  "difficulty": "HUNT",
+  "task": "1127-1821-ask-ревью",
+  "project": "ask",
+  "master": "ask",
+  "max": 0,
+  "accept_max": 0,
+  "cont": 0,
+  "skill": "/home/aisee/.claude/skills/worker-model",
+  "pid": 2230260,
+  "class_route": "HUNT",
+  "ask": true,
+  "created": "2026-11-27T18:21:14.170700996+01:00"
+}

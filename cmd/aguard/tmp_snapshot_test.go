@@ -296,6 +296,9 @@ func (l tmpPlanLive) ByName(name string) (policy.Target, bool) {
 func (tmpPlanLive) WorkerByUnit(string) (policy.WorkerJob, bool, error) {
 	return policy.WorkerJob{}, false, nil
 }
+func (tmpPlanLive) WorkerByPid(int, time.Time) (policy.WorkerJob, bool, error) {
+	return policy.WorkerJob{}, false, nil
+}
 
 func (tmpPlanLive) ProcAlive(int, string) bool { return false }
 

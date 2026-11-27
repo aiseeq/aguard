@@ -36,6 +36,8 @@ type Live interface {
 	ByName(name string) (Target, bool)
 	// WorkerByUnit — заказчик и состояние задания по unit создателя записи.
 	WorkerByUnit(unit string) (WorkerJob, bool, error)
+	// WorkerByPid — отдельный путь для worker-io scope: там нет id задания, и выбор зависит от pid и Born.
+	WorkerByPid(pid int, born time.Time) (WorkerJob, bool, error)
 	ProcAlive(pid int, procStart string) bool
 }
 
