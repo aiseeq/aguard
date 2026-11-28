@@ -18,6 +18,7 @@ import (
 	"github.com/aiseeq/aguard/internal/bgtask"
 	"github.com/aiseeq/aguard/internal/policy"
 	"github.com/aiseeq/aguard/internal/record"
+	"github.com/aiseeq/akit/deliver"
 )
 
 const (
@@ -315,7 +316,7 @@ func (s *State) armed(r Reading, idle time.Duration) ([]Notice, bool) {
 		return []Notice{{KindFull, fullText(r, idle)}}, false
 	}
 	if s.Reset.Key == "" {
-		s.Reset.Key = newKey()
+		s.Reset.Key = deliver.NewUUID() // UUID v4: его советует схема app-server для idempotencyKey
 	}
 	return nil, true
 }

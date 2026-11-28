@@ -1,7 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/aiseeq/akit v1.93.2 h1:IvPr3zfOdRRs3QQXVkKzW0d9q8MgYIMYz3secm42WyU=
-github.com/aiseeq/akit v1.93.2/go.mod h1:Rw1pDx0np178lTHqhg1r+zcge6XRcY8/pokBW5WuH9I=
+github.com/aiseeq/akit v1.93.3 h1:u7WmInorHEiCzZ7zQgYL963vkuwvE64vgjX27tKOvU4=
+github.com/aiseeq/akit v1.93.3/go.mod h1:Rw1pDx0np178lTHqhg1r+zcge6XRcY8/pokBW5WuH9I=
 github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
 github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/go-quicktest/qt v1.102.0 h1:HSQxCeh5YZH3EL3W39ixjtyaEhcWSXQHtHnMBzSs474=

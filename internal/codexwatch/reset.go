@@ -1,7 +1,6 @@
 package codexwatch
 
 import (
-	"crypto/rand"
 	"fmt"
 	"time"
 )
@@ -56,15 +55,6 @@ func (s *State) Delivered() {
 		}
 	}
 	s.Pending = keep
-}
-
-// newKey — UUID v4: его советует схема app-server для idempotencyKey.
-func newKey() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:]) // crypto/rand.Read не возвращает ошибку (Go 1.24+)
-	b[6] = b[6]&0x0f | 0x40
-	b[8] = b[8]&0x3f | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // outcomeWhat — исходы consume по схеме app-server (codex-cli 0.164.0); другой исход akit/codexlimit возвращает ошибкой.

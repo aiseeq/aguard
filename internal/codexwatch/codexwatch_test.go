@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aiseeq/akit/deliver"
 )
 
 var (
@@ -439,9 +441,10 @@ func TestSameWindowByMinute(t *testing.T) {
 	}
 }
 
-func TestNewKeyUUID(t *testing.T) {
-	k := newKey()
-	if len(k) != 36 || k[14] != '4' || k == newKey() {
+// Ключ взвода — UUID v4 (схема app-server для idempotencyKey); ключ даёт akit deliver.NewUUID.
+func TestResetKeyUUID(t *testing.T) {
+	k := deliver.NewUUID()
+	if len(k) != 36 || k[14] != '4' || k == deliver.NewUUID() {
 		t.Fatalf("ключ %q", k)
 	}
 }
