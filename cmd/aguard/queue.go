@@ -35,6 +35,7 @@ type queueTicketJSON struct {
 	Slug     string `json:"slug"`
 	Title    string `json:"title"`
 	Executor string `json:"executor"`
+	Check    string `json:"check"` // tk done --check: у q-тикета — ответ пользователя для письма заказчику
 	Journal  bool   `json:"journal"`
 	// Actors — время последней записи журнала по авторам, «2006-01-02 15:04» местного (akit tk v1.47.0).
 	Actors map[string]string `json:"actors"`
@@ -911,7 +912,7 @@ func (a *app) queueTicketFromJSON(c *config.Config, root string, rootMode bool, 
 		ticketPath = filepath.Join("docs", "tasks", filepath.Base(filepath.FromSlash(r.Path)))
 	}
 	actorNotes := a.queueActorNotes(r)
-	return queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Path: ticketPath, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Journal: r.Journal,
+	return queue.Ticket{Key: key, Project: filepath.Base(project), Dir: project, Path: ticketPath, Slug: r.Slug, Title: r.Title, Prio: r.Prio, Status: r.Status, Back: r.Back, Master: master, Admin: admin, Created: created, Executor: r.Executor, Check: r.Check, Journal: r.Journal,
 		MasterNote: actorNotes[master], ActorNotes: actorNotes, BlockedBy: r.BlockedBy, Overdue: r.Overdue, WaitDue: r.Due != ""}, true
 }
 

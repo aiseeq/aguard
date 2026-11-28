@@ -711,3 +711,17 @@ func TestQueueTicketBlockedBy(t *testing.T) {
 		t.Fatalf("%+v", ts)
 	}
 }
+
+// Ответ пользователя из tk done --check (tk ls --json, check) доходит до тикета очереди: из него письмо заказчику
+// о закрытии q-тикета (q-close-carry-answer).
+func TestQueueTicketCheck(t *testing.T) {
+	list := `[{"repo":"p","slug":"q-x","status":"готово","prio":"MED","title":"t","back":"c-master","check":"«а» (tl 27d21ddd:61023)","path":"docs/tasks/20261103-1205-MED-q-x.md"}]`
+	b := newQueueBench(t, list, "[]")
+	ts, err := b.a.queueTickets(context.Background(), b.c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ts) != 1 || ts[0].Check != "«а» (tl 27d21ddd:61023)" {
+		t.Fatalf("%+v", ts)
+	}
+}

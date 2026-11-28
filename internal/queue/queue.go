@@ -210,6 +210,7 @@ type Ticket struct {
 	CancelJournalRead                                            bool
 	Journal                                                      bool   // журнал, а не задача: вне tk next, кроме наступившего wait
 	Transfer                                                     string // перенесён во внешний трекер: ключ и адрес; файла тикета больше нет
+	Check                                                        string // tk done --check: у q-тикета по порядку админа — цитата ответа пользователя
 	External                                                     bool   // задача внешнего трекера: файла тикета нет
 	Started                                                      bool   // внешняя задача уже в работе: письмо мастеру есть, письма админу «не взят» нет
 	Created                                                      time.Time
@@ -990,7 +991,7 @@ func (s *State) backNotices(t Ticket, st *ticketState, v View) []Notice {
 		st.Closed = v.Rest.End(v.Now) // срок 7 суток не идёт, пока получатель на дне отдыха
 		return nil
 	}
-	line := fmt.Sprintf("aguard: закрыт %s/%s (%s) — %s", t.Project, t.Slug, t.Status, t.Title)
+	line := fmt.Sprintf("aguard: закрыт %s/%s (%s) — %s", t.Project, t.Slug, t.Status, t.Title) + questionAnswer(t)
 	if t.Transfer != "" {
 		line = fmt.Sprintf("aguard: перенесён %s/%s → %s", t.Project, t.Slug, t.Transfer)
 	}
@@ -1002,6 +1003,21 @@ func (s *State) backNotices(t Ticket, st *ticketState, v View) []Notice {
 		return []Notice{notice(t, v, KindBack, t.Back, line)}
 	}
 	return nil
+}
+
+// questionAnswer — хвост письма о закрытии q-тикета: ответ пользователя из tk done --check (`work-supervisor`, «Ответы
+// пользователю»: админ кладёт туда цитату). Без него до заказчика доходит только заголовок, и ответ теряется
+// (q-close-carry-answer). Письма идут построчно, поэтому ответ — одной строкой.
+func questionAnswer(t Ticket) string {
+	if !strings.HasPrefix(t.Slug, "q-") || t.Status != "готово" {
+		return ""
+	}
+	answer := strings.Join(strings.Fields(t.Check), " ")
+	if answer == "" {
+		return ""
+	}
+	// Подпись называет источник: по старому образцу check пишет приёмка, и цитата бывает внутри её текста.
+	return "; ответ (из --check): " + answer
 }
 
 func (s *State) cancelNotices(t Ticket, st *ticketState, v View) []Notice {
