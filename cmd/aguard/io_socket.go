@@ -79,7 +79,7 @@ func (s *ioService) answer(line []byte) any {
 		if err != nil {
 			return fail(err)
 		}
-		return iowatch.Answer{V: iowatch.ProtoVersion, Cases: got.cases, Coverage: &got.cover}
+		return iowatch.CasesAnswer{Cases: got.cases, Coverage: &got.cover}
 	default: // QueryProfiles: CheckRequest других не пропускает
 		profiles, err := ioAsk(s, func() []iowatch.Profile { return iowatch.FilterProfiles(s.ended, req.Kind, since) })
 		if err != nil {

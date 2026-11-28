@@ -1,7 +1,9 @@
 package iowatch
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -56,4 +58,60 @@ func CheckRequest(req Request) (since time.Time, err error) {
 		}
 	}
 	return since, nil
+}
+
+// CasesAnswer — ответ cases, который пишет себя по одному случаю (linesock зовёт StreamJSON): сводки за неделю —
+// десятки МБ JSON, а json.Marshal всего ответа собирал их одним буфером — ступень пика памяти демона 99 МБ
+// (rss-growth-1118). Байты те же, что у json.Marshal(Answer{V: ProtoVersion, Cases: …, Coverage: …}).
+type CasesAnswer struct {
+	Cases    []Case
+	Coverage *CoverRecord
+}
+
+// StreamJSON пишет ответ в w без перевода строки.
+func (a CasesAnswer) StreamJSON(w io.Writer) error {
+	sw := &stickyWriter{w: w}
+	sw.write(fmt.Appendf(nil, `{"v":%d`, ProtoVersion))
+	if len(a.Cases) > 0 {
+		sw.write([]byte(`,"cases":[`))
+		for i := range a.Cases {
+			b, err := json.Marshal(&a.Cases[i])
+			if err != nil {
+				return fmt.Errorf("случай %d: %w", i, err)
+			}
+			if i > 0 {
+				sw.write([]byte(","))
+			}
+			sw.write(b)
+			if sw.err != nil {
+				break
+			}
+		}
+		sw.write([]byte("]"))
+	}
+	if a.Coverage != nil && sw.err == nil {
+		b, err := json.Marshal(a.Coverage)
+		if err != nil {
+			return fmt.Errorf("учёт покрытия: %w", err)
+		}
+		sw.write([]byte(`,"coverage":`))
+		sw.write(b)
+	}
+	sw.write([]byte("}"))
+	if sw.err != nil {
+		return fmt.Errorf("запись ответа cases: %w", sw.err)
+	}
+	return nil
+}
+
+// stickyWriter запоминает первую ошибку записи; следующие записи после неё не идут.
+type stickyWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (s *stickyWriter) write(b []byte) {
+	if s.err == nil {
+		_, s.err = s.w.Write(b)
+	}
 }

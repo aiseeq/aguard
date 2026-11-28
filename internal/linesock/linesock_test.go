@@ -3,6 +3,8 @@ package linesock
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -67,5 +69,39 @@ func TestAskSilentServerDeadline(t *testing.T) {
 	}
 	if conn := <-accepted; conn != nil {
 		_ = conn.Close()
+	}
+}
+
+// streamed — ответ со своим StreamJSON; json.Marshal на нём падает, так что ответ дойдёт, только если сервер
+// пишет поток (rss-growth-1118: большой ответ io не собирается одним буфером).
+type streamed struct{ n int }
+
+func (s streamed) StreamJSON(w io.Writer) error {
+	_, err := fmt.Fprintf(w, `{"N":%d}`, s.n)
+	return err
+}
+
+func (streamed) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("ответ-поток не должен идти через Marshal")
+}
+
+func TestServeStreamsStreamer(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "s", "test.sock")
+	ln, err := Listen(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, ln, func(line []byte) any { return streamed{len(line)} }, slog.New(slog.DiscardHandler), "test")
+	}()
+	var out struct{ N int }
+	if err := Ask(socket, time.Second, map[string]int{"n": 1}, &out); err != nil || out.N != len(`{"n":1}`) {
+		t.Fatalf("ответ %+v: %v", out, err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

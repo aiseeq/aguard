@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -84,14 +85,34 @@ func handle(conn net.Conn, answer func([]byte) any) (err error) {
 	if err != nil {
 		return fmt.Errorf("чтение вопроса: %w", err)
 	}
-	b, err := json.Marshal(answer(bytes.TrimSuffix(line, []byte("\n"))))
-	if err != nil {
-		return fmt.Errorf("ответ: %w", err)
+	ans := answer(bytes.TrimSuffix(line, []byte("\n")))
+	w := bufio.NewWriterSize(conn, 64<<10)
+	if s, ok := ans.(Streamer); ok {
+		if err := s.StreamJSON(w); err != nil {
+			return fmt.Errorf("ответ: %w", err)
+		}
+	} else {
+		b, err := json.Marshal(ans)
+		if err != nil {
+			return fmt.Errorf("ответ: %w", err)
+		}
+		if _, err := w.Write(b); err != nil {
+			return fmt.Errorf("запись ответа: %w", err)
+		}
 	}
-	if _, err := conn.Write(append(b, '\n')); err != nil {
+	if err := w.WriteByte('\n'); err != nil {
+		return fmt.Errorf("запись ответа: %w", err)
+	}
+	if err := w.Flush(); err != nil {
 		return fmt.Errorf("запись ответа: %w", err)
 	}
 	return nil
+}
+
+// Streamer — ответ, который пишет свой JSON сам, частями (без перевода строки): большой ответ не собирается
+// одним буфером json.Marshal.
+type Streamer interface {
+	StreamJSON(w io.Writer) error
 }
 
 // ErrNoServer — сокета нет или его никто не слушает: сервер не запущен.

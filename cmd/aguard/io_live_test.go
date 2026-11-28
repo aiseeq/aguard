@@ -276,3 +276,32 @@ func TestIOProfilesNoIOText(t *testing.T) {
 		t.Fatalf("профиль без IO: %q", line)
 	}
 }
+
+// Ответ cases службы — потоковый (linesock.Streamer): сводки недели не собираются одним буфером json.Marshal
+// (ступень пика памяти демона, rss-growth-1118); ответ остаётся тем же JSON с v и учётом покрытия.
+func TestIOSocketCasesStreams(t *testing.T) {
+	s, _, _ := ioLiveService(t, t.Context())
+	go func() {
+		select {
+		case action := <-s.extra:
+			action()
+		case <-time.After(2 * time.Second):
+		}
+	}()
+	answer := s.answer([]byte(`{"v":1,"q":"cases"}`))
+	st, ok := answer.(linesock.Streamer)
+	if !ok {
+		t.Fatalf("ответ cases не потоковый: %T", answer)
+	}
+	var buf bytes.Buffer
+	if err := st.StreamJSON(&buf); err != nil {
+		t.Fatal(err)
+	}
+	var decoded iowatch.Answer
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("%v: %s", err, buf.Bytes())
+	}
+	if decoded.V != iowatch.ProtoVersion || decoded.Coverage == nil {
+		t.Fatalf("ответ cases: %s", buf.Bytes())
+	}
+}
