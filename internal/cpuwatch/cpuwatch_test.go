@@ -23,6 +23,9 @@ func TestWorkerScopeJobIDsDoesNotTreatScopeAsJob(t *testing.T) {
 }
 
 func TestWorkerScopeReadsOnlyDateWindowCandidates(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = oldLocal })
 	root := t.TempDir()
 	for _, dir := range []string{"1120-1200-old", "1126-1200-in-window", "1127-1200-future"} {
 		write(t, filepath.Join(root, dir, "job.json"), `{"pid":8}`)
@@ -831,5 +834,115 @@ func TestWorkerScopeSecondPidReusesReadJobs(t *testing.T) {
 	}
 	if jobs.JobJSONReads != 3 {
 		t.Fatalf("второй pid перечитал job.json: прочитано %d, папок 3", jobs.JobJSONReads)
+	}
+}
+
+func TestWorkerScopeLookupStopsAfterMatchingMinute(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.FixedZone("worker-local", 3600)
+	t.Cleanup(func() { time.Local = oldLocal })
+	root := t.TempDir()
+	local := time.FixedZone("worker-local", 3600)
+	for i := range 12 {
+		dir := fmt.Sprintf("1127-181%d-old-%02d", 9-i/10, i)
+		write(t, filepath.Join(root, dir, "job.json"), `{"pid":8}`)
+	}
+	for i, created := range []string{"2026-11-27T18:21:12+01:00", "2026-11-27T18:21:48+01:00", "2026-11-27T18:21:20+01:00"} {
+		dir := fmt.Sprintf("1127-1821-same-%d", i)
+		pid := 8
+		if i == 1 || i == 2 {
+			pid = 7
+		}
+		write(t, filepath.Join(root, dir, "job.json"), fmt.Sprintf(`{"id":%q,"pid":%d,"master":"m","created":%q}`, dir, pid, created))
+	}
+	jobs := &Jobs{Dir: root}
+	job, err := jobs.ByPidBorn(7, time.Date(2026, 11, 27, 18, 22, 0, 0, local))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job == nil || job.ID != "1127-1821-same-1" {
+		t.Fatalf("нашлось не самое позднее подходящее задание: %+v", job)
+	}
+	if jobs.JobJSONReads != 3 {
+		t.Fatalf("прочитано %d job.json, хотим только 3 папки той же минуты", jobs.JobJSONReads)
+	}
+}
+
+func TestWorkerScopeLookupUsesLocalFolderMinute(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.FixedZone("worker-local", 2*60*60)
+	t.Cleanup(func() { time.Local = oldLocal })
+	root := t.TempDir()
+	write(t, filepath.Join(root, "1127-2021-utc-born", "job.json"),
+		`{"id":"1127-2021-utc-born","pid":7,"master":"m","created":"2026-11-27T18:21:40Z"}`)
+	born := time.Date(2026, 11, 27, 18, 22, 0, 0, time.UTC)
+	job, err := (&Jobs{Dir: root}).ByPidBorn(7, born)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job == nil || job.ID != "1127-2021-utc-born" {
+		t.Fatalf("не найдено задание с локальным именем папки: %+v", job)
+	}
+}
+
+func TestWorkerScopeLookupKeepsMatchWithBrokenStatus(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.FixedZone("worker-local", 3600)
+	t.Cleanup(func() { time.Local = oldLocal })
+	root := t.TempDir()
+	dir := "1127-1821-bad-status"
+	write(t, filepath.Join(root, dir, "job.json"),
+		`{"id":"1127-1821-bad-status","pid":7,"master":"m","created":"2026-11-27T18:21:40+01:00"}`)
+	write(t, filepath.Join(root, dir, "status.json"), `{`)
+	job, err := (&Jobs{Dir: root}).ByPidBorn(7, time.Date(2026, 11, 27, 18, 22, 0, 0, time.FixedZone("CET", 3600)))
+	if job == nil || job.ID != dir || !job.Ended.IsZero() {
+		t.Fatalf("битый статус должен сохранить задание как незавершённое: job=%+v err=%v", job, err)
+	}
+	if err == nil {
+		t.Fatal("ошибка чтения status.json не возвращена вызывающему")
+	}
+}
+
+func TestWorkerScopeLookupRechecksPidForLaterBorn(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.FixedZone("worker-local", 3600)
+	t.Cleanup(func() { time.Local = oldLocal })
+	root := t.TempDir()
+	for dir, created := range map[string]string{
+		"1127-1819-older": "2026-11-27T18:19:20+01:00",
+		"1127-1821-newer": "2026-11-27T18:21:20+01:00",
+	} {
+		write(t, filepath.Join(root, dir, "job.json"),
+			fmt.Sprintf(`{"id":%q,"pid":7,"master":"m","created":%q}`, dir, created))
+	}
+	jobs := &Jobs{Dir: root}
+	first, err := jobs.ByPidBorn(7, time.Date(2026, 11, 27, 18, 20, 0, 0, time.Local))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || first.ID != "1127-1819-older" {
+		t.Fatalf("первый born не нашёл старое задание: %+v", first)
+	}
+	later, err := jobs.ByPidBorn(7, time.Date(2026, 11, 27, 18, 22, 0, 0, time.Local))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later == nil || later.ID != "1127-1821-newer" {
+		t.Fatalf("повторный born потерял самое позднее задание: %+v", later)
+	}
+}
+
+func TestWorkerScopeLookupYearFromLocalBorn(t *testing.T) {
+	oldLocal := time.Local
+	time.Local = time.FixedZone("worker-local", 3600)
+	t.Cleanup(func() { time.Local = oldLocal })
+	root := t.TempDir()
+	write(t, filepath.Join(root, "0101-0020-newyear", "job.json"),
+		`{"id":"0101-0020-newyear","master":"ask","pid":7,"created":"2027-01-01T00:20:00+01:00"}`)
+	write(t, filepath.Join(root, "0101-0020-newyear", "status.json"), `{"ended":"2027-01-01T01:00:00+01:00"}`)
+	born := time.Date(2026, 12, 31, 23, 30, 0, 0, time.UTC) // местное 01.01.2027 00:30
+	job, err := (&Jobs{Dir: root}).ByPidBorn(7, born)
+	if err != nil || job == nil || job.ID != "0101-0020-newyear" {
+		t.Fatalf("born в UTC накануне местного Нового года не нашёл задание: job=%+v err=%v", job, err)
 	}
 }

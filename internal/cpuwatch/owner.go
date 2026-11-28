@@ -113,49 +113,95 @@ func (j *Jobs) readPidJobDirs() error {
 }
 
 func (j *Jobs) scanPidCandidates(pid int, born time.Time) error {
-	var candidates []jobDirTime
-	for _, ent := range j.jobDirs {
-		if !ent.IsDir() {
-			continue
-		}
-		if created, ok := jobDirMinute(ent.Name(), born); ok && !created.After(born) && !created.Before(born.Add(-7*24*time.Hour)) && !j.pidScanned[pid][ent.Name()] {
-			candidates = append(candidates, jobDirTime{name: ent.Name(), created: created})
-		}
-	}
+	candidates := j.pidJobCandidates(pid, born)
 	slices.SortFunc(candidates, func(a, b jobDirTime) int { return b.created.Compare(a.created) })
-	// Битое задание пропускается, а не обрывает поиск: остальные кандидаты читаются, сбой уходит в ответ.
+	// Ошибка одного задания не обрывает минуту: ошибка уходит в ответ, совпадение сохраняется.
 	var errs []error
-	for _, candidate := range candidates {
-		j.pidScanned[pid][candidate.name] = true
-		if _, cached := j.byID[candidate.name]; !cached {
-			j.JobJSONReads++
-		}
-		job, err := j.get(candidate.name) // общий кеш прохода: другой pid того же прохода не читает job.json заново
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if job == nil || job.Pid != pid {
-			continue
-		}
-		status, err := os.ReadFile(filepath.Join(j.Dir, candidate.name, "status.json"))
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("статус задания worker %s: %w", candidate.name, err))
-			continue
-		}
-		if err == nil {
-			var v struct {
-				Ended time.Time `json:"ended"`
+	for start := 0; start < len(candidates); {
+		minute := candidates[start].created
+		// byPid может содержать подходящее задание из прежней записи того же pid с другим Born.
+		// Оно задаёт нижнюю границу поиска, но кандидаты его минуты всё равно надо дочитать.
+		if best := j.bestPidJob(pid, born); best != nil {
+			bestMinute, ok := jobDirMinute(best.ID, born)
+			if ok && minute.Before(bestMinute) {
+				break
 			}
-			if err := json.Unmarshal(status, &v); err != nil {
-				errs = append(errs, fmt.Errorf("статус задания worker %s: %w", candidate.name, err))
-				continue
-			}
-			job.Ended = v.Ended
 		}
-		j.byPid[pid] = append(j.byPid[pid], job)
+		end := pidMinuteEnd(candidates, start)
+		errs = append(errs, j.scanPidCandidateMinute(pid, candidates[start:end])...)
+		start = end
 	}
 	return errors.Join(errs...)
+}
+
+func (j *Jobs) pidJobCandidates(pid int, born time.Time) []jobDirTime {
+	var candidates []jobDirTime
+	for _, ent := range j.jobDirs {
+		if !ent.IsDir() || j.pidScanned[pid][ent.Name()] {
+			continue
+		}
+		created, ok := jobDirMinute(ent.Name(), born)
+		if !ok || created.After(born) || created.Before(born.Add(-7*24*time.Hour)) {
+			continue
+		}
+		candidates = append(candidates, jobDirTime{name: ent.Name(), created: created})
+	}
+	return candidates
+}
+
+func pidMinuteEnd(candidates []jobDirTime, start int) int {
+	end := start + 1
+	for end < len(candidates) && sameJobMinute(candidates[end].created, candidates[start].created) {
+		end++
+	}
+	return end
+}
+
+func (j *Jobs) scanPidCandidateMinute(pid int, candidates []jobDirTime) []error {
+	var errs []error
+	for _, candidate := range candidates {
+		if err := j.scanPidCandidate(pid, candidate); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
+func (j *Jobs) scanPidCandidate(pid int, candidate jobDirTime) error {
+	j.pidScanned[pid][candidate.name] = true
+	if _, cached := j.byID[candidate.name]; !cached {
+		j.JobJSONReads++
+	}
+	job, err := j.get(candidate.name) // общий кеш прохода: другой pid того же прохода не читает job.json заново
+	if err != nil {
+		return err
+	}
+	if job == nil || job.Pid != pid {
+		return nil
+	}
+	status, err := os.ReadFile(filepath.Join(j.Dir, candidate.name, "status.json"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// Сохраняем атрибуцию как незавершённую: WorkerByPid признает её живой,
+		// только пока процесс существует и его comm равен worker. Ошибку отдаём вызывающему.
+		j.byPid[pid] = append(j.byPid[pid], job)
+		return fmt.Errorf("статус задания worker %s: %w", candidate.name, err)
+	}
+	if err == nil {
+		var v struct {
+			Ended time.Time `json:"ended"`
+		}
+		if err := json.Unmarshal(status, &v); err != nil {
+			j.byPid[pid] = append(j.byPid[pid], job)
+			return fmt.Errorf("статус задания worker %s: %w", candidate.name, err)
+		}
+		job.Ended = v.Ended
+	}
+	j.byPid[pid] = append(j.byPid[pid], job)
+	return nil
+}
+
+func sameJobMinute(a, b time.Time) bool {
+	return a.Year() == b.Year() && a.Month() == b.Month() && a.Day() == b.Day() && a.Hour() == b.Hour() && a.Minute() == b.Minute()
 }
 
 func (j *Jobs) bestPidJob(pid int, born time.Time) *Job {
@@ -196,7 +242,8 @@ func jobDirMinute(name string, ref time.Time) (time.Time, bool) {
 	if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 {
 		return time.Time{}, false
 	}
-	created := time.Date(ref.Year(), time.Month(month), day, hour, minute, 0, 0, ref.Location())
+	// Год — по местному времени, как и имя папки: born в UTC 31.12 23:30 — уже 1 января по-местному.
+	created := time.Date(ref.In(time.Local).Year(), time.Month(month), day, hour, minute, 0, 0, time.Local)
 	if int(created.Month()) != month || created.Day() != day {
 		return time.Time{}, false
 	}

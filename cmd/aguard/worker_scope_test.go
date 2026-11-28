@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -138,5 +140,41 @@ func TestWorkerScopeLiveRequiresWorkerComm(t *testing.T) {
 	item, err = resolveScope(t, &cpuwatch.Jobs{Dir: root, ProcRoot: procRoot}, born)
 	if err != nil || item.WorkerLive {
 		t.Fatalf("чужой процесс признан живым: %+v err=%v", item, err)
+	}
+}
+
+func TestWorkerScopeLookupReturnsBrokenStatusError(t *testing.T) {
+	root := t.TempDir()
+	dir := "1127-1821-bad-status"
+	scopeJob(t, root, dir, 2230260, "2026-11-27T18:21:14+01:00", "", "ask")
+	if err := os.WriteFile(filepath.Join(root, dir, "status.json"), []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	born, _ := time.Parse(time.RFC3339, "2026-11-27T18:21:48+01:00")
+	live := &liveSessions{
+		jobs:   &cpuwatch.Jobs{Dir: root},
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		byName: map[string]session.Info{},
+	}
+	job, ok, err := live.WorkerByPid(2230260, born)
+	if !ok || job.ID != dir || err == nil {
+		t.Fatalf("WorkerByPid потерял атрибуцию или ошибку: job=%+v ok=%v err=%v", job, ok, err)
+	}
+}
+
+func TestWorkerScopeLookupBrokenStatusStillRoutesToMaster(t *testing.T) {
+	root := t.TempDir()
+	dir := "1127-1821-bad-status"
+	scopeJob(t, root, dir, 2230260, "2026-11-27T18:21:14+01:00", "", "ask")
+	if err := os.WriteFile(filepath.Join(root, dir, "status.json"), []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	born, _ := time.Parse(time.RFC3339, "2026-11-27T18:21:48+01:00")
+	item, err := resolveScope(t, &cpuwatch.Jobs{Dir: root}, born)
+	if item.WorkerMaster != "ask" || item.OwnerKey != "w:ask" {
+		t.Fatalf("битый status.json увёл запись лиду: %+v err=%v", item, err)
+	}
+	if err == nil {
+		t.Fatal("сбой чтения status.json потерян")
 	}
 }

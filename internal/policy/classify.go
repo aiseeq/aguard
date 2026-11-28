@@ -206,7 +206,10 @@ func ResolveWorkerJobs(items []Item, live Live) error {
 				label = fmt.Sprintf("worker-io-%d.scope", pid)
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", label, err))
-			continue
+			// Задание найдено среди прочитанных (ok) — запись всё равно идёт заказчику; без ok — прежняя группировка.
+			if !ok {
+				continue
+			}
 		}
 		if !ok || job.Master == "" {
 			continue

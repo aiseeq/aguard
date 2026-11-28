@@ -156,9 +156,8 @@ func (l *liveSessions) WorkerByPid(pid int, born time.Time) (policy.WorkerJob, b
 	if job == nil {
 		return policy.WorkerJob{}, false, err
 	}
-	if err != nil { // задание нашлось среди прочитанных: сводка идёт заказчику, битые задания — в журнал
-		l.log.Warn("aguard tmp: задания worker по pid", "pid", pid, "err", err)
-	}
+	// Задание нашлось, но часть файлов не прочиталась: задание и ошибка идут вместе, ResolveWorkerJobs ведёт
+	// запись заказчику, а вызывающий проход пишет ошибку в журнал (worker_lookup_failed).
 	procRoot := l.jobs.ProcRoot
 	if procRoot == "" {
 		procRoot = "/proc"
@@ -171,7 +170,7 @@ func (l *liveSessions) WorkerByPid(pid int, born time.Time) (policy.WorkerJob, b
 	if in, ok := l.byName[job.Master]; ok {
 		cwd = in.Cwd
 	}
-	return policy.WorkerJob{ID: job.ID, Master: job.Master, Cwd: cwd, Live: jobLive}, true, nil
+	return policy.WorkerJob{ID: job.ID, Master: job.Master, Cwd: cwd, Live: jobLive}, true, err
 }
 
 func (l *liveSessions) ByName(name string) (policy.Target, bool) {
@@ -495,7 +494,7 @@ func (a *app) tmpRound(cfg *policy.Config, dry bool) error {
 	prev := copyAlerts(st.Alerts)
 	items := cfg.Items(snap.Entries, a.uid)
 	if err := policy.ResolveWorkerJobs(items, live); err != nil {
-		a.warn("tmp", "часть заданий worker не прочиталась, записи сгруппированы прежним способом", "err", err)
+		a.warn("tmp", "часть заданий worker не прочиталась: записи без найденного задания сгруппированы прежним способом", "err", err)
 		a.note("tmp", "worker_lookup_failed", "", "", 1, "errors")
 	}
 	factor := a.tmpFactor(cfg)
@@ -694,7 +693,7 @@ func (a *app) tmpReport(cfg *policy.Config, since time.Duration) error {
 	factor := a.tmpFactor(cfg)
 	items := cfg.Items(snap.Entries, a.uid)
 	if err := policy.ResolveWorkerJobs(items, live); err != nil {
-		a.warn("tmp", "часть заданий worker не прочиталась, записи сгруппированы прежним способом", "err", err)
+		a.warn("tmp", "часть заданий worker не прочиталась: записи без найденного задания сгруппированы прежним способом", "err", err)
 	}
 	groups := cfg.Over(now, items, factor)
 	a.markTmpHolders("/proc", groups)
@@ -751,7 +750,7 @@ func (a *app) tmpSendTest(cfg *policy.Config, to string, dry bool) error {
 	var sum *policy.Summary
 	items := cfg.Items(snap.Entries, a.uid)
 	if err := policy.ResolveWorkerJobs(items, live); err != nil {
-		a.warn("tmp", "часть заданий worker не прочиталась, записи сгруппированы прежним способом", "err", err)
+		a.warn("tmp", "часть заданий worker не прочиталась: записи без найденного задания сгруппированы прежним способом", "err", err)
 	}
 	groups := cfg.Over(now, items, factor)
 	a.markTmpHolders("/proc", groups)
